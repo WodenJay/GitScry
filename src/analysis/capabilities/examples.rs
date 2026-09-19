@@ -24,25 +24,25 @@ pub(crate) fn run(
     let reverts = retrieval::reverts(connection)?;
     let steps = pool.steps(connection)?;
 
-    let mut ranked = pool
-        .candidates
-        .iter()
-        .enumerate()
-        .map(|(index, candidate)| {
-            let anchored = candidate.signals.matched_anchors();
-            let coherent = coherent_change(&pool, index);
-            let mut score = candidate.signals.score() + anchored as f64 * ANCHOR_WEIGHT;
-            score += if coherent { COHERENT_WEIGHT } else { 0.0 };
-            let reverted = reverts.reverting(&candidate.oid).is_some();
-            score -= if reverted { REVERT_DEMOTION } else { 0.0 };
-            retrieval::Ranked {
-                score,
-                commit_time: candidate.commit_time,
-                oid: candidate.oid.clone(),
-                value: (index, anchored, coherent),
-            }
-        })
-        .collect::<Vec<_>>();
+    let mut ranked = Vec::new();
+    for (index, candidate) in pool.candidates.iter().enumerate() {
+        let anchored = candidate.signals.matched_anchors();
+        let coherent = coherent_change(&pool, index);
+        let mut score = candidate.signals.score() + anchored as f64 * ANCHOR_WEIGHT;
+        score += if coherent { COHERENT_WEIGHT } else { 0.0 };
+        // Work that was later undone, and the revert itself, are not precedents to follow.
+        if reverts.is_revert(&candidate.oid)
+            || retrieval::link(connection, &reverts, candidate)?.is_some()
+        {
+            score -= REVERT_DEMOTION;
+        }
+        ranked.push(retrieval::Ranked {
+            score,
+            commit_time: candidate.commit_time,
+            oid: candidate.oid.clone(),
+            value: (index, anchored, coherent),
+        });
+    }
     retrieval::sort(&mut ranked);
 
     let mut materials = Vec::new();
@@ -62,7 +62,10 @@ pub(crate) fn run(
             candidate.subject.clone(),
         )];
         let mut confidence = confidence(&candidate.signals);
-        if let Some(revert) = reverts.reverting(&candidate.oid) {
+        if reverts.is_revert(&candidate.oid) {
+            basis.push("demoted: a revert, not a precedent".to_owned());
+            confidence = Confidence::Low;
+        } else if let Some(revert) = retrieval::link(connection, &reverts, candidate)? {
             citations.push(
                 Citation::new(revert.oid.clone(), revert.subject.clone()).noting("later reverted"),
             );

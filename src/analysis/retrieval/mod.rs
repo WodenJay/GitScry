@@ -20,7 +20,7 @@ pub(crate) use text::{message_parts, searchable_text};
 
 pub(in crate::analysis) use lexical::Signals;
 pub(in crate::analysis) use rank::{Ranked, assign_citations, sort};
-pub(in crate::analysis) use reverts::RevertIndex;
+pub(in crate::analysis) use reverts::{Revert, RevertIndex};
 
 use super::Step;
 
@@ -29,6 +29,8 @@ const CANDIDATE_MULTIPLIER: usize = 20;
 
 /// One candidate with everything retrieval knows about it.
 pub(in crate::analysis) struct Scored {
+    /// Position in the cache generation, which orders commits recorded in the same second.
+    pub(in crate::analysis) position: i64,
     pub(in crate::analysis) oid: String,
     pub(in crate::analysis) commit_time: i64,
     pub(in crate::analysis) subject: String,
@@ -88,6 +90,7 @@ pub(in crate::analysis) fn pool(
         .into_iter()
         .map(|candidate| Scored {
             signals: lexical::signals(intent, &candidate.subject, &candidate.paths, candidate.bm25),
+            position: candidate.position,
             oid: candidate.oid,
             commit_time: candidate.commit_time,
             subject: candidate.subject,
@@ -114,13 +117,36 @@ pub(in crate::analysis) fn commit_text(
     store::text(connection, oid)
 }
 
-/// The earliest later commit that touches the abandoned paths.
+/// The revert history associates with a candidate: the trailer it names first, then the
+/// earliest later revert of the same paths that no intervening commit also touched.
+pub(in crate::analysis) fn link<'a>(
+    connection: &Connection,
+    reverts: &'a RevertIndex,
+    candidate: &Scored,
+) -> Result<Option<&'a Revert>, AppError> {
+    if let Some(revert) = reverts.of(&candidate.oid) {
+        return Ok(Some(revert));
+    }
+    for revert in reverts.sharing_paths(&candidate.oid, &candidate.paths, candidate.position) {
+        if !store::touch_between(
+            connection,
+            candidate.position,
+            revert.position,
+            &candidate.paths,
+        )? {
+            return Ok(Some(revert));
+        }
+    }
+    Ok(None)
+}
+
+/// The next commit that touches the abandoned paths, after the revert that recorded it.
 pub(in crate::analysis) fn corrective_follow_up(
     connection: &Connection,
-    after_time: i64,
+    revert_oid: &str,
     paths: &[Vec<u8>],
 ) -> Result<Option<(String, String)>, AppError> {
-    store::corrective_follow_up(connection, after_time, paths)
+    store::corrective_follow_up(connection, revert_oid, paths)
 }
 
 fn match_query(terms: &[String]) -> String {

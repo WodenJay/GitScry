@@ -1,0 +1,507 @@
+use std::{ffi::OsStr, fs, path::Path, process::Command};
+
+use tempfile::TempDir;
+
+struct TestRepo {
+    dir: TempDir,
+}
+
+impl TestRepo {
+    fn new() -> Self {
+        let dir = tempfile::tempdir().expect("create temporary repository");
+        git(dir.path(), ["init", "--initial-branch=main"]);
+        git(dir.path(), ["config", "user.name", "GitScry Test"]);
+        git(
+            dir.path(),
+            ["config", "user.email", "gitscry@example.invalid"],
+        );
+        Self { dir }
+    }
+
+    /// Commit with an explicit author and committer date, so ordering never depends on
+    /// how fast the test runs.
+    fn commit_at(&self, path: &str, contents: &[u8], message: &str, date: &str) -> String {
+        if let Some(parent) = Path::new(path).parent() {
+            fs::create_dir_all(self.dir.path().join(parent)).expect("create parent directory");
+        }
+        fs::write(self.dir.path().join(path), contents).expect("write tracked file");
+        git(self.dir.path(), ["add", "--all"]);
+        let output = Command::new("git")
+            .args(["commit", "-m", message])
+            .current_dir(self.dir.path())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_DATE", date)
+            .env("GIT_COMMITTER_DATE", date)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        self.head()
+    }
+
+    /// Remove a path and record the removal, so it exists only in history afterwards.
+    fn remove(&self, path: &str, message: &str) -> String {
+        fs::remove_file(self.dir.path().join(path)).expect("remove tracked file");
+        git(self.dir.path(), ["add", "--all"]);
+        git(self.dir.path(), ["commit", "-m", message]);
+        self.head()
+    }
+
+    fn head(&self) -> String {
+        git_stdout(self.dir.path(), ["rev-parse", "HEAD"])
+    }
+
+    fn run<I, S>(&self, args: I) -> std::process::Output
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        Command::new(env!("CARGO_BIN_EXE_gitscry"))
+            .args(args)
+            .current_dir(self.dir.path())
+            .output()
+            .expect("run gitscry")
+    }
+}
+
+fn git<I, S>(cwd: &Path, args: I)
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .expect("run git");
+    assert!(
+        output.status.success(),
+        "git failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn git_stdout<I, S>(cwd: &Path, args: I) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .expect("run git");
+    assert!(
+        output.status.success(),
+        "git failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+fn stdout(output: &std::process::Output) -> String {
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+fn stderr(output: &std::process::Output) -> String {
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+/// The block of one result, up to the next result marker.
+fn block<'a>(text: &'a str, oid_prefix: &str) -> &'a str {
+    let start = text
+        .find(oid_prefix)
+        .unwrap_or_else(|| panic!("result {oid_prefix} missing from:\n{text}"));
+    let rest = &text[start..];
+    match rest[1..].find("\n- ") {
+        Some(offset) => &rest[..offset + 1],
+        None => rest,
+    }
+}
+
+/// Two analogous provider retirements, the shape `examples` exists to surface.
+fn provider_retirements() -> TestRepo {
+    let repo = TestRepo::new();
+    repo.commit_at(
+        "src/providers/tavily.rs",
+        b"tavily backend\n",
+        "Retire TavilyProvider across registration, aliases and tests",
+        "2020-01-01T00:00:00+0000",
+    );
+    repo.commit_at(
+        "src/providers/mod.rs",
+        b"registry: tavily\n",
+        "Register Tavily provider aliases",
+        "2020-01-02T00:00:00+0000",
+    );
+    repo
+}
+
+#[test]
+fn examples_returns_analogous_changes_with_reusable_steps() {
+    let repo = provider_retirements();
+    repo.commit_at(
+        "src/providers/brave.rs",
+        b"brave backend\n",
+        "Retire BraveProvider while preserving migration guidance",
+        "2021-01-01T00:00:00+0000",
+    );
+
+    let output = repo.run(["examples", "retire", "provider"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("Retire BraveProvider"), "{text}");
+    assert!(text.contains("Retire TavilyProvider"), "{text}");
+    assert!(text.contains("step:"), "{text}");
+    assert!(text.contains("confidence:"), "{text}");
+    assert!(text.contains("basis:"), "{text}");
+
+    // Steps describe what history did; they must not instruct the caller.
+    for mandate in [" must ", " should ", "you need to", "required to"] {
+        assert!(
+            !text.contains(mandate),
+            "steps read as a mandate via {mandate:?}:\n{text}"
+        );
+    }
+}
+
+#[test]
+fn examples_accepts_an_anchored_path_and_prefers_overlapping_change() {
+    let repo = provider_retirements();
+    repo.commit_at(
+        "src/providers/brave.rs",
+        b"brave backend\n",
+        "Retire BraveProvider while preserving migration guidance",
+        "2021-01-01T00:00:00+0000",
+    );
+    repo.commit_at(
+        "docs/providers.md",
+        b"provider docs\n",
+        "Retire provider references from the documentation",
+        "2021-02-01T00:00:00+0000",
+    );
+
+    let unanchored = repo.run(["examples", "retire", "provider"]);
+    assert_eq!(unanchored.status.code(), Some(0));
+
+    let anchored = repo.run([
+        "examples",
+        "retire",
+        "provider",
+        "--path",
+        "src/providers/brave.rs",
+    ]);
+    assert_eq!(anchored.status.code(), Some(0), "{}", stderr(&anchored));
+    let text = stdout(&anchored);
+    assert!(text.contains("exact path match"), "{text}");
+    assert!(text.contains("anchored path match"), "{text}");
+
+    // The anchored query must put the overlapping change ahead of the documentation change.
+    let brave = text.find("Retire BraveProvider").expect("brave result");
+    let docs = text.find("documentation").unwrap_or(usize::MAX);
+    assert!(brave < docs, "anchored result not preferred:\n{text}");
+
+    // Quoted and split natural language are the same request.
+    let split = repo.run(["examples", "retire", "provider"]);
+    assert_eq!(stdout(&split), stdout(&unanchored));
+}
+
+#[test]
+fn examples_demotes_reverted_work_and_cites_the_revert() {
+    let repo = TestRepo::new();
+    // Two changes answer the query identically, so only the revert can order them.
+    let kept = repo.commit_at(
+        "src/providers/registry.rs",
+        b"registry v1
+",
+        "Retire TavilyProvider registration",
+        "2021-01-01T00:00:00+0000",
+    );
+    let abandoned = repo.commit_at(
+        "src/providers/registry.rs",
+        b"registry v2
+",
+        "Retire TavilyProvider registration",
+        "2021-02-01T00:00:00+0000",
+    );
+    repo.commit_at(
+        "src/providers/registry.rs",
+        b"registry v3
+",
+        &format!(
+            "revert: retire TavilyProvider registration
+
+             This reverts commit {abandoned}.
+"
+        ),
+        "2021-03-01T00:00:00+0000",
+    );
+
+    let output = repo.run(["examples", "retire", "tavily", "provider", "registration"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+
+    let abandoned_block = block(&text, &abandoned[..12]);
+    assert!(
+        abandoned_block.contains("demoted: later reverted"),
+        "{abandoned_block}"
+    );
+    assert!(
+        abandoned_block.contains("confidence: low"),
+        "{abandoned_block}"
+    );
+    assert!(
+        abandoned_block.contains("(later reverted)"),
+        "{abandoned_block}"
+    );
+
+    // Abandoned work is not precedent, so the surviving change outranks it.
+    let kept_position = text.find(&kept[..12]).expect("kept result");
+    let abandoned_position = text.find(&abandoned[..12]).expect("abandoned result");
+    assert!(
+        kept_position < abandoned_position,
+        "reverted work was not demoted:
+{text}"
+    );
+}
+
+#[test]
+fn failures_reports_the_stated_reason_and_the_corrective_follow_up() {
+    let repo = TestRepo::new();
+    let abandoned = repo.commit_at(
+        "src/db/index.rs",
+        b"cron sessions\n",
+        "Exclude cron sessions from the FTS index",
+        "2020-01-01T00:00:00+0000",
+    );
+    repo.commit_at(
+        "src/db/index.rs",
+        b"cron sessions restored\n",
+        &format!(
+            "revert: exclude cron sessions from the FTS index\n\n\
+             This reverts commit {abandoned}.\n\n\
+             The shared predicate slowed the hot ingestion path for every provider.\n\n\
+             Re-land criteria: gate the exclusion to the cron writer and measure ingestion latency.\n"
+        ),
+        "2020-02-01T00:00:00+0000",
+    );
+    let revert = repo.head();
+    // Touches the same path first, but corrects nothing, so it must not be claimed.
+    repo.commit_at(
+        "src/db/index.rs",
+        b"cron sessions (reformatted)
+",
+        "chore(db): reformat the index module",
+        "2020-02-15T00:00:00+0000",
+    );
+    let follow_up = repo.commit_at(
+        "src/db/index.rs",
+        b"cron sessions (gated)\n",
+        "fix(db): gate the cron session exclusion to its own writer",
+        "2020-03-01T00:00:00+0000",
+    );
+
+    let output = repo.run(["failures", "exclude", "cron", "sessions"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    let entry = block(&text, &abandoned[..12]);
+
+    assert!(
+        entry.contains("reason: The shared predicate slowed the hot ingestion path"),
+        "{entry}"
+    );
+    assert!(
+        entry.contains("retry: gate the exclusion to the cron writer"),
+        "{entry}"
+    );
+    assert!(entry.contains(&revert[..12]), "{entry}");
+    assert!(entry.contains("(reverts this change)"), "{entry}");
+    assert!(entry.contains(&follow_up[..12]), "{entry}");
+    assert!(entry.contains("(follow-up)"), "{entry}");
+    assert!(entry.contains("basis:"), "{entry}");
+
+    // The revert is told by the change it undid, so it is not also its own result.
+    assert!(
+        !text.contains(&format!("\n- {} ", &revert[..12])),
+        "revert repeated as its own result:\n{text}"
+    );
+}
+
+#[test]
+fn failures_prints_reason_unknown_rather_than_inventing_one() {
+    let repo = TestRepo::new();
+    let abandoned = repo.commit_at(
+        "src/db/index.rs",
+        b"cron sessions\n",
+        "Exclude cron sessions from the FTS index",
+        "2020-01-01T00:00:00+0000",
+    );
+    // A revert that records no reason at all beyond the trailer.
+    repo.commit_at(
+        "src/db/index.rs",
+        b"cron sessions restored\n",
+        &format!(
+            "revert: exclude cron sessions from the FTS index\n\n\
+             This reverts commit {abandoned}.\n"
+        ),
+        "2020-02-01T00:00:00+0000",
+    );
+
+    let output = repo.run(["failures", "exclude", "cron", "sessions"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    let entry = block(&text, &abandoned[..12]);
+
+    assert!(entry.contains("reason: Reason unknown"), "{entry}");
+    assert!(
+        !entry.contains("retry:"),
+        "retry condition invented without history:\n{entry}"
+    );
+}
+
+#[test]
+fn examples_and_failures_accept_a_path_that_exists_only_in_history() {
+    let repo = TestRepo::new();
+    let original = repo.commit_at(
+        "src/db/legacy_index.rs",
+        b"legacy cron exclusion\n",
+        "Exclude cron sessions from the FTS index",
+        "2020-01-01T00:00:00+0000",
+    );
+    repo.commit_at(
+        "src/db/legacy_index.rs",
+        b"legacy cron exclusion removed\n",
+        &format!(
+            "revert: exclude cron sessions from the FTS index\n\n\
+             This reverts commit {original}.\n\n\
+             The shared predicate slowed ingestion for every caller.\n"
+        ),
+        "2020-02-01T00:00:00+0000",
+    );
+    let removed = repo.remove(
+        "src/db/legacy_index.rs",
+        "refactor(db): drop the unused legacy index module",
+    );
+    assert!(!repo.dir.path().join("src/db/legacy_index.rs").exists());
+    assert!(!removed.is_empty());
+
+    let examples = repo.run([
+        "examples",
+        "cron",
+        "exclusions",
+        "--path",
+        "src/db/legacy_index.rs",
+    ]);
+    assert_eq!(examples.status.code(), Some(0), "{}", stderr(&examples));
+    assert!(
+        stdout(&examples).contains(&original[..12]),
+        "{}",
+        stdout(&examples)
+    );
+
+    let failures = repo.run([
+        "failures",
+        "cron",
+        "exclusions",
+        "--path",
+        "src/db/legacy_index.rs",
+    ]);
+    assert_eq!(failures.status.code(), Some(0), "{}", stderr(&failures));
+    let text = stdout(&failures);
+    assert!(text.contains(&original[..12]), "{text}");
+    assert!(
+        text.contains("reason: The shared predicate slowed ingestion"),
+        "{text}"
+    );
+}
+
+#[test]
+fn examples_and_failures_report_their_fixed_empty_results() {
+    let repo = provider_retirements();
+
+    let examples = repo.run(["examples", "term-that-does-not-exist"]);
+    assert_eq!(examples.status.code(), Some(0));
+    assert_eq!(stdout(&examples), "No historical examples found.\n");
+
+    let failures = repo.run(["failures", "term-that-does-not-exist"]);
+    assert_eq!(failures.status.code(), Some(0));
+    assert_eq!(stdout(&failures), "No failed approaches found.\n");
+}
+
+#[test]
+fn examples_truncates_deterministically_and_rejects_invalid_input() {
+    let repo = provider_retirements();
+    for (index, date) in ["2021-01-01", "2021-02-01", "2021-03-01"]
+        .iter()
+        .enumerate()
+    {
+        repo.commit_at(
+            &format!("src/providers/extra{index}.rs"),
+            format!("extra provider {index}\n").as_bytes(),
+            "Retire ExtraProvider across registration surfaces",
+            &format!("{date}T00:00:00+0000"),
+        );
+    }
+
+    let first = repo.run(["examples", "retire", "provider", "--limit", "2"]);
+    assert_eq!(first.status.code(), Some(0), "{}", stderr(&first));
+    let text = stdout(&first);
+    assert_eq!(text.matches("confidence:").count(), 2, "{text}");
+    assert!(text.contains("results truncated"), "{text}");
+    assert!(text.contains("Showing 2 of 5"), "{text}");
+
+    let again = repo.run(["examples", "retire", "provider", "--limit", "2"]);
+    assert_eq!(stdout(&again), text);
+
+    for invalid in [
+        vec!["examples"],
+        vec!["examples", "provider", "--limit", "0"],
+        vec!["examples", "provider", "--path", ""],
+        vec!["failures"],
+        vec!["failures", "provider", "--limit", "0"],
+        vec!["failures", "provider", "--path", ""],
+    ] {
+        let output = repo.run(invalid.clone());
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{invalid:?} should be invalid input: {}{}",
+            stdout(&output),
+            stderr(&output)
+        );
+    }
+}
+
+#[test]
+fn examples_and_failures_reuse_the_cache_without_preparation_noise() {
+    let repo = provider_retirements();
+    repo.commit_at(
+        "src/providers/brave.rs",
+        b"brave backend\n",
+        "Retire BraveProvider while preserving migration guidance",
+        "2021-01-01T00:00:00+0000",
+    );
+
+    let first = repo.run(["examples", "retire", "provider"]);
+    assert_eq!(first.status.code(), Some(0));
+    assert!(stderr(&first).contains("Indexing local history"));
+
+    let second = repo.run(["examples", "retire", "provider"]);
+    assert_eq!(second.status.code(), Some(0));
+    assert!(
+        stderr(&second).is_empty(),
+        "fresh query was noisy: {}",
+        stderr(&second)
+    );
+    assert_eq!(stdout(&second), stdout(&first));
+
+    // The same completed cache answers the failure capability too.
+    let failures = repo.run(["failures", "retire", "provider"]);
+    assert_eq!(failures.status.code(), Some(0), "{}", stderr(&failures));
+    assert!(stderr(&failures).is_empty(), "{}", stderr(&failures));
+}

@@ -7,6 +7,7 @@ use super::super::search_error;
 
 /// A lexical candidate: one cache row with the paths it changed.
 pub(super) struct Stored {
+    pub(super) position: i64,
     pub(super) oid: String,
     pub(super) commit_time: i64,
     pub(super) subject: String,
@@ -38,7 +39,7 @@ pub(in crate::analysis) fn candidates(
 ) -> Result<Vec<Stored>, AppError> {
     let mut statement = connection
         .prepare(
-            "SELECT c.oid, c.commit_time, c.message, bm25(search_fts, 10.0, 3.0, 2.0)
+            "SELECT c.oid, c.commit_time, c.message, bm25(search_fts, 10.0, 3.0, 2.0), c.rowid
              FROM search_fts
              JOIN search_documents AS d ON d.rowid = search_fts.rowid
              JOIN commits AS c ON c.oid = d.commit_oid
@@ -58,6 +59,7 @@ pub(in crate::analysis) fn candidates(
                 body,
                 paths: Vec::new(),
                 bm25: row.get(3)?,
+                position: row.get(4)?,
             })
         })
         .map_err(|error| search_error("running search", error))?;
@@ -142,41 +144,92 @@ pub(in crate::analysis) fn text(
     Ok(message.map(|message| super::text::message_parts(&message)))
 }
 
-/// Every cached commit message, oldest first: the default branch cache generation in order.
-pub(in crate::analysis) fn all_texts(
-    connection: &Connection,
-) -> Result<Vec<(String, Vec<u8>)>, AppError> {
+/// A cached commit: its object ID, message, and cache position.
+///
+/// The position orders commits the way the cache generation was built, which separates
+/// commits a repository recorded in the same second.
+pub(in crate::analysis) struct StoredCommit {
+    pub(in crate::analysis) position: i64,
+    pub(in crate::analysis) oid: String,
+    pub(in crate::analysis) message: Vec<u8>,
+}
+
+/// Every cached commit, oldest first.
+pub(in crate::analysis) fn history(connection: &Connection) -> Result<Vec<StoredCommit>, AppError> {
     let mut statement = connection
-        .prepare("SELECT oid, message FROM commits ORDER BY commit_time, oid")
+        .prepare("SELECT rowid, oid, message FROM commits ORDER BY commit_time, oid")
         .map_err(|error| search_error("preparing history scan", error))?;
     statement
         .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+            Ok(StoredCommit {
+                position: row.get(0)?,
+                oid: row.get(1)?,
+                message: row.get(2)?,
+            })
         })
         .map_err(|error| search_error("reading history scan", error))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| search_error("reading history scan", error))
 }
 
-/// The earliest later commit that touches the abandoned paths, preferring a corrective one.
+/// Whether any commit strictly between two positions touched one of `paths`.
+///
+/// A revert only counts as undoing a candidate when that candidate was the last work on
+/// the path; otherwise the revert belongs to some later, unrelated change.
+pub(in crate::analysis) fn touch_between(
+    connection: &Connection,
+    from_position: i64,
+    to_position: i64,
+    paths: &[Vec<u8>],
+) -> Result<bool, AppError> {
+    if paths.is_empty() || from_position >= to_position {
+        return Ok(false);
+    }
+    let placeholders = std::iter::repeat_n("?", paths.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let query = format!(
+        "SELECT COUNT(*)
+         FROM commits AS c
+         JOIN changes AS ch ON ch.commit_oid = c.oid
+         WHERE c.rowid > ?1 AND c.rowid < ?2
+           AND (ch.old_path IN ({placeholders}) OR ch.new_path IN ({placeholders}))",
+    );
+    let values = [Value::Integer(from_position), Value::Integer(to_position)]
+        .into_iter()
+        .chain(paths.iter().map(|path| Value::Blob(path.clone())))
+        .chain(paths.iter().map(|path| Value::Blob(path.clone())));
+    let count: i64 = connection
+        .query_row(&query, params_from_iter(values), |row| row.get(0))
+        .map_err(|error| search_error("checking intervening history", error))?;
+    Ok(count > 0)
+}
+
+/// The first later commit that corrects work on the abandoned paths, if history records one.
+///
+/// Ordering is by cache insertion order rather than timestamp, because a repository can
+/// record a revert and its follow-up in the same second.
 pub(in crate::analysis) fn corrective_follow_up(
     connection: &Connection,
-    after_time: i64,
+    revert_oid: &str,
     paths: &[Vec<u8>],
 ) -> Result<Option<(String, String)>, AppError> {
-    let placeholders = std::iter::repeat_n("?", paths.len() * 2)
+    // The placeholder list is interpolated twice, once per IN list.
+    let placeholders = std::iter::repeat_n("?", paths.len())
         .collect::<Vec<_>>()
         .join(", ");
     let query = format!(
         "SELECT c.oid, c.message
          FROM commits AS c
          JOIN changes AS ch ON ch.commit_oid = c.oid
-         WHERE c.commit_time > ?1
+         WHERE c.rowid > (SELECT rowid FROM commits WHERE oid = ?1)
+           AND c.oid NOT IN (SELECT oid FROM commits WHERE oid = ?1)
            AND (ch.old_path IN ({placeholders}) OR ch.new_path IN ({placeholders}))
          GROUP BY c.oid
-         ORDER BY c.commit_time ASC, c.oid ASC",
+         ORDER BY c.rowid ASC",
     );
-    let values = std::iter::once(Value::Integer(after_time))
+    let values = std::iter::once(Value::Text(revert_oid.to_owned()))
+        .chain(paths.iter().map(|path| Value::Blob(path.clone())))
         .chain(paths.iter().map(|path| Value::Blob(path.clone())));
     let mut statement = connection
         .prepare(&query)
@@ -186,15 +239,15 @@ pub(in crate::analysis) fn corrective_follow_up(
             Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
         })
         .map_err(|error| search_error("reading corrective follow-up", error))?;
-    let mut fallback = None;
     for row in rows {
         let (oid, message) =
             row.map_err(|error| search_error("reading corrective follow-up", error))?;
         let (subject, _) = super::text::message_parts(&message);
+        // Only a commit that reads as a correction counts; a later incidental touch of the
+        // same path is not evidence about how the abandoned approach moved on.
         if super::super::provenance::is_corrective_subject(&subject) {
             return Ok(Some((oid, subject)));
         }
-        fallback.get_or_insert((oid, subject));
     }
-    Ok(fallback)
+    Ok(None)
 }

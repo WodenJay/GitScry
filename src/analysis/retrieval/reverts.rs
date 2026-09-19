@@ -8,46 +8,79 @@ use super::super::provenance::{is_revert_subject, reverted_commit};
 use super::store;
 use super::text::message_parts;
 
-/// A cached commit whose subject reads like a revert, with the commit it reverts when known.
+/// How many paths a revert and a candidate must share to be linked by evidence.
+const LINKED_PATHS: usize = 1;
+
+/// A cached commit whose subject reads like a revert, with what is needed to link it to the
+/// work it undid. The `This reverts commit` trailer is authoritative; most reverts in the
+/// wild omit it, so changed paths are recorded as the fallback evidence.
 pub(in crate::analysis) struct Revert {
+    pub(in crate::analysis) position: i64,
     pub(in crate::analysis) oid: String,
     pub(in crate::analysis) subject: String,
     pub(in crate::analysis) body: String,
-    pub(in crate::analysis) target: Option<String>,
+    pub(in crate::analysis) paths: Vec<Vec<u8>>,
+    target: Option<String>,
 }
 
-/// Every cached revert marker, indexed by the commit it reverts.
+/// Every cached revert, indexed by the commit its trailer names.
 pub(in crate::analysis) struct RevertIndex {
     reverts: Vec<Revert>,
     by_target: HashMap<String, usize>,
 }
 
 impl RevertIndex {
-    /// The earliest revert history records for `oid`.
-    pub(in crate::analysis) fn reverting(&self, oid: &str) -> Option<&Revert> {
+    /// Whether `oid` is itself a recorded revert.
+    pub(in crate::analysis) fn is_revert(&self, oid: &str) -> bool {
+        self.reverts.iter().any(|revert| revert.oid == oid)
+    }
+
+    /// The revert this commit's own message names, when the trailer is present.
+    pub(in crate::analysis) fn of(&self, oid: &str) -> Option<&Revert> {
         self.by_target.get(oid).map(|index| &self.reverts[*index])
+    }
+
+    /// Later reverts that share at least one changed path with this commit, earliest first.
+    pub(in crate::analysis) fn sharing_paths<'a>(
+        &'a self,
+        oid: &str,
+        paths: &[Vec<u8>],
+        position: i64,
+    ) -> impl Iterator<Item = &'a Revert> {
+        let matches = self
+            .reverts
+            .iter()
+            .filter(move |revert| {
+                revert.oid != oid
+                    && revert.position > position
+                    && shared_paths(&revert.paths, paths) >= LINKED_PATHS
+            })
+            .collect::<Vec<_>>();
+        matches.into_iter()
     }
 }
 
-/// Index every cached revert marker; the earliest recorded revert of a commit wins.
+/// Index every cached revert in cache order; the earliest resolved revert of a commit wins.
 pub(in crate::analysis) fn index(connection: &Connection) -> Result<RevertIndex, AppError> {
-    let commits = store::all_texts(connection)?;
+    let commits = store::history(connection)?;
     let known = commits
         .iter()
-        .map(|(oid, _)| oid.clone())
+        .map(|commit| commit.oid.clone())
         .collect::<HashSet<_>>();
     let mut reverts = Vec::new();
-    for (oid, message) in commits {
-        let (subject, body) = message_parts(&message);
+    for commit in commits {
+        let (subject, body) = message_parts(&commit.message);
         if !is_revert_subject(&subject) {
             continue;
         }
         let target =
             reverted_commit(&format!("{subject}\n{body}")).and_then(|hex| resolve(&known, &hex));
         reverts.push(Revert {
-            oid,
+            paths: store::changed_paths(connection, &commit.oid)?,
+            oid: commit.oid,
             subject,
             body,
+            position: commit.position,
             target,
         });
     }
@@ -58,6 +91,12 @@ pub(in crate::analysis) fn index(connection: &Connection) -> Result<RevertIndex,
         }
     }
     Ok(RevertIndex { reverts, by_target })
+}
+
+fn shared_paths(left: &[Vec<u8>], right: &[Vec<u8>]) -> usize {
+    left.iter()
+        .filter(|path| right.iter().any(|other| other == *path))
+        .count()
 }
 
 /// Resolve an abbreviated object ID, but only when it is unambiguous.

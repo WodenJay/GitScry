@@ -106,6 +106,39 @@ pub(super) fn stated_reason(subject: &str, body: &str) -> Option<String> {
         .filter(|reason| reason.len() >= MIN_REASON)
 }
 
+/// The rationale a revert message records.
+///
+/// A revert body is where the reason is written down, so the first substantive sentence
+/// counts even without a rationale marker. Boilerplate trailer lines are not a reason.
+pub(super) fn revert_reason(subject: &str, body: &str) -> Option<String> {
+    if let Some(reason) = stated_reason(subject, body) {
+        return Some(reason);
+    }
+    for sentence in sentences(body) {
+        let reason = clean(&sentence);
+        if reason.len() >= MIN_REASON && !is_boilerplate(&reason) {
+            return Some(reason);
+        }
+    }
+    None
+}
+
+/// Whether a line is revert bookkeeping rather than a stated reason.
+fn is_boilerplate(sentence: &str) -> bool {
+    let lowered = sentence.to_ascii_lowercase();
+    [
+        "this reverts commit",
+        "reverts commit ",
+        "co-authored-by",
+        "signed-off-by",
+        "reviewed-by",
+        "refs ",
+        "see ",
+    ]
+    .iter()
+    .any(|marker| lowered.starts_with(marker))
+}
+
 /// A safe retry condition, but only one history records.
 pub(super) fn stated_retry(text: &str) -> Option<String> {
     for sentence in sentences(text) {
