@@ -108,7 +108,7 @@ pub(super) fn read(
     })
 }
 
-fn read_shallow_boundaries(git: &Git) -> Result<Vec<String>, AppError> {
+pub(super) fn read_shallow_boundaries(git: &Git) -> Result<Vec<String>, AppError> {
     if git.text(["rev-parse", "--is-shallow-repository"])?.trim() != "true" {
         return Ok(Vec::new());
     }

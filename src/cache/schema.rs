@@ -17,6 +17,22 @@ CREATE TABLE commits (
     message BLOB NOT NULL,
     commit_time INTEGER NOT NULL
 ) STRICT;
+CREATE TABLE search_documents (
+    rowid INTEGER PRIMARY KEY,
+    commit_oid TEXT NOT NULL UNIQUE REFERENCES commits(oid),
+    subject TEXT NOT NULL,
+    body TEXT NOT NULL,
+    paths TEXT NOT NULL
+) STRICT;
+CREATE VIRTUAL TABLE search_fts USING fts5(
+    subject,
+    body,
+    paths,
+    content = 'search_documents',
+    content_rowid = 'rowid',
+    tokenize = 'unicode61',
+    detail = 'full'
+);
 CREATE TABLE commit_parents (
     commit_oid TEXT NOT NULL REFERENCES commits(oid),
     position INTEGER NOT NULL,

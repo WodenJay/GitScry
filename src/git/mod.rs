@@ -32,21 +32,37 @@ impl Repository {
         })
     }
 
-    pub(crate) fn read_default_history(&self) -> Result<Snapshot, AppError> {
+    pub(crate) fn default_target(&self) -> Result<(String, String), AppError> {
         let default_ref = self.resolve_default_branch()?;
+        let tip = self.tip_for(&default_ref)?;
+        Ok((default_ref, tip))
+    }
+
+    pub(crate) fn shallow_boundaries(&self) -> Result<Vec<String>, AppError> {
+        let mut boundaries = history::read_shallow_boundaries(&self.git)?;
+        boundaries.sort();
+        boundaries.dedup();
+        Ok(boundaries)
+    }
+
+    pub(crate) fn read_default_history_at(
+        &self,
+        default_ref: String,
+        tip: String,
+    ) -> Result<Snapshot, AppError> {
+        let object_format = self.git.text(["rev-parse", "--show-object-format"])?;
+        let object_format = object_format.trim().to_owned();
+        history::read(&self.git, default_ref, tip, object_format)
+    }
+
+    fn tip_for(&self, default_ref: &str) -> Result<String, AppError> {
         let tip = self.git.text([
             "rev-parse",
             "--verify",
             "--end-of-options",
             &format!("{default_ref}^{{commit}}"),
         ])?;
-        let tip = tip.trim().to_owned();
-        let object_format = self
-            .git
-            .text(["rev-parse", "--show-object-format"])?
-            .trim()
-            .to_owned();
-        history::read(&self.git, default_ref, tip, object_format)
+        Ok(tip.trim().to_owned())
     }
 
     fn resolve_default_branch(&self) -> Result<String, AppError> {

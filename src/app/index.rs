@@ -1,23 +1,17 @@
-use crate::{cache, git};
+use crate::git;
 
-use super::{AppError, Outcome};
+use super::{AppError, Outcome, prepare_cache};
 
 pub(super) fn run() -> Result<Outcome, AppError> {
     let repository = git::Repository::discover()?;
-    let snapshot = repository.read_default_history()?;
-    let commit_count = snapshot.commits.len();
-    let mut progress = vec!["Indexing local history...".to_owned()];
-    if !snapshot.shallow_boundaries.is_empty() {
-        progress
-            .push("warning: local history is shallow; cache material is incomplete.".to_owned());
-    }
-    cache::publish(&repository.root, &snapshot)?;
+    let prepared = prepare_cache(&repository, true)?;
 
     Ok(Outcome {
-        progress,
+        progress: prepared.progress,
         message: format!(
-            "Indexed {commit_count} commit{}.",
-            if commit_count == 1 { "" } else { "s" }
+            "Indexed {} commit{}.",
+            prepared.commit_count,
+            if prepared.commit_count == 1 { "" } else { "s" }
         ),
     })
 }

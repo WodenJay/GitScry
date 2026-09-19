@@ -1,16 +1,114 @@
 mod schema;
 
-use std::{fs, path::Path};
+use std::{collections::HashMap, fs, path::Path};
 
 use rusqlite::{Connection, params};
 
 use crate::{
+    analysis,
     app::AppError,
     git::{Change, Commit, Hunk, Snapshot},
 };
 
-const SCHEMA_VERSION: &str = "1";
+const SCHEMA_VERSION: &str = "2";
 
+pub(crate) fn ready_commit_count(
+    root: &Path,
+    expected_default_ref: &str,
+    expected_tip: &str,
+    expected_shallow_boundaries: &[String],
+) -> Option<usize> {
+    let path = root.join(".gitscry/cache.sqlite");
+    if !path.is_file() {
+        return None;
+    }
+    let connection = Connection::open(path).ok()?;
+    let version: String = connection
+        .query_row(
+            "SELECT value FROM metadata WHERE key = 'schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .ok()?;
+    if version != SCHEMA_VERSION {
+        return None;
+    }
+    let completed_default_ref: String = connection
+        .query_row(
+            "SELECT value FROM metadata WHERE key = 'default_ref'",
+            [],
+            |row| row.get(0),
+        )
+        .ok()?;
+    if completed_default_ref != expected_default_ref {
+        return None;
+    }
+    let completed_tip: String = connection
+        .query_row(
+            "SELECT value FROM metadata WHERE key = 'completed_tip'",
+            [],
+            |row| row.get(0),
+        )
+        .ok()?;
+    if completed_tip != expected_tip {
+        return None;
+    }
+    let mut statement = connection
+        .prepare("SELECT oid FROM shallow_boundaries ORDER BY oid")
+        .ok()?;
+    let cached_shallow_boundaries = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .ok()?
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    if cached_shallow_boundaries != expected_shallow_boundaries {
+        return None;
+    }
+    connection
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'search_documents'",
+            [],
+            |_row| Ok(()),
+        )
+        .ok()?;
+    connection
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'search_fts'",
+            [],
+            |_row| Ok(()),
+        )
+        .ok()?;
+    let count: i64 = connection
+        .query_row("SELECT COUNT(*) FROM commits", [], |row| row.get(0))
+        .ok()?;
+    let document_count: i64 = connection
+        .query_row("SELECT COUNT(*) FROM search_documents", [], |row| {
+            row.get(0)
+        })
+        .ok()?;
+    if document_count != count {
+        return None;
+    }
+    let indexed_count: i64 = connection
+        .query_row("SELECT COUNT(*) FROM search_fts_docsize", [], |row| {
+            row.get(0)
+        })
+        .ok()?;
+    if indexed_count != count {
+        return None;
+    }
+    usize::try_from(count).ok()
+}
+
+pub(crate) fn shallow_warning(shallow_boundaries: &[String]) -> Option<String> {
+    (!shallow_boundaries.is_empty())
+        .then_some("warning: local history is shallow; cache material is incomplete.".to_owned())
+}
+
+pub(crate) fn open(root: &Path) -> Result<Connection, AppError> {
+    Connection::open(root.join(".gitscry/cache.sqlite"))
+        .map_err(|error| cache_error("opening cache", error))
+}
 pub(crate) fn publish(root: &Path, snapshot: &Snapshot) -> Result<(), AppError> {
     let directory = root.join(".gitscry");
     fs::create_dir_all(&directory).map_err(|error| cache_error("creating .gitscry", error))?;
@@ -100,8 +198,28 @@ fn build(path: &Path, snapshot: &Snapshot) -> Result<(), AppError> {
             .execute("INSERT INTO shallow_boundaries(oid) VALUES (?1)", [oid])
             .map_err(|error| cache_error("writing shallow boundary", error))?;
     }
+
+    let mut paths_by_commit = HashMap::<String, Vec<Vec<u8>>>::new();
+    for change in &snapshot.changes {
+        let paths = paths_by_commit
+            .entry(change.commit_oid.clone())
+            .or_default();
+        for path in [&change.old_path, &change.new_path].into_iter().flatten() {
+            if !paths.iter().any(|existing| existing == path) {
+                paths.push(path.clone());
+            }
+        }
+    }
     for commit in &snapshot.commits {
         insert_commit(&transaction, commit)?;
+        insert_document(
+            &transaction,
+            commit,
+            paths_by_commit
+                .get(&commit.oid)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]),
+        )?;
     }
     for change in &snapshot.changes {
         insert_change(&transaction, change)?;
@@ -109,6 +227,9 @@ fn build(path: &Path, snapshot: &Snapshot) -> Result<(), AppError> {
     for hunk in &snapshot.hunks {
         insert_hunk(&transaction, hunk)?;
     }
+    transaction
+        .execute("INSERT INTO search_fts(search_fts) VALUES ('rebuild')", [])
+        .map_err(|error| cache_error("building search index", error))?;
     transaction
         .commit()
         .map_err(|error| cache_error("committing staging cache", error))?;
@@ -132,6 +253,28 @@ fn insert_commit(connection: &Connection, commit: &Commit) -> Result<(), AppErro
             )
             .map_err(|error| cache_error("writing commit parent", error))?;
     }
+    Ok(())
+}
+fn insert_document(
+    connection: &Connection,
+    commit: &Commit,
+    paths: &[Vec<u8>],
+) -> Result<(), AppError> {
+    let (subject, body) = analysis::message_parts(&commit.message);
+    let subject = analysis::searchable_text(&subject);
+    let body = analysis::searchable_text(&body);
+    let paths = paths
+        .iter()
+        .map(|path| String::from_utf8_lossy(path).into_owned())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let paths = analysis::searchable_text(&paths);
+    connection
+        .execute(
+            "INSERT INTO search_documents(commit_oid, subject, body, paths) VALUES (?1, ?2, ?3, ?4)",
+            params![commit.oid, subject, body, paths],
+        )
+        .map_err(|error| cache_error("writing search document", error))?;
     Ok(())
 }
 
