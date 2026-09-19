@@ -625,6 +625,7 @@ fn count_connection(connection: &Connection, query: &str) -> Result<i64, AppErro
         .map_err(|error| cache_error("counting cache rows", error))
 }
 
+#[cfg(windows)]
 fn atomic_replace(directory: &Path, final_path: &Path, staging: &Path) -> Result<(), AppError> {
     if final_path.exists() {
         let previous = directory.join("cache.sqlite.previous");
@@ -642,6 +643,11 @@ fn atomic_replace(directory: &Path, final_path: &Path, staging: &Path) -> Result
             .map_err(|error| cache_error("publishing the cache", error))?;
     }
     Ok(())
+}
+
+#[cfg(not(windows))]
+fn atomic_replace(_directory: &Path, final_path: &Path, staging: &Path) -> Result<(), AppError> {
+    fs::rename(staging, final_path).map_err(|error| cache_error("publishing the cache", error))
 }
 
 fn ensure_ignored(directory: &Path) -> Result<(), AppError> {
