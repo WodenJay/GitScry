@@ -599,6 +599,8 @@ fn missing_cached_commit_fails_the_next_preparation() {
     let missing_commit = repo.head();
     repo.commit("history.txt", b"two\n", "Second history");
     assert_eq!(repo.run().status.code(), Some(0));
+    let cache_path = repo.dir.path().join(".gitscry/cache.sqlite");
+    let completed_tip = repo.head();
 
     let object_path = repo
         .dir
@@ -611,6 +613,24 @@ fn missing_cached_commit_fails_the_next_preparation() {
     let output = repo.run();
     assert_eq!(output.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&output.stderr).contains("Git command failed"));
+    let cache = Connection::open(cache_path).unwrap();
+    assert_eq!(
+        cache
+            .query_row("SELECT COUNT(*) FROM commits", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        cache
+            .query_row(
+                "SELECT value FROM metadata WHERE key = 'completed_tip'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+        completed_tip
+    );
 }
 
 #[test]
@@ -684,4 +704,58 @@ fn recovers_a_previous_generation_after_interrupted_replace() {
     assert!(output.stderr.is_empty());
     assert!(cache.is_file());
     assert!(!previous.exists());
+}
+
+#[test]
+fn concurrent_indexers_leave_one_complete_generation() {
+    let repo = TestRepo::new();
+    repo.commit("history.txt", b"one\n", "Initial history");
+
+    let first = Command::new(env!("CARGO_BIN_EXE_gitscry"))
+        .arg("index")
+        .current_dir(repo.dir.path())
+        .spawn()
+        .unwrap();
+    let second = Command::new(env!("CARGO_BIN_EXE_gitscry"))
+        .arg("index")
+        .current_dir(repo.dir.path())
+        .spawn()
+        .unwrap();
+    let first = first.wait_with_output().unwrap();
+    let second = second.wait_with_output().unwrap();
+
+    assert_eq!(first.status.code(), Some(0));
+    assert_eq!(second.status.code(), Some(0));
+    let cache = Connection::open(repo.dir.path().join(".gitscry/cache.sqlite")).unwrap();
+    assert_eq!(
+        cache
+            .query_row("SELECT COUNT(*) FROM commits", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn concurrent_readers_return_identical_material() {
+    let repo = TestRepo::new();
+    repo.commit("history.txt", b"one\n", "Initial history");
+    assert_eq!(repo.run().status.code(), Some(0));
+
+    let first = Command::new(env!("CARGO_BIN_EXE_gitscry"))
+        .args(["search", "history"])
+        .current_dir(repo.dir.path())
+        .spawn()
+        .unwrap();
+    let second = Command::new(env!("CARGO_BIN_EXE_gitscry"))
+        .args(["search", "history"])
+        .current_dir(repo.dir.path())
+        .spawn()
+        .unwrap();
+    let first = first.wait_with_output().unwrap();
+    let second = second.wait_with_output().unwrap();
+
+    assert_eq!(first.status.code(), Some(0));
+    assert_eq!(second.status.code(), Some(0));
+    assert_eq!(first.stdout, second.stdout);
 }
