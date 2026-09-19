@@ -239,6 +239,17 @@ fn search_rebuilds_cache_when_fts_index_is_damaged() {
     assert_eq!(second.status.code(), Some(0));
     assert!(String::from_utf8_lossy(&second.stdout).contains("Provider history"));
     assert!(String::from_utf8_lossy(&second.stderr).contains("Indexing local history"));
+    assert!(
+        fs::read_dir(repo.dir.path().join(".gitscry"))
+            .unwrap()
+            .flatten()
+            .any(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("cache.sqlite.corrupt-")
+            })
+    );
 }
 
 #[test]

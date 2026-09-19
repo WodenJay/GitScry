@@ -492,3 +492,51 @@ fn non_fast_forward_rebuild_removes_unreachable_commits() {
         1
     );
 }
+
+#[test]
+fn default_ref_change_rebuilds_the_pinned_generation() {
+    let repo = TestRepo::new();
+    repo.commit("history.txt", b"main\n", "Main history");
+    assert_eq!(repo.run().status.code(), Some(0));
+
+    git(repo.dir.path(), ["checkout", "-b", "feature"]);
+    repo.commit("feature.txt", b"feature\n", "Feature history");
+    let feature_tip = repo.head();
+    git(repo.dir.path(), ["checkout", "main"]);
+    git(
+        repo.dir.path(),
+        ["update-ref", "refs/remotes/origin/feature", &feature_tip],
+    );
+    git(
+        repo.dir.path(),
+        [
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/feature",
+        ],
+    );
+
+    let output = repo.run();
+    assert_eq!(output.status.code(), Some(0));
+    let cache = Connection::open(repo.dir.path().join(".gitscry/cache.sqlite")).unwrap();
+    assert_eq!(
+        cache
+            .query_row(
+                "SELECT value FROM metadata WHERE key = 'default_ref'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+        "refs/remotes/origin/feature"
+    );
+    assert_eq!(
+        cache
+            .query_row(
+                "SELECT value FROM metadata WHERE key = 'completed_tip'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+        feature_tip
+    );
+}
