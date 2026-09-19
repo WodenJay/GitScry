@@ -140,12 +140,13 @@ fn read_selected(
         .collect::<HashSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
-    let mut missing_objects = git.missing_objects(&object_ids)?;
+    let selected_missing = git.missing_objects(&object_ids)?;
+    let mut missing_objects = selected_missing.clone();
     missing_objects.extend(known_missing_objects);
     missing_objects.sort();
     missing_objects.dedup();
 
-    let hunks = if missing_objects.is_empty() {
+    let hunks = if selected_missing.is_empty() {
         let patch = git.output(
             [
                 "diff-tree",

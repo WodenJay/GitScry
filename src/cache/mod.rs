@@ -295,7 +295,10 @@ pub(crate) fn publish(root: &Path, snapshot: &Snapshot) -> Result<(), AppError> 
     let final_path = directory.join("cache.sqlite");
     let staging = directory.join(format!("cache.sqlite.staging-{}", std::process::id()));
     let _ = fs::remove_file(&staging);
-    build(&staging, snapshot)?;
+    if let Err(error) = build(&staging, snapshot) {
+        let _ = fs::remove_file(&staging);
+        return Err(error);
+    }
     if let Err(error) = validate(&staging, snapshot.commits.len()) {
         let _ = fs::remove_file(&staging);
         return Err(error);
