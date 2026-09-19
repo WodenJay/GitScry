@@ -2,10 +2,20 @@ use rusqlite::Connection;
 
 use crate::app::AppError;
 
-use super::super::provenance::{revert_reason, stated_reason, stated_retry};
+use super::super::provenance::{revert_reason, stated_retry};
 use super::super::retrieval;
 use super::super::{Citation, Confidence, Detail, Failure, Intent, Material, Report, ReportKind};
-use super::{confidence, empty};
+use super::lexical_confidence;
+
+/// One assembled failure result, before the report decides which survive the limit.
+struct Entry {
+    index: usize,
+    basis: Vec<String>,
+    citations: Vec<Citation>,
+    reason: Option<String>,
+    retry: Option<String>,
+    confidence: Confidence,
+}
 
 /// A candidate must share at least one intent term before its paths count as evidence.
 const MIN_SHARED_TERMS: usize = 1;
@@ -20,7 +30,7 @@ pub(crate) fn run(
     limit: usize,
 ) -> Result<Report, AppError> {
     let Some(pool) = retrieval::pool(connection, intent, limit)? else {
-        return Ok(empty(ReportKind::Failures));
+        return Ok(super::super::empty_report(ReportKind::Failures));
     };
     let reverts = retrieval::reverts(connection)?;
 
@@ -36,69 +46,87 @@ pub(crate) fn run(
         if candidate.signals.shared_terms() < MIN_SHARED_TERMS {
             continue;
         }
-        // A revert told by the abandoned change it undid is not a second result.
-        if linked.iter().enumerate().any(|(other, reverted)| {
-            other != index && reverted.map(|revert| revert.oid.as_str()) == Some(&candidate.oid)
-        }) {
-            continue;
-        }
-
-        // Only history that records an actual revert is failed-approach material. A revert
-        // that resolves no undone work, and a change no revert undid, is not the failure.
         let linked_revert = linked[index];
-        if linked_revert.is_none() && reverts.target_of(&candidate.oid).is_none() {
+        let is_revert = reverts.target_of(&candidate.oid).is_some();
+        // A revert told by the abandoned change it undid is not a second result.
+        if is_revert
+            && linked.iter().enumerate().any(|(other, reverted)| {
+                other != index && reverted.map(|revert| revert.oid.as_str()) == Some(&candidate.oid)
+            })
+        {
+            continue;
+        }
+        // Failed-approach material is an abandoned change, or the revert that abandoned it.
+        // Work no revert undid, and a revert that resolves to nothing in this repository, is
+        // not a failed approach however much its text resembles one.
+        if linked_revert.is_none() && !is_revert {
             continue;
         }
 
-        let mut score = candidate.signals.score();
+        let mut score = candidate.signals.identified_score();
         let mut basis = Vec::new();
-        candidate.signals.describe(&mut basis);
+        candidate.signals.describe_identified(&mut basis);
         let mut citations = vec![Citation::new(
             candidate.oid.clone(),
             candidate.subject.clone(),
         )];
-        let mut confidence = confidence(&candidate.signals);
-        let mut reason = if reverts.is_revert(&candidate.oid) {
-            revert_reason(&candidate.subject, &candidate.body)
-        } else {
-            stated_reason(&candidate.subject, &candidate.body)
-        };
-
-        if let Some(revert) = linked_revert {
-            score += REVERT_WEIGHT;
-            basis.push("recorded revert".to_owned());
-            citations.push(
-                Citation::new(revert.oid.clone(), revert.subject.clone())
-                    .noting("reverts this change"),
-            );
-            reason = revert_reason(&revert.subject, &revert.body).or(reason);
-            confidence = Confidence::High;
-        }
-
-        // A correction only means something once history records the revert it followed.
+        // Only a resolved revert states a failure reason. An abandoned change's own message
+        // is not used, because GitScry never infers why work was undone.
+        let mut reason = None;
         let mut retry = None;
-        if let Some(revert) = linked_revert {
+        let mut follow_up = false;
+
+        // The message that recorded the abandonment: the reverting commit for abandoned
+        // work, or the revert's own message when that is the subject.
+        let recording = linked_revert.or_else(|| reverts.resolved_revert(&candidate.oid));
+        if let Some(revert) = recording {
+            let abandoned_by_name = linked_revert.is_some();
+            if abandoned_by_name {
+                score += REVERT_WEIGHT;
+                basis.push("recorded revert".to_owned());
+                citations.push(
+                    Citation::new(revert.oid.clone(), revert.subject.clone())
+                        .noting("reverts this change"),
+                );
+            }
+            reason = revert_reason(&revert.subject, &revert.body);
             retry = stated_retry(&revert.body);
             if let Some((oid, subject)) =
                 retrieval::corrective_follow_up(connection, &revert.oid, &candidate.paths)?
             {
                 score += FOLLOW_UP_WEIGHT;
                 basis.push("corrective follow-up".to_owned());
-                let follow_up = retrieval::commit_text(connection, &oid)?;
-                retry = follow_up
+                let text = retrieval::commit_text(connection, &oid)?;
+                retry = text
                     .map(|text| format!("{}\n{}", text.0, text.1))
                     .and_then(|text| stated_retry(&text))
                     .or(retry);
                 citations.push(Citation::new(oid, subject).noting("follow-up"));
-                confidence = Confidence::High;
+                follow_up = true;
             }
         }
+
+        // Confidence reflects what was actually recovered, not that a link exists.
+        let confidence = if reason.is_some() && follow_up {
+            Confidence::High
+        } else if reason.is_some() {
+            Confidence::Medium
+        } else {
+            lexical_confidence(&candidate.signals)
+        };
 
         ranked.push(retrieval::Ranked {
             score,
             commit_time: candidate.commit_time,
             oid: candidate.oid.clone(),
-            value: (index, basis, citations, reason, retry, confidence),
+            value: Entry {
+                index,
+                basis,
+                citations,
+                reason,
+                retry,
+                confidence,
+            },
         });
     }
     retrieval::sort(&mut ranked);
@@ -107,15 +135,18 @@ pub(crate) fn run(
         .into_iter()
         .take(limit)
         .map(|ranked| {
-            let (index, basis, citations, reason, retry, confidence) = ranked.value;
-            let candidate = &pool.candidates[index];
+            let entry = ranked.value;
+            let candidate = &pool.candidates[entry.index];
             Material {
                 subject: candidate.subject.clone(),
                 paths: candidate.paths.clone(),
-                confidence,
-                basis,
-                citations,
-                detail: Some(Detail::Failure(Failure { reason, retry })),
+                confidence: entry.confidence,
+                basis: entry.basis,
+                citations: entry.citations,
+                detail: Some(Detail::Failure(Failure {
+                    reason: entry.reason,
+                    retry: entry.retry,
+                })),
             }
         })
         .collect::<Vec<_>>();

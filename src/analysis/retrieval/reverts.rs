@@ -60,6 +60,13 @@ impl RevertIndex {
             .into_iter()
     }
 
+    /// The revert that names a cached commit in its trailer, when `oid` is that revert.
+    pub(in crate::analysis) fn resolved_revert(&self, oid: &str) -> Option<&Revert> {
+        self.reverts
+            .iter()
+            .find(|revert| revert.oid == oid && revert.target.is_some())
+    }
+
     /// The cached commit this subject's trailer names, when it names one.
     pub(in crate::analysis) fn target_of(&self, oid: &str) -> Option<&str> {
         self.reverts

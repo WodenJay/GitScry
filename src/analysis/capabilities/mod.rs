@@ -7,14 +7,12 @@ mod examples;
 mod failures;
 mod search;
 
-use super::ReportKind;
-
 pub(crate) use examples::run as examples;
 pub(crate) use failures::run as failures;
 pub(crate) use search::run as search;
 
-/// The confidence a plain lexical result carries.
-pub(super) fn confidence(signals: &super::retrieval::Signals) -> super::Confidence {
+/// The confidence a result carries when nothing beyond the lexical match supports it.
+pub(super) fn lexical_confidence(signals: &super::retrieval::Signals) -> super::Confidence {
     if signals.strong() {
         super::Confidence::High
     } else if signals.moderate() {
@@ -22,9 +20,4 @@ pub(super) fn confidence(signals: &super::retrieval::Signals) -> super::Confiden
     } else {
         super::Confidence::Low
     }
-}
-
-/// A report with no material and the capability's fixed empty answer.
-pub(super) fn empty(kind: ReportKind) -> super::Report {
-    super::empty_report(kind)
 }

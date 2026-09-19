@@ -668,3 +668,104 @@ fn examples_bounds_the_steps_it_offers() {
 {text}"
     );
 }
+
+#[test]
+fn failures_never_takes_a_reason_from_the_abandoned_change() {
+    let repo = TestRepo::new();
+    // The abandoned change states a reason of its own; the revert states none. Only the
+    // revert can confirm why the work was undone, so the honest answer is Reason unknown.
+    let abandoned = repo.commit_at(
+        "src/db/index.rs",
+        b"cron sessions\n",
+        "Exclude cron sessions from the FTS index
+
+Cron sessions are noisy in search results, so we filter them here.",
+        "2020-01-01T00:00:00+0000",
+    );
+    repo.commit_at(
+        "src/db/index.rs",
+        b"cron sessions restored\n",
+        &format!(
+            "revert: exclude cron sessions from the FTS index\n\n\
+             This reverts commit {abandoned}.\n"
+        ),
+        "2020-02-01T00:00:00+0000",
+    );
+
+    let output = repo.run(["failures", "exclude", "cron", "sessions"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    let entry = block(&text, &abandoned[..12]);
+
+    assert!(entry.contains("reason: Reason unknown"), "{entry}");
+    assert!(
+        !entry.contains("noisy"),
+        "a reason was inferred from the abandoned change:\n{entry}"
+    );
+    // No recorded reason and no correction, so the lexical match is all the support there is.
+    assert!(!entry.contains("confidence: high"), "{entry}");
+}
+
+#[test]
+fn failures_links_a_revert_whose_named_commit_is_absent() {
+    let repo = TestRepo::new();
+    let abandoned = repo.commit_at(
+        "src/db/index.rs",
+        b"cron sessions
+",
+        "Exclude cron sessions from the FTS index",
+        "2020-01-01T00:00:00+0000",
+    );
+    let revert = repo.commit_at(
+        "src/db/index.rs",
+        b"cron sessions restored
+",
+        "revert: exclude cron sessions from the FTS index
+
+         This reverts commit 0123456789abcdef0123456789abcdef01234567.
+
+         The predicate was too broad for the shared writer.
+",
+        "2020-02-01T00:00:00+0000",
+    );
+
+    let output = repo.run(["failures", "exclude", "cron", "sessions"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    let entry = block(&text, &abandoned[..12]);
+
+    // The undone paths confirm the link without the trailer, but no message states why.
+    assert!(entry.contains(&revert[..12]), "{entry}");
+    assert!(entry.contains("reason: Reason unknown"), "{entry}");
+    // The revert itself resolves to nothing, so it is not reported on its own.
+    assert!(
+        !text.contains(&format!(
+            "
+- {} ",
+            &revert[..12]
+        )),
+        "an unresolved revert was reported as its own failed approach:
+{text}"
+    );
+}
+
+#[test]
+fn examples_and_failures_reject_paths_outside_the_repository() {
+    let repo = provider_retirements();
+    for path in ["/etc/passwd", "../../etc/passwd", "C:/Windows/system32"] {
+        for command in ["examples", "failures"] {
+            let output = repo.run([command, "provider", "--path", path]);
+            assert_eq!(
+                output.status.code(),
+                Some(2),
+                "{command} --path {path} should be invalid input: {}{}",
+                stdout(&output),
+                stderr(&output)
+            );
+            assert!(
+                stdout(&output).is_empty(),
+                "{command} --path {path} still returned material"
+            );
+        }
+    }
+}

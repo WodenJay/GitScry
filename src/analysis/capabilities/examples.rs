@@ -4,7 +4,7 @@ use crate::app::AppError;
 
 use super::super::retrieval;
 use super::super::{Citation, Confidence, Detail, Intent, Material, Report, ReportKind};
-use super::{confidence, empty};
+use super::lexical_confidence;
 
 /// How much one anchored path overlap raises a candidate.
 const ANCHOR_WEIGHT: f64 = 4.0;
@@ -21,16 +21,15 @@ pub(crate) fn run(
     limit: usize,
 ) -> Result<Report, AppError> {
     let Some(pool) = retrieval::pool(connection, intent, limit)? else {
-        return Ok(empty(ReportKind::Examples));
+        return Ok(super::super::empty_report(ReportKind::Examples));
     };
     let reverts = retrieval::reverts(connection)?;
-    let steps = pool.steps(connection)?;
 
     let mut ranked = Vec::new();
     for (index, candidate) in pool.candidates.iter().enumerate() {
         let anchored = candidate.signals.matched_anchors();
         let coherent = coherent_change(&pool, index);
-        let mut score = candidate.signals.score() + anchored as f64 * ANCHOR_WEIGHT;
+        let mut score = candidate.signals.identified_score() + anchored as f64 * ANCHOR_WEIGHT;
         score += if coherent { COHERENT_WEIGHT } else { 0.0 };
         // Work that was later undone, and the revert itself, are not precedents to follow.
         if reverts.is_revert(&candidate.oid)
@@ -52,7 +51,7 @@ pub(crate) fn run(
         let (index, anchored, coherent) = ranked.value;
         let candidate = &pool.candidates[index];
         let mut basis = Vec::new();
-        candidate.signals.describe(&mut basis);
+        candidate.signals.describe_identified(&mut basis);
         if anchored > 0 {
             basis.push(format!("anchored path match ({anchored})"));
         }
@@ -63,7 +62,7 @@ pub(crate) fn run(
             candidate.oid.clone(),
             candidate.subject.clone(),
         )];
-        let mut confidence = confidence(&candidate.signals);
+        let mut confidence = lexical_confidence(&candidate.signals);
         if reverts.is_revert(&candidate.oid) {
             basis.push("demoted: a revert, not a precedent".to_owned());
             confidence = Confidence::Low;
@@ -74,13 +73,15 @@ pub(crate) fn run(
             basis.push("demoted: later reverted".to_owned());
             confidence = Confidence::Low;
         }
+        // Steps are only read for the results actually returned, not the whole pool.
+        let steps = retrieval::steps(connection, &candidate.oid)?;
         materials.push(Material {
             subject: candidate.subject.clone(),
             paths: candidate.paths.clone(),
             confidence,
             basis,
             citations,
-            detail: (!steps[index].is_empty()).then_some(Detail::Steps(steps[index].clone())),
+            detail: (!steps.is_empty()).then_some(Detail::Steps(steps)),
         });
     }
     retrieval::assign_citations(&mut materials);

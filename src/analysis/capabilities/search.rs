@@ -4,7 +4,7 @@ use crate::app::AppError;
 
 use super::super::retrieval;
 use super::super::{Citation, Intent, Material, Report, ReportKind};
-use super::{confidence, empty};
+use super::lexical_confidence;
 
 pub(crate) fn run(
     connection: &Connection,
@@ -12,7 +12,7 @@ pub(crate) fn run(
     limit: usize,
 ) -> Result<Report, AppError> {
     let Some(pool) = retrieval::pool(connection, intent, limit)? else {
-        return Ok(empty(ReportKind::Search));
+        return Ok(super::super::empty_report(ReportKind::Search));
     };
 
     let mut ranked = pool
@@ -37,7 +37,7 @@ pub(crate) fn run(
             Material {
                 subject: candidate.subject.clone(),
                 paths: candidate.paths,
-                confidence: confidence(&candidate.signals),
+                confidence: lexical_confidence(&candidate.signals),
                 basis,
                 citations: vec![Citation::new(candidate.oid, candidate.subject)],
                 detail: None,

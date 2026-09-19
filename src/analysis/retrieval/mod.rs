@@ -20,9 +20,8 @@ pub(crate) use text::{message_parts, searchable_text};
 
 pub(in crate::analysis) use lexical::Signals;
 pub(in crate::analysis) use rank::{Ranked, assign_citations, sort};
-pub(in crate::analysis) use reverts::{Revert, RevertIndex};
-
-use super::Step;
+pub(in crate::analysis) use reverts::{Revert, RevertIndex, index as reverts};
+pub(in crate::analysis) use store::{corrective_follow_up, steps, text as commit_text};
 
 /// How deep the lexical pool reaches relative to the caller's `--limit`.
 const CANDIDATE_MULTIPLIER: usize = 20;
@@ -34,7 +33,6 @@ pub(in crate::analysis) struct Scored {
     pub(in crate::analysis) oid: String,
     pub(in crate::analysis) commit_time: i64,
     pub(in crate::analysis) subject: String,
-    pub(in crate::analysis) body: String,
     pub(in crate::analysis) paths: Vec<Vec<u8>>,
     pub(in crate::analysis) signals: Signals,
 }
@@ -46,17 +44,6 @@ pub(in crate::analysis) struct Pool {
 }
 
 impl Pool {
-    /// The moves each candidate made, in pool order.
-    pub(in crate::analysis) fn steps(
-        &self,
-        connection: &Connection,
-    ) -> Result<Vec<Vec<Step>>, AppError> {
-        self.candidates
-            .iter()
-            .map(|candidate| store::steps(connection, &candidate.oid))
-            .collect()
-    }
-
     /// How many of another candidate's paths this one also changed.
     pub(in crate::analysis) fn shared_paths(&self, index: usize, other: usize) -> usize {
         let (Some(left), Some(right)) = (self.candidates.get(index), self.candidates.get(other))
@@ -89,12 +76,17 @@ pub(in crate::analysis) fn pool(
     let candidates = store::candidates(connection, &query, candidate_limit(limit))?
         .into_iter()
         .map(|candidate| Scored {
-            signals: lexical::signals(intent, &candidate.subject, &candidate.paths, candidate.bm25),
+            signals: lexical::signals(
+                intent,
+                &candidate.subject,
+                &candidate.body,
+                &candidate.paths,
+                candidate.bm25,
+            ),
             position: candidate.position,
             oid: candidate.oid,
             commit_time: candidate.commit_time,
             subject: candidate.subject,
-            body: candidate.body,
             paths: candidate.paths,
         })
         .collect();
@@ -102,19 +94,6 @@ pub(in crate::analysis) fn pool(
         matched_count,
         candidates,
     }))
-}
-
-/// Resolve every recorded revert in the cache generation.
-pub(in crate::analysis) fn reverts(connection: &Connection) -> Result<RevertIndex, AppError> {
-    reverts::index(connection)
-}
-
-/// Subject and body of one cached commit.
-pub(in crate::analysis) fn commit_text(
-    connection: &Connection,
-    oid: &str,
-) -> Result<Option<(String, String)>, AppError> {
-    store::text(connection, oid)
 }
 
 /// The revert history associates with a candidate: the trailer it names first, then the
@@ -138,15 +117,6 @@ pub(in crate::analysis) fn link<'a>(
         }
     }
     Ok(None)
-}
-
-/// The next commit that touches the abandoned paths, after the revert that recorded it.
-pub(in crate::analysis) fn corrective_follow_up(
-    connection: &Connection,
-    revert_oid: &str,
-    paths: &[Vec<u8>],
-) -> Result<Option<(String, String)>, AppError> {
-    store::corrective_follow_up(connection, revert_oid, paths)
 }
 
 fn match_query(terms: &[String]) -> String {

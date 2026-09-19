@@ -2,17 +2,10 @@ use crate::app::AppError;
 
 use super::text::{normalize_path, tokenize};
 
-/// Words that carry no repository meaning. They are dropped from the query, not from the
-/// cache, so ordinary prose cannot inflate term coverage.
-const STOPWORDS: &[&str] = &[
-    "a", "an", "the", "and", "or", "of", "for", "to", "in", "on", "at", "by", "with", "from", "as",
-    "is", "are", "was", "were", "be", "been", "it", "its", "this", "that", "these", "those", "we",
-    "our", "you", "your", "while", "when", "where", "into", "than", "then",
-];
-
 /// What one natural-language query asks the cache for.
 pub(crate) struct Intent {
     terms: Vec<String>,
+    /// Repository-relative anchors, from `--path` and from path-like query words.
     anchors: Vec<String>,
 }
 
@@ -27,29 +20,49 @@ impl Intent {
             .into_iter()
             .chain(paths.iter().cloned())
         {
-            let anchor = normalize_path(anchor.as_bytes());
-            if anchor.is_empty() {
+            // Validate before normalizing, because normalizing trims the leading slash that
+            // marks an absolute path.
+            if anchor.trim().is_empty() {
                 return Err(AppError::input("path must not be empty"));
             }
+            if !is_repository_relative(&anchor) {
+                return Err(AppError::input(format!(
+                    "path must be repository-relative: {anchor}"
+                )));
+            }
+            let anchor = normalize_path(anchor.as_bytes());
             if !anchors.contains(&anchor) {
                 anchors.push(anchor);
             }
         }
-        let terms = tokenize(&input)
-            .into_iter()
-            .filter(|term| !STOPWORDS.contains(&term.as_str()))
-            .collect();
-        Ok(Self { terms, anchors })
+        Ok(Self {
+            terms: tokenize(&input),
+            anchors,
+        })
     }
 
-    pub(crate) fn terms(&self) -> &[String] {
+    pub(super) fn terms(&self) -> &[String] {
         &self.terms
     }
 
     /// Every anchor the caller supplied, path-like query words included.
-    pub(crate) fn anchors(&self) -> &[String] {
+    pub(super) fn anchors(&self) -> &[String] {
         &self.anchors
     }
+}
+
+/// Whether a caller-supplied path is relative to the repository root.
+///
+/// An absolute path, a Windows drive, or a traversal escapes the repository, so it is
+/// invalid input rather than a query that silently broadens.
+fn is_repository_relative(path: &str) -> bool {
+    let path = std::path::Path::new(path);
+    // `has_root` also catches `/etc/passwd`, which is not `is_absolute` on Windows.
+    !path.is_absolute()
+        && !path.has_root()
+        && path
+            .components()
+            .all(|component| !matches!(component, std::path::Component::ParentDir))
 }
 
 /// Path-like words inside the query text, so `examples provider/tavily.rs` still anchors.

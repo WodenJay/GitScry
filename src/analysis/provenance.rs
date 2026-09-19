@@ -8,8 +8,8 @@
 const MAX_REASON: usize = 240;
 const MIN_REASON: usize = 24;
 
-/// Markers that a sentence states why a change failed or was abandoned.
-const RATIONALE_MARKERS: &[&str] = &[
+/// Markers of a sentence that states why a change failed: a cause, or the harm it did.
+const CAUSE_MARKERS: &[&str] = &[
     "because",
     "since ",
     "due to",
@@ -17,17 +17,36 @@ const RATIONALE_MARKERS: &[&str] = &[
     "why:",
     "root cause",
     "caused by",
+    "so that",
+    "therefore",
+    "thus ",
     "could not",
     "cannot ",
     "can't ",
+];
+
+/// Markers of a sentence that reports harm an approach did.
+const HARM_MARKERS: &[&str] = &[
     "fails",
     "failed",
     "breaks",
     "broke",
     "bricking",
+    "bricked",
     "regression",
     "no longer",
     "silently",
+    "slowed",
+    "slows",
+    "clobber",
+    "corrupt",
+    "leak",
+    "race",
+    "overhead",
+    "stall",
+    "hangs",
+    "flaky",
+    "unstable",
 ];
 
 /// Markers that a message records how to retry the abandoned approach safely.
@@ -96,8 +115,10 @@ pub(super) fn reverted_commit(text: &str) -> Option<String> {
 
 /// A failure reason, but only one history states.
 pub(super) fn stated_reason(subject: &str, body: &str) -> Option<String> {
+    // The reason is stated wherever the message states it, so the first labelled sentence
+    // wins rather than a preferred kind of label.
     for sentence in sentences(body) {
-        if contains_marker(&sentence, RATIONALE_MARKERS) {
+        if contains_marker(&sentence, CAUSE_MARKERS) || contains_marker(&sentence, HARM_MARKERS) {
             let reason = clean(&sentence);
             if reason.len() >= MIN_REASON {
                 return Some(reason);
@@ -105,22 +126,26 @@ pub(super) fn stated_reason(subject: &str, body: &str) -> Option<String> {
         }
     }
     let subject = strip_conventional_prefix(subject);
-    contains_marker(subject, RATIONALE_MARKERS)
+    (contains_marker(subject, CAUSE_MARKERS) || contains_marker(subject, HARM_MARKERS))
         .then(|| clean(subject))
         .filter(|reason| reason.len() >= MIN_REASON)
 }
 
 /// The rationale a revert message records.
 ///
-/// A revert body is where the reason is written down, so the first substantive sentence
-/// counts even without a rationale marker. Boilerplate trailer lines are not a reason.
+/// A revert body is where a reason is written down, so a sentence that states harm or cause
+/// counts even without an explicit `reason:` label. A revert that records only bookkeeping
+/// states no reason, and then `Reason unknown` is the honest answer.
 pub(super) fn revert_reason(subject: &str, body: &str) -> Option<String> {
     if let Some(reason) = stated_reason(subject, body) {
         return Some(reason);
     }
     for sentence in sentences(body) {
         let reason = clean(&sentence);
-        if reason.len() >= MIN_REASON && !is_boilerplate(&reason) {
+        if reason.len() >= MIN_REASON
+            && !is_boilerplate(&reason)
+            && (contains_marker(&reason, CAUSE_MARKERS) || contains_marker(&reason, HARM_MARKERS))
+        {
             return Some(reason);
         }
     }
