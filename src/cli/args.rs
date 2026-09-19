@@ -4,24 +4,11 @@ use clap::{Parser, Subcommand};
 #[command(name = "gitscry", version, color = clap::ColorChoice::Never)]
 pub(super) struct Cli {
     #[command(subcommand)]
-    command: CommandArgs,
+    pub(super) command: Command,
 }
 
 #[derive(Debug, Subcommand)]
-enum CommandArgs {
+pub(crate) enum Command {
     /// Build the local cache from the default branch history.
     Index,
-}
-
-#[derive(Debug)]
-pub(crate) enum Command {
-    Index,
-}
-
-impl From<Cli> for Command {
-    fn from(cli: Cli) -> Self {
-        match cli.command {
-            CommandArgs::Index => Self::Index,
-        }
-    }
 }

@@ -292,3 +292,109 @@ fn invalid_cli_input_exits_two() {
     assert_eq!(output.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&output.stderr).contains("unexpected"));
 }
+
+#[test]
+fn help_is_successful_output() {
+    let output = Command::new(env!("CARGO_BIN_EXE_gitscry"))
+        .arg("--help")
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Usage:"));
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
+fn shallow_merge_keeps_parents_and_reindexes_after_deepening() {
+    let source = TestRepo::new();
+    source.commit("root.txt", b"root\n", "root");
+    git(source.dir.path(), ["checkout", "-b", "side"]);
+    source.commit("side.txt", b"side\n", "side");
+    git(source.dir.path(), ["checkout", "main"]);
+    source.commit("main.txt", b"main\n", "main");
+    git(
+        source.dir.path(),
+        ["merge", "--no-ff", "side", "-m", "merge"],
+    );
+    let merge = source.head();
+
+    let parent = tempfile::tempdir().unwrap();
+    let clone = parent.path().join("clone");
+    let cloned = Command::new("git")
+        .args(["clone", "--depth", "1", "--no-local"])
+        .arg(source.dir.path())
+        .arg(&clone)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .unwrap();
+    assert!(
+        cloned.status.success(),
+        "{}",
+        String::from_utf8_lossy(&cloned.stderr)
+    );
+
+    let first = Command::new(env!("CARGO_BIN_EXE_gitscry"))
+        .arg("index")
+        .current_dir(&clone)
+        .output()
+        .unwrap();
+    assert_eq!(
+        first.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let cache_path = clone.join(".gitscry/cache.sqlite");
+    let cache = Connection::open(&cache_path).unwrap();
+    assert_eq!(
+        cache
+            .query_row(
+                "SELECT COUNT(*) FROM commit_parents WHERE commit_oid = ?1",
+                [&merge],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        cache
+            .query_row(
+                "SELECT COUNT(*) FROM changes WHERE commit_oid = ?1",
+                [&merge],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0
+    );
+    drop(cache);
+
+    git(&clone, ["fetch", "--unshallow"]);
+    let second = Command::new(env!("CARGO_BIN_EXE_gitscry"))
+        .arg("index")
+        .current_dir(&clone)
+        .output()
+        .unwrap();
+    assert_eq!(
+        second.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let cache = Connection::open(cache_path).unwrap();
+    assert_eq!(
+        cache
+            .query_row("SELECT COUNT(*) FROM commits", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        4
+    );
+    let merge_paths: Vec<Vec<u8>> = cache
+        .prepare("SELECT new_path FROM changes WHERE commit_oid = ?1 ORDER BY ordinal")
+        .unwrap()
+        .query_map([&merge], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(merge_paths, vec![b"side.txt".to_vec()]);
+}

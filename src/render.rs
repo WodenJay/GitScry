@@ -29,3 +29,13 @@ fn write_outcome(outcome: Outcome) -> io::Result<()> {
     }
     writeln!(io::stdout().lock(), "{}", outcome.message)
 }
+
+pub(crate) fn display(text: &str) -> i32 {
+    match write!(io::stdout().lock(), "{text}") {
+        Ok(()) => 0,
+        Err(error) => {
+            let _ = writeln!(io::stderr().lock(), "error: writing output: {error}");
+            1
+        }
+    }
+}

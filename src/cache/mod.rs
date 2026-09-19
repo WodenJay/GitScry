@@ -17,9 +17,6 @@ pub(crate) fn publish(root: &Path, snapshot: &Snapshot) -> Result<(), AppError> 
     ensure_ignored(&directory)?;
 
     let final_path = directory.join("cache.sqlite");
-    if is_current(&final_path, snapshot)? {
-        return Ok(());
-    }
 
     let staging = directory.join(format!("cache.sqlite.staging-{}", std::process::id()));
     let _ = fs::remove_file(&staging);
@@ -66,27 +63,6 @@ fn ensure_ignored(directory: &Path) -> Result<(), AppError> {
     }
     contents.extend_from_slice(b"*\n");
     fs::write(path, contents).map_err(|error| cache_error("writing .gitscry/.gitignore", error))
-}
-
-fn is_current(path: &Path, snapshot: &Snapshot) -> Result<bool, AppError> {
-    if !path.exists() {
-        return Ok(false);
-    }
-    let connection = match Connection::open(path) {
-        Ok(connection) => connection,
-        Err(_) => return Ok(false),
-    };
-    let query = |key: &str| {
-        connection.query_row("SELECT value FROM metadata WHERE key = ?1", [key], |row| {
-            row.get::<_, String>(0)
-        })
-    };
-    Ok(
-        query("schema_version").ok().as_deref() == Some(SCHEMA_VERSION)
-            && query("completed_tip").ok().as_deref() == Some(snapshot.tip.as_str())
-            && query("default_ref").ok().as_deref() == Some(snapshot.default_ref.as_str())
-            && query("object_format").ok().as_deref() == Some(snapshot.object_format.as_str()),
-    )
 }
 
 fn build(path: &Path, snapshot: &Snapshot) -> Result<(), AppError> {

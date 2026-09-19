@@ -50,18 +50,19 @@ pub(super) fn read(
     tip: String,
     object_format: String,
 ) -> Result<Snapshot, AppError> {
-    let graph = git.output(
-        ["rev-list", "--reverse", "--topo-order", "--parents", &tip],
-        &[],
-    )?;
+    let graph = git.output(["rev-list", "--reverse", "--topo-order", &tip], &[])?;
     let graph = parse_graph(&graph)?;
     let shallow_boundaries = read_shallow_boundaries(git)?;
     let commits = read_commits(git, &graph)?;
-    let diff_input = graph
+    let available: HashSet<&str> = commits.iter().map(|commit| commit.oid.as_str()).collect();
+    let diff_input = commits
         .iter()
-        .map(|(oid, parents)| match parents.first() {
-            Some(parent) => format!("{oid} {parent}\n"),
-            None => format!("{oid}\n"),
+        .filter_map(|commit| match commit.parents.first() {
+            Some(parent) if available.contains(parent.as_str()) => {
+                Some(format!("{} {parent}\n", commit.oid))
+            }
+            Some(_) => None,
+            None => Some(format!("{}\n", commit.oid)),
         })
         .collect::<String>();
     let raw = git.output(
@@ -77,7 +78,7 @@ pub(super) fn read(
         ],
         diff_input.as_bytes(),
     )?;
-    let known = graph.iter().map(|(oid, _)| oid.as_str()).collect();
+    let known = available;
     let changes = parse_changes(&raw, &known)?;
     let patch = git.output(
         [
@@ -130,33 +131,29 @@ fn read_shallow_boundaries(git: &Git) -> Result<Vec<String>, AppError> {
         .collect()
 }
 
-fn parse_graph(bytes: &[u8]) -> Result<Vec<(String, Vec<String>)>, AppError> {
+fn parse_graph(bytes: &[u8]) -> Result<Vec<String>, AppError> {
     let text = std::str::from_utf8(bytes)
         .map_err(|error| parse_error(format!("revision graph is not UTF-8: {error}")))?;
     text.lines()
-        .map(|line| {
-            let mut fields = line.split_ascii_whitespace();
-            let oid = fields
-                .next()
-                .ok_or_else(|| parse_error("revision graph contained an empty record"))?;
-            if !is_oid(oid.as_bytes()) {
-                return Err(parse_error("revision graph contained an invalid object ID"));
+        .map(|oid| {
+            if is_oid(oid.as_bytes()) {
+                Ok(oid.to_owned())
+            } else {
+                Err(parse_error("revision graph contained an invalid object ID"))
             }
-            let parents = fields.map(str::to_owned).collect();
-            Ok((oid.to_owned(), parents))
         })
         .collect()
 }
 
-fn read_commits(git: &Git, graph: &[(String, Vec<String>)]) -> Result<Vec<Commit>, AppError> {
+fn read_commits(git: &Git, graph: &[String]) -> Result<Vec<Commit>, AppError> {
     let input = graph
         .iter()
-        .map(|(oid, _)| format!("{oid}\n"))
+        .map(|oid| format!("{oid}\n"))
         .collect::<String>();
     let output = git.output(["cat-file", "--batch"], input.as_bytes())?;
     let mut cursor = 0;
     let mut commits = Vec::with_capacity(graph.len());
-    for (expected_oid, parents) in graph {
+    for expected_oid in graph {
         let header_end = find_byte(&output, cursor, b'\n')
             .ok_or_else(|| parse_error("truncated cat-file header"))?;
         let header = std::str::from_utf8(&output[cursor..header_end])
@@ -178,19 +175,19 @@ fn read_commits(git: &Git, graph: &[(String, Vec<String>)]) -> Result<Vec<Commit
             .filter(|end| *end < output.len())
             .ok_or_else(|| parse_error("truncated commit object"))?;
         let body = &output[start..end];
-        let (time, message) = parse_commit(body)?;
+        let (time, message, parents) = parse_commit(body)?;
         commits.push(Commit {
             oid: oid.to_owned(),
             message: message.to_vec(),
             time,
-            parents: parents.clone(),
+            parents,
         });
         cursor = end + 1;
     }
     Ok(commits)
 }
 
-fn parse_commit(body: &[u8]) -> Result<(i64, &[u8]), AppError> {
+fn parse_commit(body: &[u8]) -> Result<(i64, &[u8], Vec<String>), AppError> {
     let separator = body
         .windows(2)
         .position(|window| window == b"\n\n")
@@ -209,7 +206,20 @@ fn parse_commit(body: &[u8]) -> Result<(i64, &[u8]), AppError> {
         .ok()
         .and_then(|value| value.parse().ok())
         .ok_or_else(|| parse_error("committer timestamp is invalid"))?;
-    Ok((time, &body[separator + 2..]))
+    let parents = headers
+        .split(|byte| *byte == b'\n')
+        .filter_map(|line| line.strip_prefix(b"parent "))
+        .map(|oid| {
+            let oid = std::str::from_utf8(oid)
+                .map_err(|error| parse_error(format!("invalid parent object ID: {error}")))?;
+            if is_oid(oid.as_bytes()) {
+                Ok(oid.to_owned())
+            } else {
+                Err(parse_error("commit contained an invalid parent object ID"))
+            }
+        })
+        .collect::<Result<_, _>>()?;
+    Ok((time, &body[separator + 2..], parents))
 }
 
 fn parse_changes(bytes: &[u8], known: &HashSet<&str>) -> Result<Vec<Change>, AppError> {
