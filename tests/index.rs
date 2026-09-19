@@ -398,3 +398,97 @@ fn shallow_merge_keeps_parents_and_reindexes_after_deepening() {
         .unwrap();
     assert_eq!(merge_paths, vec![b"side.txt".to_vec()]);
 }
+
+#[test]
+fn fresh_index_is_quiet_and_reports_completed_count() {
+    let repo = TestRepo::new();
+    repo.commit("history.txt", b"one\n", "Initial history");
+
+    let first = repo.run();
+    assert_eq!(first.status.code(), Some(0));
+    let second = repo.run();
+    assert_eq!(second.status.code(), Some(0));
+    assert_eq!(second.stdout, b"Indexed 1 commit.\n");
+    assert!(second.stderr.is_empty());
+}
+
+#[test]
+fn fast_forward_updates_one_completed_generation() {
+    let repo = TestRepo::new();
+    repo.commit("history.txt", b"one\n", "Initial history");
+    let first = repo.head();
+    assert_eq!(repo.run().status.code(), Some(0));
+
+    repo.commit("history.txt", b"two\n", "Second history");
+    let second = repo.run();
+    assert_eq!(second.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&second.stderr).contains("Indexing local history"));
+
+    let cache = Connection::open(repo.dir.path().join(".gitscry/cache.sqlite")).unwrap();
+    assert_eq!(
+        cache
+            .query_row("SELECT COUNT(*) FROM commits", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        cache
+            .query_row(
+                "SELECT value FROM metadata WHERE key = 'completed_commit_count'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+        "2"
+    );
+    assert_eq!(
+        cache
+            .query_row(
+                "SELECT COUNT(*) FROM changes WHERE commit_oid = ?1",
+                [&first],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn non_fast_forward_rebuild_removes_unreachable_commits() {
+    let repo = TestRepo::new();
+    repo.commit("history.txt", b"one\n", "Initial history");
+    let base = repo.head();
+    repo.commit("history.txt", b"two\n", "Old second history");
+    let old_tip = repo.head();
+    assert_eq!(repo.run().status.code(), Some(0));
+
+    git(repo.dir.path(), ["reset", "--hard", &base]);
+    repo.commit("history.txt", b"replacement\n", "Replacement history");
+    let new_tip = repo.head();
+    let output = repo.run();
+    assert_eq!(output.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Indexing local history"));
+
+    let cache = Connection::open(repo.dir.path().join(".gitscry/cache.sqlite")).unwrap();
+    assert_eq!(
+        cache
+            .query_row(
+                "SELECT COUNT(*) FROM commits WHERE oid = ?1",
+                [&old_tip],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        cache
+            .query_row(
+                "SELECT COUNT(*) FROM commits WHERE oid = ?1",
+                [&new_tip],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1
+    );
+}
