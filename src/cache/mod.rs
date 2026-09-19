@@ -611,7 +611,8 @@ fn validate_connection(connection: &Connection, expected_commits: i64) -> Result
     let count = count_connection(connection, "SELECT COUNT(*) FROM commits")?;
     let documents = count_connection(connection, "SELECT COUNT(*) FROM search_documents")?;
     let fts = count_connection(connection, "SELECT COUNT(*) FROM search_fts_docsize")?;
-    if count != expected_commits || documents != count || fts != count {
+    let fts_rows = count_connection(connection, "SELECT COUNT(*) FROM search_fts")?;
+    if count != expected_commits || documents != count || fts != count || fts_rows != count {
         return Err(AppError::operational(
             "error: validating cache transaction failed; retry",
         ));
