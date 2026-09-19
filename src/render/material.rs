@@ -1,5 +1,8 @@
 use crate::analysis::{Detail, Failure, Material, Report, ReportKind, Step};
 
+/// Printed when history does not state why an approach failed.
+const REASON_UNKNOWN: &str = "Reason unknown";
+
 use super::escape;
 
 /// Paths shown per result before the remainder is summarised.
@@ -109,7 +112,7 @@ fn describe(failure: &Failure) -> String {
     failure
         .reason
         .clone()
-        .unwrap_or_else(|| Failure::UNKNOWN.to_owned())
+        .unwrap_or_else(|| REASON_UNKNOWN.to_owned())
 }
 
 fn render_paths(lines: &mut Vec<String>, paths: &[Vec<u8>]) {

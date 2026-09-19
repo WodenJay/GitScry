@@ -244,7 +244,7 @@ pub(in crate::analysis) fn corrective_follow_up(
             row.map_err(|error| search_error("reading corrective follow-up", error))?;
         let (subject, _) = super::text::message_parts(&message);
         // Only a commit that reads as a correction counts; a later incidental touch of the
-        // same path is not evidence about how the abandoned approach moved on.
+        // same path is not material about how the abandoned approach moved on.
         if super::super::provenance::is_corrective_subject(&subject) {
             return Ok(Some((oid, subject)));
         }

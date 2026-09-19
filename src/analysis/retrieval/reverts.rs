@@ -10,7 +10,7 @@ use super::text::message_parts;
 
 /// A cached commit whose subject reads like a revert, with what is needed to link it to the
 /// work it undid. The `This reverts commit` trailer is authoritative; most reverts in the
-/// wild omit it, so changed paths are recorded as the fallback evidence.
+/// wild omit it, so changed paths are recorded as the fallback link.
 pub(in crate::analysis) struct Revert {
     pub(in crate::analysis) position: i64,
     pub(in crate::analysis) oid: String,

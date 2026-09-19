@@ -1,6 +1,6 @@
 //! Assembling the material each query command returns.
 //!
-//! One reason to change: what a capability's answer is made of. Reading and scoring live
+//! One reason to change: what a capability returns. Reading and scoring live
 //! in [`super::retrieval`]; wording lives in `render`.
 
 mod examples;

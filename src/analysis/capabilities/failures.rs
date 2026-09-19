@@ -17,9 +17,9 @@ struct Entry {
     confidence: Confidence,
 }
 
-/// A candidate must share at least one intent term before its paths count as evidence.
+/// A candidate must share at least one intent term before its paths count as material.
 const MIN_SHARED_TERMS: usize = 1;
-/// History recording the revert itself is the strongest failure evidence there is.
+/// History recording the revert itself is the strongest failure material there is.
 const REVERT_WEIGHT: f64 = 6.0;
 /// A later correction of the abandoned paths explains how the approach moved on.
 const FOLLOW_UP_WEIGHT: f64 = 3.0;

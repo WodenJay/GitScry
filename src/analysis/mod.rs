@@ -1,7 +1,7 @@
 //! Turning cache rows into traceable `material` for one capability.
 //!
 //! Three parts, three reasons to change. [`retrieval`] owns *how history is read and
-//! scored*; [`provenance`] owns *how a commit message is read for failure evidence*;
+//! scored*; [`provenance`] owns *how a commit message is read for failure provenance*;
 //! [`capabilities`] owns *what material each command assembles*. Ranking weights and
 //! retrieval mechanics stay private, and all user-visible wording belongs to `render`.
 
@@ -15,7 +15,7 @@ use crate::app::AppError;
 
 pub(crate) use retrieval::{Intent, message_parts, searchable_text};
 
-/// A complete, renderable answer for one capability.
+/// The complete `material` one capability returns.
 pub(crate) struct Report {
     pub(crate) kind: ReportKind,
     pub(crate) materials: Vec<Material>,
@@ -79,10 +79,6 @@ impl Step {
 pub(crate) struct Failure {
     pub(crate) reason: Option<String>,
     pub(crate) retry: Option<String>,
-}
-
-impl Failure {
-    pub(crate) const UNKNOWN: &'static str = "Reason unknown";
 }
 
 /// Strength of the supporting facts behind a piece of material.
