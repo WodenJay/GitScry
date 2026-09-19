@@ -20,6 +20,7 @@ pub(super) struct Stored {
 pub(in crate::analysis) struct ChangeSet {
     pub(in crate::analysis) oid: String,
     pub(in crate::analysis) commit_time: i64,
+    pub(in crate::analysis) is_merge: bool,
     pub(in crate::analysis) subject: String,
     pub(in crate::analysis) paths: Vec<Vec<u8>>,
 }
@@ -29,7 +30,7 @@ pub(in crate::analysis) fn change_sets(
 ) -> Result<Vec<ChangeSet>, AppError> {
     let mut statement = connection
         .prepare(
-            "SELECT c.oid, c.commit_time, c.message, ch.old_path, ch.new_path\n             FROM commits AS c\n             JOIN changes AS ch ON ch.commit_oid = c.oid\n             ORDER BY c.rowid, ch.ordinal",
+            "SELECT c.oid, c.commit_time, c.message,\n                    (SELECT COUNT(*) FROM commit_parents WHERE commit_oid = c.oid) > 1,\n                    ch.old_path, ch.new_path\n             FROM commits AS c\n             JOIN changes AS ch ON ch.commit_oid = c.oid\n             ORDER BY c.rowid, ch.ordinal",
         )
         .map_err(|error| search_error("preparing relation history", error))?;
     let rows = statement
@@ -38,14 +39,15 @@ pub(in crate::analysis) fn change_sets(
                 row.get::<_, String>(0)?,
                 row.get::<_, i64>(1)?,
                 row.get::<_, Vec<u8>>(2)?,
-                row.get::<_, Option<Vec<u8>>>(3)?,
+                row.get::<_, bool>(3)?,
                 row.get::<_, Option<Vec<u8>>>(4)?,
+                row.get::<_, Option<Vec<u8>>>(5)?,
             ))
         })
         .map_err(|error| search_error("reading relation history", error))?;
     let mut changes = Vec::new();
     for row in rows {
-        let (oid, commit_time, message, old_path, new_path) =
+        let (oid, commit_time, message, is_merge, old_path, new_path) =
             row.map_err(|error| search_error("reading relation history", error))?;
         if changes
             .last()
@@ -55,6 +57,7 @@ pub(in crate::analysis) fn change_sets(
             changes.push(ChangeSet {
                 oid,
                 commit_time,
+                is_merge,
                 subject,
                 paths: Vec::new(),
             });

@@ -59,7 +59,7 @@ fn run(
     let seed_keys = intent.anchors().iter().cloned().collect::<HashSet<_>>();
     let current_keys = worktree_paths
         .iter()
-        .map(|path| normalize_path(path))
+        .map(|path| retrieval::normalize_path(path))
         .collect::<HashSet<_>>();
     let changes = retrieval::change_sets(connection)?;
     let (candidates, seed_touch_commits, eligible_commits, mass_changes_filtered) =
@@ -99,7 +99,7 @@ fn run(
             seed_keys.len(),
         );
         if tests_only && !obvious_mirror {
-            score += 1.0;
+            score *= 1.25;
         }
 
         let mut supporting = candidate.supporting;
@@ -198,12 +198,17 @@ fn collect_candidates(
     let mut mass_changes_filtered = false;
 
     for change in changes {
+        if change.is_merge {
+            continue;
+        }
         let paths = canonical_paths(change);
         if paths.len() <= 1 {
             continue;
         }
         if paths.len() > MASS_CHANGE_PATH_LIMIT {
-            mass_changes_filtered = true;
+            if paths.iter().any(|(key, _)| seed_keys.contains(key)) {
+                mass_changes_filtered = true;
+            }
             continue;
         }
         eligible_commits += 1;
@@ -249,7 +254,7 @@ fn collect_candidates(
 fn canonical_paths(change: &retrieval::ChangeSet) -> Vec<(String, Vec<u8>)> {
     let mut paths = Vec::new();
     for path in &change.paths {
-        let key = normalize_path(path);
+        let key = retrieval::normalize_path(path);
         if !key.is_empty() && !paths.iter().any(|(known, _)| known == &key) {
             paths.push((key, path.clone()));
         }
@@ -282,33 +287,26 @@ fn confidence(support_count: usize, proportion: f64) -> Confidence {
     }
 }
 
-fn normalize_path(path: &[u8]) -> String {
-    let path = String::from_utf8_lossy(path);
-    let mut path = path.replace('\\', "/").to_ascii_lowercase();
-    while let Some(stripped) = path.strip_prefix("./") {
-        path = stripped.to_owned();
-    }
-    path.trim_matches('/').to_owned()
-}
-
 fn is_test_path(path: &[u8]) -> bool {
-    let path = normalize_path(path);
+    let path = retrieval::normalize_path(path);
     let mut parts = path.rsplit('/');
     let name = parts.next().unwrap_or_default();
-    if parts.any(|part| matches!(part, "test" | "tests")) {
+    if parts.any(|part| matches!(part, "test" | "tests" | "__tests__" | "spec")) {
         return true;
     }
     let stem = name.rsplit_once('.').map_or(name, |(stem, _)| stem);
     stem.starts_with("test_")
         || stem.starts_with("test-")
         || stem.ends_with("_test")
+        || stem.ends_with("_spec")
         || name.contains(".test.")
+        || name.contains(".spec.")
 }
 
 fn obvious_mirror(seed: &str, candidate: &[u8]) -> bool {
     let seed = seed.rsplit('/').next().unwrap_or(seed);
     let seed = seed.rsplit_once('.').map_or(seed, |(stem, _)| stem);
-    let candidate = normalize_path(candidate);
+    let candidate = retrieval::normalize_path(candidate);
     let candidate = candidate.rsplit('/').next().unwrap_or_default();
     let candidate = candidate
         .rsplit_once('.')

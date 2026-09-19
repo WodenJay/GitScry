@@ -58,7 +58,10 @@ fn normalize_anchors(anchors: impl IntoIterator<Item = String>) -> Result<Vec<St
             )));
         }
         let anchor = normalize_path(anchor.as_bytes());
-        if !anchor.is_empty() && !normalized.contains(&anchor) {
+        if anchor.is_empty() {
+            return Err(AppError::input("path must not be empty"));
+        }
+        if !normalized.contains(&anchor) {
             normalized.push(anchor);
         }
     }

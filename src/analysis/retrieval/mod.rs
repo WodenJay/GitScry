@@ -16,7 +16,7 @@ use rusqlite::Connection;
 use crate::app::AppError;
 
 pub(crate) use intent::Intent;
-pub(crate) use text::{message_parts, searchable_text};
+pub(crate) use text::{message_parts, normalize_path, searchable_text};
 
 pub(in crate::analysis) use lexical::Signals;
 pub(in crate::analysis) use rank::{Ranked, assign_citations, sort};

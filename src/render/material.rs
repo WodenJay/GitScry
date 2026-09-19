@@ -105,6 +105,13 @@ fn render_relation(lines: &mut Vec<String>, material: &Material, relation: &Rela
             citation.abbreviation, subject,
         ));
     }
+    if material.citations.len() < relation.supporting_count {
+        let remaining = relation.supporting_count - material.citations.len();
+        lines.push(format!(
+            "  ... {remaining} more supporting commit{}",
+            if remaining == 1 { "" } else { "s" }
+        ));
+    }
     lines.push(format!("  confidence: {}", material.confidence.as_str()));
     lines.push(format!("  basis: {}", material.basis.join(", ")));
 }
