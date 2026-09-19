@@ -182,7 +182,8 @@ fn run(
     let mut report = super::super::report(kind, materials, matched_count, limit);
     if tests_only && omitted_test_path {
         report.warnings.push(
-            "warning: unresolved test rename continuity may hide historical candidates.".to_owned(),
+            "warning: historical test paths absent from the current worktree may include unresolved renames."
+                .to_owned(),
         );
     }
     Ok(report)
