@@ -759,3 +759,60 @@ fn concurrent_readers_return_identical_material() {
     assert_eq!(second.status.code(), Some(0));
     assert_eq!(first.stdout, second.stdout);
 }
+
+#[test]
+fn reduced_shallow_history_rebuilds_without_reusing_rows() {
+    let source = TestRepo::new();
+    for (index, contents) in [
+        (1, &b"one\n"[..]),
+        (2, &b"two\n"[..]),
+        (3, &b"three\n"[..]),
+        (4, &b"four\n"[..]),
+    ] {
+        source.commit("history.txt", contents, &format!("History {index}"));
+    }
+
+    let parent = tempfile::tempdir().unwrap();
+    let clone = parent.path().join("clone");
+    let cloned = Command::new("git")
+        .args(["clone", "--depth", "2", "--no-local"])
+        .arg(source.dir.path())
+        .arg(&clone)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .unwrap();
+    assert!(cloned.status.success());
+
+    let first = Command::new(env!("CARGO_BIN_EXE_gitscry"))
+        .arg("index")
+        .current_dir(&clone)
+        .output()
+        .unwrap();
+    assert_eq!(first.status.code(), Some(0));
+    let cache_path = clone.join(".gitscry/cache.sqlite");
+    let cache = Connection::open(&cache_path).unwrap();
+    assert_eq!(
+        cache
+            .query_row("SELECT COUNT(*) FROM commits", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    drop(cache);
+
+    git(&clone, ["fetch", "--depth=1"]);
+    let second = Command::new(env!("CARGO_BIN_EXE_gitscry"))
+        .arg("index")
+        .current_dir(&clone)
+        .output()
+        .unwrap();
+    assert_eq!(second.status.code(), Some(0));
+    let cache = Connection::open(cache_path).unwrap();
+    assert_eq!(
+        cache
+            .query_row("SELECT COUNT(*) FROM commits", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        1
+    );
+}
