@@ -13,5 +13,6 @@ pub(super) fn run() -> Result<Outcome, AppError> {
             prepared.commit_count,
             if prepared.commit_count == 1 { "" } else { "s" }
         ),
+        notices: Vec::new(),
     })
 }

@@ -12,6 +12,7 @@ mod retrieval;
 use rusqlite::Connection;
 
 use crate::app::AppError;
+use crate::git::WhyTarget;
 
 pub(crate) use retrieval::{Intent, message_parts, searchable_text};
 
@@ -21,6 +22,7 @@ pub(crate) struct Report {
     pub(crate) materials: Vec<Material>,
     pub(crate) matched_count: usize,
     pub(crate) truncated: bool,
+    pub(crate) notices: Vec<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -28,6 +30,7 @@ pub(crate) enum ReportKind {
     Search,
     Examples,
     Failures,
+    Why,
 }
 
 /// One result: the analogous or abandoned change, why it was selected, and its citations.
@@ -47,6 +50,14 @@ pub(crate) enum Detail {
     Steps(Vec<Step>),
     /// The failure provenance history records for an abandoned approach.
     Failure(Failure),
+    /// The target anchor and revision behind a why explanation.
+    Why(WhyDetail),
+}
+
+pub(crate) struct WhyDetail {
+    pub(crate) anchor: String,
+    pub(crate) revision: String,
+    pub(crate) line: usize,
 }
 
 /// One move a historical change made. Paths stay raw bytes for lossless rendering.
@@ -140,6 +151,19 @@ pub(crate) fn examples(
     capabilities::examples(connection, intent, limit)
 }
 
+pub(crate) fn why(
+    connection: &Connection,
+    target: &WhyTarget,
+    limit: usize,
+) -> Result<Report, AppError> {
+    validate_limit(limit)?;
+    capabilities::why(connection, target, limit)
+}
+
+pub(crate) fn why_without_cache(target: &WhyTarget, limit: usize) -> Result<Report, AppError> {
+    validate_limit(limit)?;
+    capabilities::without_cache(target, limit)
+}
 pub(crate) fn failures(
     connection: &Connection,
     intent: &Intent,
@@ -167,6 +191,7 @@ pub(crate) fn report(
         materials,
         matched_count,
         truncated: matched_count > limit,
+        notices: Vec::new(),
     }
 }
 
@@ -176,6 +201,7 @@ pub(crate) fn empty_report(kind: ReportKind) -> Report {
         materials: Vec::new(),
         matched_count: 0,
         truncated: false,
+        notices: Vec::new(),
     }
 }
 

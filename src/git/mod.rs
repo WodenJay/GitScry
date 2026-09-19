@@ -1,5 +1,6 @@
 mod history;
 mod process;
+mod target;
 
 use std::path::PathBuf;
 
@@ -7,6 +8,7 @@ use crate::app::AppError;
 
 pub(crate) use history::{Change, Commit, HistoryTarget, Hunk, Snapshot};
 use process::Git;
+pub(crate) use target::{WhyAnchor, WhyTarget};
 
 pub(crate) struct Repository {
     pub(crate) root: PathBuf,
@@ -32,10 +34,28 @@ impl Repository {
         })
     }
 
+    pub(crate) fn pin_why_target(
+        &self,
+        revision: &str,
+        path: &str,
+        anchor: WhyAnchor,
+    ) -> Result<WhyTarget, AppError> {
+        target::pin(&self.git, Some(revision), path, anchor)
+    }
+
     pub(crate) fn default_target(&self) -> Result<(String, String), AppError> {
-        let default_ref = self.resolve_default_branch()?;
+        let default_ref = self
+            .resolve_default_branch()?
+            .ok_or_else(|| default_branch_error("no default branch reference exists"))?;
         let tip = self.tip_for(&default_ref)?;
         Ok((default_ref, tip))
+    }
+
+    pub(crate) fn default_target_if_available(&self) -> Result<Option<(String, String)>, AppError> {
+        let Some(default_ref) = self.resolve_default_branch()? else {
+            return Ok(None);
+        };
+        Ok(Some((default_ref.clone(), self.tip_for(&default_ref)?)))
     }
 
     pub(crate) fn object_format(&self) -> Result<String, AppError> {
@@ -112,7 +132,7 @@ impl Repository {
         Ok(tip.trim().to_owned())
     }
 
-    fn resolve_default_branch(&self) -> Result<String, AppError> {
+    fn resolve_default_branch(&self) -> Result<Option<String>, AppError> {
         let refs = self.git.text([
             "for-each-ref",
             "--format=%(refname)%00%(symref)",
@@ -141,23 +161,23 @@ impl Repository {
         }
 
         if let Some(reference) = origin_head {
-            return Ok(reference);
+            return Ok(Some(reference));
         }
         remote_heads.sort();
         remote_heads.dedup();
         if remote_heads.len() == 1 {
-            return Ok(remote_heads.remove(0));
+            return Ok(Some(remote_heads.remove(0)));
         }
         if remote_heads.len() > 1 {
             return Err(default_branch_error("multiple remote HEADs"));
         }
         if local_defaults.len() == 1 {
-            return Ok(local_defaults.remove(0));
+            return Ok(Some(local_defaults.remove(0)));
         }
         if local_defaults.len() > 1 {
             return Err(default_branch_error("both main and master exist"));
         }
-        Err(default_branch_error("no default branch reference exists"))
+        Ok(None)
     }
 }
 

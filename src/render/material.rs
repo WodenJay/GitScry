@@ -16,25 +16,27 @@ fn empty_message(kind: ReportKind) -> &'static str {
         ReportKind::Search => "No relevant history found.",
         ReportKind::Examples => "No historical examples found.",
         ReportKind::Failures => "No failed approaches found.",
+        ReportKind::Why => "No explanatory history found.",
     }
 }
 
 pub(crate) fn format_report(report: &Report) -> String {
-    if report.materials.is_empty() {
-        return empty_message(report.kind).to_owned();
-    }
-
-    let mut lines = vec![header(report)];
-    for material in &report.materials {
-        render_material(&mut lines, material);
-    }
-    if report.truncated {
-        lines.push(format!(
-            "Showing {} of {} matching commits; results truncated.",
-            report.materials.len(),
-            report.matched_count,
-        ));
-    }
+    let lines = if report.materials.is_empty() {
+        vec![empty_message(report.kind).to_owned()]
+    } else {
+        let mut lines = vec![header(report)];
+        for material in &report.materials {
+            render_material(&mut lines, material);
+        }
+        if report.truncated {
+            lines.push(format!(
+                "Showing {} of {} matching commits; results truncated.",
+                report.materials.len(),
+                report.matched_count,
+            ));
+        }
+        lines
+    };
     lines.join("\n")
 }
 
@@ -43,6 +45,7 @@ fn header(report: &Report) -> String {
         ReportKind::Search => "Relevant history",
         ReportKind::Examples => "Historical examples",
         ReportKind::Failures => "Failed approaches",
+        ReportKind::Why => "Why history",
     };
     format!(
         "{noun} ({} match{}):",
@@ -93,6 +96,14 @@ fn render_detail(lines: &mut Vec<String>, detail: &Option<Detail>) {
             if let Some(retry) = failure.retry.as_deref() {
                 lines.push(format!("  retry: {retry}"));
             }
+        }
+        Some(Detail::Why(why)) => {
+            lines.push(format!(
+                "  target: {} at {} (line {})",
+                escape::subject(&why.anchor),
+                escape::subject(&why.revision),
+                why.line
+            ));
         }
         None => {}
     }
