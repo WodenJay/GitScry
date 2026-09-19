@@ -75,7 +75,7 @@ fn identifier_boundary(
             && next.is_some_and(char::is_lowercase))
 }
 
-pub(super) fn normalize_path(path: &[u8]) -> String {
+pub(crate) fn normalize_path(path: &[u8]) -> String {
     let path = String::from_utf8_lossy(path);
     let mut path = path.replace('\\', "/").to_ascii_lowercase();
     while let Some(stripped) = path.strip_prefix("./") {

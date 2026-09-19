@@ -5,10 +5,12 @@
 
 mod examples;
 mod failures;
+mod relations;
 mod search;
 
 pub(crate) use examples::run as examples;
 pub(crate) use failures::run as failures;
+pub(crate) use relations::{related, tests};
 pub(crate) use search::run as search;
 
 /// The confidence a result carries when nothing beyond the lexical match supports it.

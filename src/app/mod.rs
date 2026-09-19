@@ -272,5 +272,7 @@ pub(crate) fn execute(command: Command) -> Result<Outcome, AppError> {
             paths,
             limit,
         } => query::run(query, paths, limit, analysis::failures),
+        Command::Related { paths, limit } => query::run_paths(paths, limit, analysis::related),
+        Command::Tests { paths, limit } => query::run_paths(paths, limit, analysis::tests),
     }
 }

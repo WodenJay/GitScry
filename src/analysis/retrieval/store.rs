@@ -16,6 +16,64 @@ pub(super) struct Stored {
     pub(super) bm25: f64,
 }
 
+/// One cached commit's deduplicated changed paths, in cache order.
+pub(in crate::analysis) struct ChangeSet {
+    pub(in crate::analysis) oid: String,
+    pub(in crate::analysis) commit_time: i64,
+    pub(in crate::analysis) is_merge: bool,
+    pub(in crate::analysis) subject: String,
+    pub(in crate::analysis) paths: Vec<Vec<u8>>,
+}
+
+pub(in crate::analysis) fn change_sets(
+    connection: &Connection,
+) -> Result<Vec<ChangeSet>, AppError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT c.oid, c.commit_time, c.message,\n                    (SELECT COUNT(*) FROM commit_parents WHERE commit_oid = c.oid) > 1,\n                    ch.old_path, ch.new_path\n             FROM commits AS c\n             JOIN changes AS ch ON ch.commit_oid = c.oid\n             ORDER BY c.rowid, ch.ordinal",
+        )
+        .map_err(|error| search_error("preparing relation history", error))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+                row.get::<_, bool>(3)?,
+                row.get::<_, Option<Vec<u8>>>(4)?,
+                row.get::<_, Option<Vec<u8>>>(5)?,
+            ))
+        })
+        .map_err(|error| search_error("reading relation history", error))?;
+    let mut changes = Vec::new();
+    for row in rows {
+        let (oid, commit_time, message, is_merge, old_path, new_path) =
+            row.map_err(|error| search_error("reading relation history", error))?;
+        if changes
+            .last()
+            .is_none_or(|change: &ChangeSet| change.oid != oid)
+        {
+            let (subject, _) = super::text::message_parts(&message);
+            changes.push(ChangeSet {
+                oid,
+                commit_time,
+                is_merge,
+                subject,
+                paths: Vec::new(),
+            });
+        }
+        let change = changes
+            .last_mut()
+            .expect("relation change was just inserted");
+        for path in [old_path, new_path].into_iter().flatten() {
+            if !change.paths.contains(&path) {
+                change.paths.push(path);
+            }
+        }
+    }
+    Ok(changes)
+}
+
 pub(in crate::analysis) fn match_count(
     connection: &Connection,
     match_query: &str,
