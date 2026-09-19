@@ -41,11 +41,13 @@ impl TestRepo {
         git(self.dir.path(), ["commit", "-m", message]);
     }
 
-    fn rename(&self, old: &str, new: &str, message: &str) {
+    fn rename_with_change(&self, old: &str, new: &str, seed: &str, message: &str) {
         if let Some(parent) = Path::new(new).parent() {
             fs::create_dir_all(self.dir.path().join(parent)).expect("create rename directory");
         }
         git(self.dir.path(), ["mv", old, new]);
+        fs::write(self.dir.path().join(seed), b"seed after rename\n").expect("write rename seed");
+        git(self.dir.path(), ["add", "--all"]);
         git(self.dir.path(), ["commit", "-m", message]);
     }
 
@@ -190,9 +192,10 @@ fn tests_filter_deleted_candidates_and_warn_about_rename_continuity() {
         "update widget tests",
     );
     repo.remove("tests/test_deleted_widget.py", "delete obsolete test");
-    repo.rename(
+    repo.rename_with_change(
         "tests/test_old_widget.py",
         "tests/test_renamed_widget.py",
+        "src/widget.py",
         "rename widget test",
     );
 

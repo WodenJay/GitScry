@@ -1,4 +1,4 @@
-use crate::analysis::{Detail, Failure, Material, Report, ReportKind, Step};
+use crate::analysis::{Detail, Failure, Material, Relation, Report, ReportKind, Step};
 
 /// Printed when history does not state why an approach failed.
 const REASON_UNKNOWN: &str = "Reason unknown";
@@ -16,6 +16,8 @@ fn empty_message(kind: ReportKind) -> &'static str {
         ReportKind::Search => "No relevant history found.",
         ReportKind::Examples => "No historical examples found.",
         ReportKind::Failures => "No failed approaches found.",
+        ReportKind::Related => "No historical relations found.",
+        ReportKind::Tests => "No historically related tests found.",
     }
 }
 
@@ -29,8 +31,12 @@ pub(crate) fn format_report(report: &Report) -> String {
         render_material(&mut lines, material);
     }
     if report.truncated {
+        let noun = match report.kind {
+            ReportKind::Related | ReportKind::Tests => "matching paths",
+            ReportKind::Search | ReportKind::Examples | ReportKind::Failures => "matching commits",
+        };
         lines.push(format!(
-            "Showing {} of {} matching commits; results truncated.",
+            "Showing {} of {} {noun}; results truncated.",
             report.materials.len(),
             report.matched_count,
         ));
@@ -43,6 +49,8 @@ fn header(report: &Report) -> String {
         ReportKind::Search => "Relevant history",
         ReportKind::Examples => "Historical examples",
         ReportKind::Failures => "Failed approaches",
+        ReportKind::Related => "Related paths",
+        ReportKind::Tests => "Historical test candidates",
     };
     format!(
         "{noun} ({} match{}):",
@@ -52,6 +60,10 @@ fn header(report: &Report) -> String {
 }
 
 fn render_material(lines: &mut Vec<String>, material: &Material) {
+    if let Some(Detail::Relation(relation)) = material.detail.as_ref() {
+        render_relation(lines, material, relation);
+        return;
+    }
     let subject = if material.subject.is_empty() {
         "(no subject)"
     } else {
@@ -71,6 +83,30 @@ fn render_material(lines: &mut Vec<String>, material: &Material) {
     lines.push(format!("  confidence: {}", material.confidence.as_str()));
     lines.push(format!("  basis: {}", material.basis.join(", ")));
     render_related_commits(lines, material);
+}
+
+fn render_relation(lines: &mut Vec<String>, material: &Material, relation: &Relation) {
+    let path = material
+        .paths
+        .first()
+        .map(|path| escape::path(path))
+        .unwrap_or_default();
+    lines.push(format!("- candidate path: {path}"));
+    lines.push(format!("  co-change count: {}", relation.co_change_count));
+    lines.push(format!("  proportion: {:.1}%", relation.proportion * 100.0));
+    lines.push(format!(
+        "  supporting commits: {}",
+        relation.supporting_count
+    ));
+    for citation in &material.citations {
+        let subject = escape::subject(citation.subject.trim());
+        lines.push(format!(
+            "  supporting commit: {} {}",
+            citation.abbreviation, subject,
+        ));
+    }
+    lines.push(format!("  confidence: {}", material.confidence.as_str()));
+    lines.push(format!("  basis: {}", material.basis.join(", ")));
 }
 
 fn render_detail(lines: &mut Vec<String>, detail: &Option<Detail>) {
@@ -94,6 +130,7 @@ fn render_detail(lines: &mut Vec<String>, detail: &Option<Detail>) {
                 lines.push(format!("  retry: {retry}"));
             }
         }
+        Some(Detail::Relation(_)) => {}
         None => {}
     }
 }

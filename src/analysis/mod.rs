@@ -21,13 +21,15 @@ pub(crate) struct Report {
     pub(crate) materials: Vec<Material>,
     pub(crate) matched_count: usize,
     pub(crate) truncated: bool,
+    pub(crate) warnings: Vec<String>,
 }
-
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReportKind {
     Search,
     Examples,
     Failures,
+    Related,
+    Tests,
 }
 
 /// One result: the analogous or abandoned change, why it was selected, and its citations.
@@ -47,6 +49,8 @@ pub(crate) enum Detail {
     Steps(Vec<Step>),
     /// The failure provenance history records for an abandoned approach.
     Failure(Failure),
+    /// Co-change support for a candidate path.
+    Relation(Relation),
 }
 
 /// One move a historical change made. Paths stay raw bytes for lossless rendering.
@@ -72,6 +76,13 @@ impl Step {
             _ => None,
         }
     }
+}
+
+/// The co-change facts rendered for a related path or test candidate.
+pub(crate) struct Relation {
+    pub(crate) co_change_count: usize,
+    pub(crate) proportion: f64,
+    pub(crate) supporting_count: usize,
 }
 
 /// What history records about why an approach failed. Absent text stays absent, so
@@ -149,6 +160,26 @@ pub(crate) fn failures(
     capabilities::failures(connection, intent, limit)
 }
 
+pub(crate) fn related(
+    connection: &Connection,
+    intent: &Intent,
+    worktree_paths: &[Vec<u8>],
+    limit: usize,
+) -> Result<Report, AppError> {
+    validate_limit(limit)?;
+    capabilities::related(connection, intent, worktree_paths, limit)
+}
+
+pub(crate) fn tests(
+    connection: &Connection,
+    intent: &Intent,
+    worktree_paths: &[Vec<u8>],
+    limit: usize,
+) -> Result<Report, AppError> {
+    validate_limit(limit)?;
+    capabilities::tests(connection, intent, worktree_paths, limit)
+}
+
 fn validate_limit(limit: usize) -> Result<(), AppError> {
     (limit > 0)
         .then_some(())
@@ -167,6 +198,7 @@ pub(crate) fn report(
         materials,
         matched_count,
         truncated: matched_count > limit,
+        warnings: Vec::new(),
     }
 }
 
@@ -176,6 +208,7 @@ pub(crate) fn empty_report(kind: ReportKind) -> Report {
         materials: Vec::new(),
         matched_count: 0,
         truncated: false,
+        warnings: Vec::new(),
     }
 }
 

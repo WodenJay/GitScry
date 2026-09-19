@@ -15,29 +15,24 @@ impl Intent {
         if input.trim().is_empty() {
             return Err(AppError::input("query must not be empty"));
         }
-        let mut anchors = Vec::new();
-        for anchor in path_like_words(&input)
-            .into_iter()
-            .chain(paths.iter().cloned())
-        {
-            // Validate before normalizing, because normalizing trims the leading slash that
-            // marks an absolute path.
-            if anchor.trim().is_empty() {
-                return Err(AppError::input("path must not be empty"));
-            }
-            if !is_repository_relative(&anchor) {
-                return Err(AppError::input(format!(
-                    "path must be repository-relative: {anchor}"
-                )));
-            }
-            let anchor = normalize_path(anchor.as_bytes());
-            if !anchors.contains(&anchor) {
-                anchors.push(anchor);
-            }
-        }
+        let anchors = normalize_anchors(
+            path_like_words(&input)
+                .into_iter()
+                .chain(paths.iter().cloned()),
+        )?;
         Ok(Self {
             terms: tokenize(&input),
             anchors,
+        })
+    }
+
+    pub(crate) fn paths(paths: &[String]) -> Result<Self, AppError> {
+        if paths.is_empty() {
+            return Err(AppError::input("at least one path is required"));
+        }
+        Ok(Self {
+            terms: Vec::new(),
+            anchors: normalize_anchors(paths.iter().cloned())?,
         })
     }
 
@@ -46,9 +41,28 @@ impl Intent {
     }
 
     /// Every anchor the caller supplied, path-like query words included.
-    pub(super) fn anchors(&self) -> &[String] {
+    pub(crate) fn anchors(&self) -> &[String] {
         &self.anchors
     }
+}
+
+fn normalize_anchors(anchors: impl IntoIterator<Item = String>) -> Result<Vec<String>, AppError> {
+    let mut normalized = Vec::new();
+    for anchor in anchors {
+        if anchor.trim().is_empty() {
+            return Err(AppError::input("path must not be empty"));
+        }
+        if !is_repository_relative(&anchor) {
+            return Err(AppError::input(format!(
+                "path must be repository-relative: {anchor}"
+            )));
+        }
+        let anchor = normalize_path(anchor.as_bytes());
+        if !anchor.is_empty() && !normalized.contains(&anchor) {
+            normalized.push(anchor);
+        }
+    }
+    Ok(normalized)
 }
 
 /// Whether a caller-supplied path is relative to the repository root.

@@ -38,6 +38,20 @@ pub(crate) enum Command {
         #[arg(long, default_value = "10", value_parser = parse_limit)]
         limit: usize,
     },
+    /// Find historical paths changed alongside one or more seed paths.
+    Related {
+        #[arg(required = true, num_args = 1..)]
+        paths: Vec<String>,
+        #[arg(long, default_value = "10", value_parser = parse_limit)]
+        limit: usize,
+    },
+    /// Find current test paths historically changed alongside one or more seed paths.
+    Tests {
+        #[arg(required = true, num_args = 1..)]
+        paths: Vec<String>,
+        #[arg(long, default_value = "10", value_parser = parse_limit)]
+        limit: usize,
+    },
 }
 
 fn parse_limit(value: &str) -> Result<usize, String> {
