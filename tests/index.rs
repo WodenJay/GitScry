@@ -1,4 +1,12 @@
-use std::{ffi::OsStr, fs, path::Path, process::Command};
+use std::{
+    env,
+    ffi::OsStr,
+    fs::{self, OpenOptions},
+    path::Path,
+    process::Command,
+    thread,
+    time::Duration,
+};
 
 use rusqlite::Connection;
 use tempfile::TempDir;
@@ -603,4 +611,59 @@ fn missing_cached_commit_fails_the_next_preparation() {
     let output = repo.run();
     assert_eq!(output.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&output.stderr).contains("Git command failed"));
+}
+
+#[test]
+fn cache_lock_holder() {
+    if env::var_os("GITSCRY_LOCK_HOLDER").is_none() {
+        return;
+    }
+    let lock_path = env::var_os("GITSCRY_LOCK_PATH").expect("lock path");
+    let ready_path = env::var_os("GITSCRY_LOCK_READY").expect("ready path");
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(lock_path)
+        .expect("open cache lock");
+    lock.lock().expect("lock cache");
+    fs::write(ready_path, b"ready").expect("signal lock holder");
+    thread::sleep(Duration::from_secs(1));
+}
+
+#[test]
+fn stale_observer_waits_once_for_an_existing_writer() {
+    let repo = TestRepo::new();
+    repo.commit("history.txt", b"one\n", "Initial history");
+    assert_eq!(repo.run().status.code(), Some(0));
+
+    let ready_path = repo.dir.path().join("lock-ready");
+    let holder = Command::new(env::current_exe().unwrap())
+        .args(["--exact", "cache_lock_holder", "--nocapture"])
+        .current_dir(repo.dir.path())
+        .env("GITSCRY_LOCK_HOLDER", "1")
+        .env(
+            "GITSCRY_LOCK_PATH",
+            repo.dir.path().join(".gitscry/cache.lock"),
+        )
+        .env("GITSCRY_LOCK_READY", &ready_path)
+        .spawn()
+        .expect("spawn lock holder");
+    for _ in 0..200 {
+        if ready_path.exists() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(ready_path.exists(), "lock holder did not start");
+
+    let output = repo.run();
+    let _ = holder.wait_with_output().expect("wait for lock holder");
+    assert_eq!(output.status.code(), Some(0));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stderr
+            .matches("Waiting for another GitScry process...")
+            .count(),
+        1
+    );
 }
