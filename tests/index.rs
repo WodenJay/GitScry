@@ -540,3 +540,67 @@ fn default_ref_change_rebuilds_the_pinned_generation() {
         feature_tip
     );
 }
+
+#[test]
+fn restores_hunks_after_a_missing_blob_returns() {
+    let repo = TestRepo::new();
+    repo.commit("history.txt", b"one\n", "First history");
+    let first = repo.head();
+    repo.commit("history.txt", b"two\n", "Second history");
+    repo.commit("history.txt", b"three\n", "Third history");
+
+    let blob = git_stdout(repo.dir.path(), ["ls-tree", &first, "history.txt"]);
+    let blob = blob.split_whitespace().nth(2).unwrap().to_owned();
+    let object_path = repo
+        .dir
+        .path()
+        .join(".git/objects")
+        .join(&blob[..2])
+        .join(&blob[2..]);
+    fs::remove_file(object_path).expect("remove loose blob");
+
+    let first_index = repo.run();
+    assert_eq!(first_index.status.code(), Some(0));
+    let cache_path = repo.dir.path().join(".gitscry/cache.sqlite");
+    let cache = Connection::open(&cache_path).unwrap();
+    let incomplete_hunks: i64 = cache
+        .query_row("SELECT COUNT(*) FROM hunks", [], |row| row.get(0))
+        .unwrap();
+    assert!(incomplete_hunks < 3);
+    drop(cache);
+
+    fs::write(repo.dir.path().join("restore.txt"), b"one\n").unwrap();
+    git(repo.dir.path(), ["hash-object", "-w", "restore.txt"]);
+    fs::remove_file(repo.dir.path().join("restore.txt")).unwrap();
+
+    let restored = repo.run();
+    assert_eq!(restored.status.code(), Some(0));
+    let cache = Connection::open(cache_path).unwrap();
+    assert_eq!(
+        cache
+            .query_row("SELECT COUNT(*) FROM hunks", [], |row| row.get::<_, i64>(0))
+            .unwrap(),
+        3
+    );
+}
+
+#[test]
+fn missing_cached_commit_fails_the_next_preparation() {
+    let repo = TestRepo::new();
+    repo.commit("history.txt", b"one\n", "First history");
+    let missing_commit = repo.head();
+    repo.commit("history.txt", b"two\n", "Second history");
+    assert_eq!(repo.run().status.code(), Some(0));
+
+    let object_path = repo
+        .dir
+        .path()
+        .join(".git/objects")
+        .join(&missing_commit[..2])
+        .join(&missing_commit[2..]);
+    fs::remove_file(object_path).expect("remove loose commit");
+
+    let output = repo.run();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Git command failed"));
+}

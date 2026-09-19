@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use crate::app::AppError;
 
-pub(crate) use history::{Change, Commit, Hunk, Snapshot};
+pub(crate) use history::{Change, Commit, HistoryTarget, Hunk, Snapshot};
 use process::Git;
 
 pub(crate) struct Repository {
@@ -57,6 +57,23 @@ impl Repository {
         self.git.missing_objects(object_ids)
     }
 
+    pub(crate) fn reachable_commits(&self, tip: &str) -> Result<Vec<String>, AppError> {
+        self.git
+            .text(["rev-list", tip])?
+            .lines()
+            .map(|oid| {
+                if matches!(oid.len(), 40 | 64) && oid.bytes().all(|byte| byte.is_ascii_hexdigit())
+                {
+                    Ok(oid.to_owned())
+                } else {
+                    Err(AppError::operational(
+                        "error: Git revision graph contained an invalid object ID",
+                    ))
+                }
+            })
+            .collect()
+    }
+
     pub(crate) fn is_ancestor(&self, ancestor: &str, descendant: &str) -> Result<bool, AppError> {
         self.git
             .success(["merge-base", "--is-ancestor", ancestor, descendant])
@@ -64,27 +81,21 @@ impl Repository {
 
     pub(crate) fn read_default_history_at(
         &self,
-        default_ref: String,
-        tip: String,
+        target: HistoryTarget,
     ) -> Result<Snapshot, AppError> {
-        let object_format = self.object_format()?;
-        history::read(&self.git, default_ref, tip, object_format)
+        history::read(&self.git, target)
     }
 
     pub(crate) fn read_incremental_history_at(
         &self,
-        default_ref: String,
-        tip: String,
+        target: HistoryTarget,
         cached_commits: &[String],
         refresh_commits: &[String],
         known_missing_objects: Vec<String>,
     ) -> Result<Snapshot, AppError> {
-        let object_format = self.object_format()?;
         history::read_incremental(
             &self.git,
-            default_ref,
-            tip,
-            object_format,
+            target,
             cached_commits,
             refresh_commits,
             known_missing_objects,

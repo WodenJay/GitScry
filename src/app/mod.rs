@@ -67,6 +67,7 @@ pub(crate) fn prepare_cache(repository: &git::Repository) -> Result<PreparedCach
     drop(shared);
 
     let exclusive = cache::acquire_exclusive(&repository.root, &mut progress)?;
+    cache::recover_previous(&repository.root)?;
     let plan = evaluate(repository, &expected, cache::inspect(&repository.root))?;
     if let Plan::Fresh {
         state,
@@ -89,8 +90,12 @@ pub(crate) fn prepare_cache(repository: &git::Repository) -> Result<PreparedCach
                 cache::preserve_damaged(&repository.root)?;
             }
             progress.push("Indexing local history...".to_owned());
-            let snapshot = repository
-                .read_default_history_at(expected.default_ref.clone(), expected.tip.clone())?;
+            let snapshot = repository.read_default_history_at(git::HistoryTarget {
+                default_ref: expected.default_ref.clone(),
+                tip: expected.tip.clone(),
+                object_format: expected.object_format.clone(),
+                shallow_boundaries: expected.shallow_boundaries.clone(),
+            })?;
             let count = snapshot.commits.len();
             cache::publish(&repository.root, &snapshot)?;
             count
@@ -112,8 +117,12 @@ pub(crate) fn prepare_cache(repository: &git::Repository) -> Result<PreparedCach
             refresh.sort();
             refresh.dedup();
             let snapshot = repository.read_incremental_history_at(
-                expected.default_ref.clone(),
-                expected.tip.clone(),
+                git::HistoryTarget {
+                    default_ref: expected.default_ref.clone(),
+                    tip: expected.tip.clone(),
+                    object_format: expected.object_format.clone(),
+                    shallow_boundaries: expected.shallow_boundaries.clone(),
+                },
                 &state.commits,
                 &refresh,
                 missing_objects,
@@ -159,6 +168,9 @@ fn evaluate(
         });
     };
 
+    if !repository.missing_objects(&state.commits)?.is_empty() {
+        return Ok(Plan::Rebuild { damaged: false });
+    }
     let current_missing = repository.missing_objects(&state.referenced_objects)?;
     let previous_missing = state.missing_objects.iter().collect::<HashSet<_>>();
     let current_missing_set = current_missing.iter().collect::<HashSet<_>>();
@@ -185,7 +197,13 @@ fn evaluate(
         false
     } else {
         let missing_boundary = repository.missing_objects(&state.shallow_boundaries)?;
+        let reachable = repository.reachable_commits(&expected.tip)?;
+        let reachable = reachable.into_iter().collect::<HashSet<_>>();
         missing_boundary.is_empty()
+            && state
+                .commits
+                .iter()
+                .all(|commit| reachable.contains(commit))
             && state.shallow_boundaries.iter().all(|boundary| {
                 repository
                     .is_ancestor(boundary, &expected.tip)

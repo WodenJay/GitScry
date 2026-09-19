@@ -286,6 +286,16 @@ pub(crate) fn preserve_damaged(root: &Path) -> Result<(), AppError> {
     fs::copy(path, preserved).map_err(|error| cache_error("preserving damaged cache", error))?;
     Ok(())
 }
+pub(crate) fn recover_previous(root: &Path) -> Result<(), AppError> {
+    let directory = root.join(".gitscry");
+    let final_path = directory.join("cache.sqlite");
+    let previous = directory.join("cache.sqlite.previous");
+    if !final_path.exists() && previous.exists() {
+        fs::rename(previous, final_path)
+            .map_err(|error| cache_error("recovering the previous cache", error))?;
+    }
+    Ok(())
+}
 
 pub(crate) fn publish(root: &Path, snapshot: &Snapshot) -> Result<(), AppError> {
     let directory = root.join(".gitscry");

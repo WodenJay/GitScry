@@ -15,6 +15,13 @@ pub(crate) struct Snapshot {
     pub(crate) hunks: Vec<Hunk>,
 }
 
+pub(crate) struct HistoryTarget {
+    pub(crate) default_ref: String,
+    pub(crate) tip: String,
+    pub(crate) object_format: String,
+    pub(crate) shallow_boundaries: Vec<String>,
+}
+
 pub(crate) struct Commit {
     pub(crate) oid: String,
     pub(crate) message: Vec<u8>,
@@ -45,34 +52,19 @@ pub(crate) struct Hunk {
     pub(crate) text: Vec<u8>,
 }
 
-pub(super) fn read(
-    git: &Git,
-    default_ref: String,
-    tip: String,
-    object_format: String,
-) -> Result<Snapshot, AppError> {
-    let graph = read_graph(git, &tip)?;
-    read_selected(
-        git,
-        default_ref,
-        tip,
-        object_format,
-        &graph,
-        &graph,
-        Vec::new(),
-    )
+pub(super) fn read(git: &Git, target: HistoryTarget) -> Result<Snapshot, AppError> {
+    let graph = read_graph(git, &target.tip)?;
+    read_selected(git, target, &graph, &graph, Vec::new())
 }
 
 pub(super) fn read_incremental(
     git: &Git,
-    default_ref: String,
-    tip: String,
-    object_format: String,
+    target: HistoryTarget,
     cached_commits: &[String],
     refresh_commits: &[String],
     known_missing_objects: Vec<String>,
 ) -> Result<Snapshot, AppError> {
-    let graph = read_graph(git, &tip)?;
+    let graph = read_graph(git, &target.tip)?;
     let cached = cached_commits.iter().collect::<HashSet<_>>();
     let refresh = refresh_commits.iter().collect::<HashSet<_>>();
     let selected = graph
@@ -80,15 +72,7 @@ pub(super) fn read_incremental(
         .filter(|oid| !cached.contains(oid) || refresh.contains(oid))
         .cloned()
         .collect::<Vec<_>>();
-    read_selected(
-        git,
-        default_ref,
-        tip,
-        object_format,
-        &graph,
-        &selected,
-        known_missing_objects,
-    )
+    read_selected(git, target, &graph, &selected, known_missing_objects)
 }
 
 fn read_graph(git: &Git, tip: &str) -> Result<Vec<String>, AppError> {
@@ -98,9 +82,7 @@ fn read_graph(git: &Git, tip: &str) -> Result<Vec<String>, AppError> {
 
 fn read_selected(
     git: &Git,
-    default_ref: String,
-    tip: String,
-    object_format: String,
+    target: HistoryTarget,
     graph: &[String],
     selected: &[String],
     known_missing_objects: Vec<String>,
@@ -108,15 +90,19 @@ fn read_selected(
     let commits = read_commits(git, selected)?;
     let graph_set = graph.iter().map(String::as_str).collect::<HashSet<_>>();
     let selected_set = selected.iter().map(String::as_str).collect::<HashSet<_>>();
-    let diff_input = commits
+    let diff_specs = commits
         .iter()
         .filter_map(|commit| match commit.parents.first() {
             Some(parent) if graph_set.contains(parent.as_str()) => {
-                Some(format!("{} {parent}\n", commit.oid))
+                Some((commit.oid.clone(), format!("{} {parent}\n", commit.oid)))
             }
             Some(_) => None,
-            None => Some(format!("{}\n", commit.oid)),
+            None => Some((commit.oid.clone(), format!("{}\n", commit.oid))),
         })
+        .collect::<Vec<_>>();
+    let diff_input = diff_specs
+        .iter()
+        .map(|(_, input)| input.as_str())
         .collect::<String>();
     let raw = git.output(
         [
@@ -146,7 +132,32 @@ fn read_selected(
     missing_objects.sort();
     missing_objects.dedup();
 
-    let hunks = if selected_missing.is_empty() {
+    let missing_set = selected_missing
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let hunk_specs = diff_specs
+        .iter()
+        .filter(|(oid, _)| {
+            !changes
+                .iter()
+                .filter(|change| change.commit_oid == *oid)
+                .flat_map(|change| [&change.old_blob, &change.new_blob])
+                .flatten()
+                .any(|blob| missing_set.contains(blob.as_str()))
+        })
+        .collect::<Vec<_>>();
+    let hunk_input = hunk_specs
+        .iter()
+        .map(|(_, input)| input.as_str())
+        .collect::<String>();
+    let hunk_known = hunk_specs
+        .iter()
+        .map(|(oid, _)| oid.as_str())
+        .collect::<HashSet<_>>();
+    let hunks = if hunk_input.is_empty() {
+        Vec::new()
+    } else {
         let patch = git.output(
             [
                 "diff-tree",
@@ -160,18 +171,16 @@ fn read_selected(
                 "--no-ext-diff",
                 "--no-textconv",
             ],
-            diff_input.as_bytes(),
+            hunk_input.as_bytes(),
         )?;
-        parse_hunks(&patch, &selected_set)?
-    } else {
-        Vec::new()
+        parse_hunks(&patch, &hunk_known)?
     };
 
     Ok(Snapshot {
-        default_ref,
-        tip,
-        object_format,
-        shallow_boundaries: read_shallow_boundaries(git)?,
+        default_ref: target.default_ref,
+        tip: target.tip,
+        object_format: target.object_format,
+        shallow_boundaries: target.shallow_boundaries,
         missing_objects,
         commits,
         changes,
