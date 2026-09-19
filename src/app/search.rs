@@ -9,7 +9,7 @@ pub(super) fn run(query: Vec<String>, limit: usize) -> Result<Outcome, AppError>
     }
 
     let repository = git::Repository::discover()?;
-    let prepared = prepare_cache(&repository, false)?;
+    let prepared = prepare_cache(&repository)?;
     let connection = cache::open(&repository.root)?;
     let report = analysis::search(&connection, &query, limit)?;
 

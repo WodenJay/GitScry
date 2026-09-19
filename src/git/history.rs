@@ -9,6 +9,7 @@ pub(crate) struct Snapshot {
     pub(crate) tip: String,
     pub(crate) object_format: String,
     pub(crate) shallow_boundaries: Vec<String>,
+    pub(crate) missing_objects: Vec<String>,
     pub(crate) commits: Vec<Commit>,
     pub(crate) changes: Vec<Change>,
     pub(crate) hunks: Vec<Hunk>,
@@ -50,15 +51,67 @@ pub(super) fn read(
     tip: String,
     object_format: String,
 ) -> Result<Snapshot, AppError> {
-    let graph = git.output(["rev-list", "--reverse", "--topo-order", &tip], &[])?;
-    let graph = parse_graph(&graph)?;
-    let shallow_boundaries = read_shallow_boundaries(git)?;
-    let commits = read_commits(git, &graph)?;
-    let available: HashSet<&str> = commits.iter().map(|commit| commit.oid.as_str()).collect();
+    let graph = read_graph(git, &tip)?;
+    read_selected(
+        git,
+        default_ref,
+        tip,
+        object_format,
+        &graph,
+        &graph,
+        Vec::new(),
+    )
+}
+
+pub(super) fn read_incremental(
+    git: &Git,
+    default_ref: String,
+    tip: String,
+    object_format: String,
+    cached_commits: &[String],
+    refresh_commits: &[String],
+    known_missing_objects: Vec<String>,
+) -> Result<Snapshot, AppError> {
+    let graph = read_graph(git, &tip)?;
+    let cached = cached_commits.iter().collect::<HashSet<_>>();
+    let refresh = refresh_commits.iter().collect::<HashSet<_>>();
+    let selected = graph
+        .iter()
+        .filter(|oid| !cached.contains(oid) || refresh.contains(oid))
+        .cloned()
+        .collect::<Vec<_>>();
+    read_selected(
+        git,
+        default_ref,
+        tip,
+        object_format,
+        &graph,
+        &selected,
+        known_missing_objects,
+    )
+}
+
+fn read_graph(git: &Git, tip: &str) -> Result<Vec<String>, AppError> {
+    let graph = git.output(["rev-list", "--reverse", "--topo-order", tip], &[])?;
+    parse_graph(&graph)
+}
+
+fn read_selected(
+    git: &Git,
+    default_ref: String,
+    tip: String,
+    object_format: String,
+    graph: &[String],
+    selected: &[String],
+    known_missing_objects: Vec<String>,
+) -> Result<Snapshot, AppError> {
+    let commits = read_commits(git, selected)?;
+    let graph_set = graph.iter().map(String::as_str).collect::<HashSet<_>>();
+    let selected_set = selected.iter().map(String::as_str).collect::<HashSet<_>>();
     let diff_input = commits
         .iter()
         .filter_map(|commit| match commit.parents.first() {
-            Some(parent) if available.contains(parent.as_str()) => {
+            Some(parent) if graph_set.contains(parent.as_str()) => {
                 Some(format!("{} {parent}\n", commit.oid))
             }
             Some(_) => None,
@@ -78,30 +131,47 @@ pub(super) fn read(
         ],
         diff_input.as_bytes(),
     )?;
-    let known = available;
-    let changes = parse_changes(&raw, &known)?;
-    let patch = git.output(
-        [
-            "diff-tree",
-            "--stdin",
-            "--root",
-            "-r",
-            "-M",
-            "-p",
-            "--full-index",
-            "--no-color",
-            "--no-ext-diff",
-            "--no-textconv",
-        ],
-        diff_input.as_bytes(),
-    )?;
-    let hunks = parse_hunks(&patch, &known)?;
+    let changes = parse_changes(&raw, &selected_set)?;
+    let object_ids = changes
+        .iter()
+        .flat_map(|change| [&change.old_blob, &change.new_blob])
+        .flatten()
+        .cloned()
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let mut missing_objects = git.missing_objects(&object_ids)?;
+    missing_objects.extend(known_missing_objects);
+    missing_objects.sort();
+    missing_objects.dedup();
+
+    let hunks = if missing_objects.is_empty() {
+        let patch = git.output(
+            [
+                "diff-tree",
+                "--stdin",
+                "--root",
+                "-r",
+                "-M",
+                "-p",
+                "--full-index",
+                "--no-color",
+                "--no-ext-diff",
+                "--no-textconv",
+            ],
+            diff_input.as_bytes(),
+        )?;
+        parse_hunks(&patch, &selected_set)?
+    } else {
+        Vec::new()
+    };
 
     Ok(Snapshot {
         default_ref,
         tip,
         object_format,
-        shallow_boundaries,
+        shallow_boundaries: read_shallow_boundaries(git)?,
+        missing_objects,
         commits,
         changes,
         hunks,
@@ -146,6 +216,9 @@ fn parse_graph(bytes: &[u8]) -> Result<Vec<String>, AppError> {
 }
 
 fn read_commits(git: &Git, graph: &[String]) -> Result<Vec<Commit>, AppError> {
+    if graph.is_empty() {
+        return Ok(Vec::new());
+    }
     let input = graph
         .iter()
         .map(|oid| format!("{oid}\n"))

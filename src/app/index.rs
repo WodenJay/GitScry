@@ -4,7 +4,7 @@ use super::{AppError, Outcome, prepare_cache};
 
 pub(super) fn run() -> Result<Outcome, AppError> {
     let repository = git::Repository::discover()?;
-    let prepared = prepare_cache(&repository, true)?;
+    let prepared = prepare_cache(&repository)?;
 
     Ok(Outcome {
         progress: prepared.progress,

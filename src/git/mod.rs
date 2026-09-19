@@ -38,6 +38,14 @@ impl Repository {
         Ok((default_ref, tip))
     }
 
+    pub(crate) fn object_format(&self) -> Result<String, AppError> {
+        Ok(self
+            .git
+            .text(["rev-parse", "--show-object-format"])? // pinned before cache preparation
+            .trim()
+            .to_owned())
+    }
+
     pub(crate) fn shallow_boundaries(&self) -> Result<Vec<String>, AppError> {
         let mut boundaries = history::read_shallow_boundaries(&self.git)?;
         boundaries.sort();
@@ -45,14 +53,42 @@ impl Repository {
         Ok(boundaries)
     }
 
+    pub(crate) fn missing_objects(&self, object_ids: &[String]) -> Result<Vec<String>, AppError> {
+        self.git.missing_objects(object_ids)
+    }
+
+    pub(crate) fn is_ancestor(&self, ancestor: &str, descendant: &str) -> Result<bool, AppError> {
+        self.git
+            .success(["merge-base", "--is-ancestor", ancestor, descendant])
+    }
+
     pub(crate) fn read_default_history_at(
         &self,
         default_ref: String,
         tip: String,
     ) -> Result<Snapshot, AppError> {
-        let object_format = self.git.text(["rev-parse", "--show-object-format"])?;
-        let object_format = object_format.trim().to_owned();
+        let object_format = self.object_format()?;
         history::read(&self.git, default_ref, tip, object_format)
+    }
+
+    pub(crate) fn read_incremental_history_at(
+        &self,
+        default_ref: String,
+        tip: String,
+        cached_commits: &[String],
+        refresh_commits: &[String],
+        known_missing_objects: Vec<String>,
+    ) -> Result<Snapshot, AppError> {
+        let object_format = self.object_format()?;
+        history::read_incremental(
+            &self.git,
+            default_ref,
+            tip,
+            object_format,
+            cached_commits,
+            refresh_commits,
+            known_missing_objects,
+        )
     }
 
     fn tip_for(&self, default_ref: &str) -> Result<String, AppError> {
