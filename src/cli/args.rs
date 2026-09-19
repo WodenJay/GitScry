@@ -18,6 +18,26 @@ pub(crate) enum Command {
         #[arg(long, default_value = "10", value_parser = parse_limit)]
         limit: usize,
     },
+    /// Find historical examples of a similar change or migration.
+    Examples {
+        #[arg(required = true, num_args = 1..)]
+        query: Vec<String>,
+        /// Repository-relative path the change touched; repeatable.
+        #[arg(long = "path", value_name = "PATH")]
+        paths: Vec<String>,
+        #[arg(long, default_value = "10", value_parser = parse_limit)]
+        limit: usize,
+    },
+    /// Find abandoned or reverted approaches, their recorded reason, and safe retry conditions.
+    Failures {
+        #[arg(required = true, num_args = 1..)]
+        query: Vec<String>,
+        /// Repository-relative path the change touched; repeatable.
+        #[arg(long = "path", value_name = "PATH")]
+        paths: Vec<String>,
+        #[arg(long, default_value = "10", value_parser = parse_limit)]
+        limit: usize,
+    },
 }
 
 fn parse_limit(value: &str) -> Result<usize, String> {

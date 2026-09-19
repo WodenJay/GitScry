@@ -1,10 +1,10 @@
 mod error;
 mod index;
-mod search;
+mod query;
 
 use std::collections::HashSet;
 
-use crate::{cache, cli::Command, git};
+use crate::{analysis, cache, cli::Command, git};
 
 pub(crate) use error::AppError;
 
@@ -261,6 +261,16 @@ fn add_warnings(progress: &mut Vec<String>, expected: &Expected, missing_objects
 pub(crate) fn execute(command: Command) -> Result<Outcome, AppError> {
     match command {
         Command::Index => index::run(),
-        Command::Search { query, limit } => search::run(query, limit),
+        Command::Search { query, limit } => query::run(query, Vec::new(), limit, analysis::search),
+        Command::Examples {
+            query,
+            paths,
+            limit,
+        } => query::run(query, paths, limit, analysis::examples),
+        Command::Failures {
+            query,
+            paths,
+            limit,
+        } => query::run(query, paths, limit, analysis::failures),
     }
 }

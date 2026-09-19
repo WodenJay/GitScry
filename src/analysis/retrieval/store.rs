@@ -1,0 +1,200 @@
+use rusqlite::{Connection, OptionalExtension, params, params_from_iter, types::Value};
+
+use crate::app::AppError;
+
+use super::super::Step;
+use super::super::search_error;
+
+/// A lexical candidate: one cache row with the paths it changed.
+pub(super) struct Stored {
+    pub(super) oid: String,
+    pub(super) commit_time: i64,
+    pub(super) subject: String,
+    pub(super) body: String,
+    pub(super) paths: Vec<Vec<u8>>,
+    pub(super) bm25: f64,
+}
+
+pub(in crate::analysis) fn match_count(
+    connection: &Connection,
+    match_query: &str,
+) -> Result<usize, AppError> {
+    let count = connection
+        .query_row(
+            "SELECT COUNT(*) FROM search_fts WHERE search_fts MATCH ?1",
+            [match_query],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|error| search_error("counting search matches", error))?;
+    usize::try_from(count)
+        .map_err(|_| search_error("counting search matches", "count exceeded platform limits"))
+}
+
+/// The strongest lexical candidates, each carrying the paths it changed.
+pub(in crate::analysis) fn candidates(
+    connection: &Connection,
+    match_query: &str,
+    limit: i64,
+) -> Result<Vec<Stored>, AppError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT c.oid, c.commit_time, c.message, bm25(search_fts, 10.0, 3.0, 2.0)
+             FROM search_fts
+             JOIN search_documents AS d ON d.rowid = search_fts.rowid
+             JOIN commits AS c ON c.oid = d.commit_oid
+             WHERE search_fts MATCH ?1
+             ORDER BY bm25(search_fts, 10.0, 3.0, 2.0), c.commit_time DESC, c.oid ASC
+             LIMIT ?2",
+        )
+        .map_err(|error| search_error("preparing search", error))?;
+    let rows = statement
+        .query_map(params![match_query, limit], |row| {
+            let message: Vec<u8> = row.get(2)?;
+            let (subject, body) = super::text::message_parts(&message);
+            Ok(Stored {
+                oid: row.get(0)?,
+                commit_time: row.get(1)?,
+                subject,
+                body,
+                paths: Vec::new(),
+                bm25: row.get(3)?,
+            })
+        })
+        .map_err(|error| search_error("running search", error))?;
+    let mut candidates = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| search_error("reading search results", error))?;
+    for candidate in &mut candidates {
+        candidate.paths = changed_paths(connection, &candidate.oid)?;
+    }
+    Ok(candidates)
+}
+
+pub(super) fn changed_paths(connection: &Connection, oid: &str) -> Result<Vec<Vec<u8>>, AppError> {
+    let mut statement = connection
+        .prepare("SELECT old_path, new_path FROM changes WHERE commit_oid = ?1 ORDER BY ordinal")
+        .map_err(|error| search_error("preparing changed paths", error))?;
+    let rows = statement
+        .query_map([oid], |row| {
+            Ok((
+                row.get::<_, Option<Vec<u8>>>(0)?,
+                row.get::<_, Option<Vec<u8>>>(1)?,
+            ))
+        })
+        .map_err(|error| search_error("reading changed paths", error))?;
+    let mut paths = Vec::new();
+    for row in rows {
+        let (old_path, new_path) =
+            row.map_err(|error| search_error("reading changed paths", error))?;
+        for path in [old_path, new_path].into_iter().flatten() {
+            if !paths.contains(&path) {
+                paths.push(path);
+            }
+        }
+    }
+    Ok(paths)
+}
+
+/// The moves a commit made, in change order and deduplicated.
+pub(in crate::analysis) fn steps(
+    connection: &Connection,
+    oid: &str,
+) -> Result<Vec<Step>, AppError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT status, old_path, new_path FROM changes WHERE commit_oid = ?1 ORDER BY ordinal",
+        )
+        .map_err(|error| search_error("preparing change shapes", error))?;
+    let rows = statement
+        .query_map([oid], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<Vec<u8>>>(1)?,
+                row.get::<_, Option<Vec<u8>>>(2)?,
+            ))
+        })
+        .map_err(|error| search_error("reading change shapes", error))?;
+    let mut steps: Vec<Step> = Vec::new();
+    for row in rows {
+        let (status, old_path, new_path) =
+            row.map_err(|error| search_error("reading change shapes", error))?;
+        if let Some(step) = Step::from_change(&status, old_path, new_path)
+            && !steps.contains(&step)
+        {
+            steps.push(step);
+        }
+    }
+    Ok(steps)
+}
+
+/// Subject and body of one cached commit.
+pub(in crate::analysis) fn text(
+    connection: &Connection,
+    oid: &str,
+) -> Result<Option<(String, String)>, AppError> {
+    let mut statement = connection
+        .prepare("SELECT message FROM commits WHERE oid = ?1")
+        .map_err(|error| search_error("preparing commit lookup", error))?;
+    let message = statement
+        .query_row([oid], |row| row.get::<_, Vec<u8>>(0))
+        .optional()
+        .map_err(|error| search_error("reading commit lookup", error))?;
+    Ok(message.map(|message| super::text::message_parts(&message)))
+}
+
+/// Every cached commit message, oldest first: the default branch cache generation in order.
+pub(in crate::analysis) fn all_texts(
+    connection: &Connection,
+) -> Result<Vec<(String, Vec<u8>)>, AppError> {
+    let mut statement = connection
+        .prepare("SELECT oid, message FROM commits ORDER BY commit_time, oid")
+        .map_err(|error| search_error("preparing history scan", error))?;
+    statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })
+        .map_err(|error| search_error("reading history scan", error))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| search_error("reading history scan", error))
+}
+
+/// The earliest later commit that touches the abandoned paths, preferring a corrective one.
+pub(in crate::analysis) fn corrective_follow_up(
+    connection: &Connection,
+    after_time: i64,
+    paths: &[Vec<u8>],
+) -> Result<Option<(String, String)>, AppError> {
+    let placeholders = std::iter::repeat_n("?", paths.len() * 2)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let query = format!(
+        "SELECT c.oid, c.message
+         FROM commits AS c
+         JOIN changes AS ch ON ch.commit_oid = c.oid
+         WHERE c.commit_time > ?1
+           AND (ch.old_path IN ({placeholders}) OR ch.new_path IN ({placeholders}))
+         GROUP BY c.oid
+         ORDER BY c.commit_time ASC, c.oid ASC",
+    );
+    let values = std::iter::once(Value::Integer(after_time))
+        .chain(paths.iter().map(|path| Value::Blob(path.clone())));
+    let mut statement = connection
+        .prepare(&query)
+        .map_err(|error| search_error("preparing corrective follow-up", error))?;
+    let rows = statement
+        .query_map(params_from_iter(values), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })
+        .map_err(|error| search_error("reading corrective follow-up", error))?;
+    let mut fallback = None;
+    for row in rows {
+        let (oid, message) =
+            row.map_err(|error| search_error("reading corrective follow-up", error))?;
+        let (subject, _) = super::text::message_parts(&message);
+        if super::super::provenance::is_corrective_subject(&subject) {
+            return Ok(Some((oid, subject)));
+        }
+        fallback.get_or_insert((oid, subject));
+    }
+    Ok(fallback)
+}
