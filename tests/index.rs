@@ -667,3 +667,21 @@ fn stale_observer_waits_once_for_an_existing_writer() {
         1
     );
 }
+
+#[test]
+fn recovers_a_previous_generation_after_interrupted_replace() {
+    let repo = TestRepo::new();
+    repo.commit("history.txt", b"one\n", "Initial history");
+    assert_eq!(repo.run().status.code(), Some(0));
+
+    let cache = repo.dir.path().join(".gitscry/cache.sqlite");
+    let previous = repo.dir.path().join(".gitscry/cache.sqlite.previous");
+    fs::rename(&cache, &previous).expect("simulate interrupted replacement");
+
+    let output = repo.run();
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(output.stdout, b"Indexed 1 commit.\n");
+    assert!(output.stderr.is_empty());
+    assert!(cache.is_file());
+    assert!(!previous.exists());
+}
