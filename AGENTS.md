@@ -9,7 +9,6 @@
 
 ## Cargo Rules
 
-- Give cargo commands enough time (1800s) to run to avoid timeout.
 - Limit cargo thread: `--jobs 1`.
 - Before completing a Rust task, run `cargo fmt --all -- --check` and `cargo clippy --all-targets --all-features --jobs 1 -- -D warnings`. No warnings should be emitted.
 
