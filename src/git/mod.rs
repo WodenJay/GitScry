@@ -1,0 +1,105 @@
+mod history;
+mod process;
+
+use std::path::PathBuf;
+
+use crate::app::AppError;
+
+pub(crate) use history::{Change, Commit, Hunk, Snapshot};
+use process::Git;
+
+pub(crate) struct Repository {
+    pub(crate) root: PathBuf,
+    git: Git,
+}
+
+impl Repository {
+    pub(crate) fn discover() -> Result<Self, AppError> {
+        let cwd = std::env::current_dir().map_err(|error| {
+            AppError::operational(format!("error: reading current directory: {error}"))
+        })?;
+        let probe = Git::new(cwd);
+        let bare = probe.text(["rev-parse", "--is-bare-repository"])?;
+        if bare.trim() == "true" {
+            return Err(AppError::operational(
+                "error: bare repositories are not supported; run GitScry in a worktree",
+            ));
+        }
+        let root = PathBuf::from(probe.text(["rev-parse", "--show-toplevel"])?.trim());
+        Ok(Self {
+            git: Git::new(root.clone()),
+            root,
+        })
+    }
+
+    pub(crate) fn read_default_history(&self) -> Result<Snapshot, AppError> {
+        let default_ref = self.resolve_default_branch()?;
+        let tip = self.git.text([
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            &format!("{default_ref}^{{commit}}"),
+        ])?;
+        let tip = tip.trim().to_owned();
+        let object_format = self
+            .git
+            .text(["rev-parse", "--show-object-format"])?
+            .trim()
+            .to_owned();
+        history::read(&self.git, default_ref, tip, object_format)
+    }
+
+    fn resolve_default_branch(&self) -> Result<String, AppError> {
+        let refs = self.git.text([
+            "for-each-ref",
+            "--format=%(refname)%00%(symref)",
+            "refs/remotes",
+            "refs/heads/main",
+            "refs/heads/master",
+        ])?;
+        let mut remote_heads = Vec::new();
+        let mut local_defaults = Vec::new();
+        let mut origin_head = None;
+
+        for line in refs.lines() {
+            let mut fields = line.split('\0');
+            let name = fields.next().unwrap_or_default();
+            let target = fields.next().unwrap_or_default();
+            if name == "refs/remotes/origin/HEAD" && !target.is_empty() {
+                origin_head = Some(target.to_owned());
+            } else if name.starts_with("refs/remotes/")
+                && name.ends_with("/HEAD")
+                && !target.is_empty()
+            {
+                remote_heads.push(target.to_owned());
+            } else if matches!(name, "refs/heads/main" | "refs/heads/master") {
+                local_defaults.push(name.to_owned());
+            }
+        }
+
+        if let Some(reference) = origin_head {
+            return Ok(reference);
+        }
+        remote_heads.sort();
+        remote_heads.dedup();
+        if remote_heads.len() == 1 {
+            return Ok(remote_heads.remove(0));
+        }
+        if remote_heads.len() > 1 {
+            return Err(default_branch_error("multiple remote HEADs"));
+        }
+        if local_defaults.len() == 1 {
+            return Ok(local_defaults.remove(0));
+        }
+        if local_defaults.len() > 1 {
+            return Err(default_branch_error("both main and master exist"));
+        }
+        Err(default_branch_error("no default branch reference exists"))
+    }
+}
+
+fn default_branch_error(reason: &str) -> AppError {
+    AppError::operational(format!(
+        "error: resolving default branch: {reason}; configure origin/HEAD or keep exactly one local main/master branch"
+    ))
+}
