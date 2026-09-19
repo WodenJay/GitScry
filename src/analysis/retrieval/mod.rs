@@ -127,7 +127,7 @@ pub(in crate::analysis) fn link<'a>(
     if let Some(revert) = reverts.of(&candidate.oid) {
         return Ok(Some(revert));
     }
-    for revert in reverts.sharing_paths(&candidate.oid, &candidate.paths, candidate.position) {
+    for revert in reverts.undoings(&candidate.oid, &candidate.paths, candidate.position) {
         if !store::touch_between(
             connection,
             candidate.position,

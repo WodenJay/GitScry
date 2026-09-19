@@ -2,6 +2,14 @@ use crate::app::AppError;
 
 use super::text::{normalize_path, tokenize};
 
+/// Words that carry no repository meaning. They are dropped from the query, not from the
+/// cache, so ordinary prose cannot inflate term coverage.
+const STOPWORDS: &[&str] = &[
+    "a", "an", "the", "and", "or", "of", "for", "to", "in", "on", "at", "by", "with", "from", "as",
+    "is", "are", "was", "were", "be", "been", "it", "its", "this", "that", "these", "those", "we",
+    "our", "you", "your", "while", "when", "where", "into", "than", "then",
+];
+
 /// What one natural-language query asks the cache for.
 pub(crate) struct Intent {
     terms: Vec<String>,
@@ -27,10 +35,11 @@ impl Intent {
                 anchors.push(anchor);
             }
         }
-        Ok(Self {
-            terms: tokenize(&input),
-            anchors,
-        })
+        let terms = tokenize(&input)
+            .into_iter()
+            .filter(|term| !STOPWORDS.contains(&term.as_str()))
+            .collect();
+        Ok(Self { terms, anchors })
     }
 
     pub(crate) fn terms(&self) -> &[String] {

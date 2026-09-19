@@ -28,9 +28,7 @@ pub(crate) fn run(
     // the fold and the citation consistent.
     let mut linked = Vec::with_capacity(pool.candidates.len());
     for candidate in &pool.candidates {
-        linked.push(
-            retrieval::link(connection, &reverts, candidate)?.map(|revert| revert.oid.clone()),
-        );
+        linked.push(retrieval::link(connection, &reverts, candidate)?);
     }
 
     let mut ranked = Vec::new();
@@ -39,14 +37,16 @@ pub(crate) fn run(
             continue;
         }
         // A revert told by the abandoned change it undid is not a second result.
-        let fold_into = linked
-            .iter()
-            .enumerate()
-            .find(|(other, reverted)| {
-                *other != index && reverted.as_deref() == Some(&candidate.oid)
-            })
-            .map(|(other, _)| other);
-        if fold_into.is_some() {
+        if linked.iter().enumerate().any(|(other, reverted)| {
+            other != index && reverted.map(|revert| revert.oid.as_str()) == Some(&candidate.oid)
+        }) {
+            continue;
+        }
+
+        // Only history that records an actual revert is failed-approach material. A revert
+        // that resolves no undone work, and a change no revert undid, is not the failure.
+        let linked_revert = linked[index];
+        if linked_revert.is_none() && reverts.target_of(&candidate.oid).is_none() {
             continue;
         }
 
@@ -64,7 +64,7 @@ pub(crate) fn run(
             stated_reason(&candidate.subject, &candidate.body)
         };
 
-        if let Some(revert) = retrieval::link(connection, &reverts, candidate)? {
+        if let Some(revert) = linked_revert {
             score += REVERT_WEIGHT;
             basis.push("recorded revert".to_owned());
             citations.push(
@@ -75,26 +75,23 @@ pub(crate) fn run(
             confidence = Confidence::High;
         }
 
-        // Look for a correction after the revert, or after the change when none is recorded.
-        let after = linked[index].as_deref().unwrap_or(&candidate.oid);
-        let mut retry = stated_retry(&candidate.body);
-        if let Some((oid, subject)) =
-            retrieval::corrective_follow_up(connection, after, &candidate.paths)?
-        {
-            score += FOLLOW_UP_WEIGHT;
-            basis.push("corrective follow-up".to_owned());
-            let follow_up = retrieval::commit_text(connection, &oid)?;
-            retry = follow_up
-                .map(|text| format!("{}\n{}", text.0, text.1))
-                .and_then(|text| stated_retry(&text))
-                .or(retry);
-            citations.push(Citation::new(oid, subject).noting("follow-up"));
-            confidence = Confidence::High;
-        }
-        if retry.is_none()
-            && let Some(revert) = retrieval::link(connection, &reverts, candidate)?
-        {
+        // A correction only means something once history records the revert it followed.
+        let mut retry = None;
+        if let Some(revert) = linked_revert {
             retry = stated_retry(&revert.body);
+            if let Some((oid, subject)) =
+                retrieval::corrective_follow_up(connection, &revert.oid, &candidate.paths)?
+            {
+                score += FOLLOW_UP_WEIGHT;
+                basis.push("corrective follow-up".to_owned());
+                let follow_up = retrieval::commit_text(connection, &oid)?;
+                retry = follow_up
+                    .map(|text| format!("{}\n{}", text.0, text.1))
+                    .and_then(|text| stated_retry(&text))
+                    .or(retry);
+                citations.push(Citation::new(oid, subject).noting("follow-up"));
+                confidence = Confidence::High;
+            }
         }
 
         ranked.push(retrieval::Ranked {

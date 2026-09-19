@@ -10,6 +10,8 @@ use super::{confidence, empty};
 const ANCHOR_WEIGHT: f64 = 4.0;
 /// A change that moved several paths together, like its neighbours, is more reusable.
 const COHERENT_WEIGHT: f64 = 2.0;
+/// Above this many paths a change is a batch, not a reusable multi-file pattern.
+const COHERENT_PATH_LIMIT: usize = 12;
 /// Reverted work is still history, but it is not a precedent to follow.
 const REVERT_DEMOTION: f64 = 8.0;
 
@@ -97,6 +99,7 @@ fn coherent_change(pool: &retrieval::Pool, index: usize) -> bool {
         return false;
     };
     candidate.paths.len() >= 2
+        && candidate.paths.len() <= COHERENT_PATH_LIMIT
         && (0..pool.candidates.len())
             .filter(|other| *other != index)
             .any(|other| pool.shared_paths(index, other) >= 2)

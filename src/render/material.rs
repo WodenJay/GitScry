@@ -4,6 +4,8 @@ use super::escape;
 
 /// Paths shown per result before the remainder is summarised.
 const PATHS_PER_RESULT: usize = 5;
+/// Steps shown per result; more would bury the reusable pattern in a file listing.
+const STEPS_PER_RESULT: usize = 8;
 
 /// Fixed no-result text, so absence of history is distinguished from a failure.
 fn empty_message(kind: ReportKind) -> &'static str {
@@ -72,8 +74,15 @@ fn render_detail(lines: &mut Vec<String>, detail: &Option<Detail>) {
     match detail {
         // Steps read as what history did, never as what the caller must do.
         Some(Detail::Steps(steps)) => {
-            for step in steps {
+            for step in steps.iter().take(STEPS_PER_RESULT) {
                 lines.push(format!("  step: {}", describe_step(step)));
+            }
+            if steps.len() > STEPS_PER_RESULT {
+                let remaining = steps.len() - STEPS_PER_RESULT;
+                lines.push(format!(
+                    "  ... {remaining} more step{}",
+                    if remaining == 1 { "" } else { "s" }
+                ));
             }
         }
         Some(Detail::Failure(failure)) => {

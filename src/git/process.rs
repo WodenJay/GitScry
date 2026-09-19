@@ -134,12 +134,18 @@ impl Git {
             .wait_with_output()
             .map_err(|error| AppError::operational(format!("error: waiting for Git: {error}")))?;
         if let Some(writer) = writer {
-            writer
+            let written = writer
                 .join()
-                .map_err(|_| AppError::operational("error: Git input writer panicked"))?
-                .map_err(|error| {
-                    AppError::operational(format!("error: sending input to Git: {error}"))
-                })?;
+                .map_err(|_| AppError::operational("error: Git input writer panicked"))?;
+            // A broken pipe means Git stopped reading input, so its own exit status and
+            // stderr carry the real diagnosis; reporting the write error would hide it.
+            if let Err(error) = written
+                && error.kind() != std::io::ErrorKind::BrokenPipe
+            {
+                return Err(AppError::operational(format!(
+                    "error: sending input to Git: {error}"
+                )));
+            }
         }
         Ok(output)
     }

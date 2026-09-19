@@ -62,6 +62,10 @@ pub(super) fn is_corrective_subject(subject: &str) -> bool {
             "restore",
             "follow-up",
             "followup",
+            "re-land",
+            "reland",
+            "re-landed",
+            "un-revert",
         ],
     )
 }
@@ -168,12 +172,16 @@ fn contains_marker(sentence: &str, markers: &[&str]) -> bool {
 }
 
 /// Sentence-bounded windows, so a reason never spans unrelated paragraphs.
+///
+/// Wrapped commit bodies break sentences across lines, so an unfinished sentence is carried
+/// to the next line rather than being emitted as a complete one.
 fn sentences(text: &str) -> Vec<String> {
     let mut sentences = Vec::new();
     let mut current = String::new();
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() {
+            // A blank line ends the paragraph, and so any sentence still open in it.
             if !current.trim().is_empty() {
                 sentences.push(std::mem::take(&mut current));
             }
@@ -183,9 +191,9 @@ fn sentences(text: &str) -> Vec<String> {
             current.push(' ');
         }
         current.push_str(line);
-        for sentence in split_sentences(&std::mem::take(&mut current)) {
-            sentences.push(sentence);
-        }
+        let (complete, remainder) = split_sentences(&current);
+        sentences.extend(complete);
+        current = remainder;
     }
     if !current.trim().is_empty() {
         sentences.push(current);
@@ -193,19 +201,25 @@ fn sentences(text: &str) -> Vec<String> {
     sentences
 }
 
-fn split_sentences(line: &str) -> Vec<String> {
+/// Split on sentence enders, returning the finished sentences and the open remainder.
+///
+/// An ender only closes a sentence at a word boundary, so a period inside
+/// `@executable_path/../lib` or `2.0` does not break the sentence it sits in.
+fn split_sentences(line: &str) -> (Vec<String>, String) {
+    let characters = line.chars().collect::<Vec<_>>();
     let mut sentences = Vec::new();
     let mut current = String::new();
-    for piece in line.split_inclusive(['.', '!', '?']) {
-        current.push_str(piece);
-        if piece.ends_with(['.', '!', '?']) {
+    for (index, character) in characters.iter().copied().enumerate() {
+        current.push(character);
+        if !matches!(character, '.' | '!' | '?') {
+            continue;
+        }
+        let next = characters.get(index + 1).copied();
+        if next.is_none_or(|next| next.is_whitespace()) {
             sentences.push(std::mem::take(&mut current));
         }
     }
-    if !current.trim().is_empty() {
-        sentences.push(current);
-    }
-    sentences
+    (sentences, current)
 }
 
 /// Drop a `type(scope):` prefix so a subject reads as prose.

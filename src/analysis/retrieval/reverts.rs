@@ -8,9 +8,6 @@ use super::super::provenance::{is_revert_subject, reverted_commit};
 use super::store;
 use super::text::message_parts;
 
-/// How many paths a revert and a candidate must share to be linked by evidence.
-const LINKED_PATHS: usize = 1;
-
 /// A cached commit whose subject reads like a revert, with what is needed to link it to the
 /// work it undid. The `This reverts commit` trailer is authoritative; most reverts in the
 /// wild omit it, so changed paths are recorded as the fallback evidence.
@@ -40,23 +37,35 @@ impl RevertIndex {
         self.by_target.get(oid).map(|index| &self.reverts[*index])
     }
 
-    /// Later reverts that share at least one changed path with this commit, earliest first.
-    pub(in crate::analysis) fn sharing_paths<'a>(
+    /// Later reverts that undid every path this commit changed, earliest first.
+    ///
+    /// An undo touches everything the undone change touched, so requiring the revert to
+    /// cover all of the candidate's paths rejects a revert that merely shares a file with
+    /// unrelated work.
+    pub(in crate::analysis) fn undoings<'a>(
         &'a self,
         oid: &str,
         paths: &[Vec<u8>],
         position: i64,
     ) -> impl Iterator<Item = &'a Revert> {
-        let matches = self
-            .reverts
+        self.reverts
             .iter()
             .filter(move |revert| {
                 revert.oid != oid
                     && revert.position > position
-                    && shared_paths(&revert.paths, paths) >= LINKED_PATHS
+                    && !paths.is_empty()
+                    && paths.iter().all(|path| revert.paths.contains(path))
             })
-            .collect::<Vec<_>>();
-        matches.into_iter()
+            .collect::<Vec<_>>()
+            .into_iter()
+    }
+
+    /// The cached commit this subject's trailer names, when it names one.
+    pub(in crate::analysis) fn target_of(&self, oid: &str) -> Option<&str> {
+        self.reverts
+            .iter()
+            .find(|revert| revert.oid == oid)
+            .and_then(|revert| revert.target.as_deref())
     }
 }
 
@@ -91,12 +100,6 @@ pub(in crate::analysis) fn index(connection: &Connection) -> Result<RevertIndex,
         }
     }
     Ok(RevertIndex { reverts, by_target })
-}
-
-fn shared_paths(left: &[Vec<u8>], right: &[Vec<u8>]) -> usize {
-    left.iter()
-        .filter(|path| right.iter().any(|other| other == *path))
-        .count()
 }
 
 /// Resolve an abbreviated object ID, but only when it is unambiguous.

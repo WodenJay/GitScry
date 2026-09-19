@@ -505,3 +505,166 @@ fn examples_and_failures_reuse_the_cache_without_preparation_noise() {
     assert_eq!(failures.status.code(), Some(0), "{}", stderr(&failures));
     assert!(stderr(&failures).is_empty(), "{}", stderr(&failures));
 }
+
+#[test]
+fn missing_history_objects_fail_with_the_git_diagnosis_and_publish_nothing() {
+    let repo = TestRepo::new();
+    repo.commit_at(
+        "src/a.txt",
+        b"a
+",
+        "Initial commit",
+        "2020-01-01T00:00:00+0000",
+    );
+
+    // Remove a tree Git must read to derive changes. The failure surfaces as a broken
+    // pipe while GitScript is still feeding `diff-tree`, which must not mask Git's own
+    // diagnosis of what is missing.
+    let tree = git_stdout(repo.dir.path(), ["rev-parse", "HEAD^{tree}"]);
+    let object = repo
+        .dir
+        .path()
+        .join(".git/objects")
+        .join(&tree[..2])
+        .join(&tree[2..]);
+    fs::remove_file(object).expect("remove tree object");
+
+    let output = repo.run(["examples", "initial"]);
+    assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
+    let message = stderr(&output);
+    assert!(message.contains("unable to read tree"), "{message}");
+    assert!(
+        !message.contains("sending input to Git"),
+        "Git's diagnosis was masked: {message}"
+    );
+    assert!(!repo.dir.path().join(".gitscry/cache.sqlite").exists());
+}
+
+#[test]
+fn failures_ignores_commits_that_merely_mention_a_revert() {
+    let repo = TestRepo::new();
+    // Mentions a revert in its body but is not abandoned work, so it is not a failed
+    // approach however much its text reads like a bug report.
+    let mentions = repo.commit_at(
+        "src/db/index.rs",
+        b"cron exclusion restored\n",
+        "fix(db): keep the cron exclusion alive across rotations
+
+The earlier attempt was reverted in #1234 because the predicate was shared, so
+this one gates the exclusion to the single writer that needs it.",
+        "2020-01-01T00:00:00+0000",
+    );
+    let abandoned = repo.commit_at(
+        "src/db/index.rs",
+        b"cron exclusion\n",
+        "Exclude cron sessions from the FTS index",
+        "2020-02-01T00:00:00+0000",
+    );
+    repo.commit_at(
+        "src/db/index.rs",
+        b"cron exclusion undone\n",
+        &format!(
+            "revert: exclude cron sessions from the FTS index\n\n\
+             This reverts commit {abandoned}.\n\n\
+             The shared predicate slowed ingestion for every caller.\n"
+        ),
+        "2020-03-01T00:00:00+0000",
+    );
+
+    let output = repo.run(["failures", "cron", "exclusion"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+
+    assert!(text.contains(&abandoned[..12]), "{text}");
+    assert!(
+        !text.contains(&mentions[..12]),
+        "a commit that only mentions a revert was reported as a failed approach:\n{text}"
+    );
+    assert!(
+        text.contains("reason: The shared predicate slowed ingestion"),
+        "{text}"
+    );
+}
+
+#[test]
+fn failures_reads_a_reason_and_retry_written_across_wrapped_lines() {
+    let repo = TestRepo::new();
+    let abandoned = repo.commit_at(
+        "src/db/index.rs",
+        b"cron sessions\n",
+        "Exclude cron sessions from the FTS index",
+        "2020-01-01T00:00:00+0000",
+    );
+    // Commit bodies are hard-wrapped, so a stated reason and retry condition both span
+    // several lines; neither may be cut at the line break.
+    repo.commit_at(
+        "src/db/index.rs",
+        b"cron sessions restored\n",
+        &format!(
+            "revert: exclude cron sessions from the FTS index\n\n\
+             This reverts commit {abandoned}.\n\n\
+             The shared predicate slowed the hot ingestion\n\
+             path for every provider.\n\n\
+             The narrow bug should be re-addressed provider-gated\n\
+             rather than on the shared path.\n"
+        ),
+        "2020-02-01T00:00:00+0000",
+    );
+
+    let output = repo.run(["failures", "exclude", "cron", "sessions"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    let entry = block(&text, &abandoned[..12]);
+
+    assert!(
+        entry.contains(
+            "reason: The shared predicate slowed the hot ingestion path for every provider"
+        ),
+        "{entry}"
+    );
+    assert!(
+        entry.contains("retry: provider-gated rather than on the shared path"),
+        "{entry}"
+    );
+}
+
+#[test]
+fn examples_bounds_the_steps_it_offers() {
+    let repo = TestRepo::new();
+    // One change touching many files: the reusable pattern must not be buried in a
+    // listing of every path it moved.
+    for index in 0..12 {
+        fs::create_dir_all(repo.dir.path().join("src/providers")).expect("create directory");
+        fs::write(
+            repo.dir
+                .path()
+                .join(format!("src/providers/bulk{index}.rs")),
+            format!(
+                "provider {index}
+"
+            ),
+        )
+        .expect("write tracked file");
+    }
+    git(repo.dir.path(), ["add", "--all"]);
+    git(
+        repo.dir.path(),
+        [
+            "commit",
+            "-m",
+            "Retire BulkProvider across registration and aliases",
+        ],
+    );
+
+    let output = repo.run(["examples", "retire", "bulk", "provider", "registration"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+
+    assert!(text.contains("more steps"), "{text}");
+    let shown = text.matches("  step: ").count();
+    assert!(
+        shown <= 8,
+        "too many steps shown ({shown}):
+{text}"
+    );
+}
