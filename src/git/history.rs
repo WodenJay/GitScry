@@ -75,19 +75,15 @@ pub(super) fn read_incremental(
     read_selected(git, target, &graph, &selected, known_missing_objects)
 }
 
-type TraceFixData = (Commit, Vec<Change>, Option<Vec<Hunk>>);
+type TraceFixData = (Commit, Option<Vec<Change>>, Option<Vec<Hunk>>);
 
-pub(super) fn read_trace_fix(
-    git: &Git,
-    fix_oid: &str,
-    parent: Option<&str>,
-) -> Result<TraceFixData, AppError> {
+pub(super) fn read_trace_fix(git: &Git, fix_oid: &str) -> Result<TraceFixData, AppError> {
     let commits = read_commits(git, &[fix_oid.to_owned()])?;
     let commit = commits
         .into_iter()
         .next()
         .ok_or_else(|| parse_error("fix commit was not returned"))?;
-    let input = match parent {
+    let input = match commit.parents.first() {
         Some(parent) => format!("{fix_oid} {parent}\n"),
         None => format!("{fix_oid}\n"),
     };
@@ -105,8 +101,8 @@ pub(super) fn read_trace_fix(
         ],
         input.as_bytes(),
     ) {
-        Ok(raw) => parse_changes(&raw, &known)?,
-        Err(_) => Vec::new(),
+        Ok(raw) => Some(parse_changes(&raw, &known)?),
+        Err(_) => None,
     };
     let hunks = match git.output(
         [

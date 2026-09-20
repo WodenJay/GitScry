@@ -53,8 +53,8 @@ pub(super) fn pin_trace_fix(
         return Err(AppError::input("revision must not contain a NUL byte"));
     }
     let revision = resolve_revision(git, requested_revision)?;
-    let parent = resolve_parent(git, &revision)?;
-    let (fix, all_changes, hunks) = history::read_trace_fix(git, &revision, parent.as_deref())?;
+    let (fix, all_changes, hunks) = history::read_trace_fix(git, &revision)?;
+    let parent = fix.parents.first().cloned();
     let shallow = !read_shallow_boundaries(git)?.is_empty();
     let mut warnings = Vec::new();
     let parent_missing = parent
@@ -62,6 +62,12 @@ pub(super) fn pin_trace_fix(
         .map(|parent| git.missing_objects(std::slice::from_ref(parent)))
         .transpose()?
         .is_some_and(|missing| !missing.is_empty());
+    if all_changes.is_none() {
+        warnings.push(
+            "warning: fix changed-path metadata is unavailable locally; lineage is degraded (confidence: low)."
+                .to_owned(),
+        );
+    }
     if shallow {
         warnings.push(
             "warning: local history is shallow; trace-fix lineage may be incomplete.".to_owned(),
@@ -85,33 +91,38 @@ pub(super) fn pin_trace_fix(
                 .to_owned(),
         );
     }
-    let selected_ordinals = if paths.is_empty() {
-        all_changes
+    let selected_ordinals = match all_changes.as_ref() {
+        None => HashSet::new(),
+        Some(all_changes) if paths.is_empty() => all_changes
             .iter()
             .map(|change| change.ordinal)
-            .collect::<HashSet<_>>()
-    } else {
-        let mut selected = HashSet::new();
-        for path in paths {
-            let bytes = path.as_bytes();
-            let matches = all_changes.iter().filter(|change| {
-                change.old_path.as_deref() == Some(bytes)
-                    || change.new_path.as_deref() == Some(bytes)
-            });
-            let mut found = false;
-            for change in matches {
-                found = true;
-                selected.insert(change.ordinal);
+            .collect::<HashSet<_>>(),
+        Some(all_changes) => {
+            let mut selected = HashSet::new();
+            for path in paths {
+                let normalized = normalize_path(path.as_bytes());
+                let matches = all_changes.iter().filter(|change| {
+                    change.old_path.as_deref().map(normalize_path).as_deref()
+                        == Some(normalized.as_slice())
+                        || change.new_path.as_deref().map(normalize_path).as_deref()
+                            == Some(normalized.as_slice())
+                });
+                let mut found = false;
+                for change in matches {
+                    found = true;
+                    selected.insert(change.ordinal);
+                }
+                if !found {
+                    return Err(AppError::input(format!(
+                        "path was not changed by fix revision: {path}"
+                    )));
+                }
             }
-            if !found {
-                return Err(AppError::input(format!(
-                    "path was not changed by fix revision: {path}"
-                )));
-            }
+            selected
         }
-        selected
     };
     let changes = all_changes
+        .unwrap_or_default()
         .into_iter()
         .filter(|change| selected_ordinals.contains(&change.ordinal))
         .collect::<Vec<_>>();
@@ -213,11 +224,6 @@ pub(super) fn pin_trace_fix(
     })
 }
 
-fn resolve_parent(git: &Git, revision: &str) -> Result<Option<String>, AppError> {
-    let output = git.text(["rev-list", "--parents", "-n", "1", revision])?;
-    Ok(output.split_ascii_whitespace().nth(1).map(str::to_owned))
-}
-
 fn push_warning(warnings: &mut Vec<String>, warning: String) {
     if !warnings.contains(&warning) {
         warnings.push(warning);
@@ -307,6 +313,20 @@ pub(super) fn pin(
         anchor_valid: true,
         warnings,
     })
+}
+
+fn normalize_path(path: &[u8]) -> Vec<u8> {
+    let mut normalized = Vec::new();
+    for component in path.split(|byte| *byte == b'/' || *byte == b'\\') {
+        if component.is_empty() || component == b"." {
+            continue;
+        }
+        if !normalized.is_empty() {
+            normalized.push(b'/');
+        }
+        normalized.extend_from_slice(component);
+    }
+    normalized
 }
 
 fn validate_path(path: &str) -> Result<(), AppError> {

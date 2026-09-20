@@ -158,9 +158,7 @@ pub(in crate::analysis) fn ancestors(
     oid: &str,
 ) -> Result<HashSet<String>, AppError> {
     let mut statement = connection
-        .prepare(
-            "SELECT parent_oid FROM commit_parents WHERE commit_oid = ?1 ORDER BY position LIMIT 1",
-        )
+        .prepare("SELECT parent_oid FROM commit_parents WHERE commit_oid = ?1 ORDER BY position")
         .map_err(|error| search_error("preparing commit ancestry", error))?;
     let mut pending = vec![oid.to_owned()];
     let mut ancestors = HashSet::new();

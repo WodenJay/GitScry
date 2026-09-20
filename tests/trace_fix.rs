@@ -96,6 +96,26 @@ impl TestRepo {
         )
         .expect("remove loose blob");
     }
+    fn remove_commit(&self, revision: &str) {
+        let output = Command::new("git")
+            .args(["rev-parse", revision])
+            .current_dir(self.dir.path())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", self.dir.path().join("global-config"))
+            .output()
+            .expect("resolve commit");
+        assert!(output.status.success());
+        let oid = String::from_utf8(output.stdout).expect("commit oid is utf-8");
+        let oid = oid.trim();
+        fs::remove_file(
+            self.dir
+                .path()
+                .join(".git/objects")
+                .join(&oid[..2])
+                .join(&oid[2..]),
+        )
+        .expect("remove loose commit");
+    }
 }
 
 fn git<I, S>(cwd: &Path, args: I)
@@ -129,7 +149,7 @@ fn trace_fix_reports_the_introducing_change_and_fix_as_one_chain() {
         Some("The old behavior failed in the production test."),
     );
 
-    let output = repo.run(["trace-fix", "HEAD", "--path", "app.txt", "--limit", "1"]);
+    let output = repo.run(["trace-fix", "HEAD", "--path", "./app.txt", "--limit", "1"]);
     assert_eq!(output.status.code(), Some(0));
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Fix lineage (1 match):"));
@@ -141,6 +161,32 @@ fn trace_fix_reports_the_introducing_change_and_fix_as_one_chain() {
         String::from_utf8_lossy(&output.stderr)
             .contains("Remote context unavailable from local history.")
     );
+}
+
+#[test]
+fn trace_fix_keeps_failure_context_on_the_blamed_path() {
+    let repo = TestRepo::new();
+    repo.commit_files(
+        &[("a.txt", b"safe-a\n"), ("b.txt", b"safe-b\n")],
+        "Initial app",
+    );
+    repo.commit("a.txt", b"buggy-a\n", "Introduce a bug", None);
+    repo.commit("b.txt", b"reported-b\n", "Report b failure #19", None);
+    repo.commit_files(
+        &[("a.txt", b"fixed-a\n"), ("b.txt", b"fixed-b\n")],
+        "Fix #19",
+    );
+
+    let output = repo.run(["trace-fix", "HEAD", "--limit", "10"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let a_start = stdout
+        .find("Introduce a bug")
+        .expect("a introducing change");
+    let a_block = &stdout[a_start..];
+    let a_end = a_block.find("\n- ").unwrap_or(a_block.len());
+    assert!(!a_block[..a_end].contains("Report b failure"));
+    assert!(stdout.contains("Report b failure #19"));
 }
 
 #[test]
@@ -178,6 +224,7 @@ fn trace_fix_uses_the_first_parent_of_a_merge_fix() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stdout.contains("Introduce bug"));
     assert!(stderr.contains("first-parent deleted lines are used"));
+    assert!(stdout.contains("confidence: low"));
     assert!(stderr.contains("fix is a merge; first-parent deleted lines are used"));
 }
 
@@ -311,6 +358,29 @@ fn trace_fix_keeps_direct_fix_facts_without_a_default_branch() {
 }
 
 #[test]
+fn trace_fix_degrades_when_the_fix_parent_commit_is_missing() {
+    let repo = TestRepo::new();
+    repo.commit("app.txt", b"safe\n", "Initial app", None);
+    git(repo.dir.path(), ["checkout", "-b", "fix-branch"]);
+    repo.commit("app.txt", b"buggy\n", "Introduce bug", None);
+    let missing_parent = repo.head();
+    repo.commit("app.txt", b"fixed\n", "Fix app", None);
+    let fix = repo.head();
+    git(repo.dir.path(), ["checkout", "main"]);
+    repo.remove_commit(&missing_parent);
+
+    let output = repo.run(["trace-fix", &fix, "--path", "app.txt"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "No introducing change could be traced.",
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("fix parent is missing locally"));
+    assert!(stderr.contains("changed-path metadata is unavailable"));
+}
+
+#[test]
 fn trace_fix_reports_shallow_parent_degradation() {
     let repo = TestRepo::new();
     repo.commit("app.txt", b"safe\n", "Initial app", None);
@@ -337,8 +407,7 @@ fn trace_fix_reports_shallow_parent_degradation() {
         "No introducing change could be traced.",
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("local history is shallow"));
-    assert!(stderr.contains("fix has no parent"));
+    assert!(stderr.contains("fix parent is missing locally"));
 }
 
 #[test]

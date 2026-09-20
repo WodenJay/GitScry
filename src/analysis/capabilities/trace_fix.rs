@@ -11,6 +11,7 @@ use super::super::provenance;
 use super::super::retrieval;
 use super::super::{Citation, Confidence, Detail, Material, Report, ReportKind, TraceFixDetail};
 
+type PathHistories = HashMap<Vec<u8>, HashMap<String, retrieval::HistoryCommit>>;
 struct Evidence {
     oid: String,
     subject: String,
@@ -55,7 +56,7 @@ pub(crate) fn run(
     let mut ranked = evidence
         .into_iter()
         .map(|evidence| {
-            let confidence = if evidence.boundary {
+            let confidence = if evidence.boundary || target.fix.parents.len() > 1 {
                 Confidence::Low
             } else if evidence.moved || evidence.parent_count > 1 || !observed_failure {
                 Confidence::Medium
@@ -89,6 +90,9 @@ pub(crate) fn run(
                 basis.push(
                     "code movement: anchored path history followed a rename or copy".to_owned(),
                 );
+            }
+            if target.fix.parents.len() > 1 {
+                basis.push("fix is a merge; deleted lines use the ordered first parent".to_owned());
             }
             if evidence.parent_count > 1 {
                 basis.push("merge lineage uses the ordered first parent".to_owned());
@@ -176,10 +180,19 @@ pub(crate) fn without_cache(target: &TraceFixTarget, limit: usize) -> Result<Rep
             subject,
             paths,
             confidence: Confidence::Low,
-            basis: vec![
-                "fix-parent deleted-line facts are available in memory".to_owned(),
-                "introducing candidates are unavailable without a default-branch cache".to_owned(),
-            ],
+            basis: {
+                let mut basis = Vec::new();
+                if target.parent.is_some() && !target.deleted_lines.is_empty() {
+                    basis.push("fix-parent deleted-line facts are available in memory".to_owned());
+                } else {
+                    basis.push("fix-parent deleted-line facts are unavailable locally".to_owned());
+                }
+                basis.push(
+                    "introducing candidates are unavailable without a default-branch cache"
+                        .to_owned(),
+                );
+                basis
+            },
             citations: vec![
                 Citation::new(target.fix.oid.clone(), "".to_owned()).noting("fix context"),
             ],
@@ -205,17 +218,12 @@ fn candidate_history(
     connection: &Connection,
     deleted_lines: &[DeletedLine],
     reachable: &HashSet<String>,
-) -> Result<HashMap<String, retrieval::HistoryCommit>, AppError> {
-    let mut histories = HashMap::new();
-    let mut paths = Vec::<Vec<u8>>::new();
+) -> Result<PathHistories, AppError> {
+    let mut histories = PathHistories::new();
     for deleted in deleted_lines {
-        if !paths.iter().any(|path| path == &deleted.path) {
-            paths.push(deleted.path.clone());
-        }
-    }
-    for path in paths {
-        for commit in retrieval::path_history(connection, &path, reachable)? {
-            histories.entry(commit.oid.clone()).or_insert(commit);
+        let path_histories = histories.entry(deleted.path.clone()).or_default();
+        for commit in retrieval::path_history(connection, &deleted.path, reachable)? {
+            path_histories.entry(commit.oid.clone()).or_insert(commit);
         }
     }
     Ok(histories)
@@ -224,17 +232,20 @@ fn candidate_history(
 fn collect_evidence(
     deleted_lines: &[DeletedLine],
     shallow: bool,
-    histories: &HashMap<String, retrieval::HistoryCommit>,
+    histories: &PathHistories,
     references: &[String],
     pre_fix: &HashSet<String>,
     fix_oid: &str,
 ) -> Vec<Evidence> {
     let mut by_oid = HashMap::<String, Evidence>::new();
     for deleted in deleted_lines {
+        let Some(path_histories) = histories.get(&deleted.path) else {
+            continue;
+        };
         let Some(blame) = &deleted.blame else {
             continue;
         };
-        let Some(history) = histories.get(&blame.oid) else {
+        let Some(history) = path_histories.get(&blame.oid) else {
             continue;
         };
         let candidate_references = message_references_from_parts(&history.subject, &history.body);
@@ -246,7 +257,7 @@ fn collect_evidence(
                     .any(|candidate| candidate == *reference)
             })
             .cloned();
-        let failure = histories
+        let failure = path_histories
             .values()
             .filter(|candidate| {
                 pre_fix.contains(&candidate.oid)
@@ -271,7 +282,7 @@ fn collect_evidence(
             })
             .max_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)))
             .map(|(_, oid, subject, _)| (oid, subject));
-        let movement = histories
+        let movement = path_histories
             .values()
             .filter(|candidate| candidate.oid != blame.oid && anchored_moved(candidate))
             .filter(|candidate| pre_fix.is_empty() || pre_fix.contains(&candidate.oid))
@@ -279,7 +290,7 @@ fn collect_evidence(
             .map(|candidate| (candidate.oid.clone(), candidate.subject.clone()));
         let mut paths = anchored_paths(history);
         if let Some((movement_oid, _)) = &movement
-            && let Some(movement_history) = histories.get(movement_oid)
+            && let Some(movement_history) = path_histories.get(movement_oid)
         {
             for path in anchored_paths(movement_history) {
                 if !paths.iter().any(|existing| existing == &path) {
