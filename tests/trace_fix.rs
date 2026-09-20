@@ -1,23 +1,10 @@
+mod support;
+
 use std::{fs, path::Path, process::Command};
 
-use tempfile::TempDir;
-
-struct TestRepo {
-    dir: TempDir,
-}
+use support::{TestRepo, git};
 
 impl TestRepo {
-    fn new() -> Self {
-        let dir = tempfile::tempdir().expect("create temporary repository");
-        git(dir.path(), ["init", "--initial-branch=main"]);
-        git(dir.path(), ["config", "user.name", "GitScry Test"]);
-        git(
-            dir.path(),
-            ["config", "user.email", "gitscry@example.invalid"],
-        );
-        Self { dir }
-    }
-
     fn commit(&self, path: &str, contents: &[u8], subject: &str, body: Option<&str>) {
         if let Some(parent) = Path::new(path).parent() {
             fs::create_dir_all(self.dir.path().join(parent)).expect("create parent directory");
@@ -43,38 +30,6 @@ impl TestRepo {
         git(self.dir.path(), ["commit", "-m", subject]);
     }
 
-    fn run<I, S>(&self, args: I) -> std::process::Output
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<std::ffi::OsStr>,
-    {
-        Self::run_at(self.dir.path(), args)
-    }
-    fn run_at<I, S>(cwd: &Path, args: I) -> std::process::Output
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<std::ffi::OsStr>,
-    {
-        Command::new(env!("CARGO_BIN_EXE_gitscry"))
-            .args(args)
-            .current_dir(cwd)
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", cwd.join("global-config"))
-            .output()
-            .expect("run gitscry")
-    }
-    fn head(&self) -> String {
-        let output = Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(self.dir.path())
-            .output()
-            .expect("read HEAD");
-        assert!(output.status.success());
-        String::from_utf8(output.stdout)
-            .expect("HEAD is utf-8")
-            .trim()
-            .to_owned()
-    }
     fn remove_blob(&self, revision: &str, path: &str) {
         let spec = format!("{revision}:{path}");
         let output = Command::new("git")
@@ -116,25 +71,6 @@ impl TestRepo {
         )
         .expect("remove loose commit");
     }
-}
-
-fn git<I, S>(cwd: &Path, args: I)
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<std::ffi::OsStr>,
-{
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", cwd.join("global-config"))
-        .output()
-        .expect("run git");
-    assert!(
-        output.status.success(),
-        "git failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
 }
 
 #[test]

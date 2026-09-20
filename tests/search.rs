@@ -1,24 +1,11 @@
+mod support;
+
+use std::{fs, path::Path, process::Command};
+
 use rusqlite::Connection;
-use std::{ffi::OsStr, fs, path::Path, process::Command};
-
-use tempfile::TempDir;
-
-struct TestRepo {
-    dir: TempDir,
-}
+use support::{TestRepo, git, git_stdout};
 
 impl TestRepo {
-    fn new() -> Self {
-        let dir = tempfile::tempdir().expect("create temporary repository");
-        git(dir.path(), ["init", "--initial-branch=main"]);
-        git(dir.path(), ["config", "user.name", "GitScry Test"]);
-        git(
-            dir.path(),
-            ["config", "user.email", "gitscry@example.invalid"],
-        );
-        Self { dir }
-    }
-
     fn commit(&self, path: &str, contents: &[u8], message: &str) {
         if let Some(parent) = Path::new(path).parent() {
             fs::create_dir_all(self.dir.path().join(parent)).expect("create parent directory");
@@ -48,59 +35,6 @@ impl TestRepo {
             String::from_utf8_lossy(&output.stderr)
         );
     }
-
-    fn head(&self) -> String {
-        git_stdout(self.dir.path(), ["rev-parse", "HEAD"])
-    }
-
-    fn run<I, S>(&self, args: I) -> std::process::Output
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<OsStr>,
-    {
-        Command::new(env!("CARGO_BIN_EXE_gitscry"))
-            .args(args)
-            .current_dir(self.dir.path())
-            .output()
-            .expect("run gitscry")
-    }
-}
-
-fn git<I, S>(cwd: &Path, args: I)
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<OsStr>,
-{
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .output()
-        .expect("run git");
-    assert!(
-        output.status.success(),
-        "git failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-fn git_stdout<I, S>(cwd: &Path, args: I) -> String
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<OsStr>,
-{
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .output()
-        .expect("run git");
-    assert!(
-        output.status.success(),
-        "git failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
 
 #[test]

@@ -1,28 +1,10 @@
-use std::{
-    ffi::OsStr,
-    fs,
-    path::Path,
-    process::{Command, Output},
-};
+mod support;
 
-use tempfile::TempDir;
+use std::{fs, path::Path, process::Output};
 
-struct TestRepo {
-    dir: TempDir,
-}
+use support::{TestRepo, git};
 
 impl TestRepo {
-    fn new() -> Self {
-        let dir = tempfile::tempdir().expect("create temporary repository");
-        git(dir.path(), ["init", "--initial-branch=main"]);
-        git(dir.path(), ["config", "user.name", "GitScry Test"]);
-        git(
-            dir.path(),
-            ["config", "user.email", "gitscry@example.invalid"],
-        );
-        Self { dir }
-    }
-
     fn commit_files(&self, files: &[(&str, &[u8])], message: &str) {
         for (path, contents) in files {
             let path = Path::new(path);
@@ -71,36 +53,6 @@ impl TestRepo {
         git(self.dir.path(), ["add", "--all"]);
         git(self.dir.path(), ["commit", "-m", "unrelated mass change"]);
     }
-
-    fn run<I, S>(&self, args: I) -> Output
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<OsStr>,
-    {
-        Command::new(env!("CARGO_BIN_EXE_gitscry"))
-            .args(args)
-            .current_dir(self.dir.path())
-            .output()
-            .expect("run gitscry")
-    }
-}
-
-fn git<I, S>(cwd: &Path, args: I)
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<OsStr>,
-{
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .output()
-        .expect("run git");
-    assert!(
-        output.status.success(),
-        "git failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
 }
 
 fn stdout(output: &Output) -> String {

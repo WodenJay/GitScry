@@ -1,86 +1,23 @@
+mod support;
+
 use std::{
     env,
-    ffi::OsStr,
     fs::{self, OpenOptions},
-    path::Path,
     process::Command,
     thread,
     time::Duration,
 };
 
-use rusqlite::Connection;
-use tempfile::TempDir;
+use support::{TestRepo, git, git_stdout};
 
-struct TestRepo {
-    dir: TempDir,
-}
+use rusqlite::Connection;
 
 impl TestRepo {
-    fn new() -> Self {
-        let dir = tempfile::tempdir().expect("create temporary repository");
-        git(dir.path(), ["init", "--initial-branch=main"]);
-        git(dir.path(), ["config", "user.name", "GitScry Test"]);
-        git(
-            dir.path(),
-            ["config", "user.email", "gitscry@example.invalid"],
-        );
-        Self { dir }
-    }
-
     fn commit(&self, path: &str, contents: &[u8], message: &str) {
         fs::write(self.dir.path().join(path), contents).expect("write tracked file");
         git(self.dir.path(), ["add", path]);
         git(self.dir.path(), ["commit", "-m", message]);
     }
-
-    fn head(&self) -> String {
-        git_stdout(self.dir.path(), ["rev-parse", "HEAD"])
-    }
-
-    fn run(&self) -> std::process::Output {
-        Command::new(env!("CARGO_BIN_EXE_gitscry"))
-            .arg("index")
-            .current_dir(self.dir.path())
-            .output()
-            .expect("run gitscry")
-    }
-}
-
-fn git<I, S>(cwd: &Path, args: I)
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<OsStr>,
-{
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .output()
-        .expect("run git");
-    assert!(
-        output.status.success(),
-        "git failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-fn git_stdout<I, S>(cwd: &Path, args: I) -> String
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<OsStr>,
-{
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .output()
-        .expect("run git");
-    assert!(
-        output.status.success(),
-        "git failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
 
 #[test]
@@ -90,7 +27,7 @@ fn first_index_publishes_complete_cache() {
     fs::create_dir(repo.dir.path().join(".gitscry")).expect("create cache directory");
     fs::write(repo.dir.path().join(".gitscry/.gitignore"), "keep-me\n").expect("seed ignore file");
 
-    let output = repo.run();
+    let output = repo.run(["index"]);
 
     assert_eq!(
         output.status.code(),
@@ -144,7 +81,7 @@ fn root_merge_and_binary_history_are_persisted() {
     repo.commit("binary.bin", b"binary\0contents", "binary");
     let binary = repo.head();
 
-    let output = repo.run();
+    let output = repo.run(["index"]);
     assert_eq!(
         output.status.code(),
         Some(0),
@@ -214,7 +151,7 @@ fn ambiguous_default_branch_fails_without_publishing() {
     repo.commit("file.txt", b"content\n", "initial");
     git(repo.dir.path(), ["branch", "master"]);
 
-    let output = repo.run();
+    let output = repo.run(["index"]);
 
     assert_eq!(output.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&output.stderr).contains("both main and master exist"));
@@ -239,7 +176,7 @@ fn origin_head_wins_over_ambiguous_local_defaults() {
         ],
     );
 
-    let output = repo.run();
+    let output = repo.run(["index"]);
 
     assert_eq!(
         output.status.code(),
@@ -255,7 +192,7 @@ fn current_branch_is_not_used_as_default() {
     repo.commit("file.txt", b"content\n", "initial");
     git(repo.dir.path(), ["branch", "-m", "topic"]);
 
-    let output = repo.run();
+    let output = repo.run(["index"]);
 
     assert_eq!(output.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&output.stderr).contains("no default branch"));
@@ -284,7 +221,7 @@ fn preparation_failure_does_not_publish_a_cache() {
     repo.commit("file.txt", b"content\n", "initial");
     fs::write(repo.dir.path().join(".gitscry"), "not a directory").unwrap();
 
-    let output = repo.run();
+    let output = repo.run(["index"]);
 
     assert_eq!(output.status.code(), Some(1));
     assert!(!repo.dir.path().join(".gitscry/cache.sqlite").exists());
@@ -412,9 +349,9 @@ fn fresh_index_is_quiet_and_reports_completed_count() {
     let repo = TestRepo::new();
     repo.commit("history.txt", b"one\n", "Initial history");
 
-    let first = repo.run();
+    let first = repo.run(["index"]);
     assert_eq!(first.status.code(), Some(0));
-    let second = repo.run();
+    let second = repo.run(["index"]);
     assert_eq!(second.status.code(), Some(0));
     assert_eq!(second.stdout, b"Indexed 1 commit.\n");
     assert!(second.stderr.is_empty());
@@ -425,10 +362,10 @@ fn fast_forward_updates_one_completed_generation() {
     let repo = TestRepo::new();
     repo.commit("history.txt", b"one\n", "Initial history");
     let first = repo.head();
-    assert_eq!(repo.run().status.code(), Some(0));
+    assert_eq!(repo.run(["index"]).status.code(), Some(0));
 
     repo.commit("history.txt", b"two\n", "Second history");
-    let second = repo.run();
+    let second = repo.run(["index"]);
     assert_eq!(second.status.code(), Some(0));
     assert!(String::from_utf8_lossy(&second.stderr).contains("Indexing local history"));
 
@@ -469,12 +406,12 @@ fn non_fast_forward_rebuild_removes_unreachable_commits() {
     let base = repo.head();
     repo.commit("history.txt", b"two\n", "Old second history");
     let old_tip = repo.head();
-    assert_eq!(repo.run().status.code(), Some(0));
+    assert_eq!(repo.run(["index"]).status.code(), Some(0));
 
     git(repo.dir.path(), ["reset", "--hard", &base]);
     repo.commit("history.txt", b"replacement\n", "Replacement history");
     let new_tip = repo.head();
-    let output = repo.run();
+    let output = repo.run(["index"]);
     assert_eq!(output.status.code(), Some(0));
     assert!(String::from_utf8_lossy(&output.stderr).contains("Indexing local history"));
 
@@ -505,7 +442,7 @@ fn non_fast_forward_rebuild_removes_unreachable_commits() {
 fn default_ref_change_rebuilds_the_pinned_generation() {
     let repo = TestRepo::new();
     repo.commit("history.txt", b"main\n", "Main history");
-    assert_eq!(repo.run().status.code(), Some(0));
+    assert_eq!(repo.run(["index"]).status.code(), Some(0));
 
     git(repo.dir.path(), ["checkout", "-b", "feature"]);
     repo.commit("feature.txt", b"feature\n", "Feature history");
@@ -524,7 +461,7 @@ fn default_ref_change_rebuilds_the_pinned_generation() {
         ],
     );
 
-    let output = repo.run();
+    let output = repo.run(["index"]);
     assert_eq!(output.status.code(), Some(0));
     let cache = Connection::open(repo.dir.path().join(".gitscry/cache.sqlite")).unwrap();
     assert_eq!(
@@ -567,7 +504,7 @@ fn restores_hunks_after_a_missing_blob_returns() {
         .join(&blob[2..]);
     fs::remove_file(object_path).expect("remove loose blob");
 
-    let first_index = repo.run();
+    let first_index = repo.run(["index"]);
     assert_eq!(first_index.status.code(), Some(0));
     let cache_path = repo.dir.path().join(".gitscry/cache.sqlite");
     let cache = Connection::open(&cache_path).unwrap();
@@ -581,7 +518,7 @@ fn restores_hunks_after_a_missing_blob_returns() {
     git(repo.dir.path(), ["hash-object", "-w", "restore.txt"]);
     fs::remove_file(repo.dir.path().join("restore.txt")).unwrap();
 
-    let restored = repo.run();
+    let restored = repo.run(["index"]);
     assert_eq!(restored.status.code(), Some(0));
     let cache = Connection::open(cache_path).unwrap();
     assert_eq!(
@@ -598,7 +535,7 @@ fn missing_cached_commit_fails_the_next_preparation() {
     repo.commit("history.txt", b"one\n", "First history");
     let missing_commit = repo.head();
     repo.commit("history.txt", b"two\n", "Second history");
-    assert_eq!(repo.run().status.code(), Some(0));
+    assert_eq!(repo.run(["index"]).status.code(), Some(0));
     let cache_path = repo.dir.path().join(".gitscry/cache.sqlite");
     let completed_tip = repo.head();
 
@@ -610,7 +547,7 @@ fn missing_cached_commit_fails_the_next_preparation() {
         .join(&missing_commit[2..]);
     fs::remove_file(object_path).expect("remove loose commit");
 
-    let output = repo.run();
+    let output = repo.run(["index"]);
     assert_eq!(output.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&output.stderr).contains("Git command failed"));
     let cache = Connection::open(cache_path).unwrap();
@@ -654,7 +591,7 @@ fn cache_lock_holder() {
 fn stale_observer_waits_once_for_an_existing_writer() {
     let repo = TestRepo::new();
     repo.commit("history.txt", b"one\n", "Initial history");
-    assert_eq!(repo.run().status.code(), Some(0));
+    assert_eq!(repo.run(["index"]).status.code(), Some(0));
 
     let ready_path = repo.dir.path().join("lock-ready");
     let holder = Command::new(env::current_exe().unwrap())
@@ -676,7 +613,7 @@ fn stale_observer_waits_once_for_an_existing_writer() {
     }
     assert!(ready_path.exists(), "lock holder did not start");
 
-    let output = repo.run();
+    let output = repo.run(["index"]);
     let _ = holder.wait_with_output().expect("wait for lock holder");
     assert_eq!(output.status.code(), Some(0));
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -692,13 +629,13 @@ fn stale_observer_waits_once_for_an_existing_writer() {
 fn recovers_a_previous_generation_after_interrupted_replace() {
     let repo = TestRepo::new();
     repo.commit("history.txt", b"one\n", "Initial history");
-    assert_eq!(repo.run().status.code(), Some(0));
+    assert_eq!(repo.run(["index"]).status.code(), Some(0));
 
     let cache = repo.dir.path().join(".gitscry/cache.sqlite");
     let previous = repo.dir.path().join(".gitscry/cache.sqlite.previous");
     fs::rename(&cache, &previous).expect("simulate interrupted replacement");
 
-    let output = repo.run();
+    let output = repo.run(["index"]);
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(output.stdout, b"Indexed 1 commit.\n");
     assert!(output.stderr.is_empty());
@@ -740,7 +677,7 @@ fn concurrent_indexers_leave_one_complete_generation() {
 fn concurrent_readers_return_identical_material() {
     let repo = TestRepo::new();
     repo.commit("history.txt", b"one\n", "Initial history");
-    assert_eq!(repo.run().status.code(), Some(0));
+    assert_eq!(repo.run(["index"]).status.code(), Some(0));
 
     let first = Command::new(env!("CARGO_BIN_EXE_gitscry"))
         .args(["search", "history"])
