@@ -312,6 +312,7 @@ fn search_limit_truncates_results_and_invalid_input_exits_two() {
     assert!(stdout.contains("results truncated"));
     assert!(stdout.contains("Showing 1 of 3"));
 
+    assert!(stdout.contains("matching commits"));
     let missing = repo.run(["search"]);
     assert_eq!(missing.status.code(), Some(2));
     let invalid_limit = repo.run(["search", "provider", "--limit", "0"]);

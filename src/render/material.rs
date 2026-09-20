@@ -35,10 +35,10 @@ pub(crate) fn format_report(report: &Report) -> String {
             let noun = match report.kind {
                 ReportKind::Related | ReportKind::Tests => "matching paths",
                 ReportKind::Why => "matching commits",
-                ReportKind::Search
-                | ReportKind::Examples
-                | ReportKind::Failures
-                | ReportKind::Regression => "matching suspects",
+                ReportKind::Search | ReportKind::Examples | ReportKind::Failures => {
+                    "matching commits"
+                }
+                ReportKind::Regression => "matching suspects",
             };
             lines.push(format!(
                 "Showing {} of {} {noun}; results truncated.",
