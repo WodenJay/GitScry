@@ -1,4 +1,6 @@
+mod generation;
 mod schema;
+pub(crate) use generation::{prepare, prepare_at};
 
 use std::{
     collections::{HashMap, HashSet},
@@ -15,11 +17,10 @@ use crate::{
     app::AppError,
     git::{Change, Commit, Hunk, Snapshot},
 };
-
 const SCHEMA_VERSION: &str = "3";
 const WAITING_MESSAGE: &str = "Waiting for another GitScry process...";
 
-pub(crate) struct CacheState {
+struct CacheState {
     pub(crate) default_ref: String,
     pub(crate) tip: String,
     pub(crate) object_format: String,
@@ -30,17 +31,17 @@ pub(crate) struct CacheState {
     pub(crate) commit_count: usize,
 }
 
-pub(crate) enum Inspection {
+enum Inspection {
     Missing,
     Damaged,
     Ready(CacheState),
 }
 
-pub(crate) struct SharedLock {
+struct SharedLock {
     file: File,
 }
 
-pub(crate) struct ExclusiveLock {
+struct ExclusiveLock {
     file: File,
 }
 
@@ -56,10 +57,7 @@ impl Drop for ExclusiveLock {
     }
 }
 
-pub(crate) fn acquire_shared(
-    root: &Path,
-    progress: &mut Vec<String>,
-) -> Result<SharedLock, AppError> {
+fn acquire_shared(root: &Path, progress: &mut Vec<String>) -> Result<SharedLock, AppError> {
     let file = open_lock_file(root)?;
     loop {
         match file.try_lock_shared() {
@@ -75,10 +73,7 @@ pub(crate) fn acquire_shared(
     }
 }
 
-pub(crate) fn acquire_exclusive(
-    root: &Path,
-    progress: &mut Vec<String>,
-) -> Result<ExclusiveLock, AppError> {
+fn acquire_exclusive(root: &Path, progress: &mut Vec<String>) -> Result<ExclusiveLock, AppError> {
     let file = open_lock_file(root)?;
     loop {
         match file.try_lock() {
@@ -119,7 +114,7 @@ fn lock_error(mode: &str, error: impl std::fmt::Display) -> AppError {
     ))
 }
 
-pub(crate) fn inspect(root: &Path) -> Inspection {
+fn inspect(root: &Path) -> Inspection {
     let path = root.join(".gitscry/cache.sqlite");
     if !path.is_file() {
         return Inspection::Missing;
@@ -250,12 +245,12 @@ fn count(connection: &Connection, query: &str) -> Result<i64, ()> {
         .map_err(|_| ())
 }
 
-pub(crate) fn shallow_warning(shallow_boundaries: &[String]) -> Option<String> {
+fn shallow_warning(shallow_boundaries: &[String]) -> Option<String> {
     (!shallow_boundaries.is_empty())
         .then_some("warning: local history is shallow; cache material is incomplete.".to_owned())
 }
 
-pub(crate) fn missing_warning(missing_objects: &[String]) -> Option<String> {
+fn missing_warning(missing_objects: &[String]) -> Option<String> {
     (!missing_objects.is_empty()).then_some(
         "warning: some local objects are missing; cache material is incomplete.".to_owned(),
     )
@@ -273,7 +268,7 @@ pub(crate) fn open_in_memory() -> Result<Connection, AppError> {
     Connection::open_in_memory().map_err(|error| cache_error("opening in-memory cache", error))
 }
 
-pub(crate) fn preserve_damaged(root: &Path) -> Result<(), AppError> {
+fn preserve_damaged(root: &Path) -> Result<(), AppError> {
     let directory = root.join(".gitscry");
     let path = directory.join("cache.sqlite");
     if !path.exists() {
@@ -290,7 +285,7 @@ pub(crate) fn preserve_damaged(root: &Path) -> Result<(), AppError> {
     fs::copy(path, preserved).map_err(|error| cache_error("preserving damaged cache", error))?;
     Ok(())
 }
-pub(crate) fn recover_previous(root: &Path) -> Result<(), AppError> {
+fn recover_previous(root: &Path) -> Result<(), AppError> {
     let directory = root.join(".gitscry");
     let final_path = directory.join("cache.sqlite");
     let previous = directory.join("cache.sqlite.previous");
@@ -301,7 +296,7 @@ pub(crate) fn recover_previous(root: &Path) -> Result<(), AppError> {
     Ok(())
 }
 
-pub(crate) fn publish(root: &Path, snapshot: &Snapshot) -> Result<(), AppError> {
+fn publish(root: &Path, snapshot: &Snapshot) -> Result<(), AppError> {
     let directory = root.join(".gitscry");
     fs::create_dir_all(&directory).map_err(|error| cache_error("creating .gitscry", error))?;
     ensure_ignored(&directory)?;
@@ -321,7 +316,7 @@ pub(crate) fn publish(root: &Path, snapshot: &Snapshot) -> Result<(), AppError> 
     atomic_replace(&directory, &final_path, &staging)
 }
 
-pub(crate) fn append(root: &Path, snapshot: &Snapshot) -> Result<usize, AppError> {
+fn append(root: &Path, snapshot: &Snapshot) -> Result<usize, AppError> {
     let path = root.join(".gitscry/cache.sqlite");
     let mut connection =
         Connection::open(&path).map_err(|error| cache_error("opening cache", error))?;
@@ -675,10 +670,7 @@ fn ensure_ignored(directory: &Path) -> Result<(), AppError> {
     fs::write(path, contents).map_err(|error| cache_error("writing .gitscry/.gitignore", error))
 }
 
-pub(crate) fn commits_for_objects(
-    root: &Path,
-    objects: &[String],
-) -> Result<Vec<String>, AppError> {
+fn commits_for_objects(root: &Path, objects: &[String]) -> Result<Vec<String>, AppError> {
     if objects.is_empty() {
         return Ok(Vec::new());
     }
@@ -706,7 +698,7 @@ pub(crate) fn commits_for_objects(
         .map_err(|error| cache_error("reading missing-object lookup", error))
 }
 
-pub(crate) fn boundary_refreshes(root: &Path) -> Result<Vec<String>, AppError> {
+fn boundary_refreshes(root: &Path) -> Result<Vec<String>, AppError> {
     let connection = Connection::open_with_flags(
         root.join(".gitscry/cache.sqlite"),
         OpenFlags::SQLITE_OPEN_READ_ONLY,

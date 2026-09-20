@@ -1,10 +1,10 @@
-use crate::git;
+use crate::{cache, git};
 
-use super::{AppError, Outcome, prepare_cache};
+use super::{AppError, Outcome};
 
 pub(super) fn run() -> Result<Outcome, AppError> {
     let repository = git::Repository::discover()?;
-    let prepared = prepare_cache(&repository)?;
+    let prepared = cache::prepare(&repository)?;
 
     Ok(Outcome {
         progress: prepared.progress,

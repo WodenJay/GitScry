@@ -6,7 +6,7 @@ use crate::{
     render,
 };
 
-use super::{AppError, Outcome, prepare_cache, prepare_cache_at};
+use super::{AppError, Outcome};
 
 /// One query command: build the intent, prepare the cache, run the capability, render it.
 pub(super) fn run(
@@ -21,7 +21,7 @@ pub(super) fn run(
 ) -> Result<Outcome, AppError> {
     let intent = analysis::Intent::parse(&words, &paths)?;
     let repository = Repository::discover()?;
-    let prepared = prepare_cache(&repository)?;
+    let prepared = cache::prepare(&repository)?;
     let connection = cache::open(&repository.root)?;
     let mut report = capability(&connection, &intent, limit)?;
     let mut progress = prepared.progress;
@@ -46,7 +46,7 @@ pub(super) fn run_paths(
 ) -> Result<Outcome, AppError> {
     let intent = analysis::Intent::paths(&paths)?;
     let repository = Repository::discover()?;
-    let prepared = prepare_cache(&repository)?;
+    let prepared = cache::prepare(&repository)?;
     let connection = cache::open(&repository.root)?;
     let worktree_paths = repository.worktree_paths()?;
     let mut report = capability(&connection, &intent, &worktree_paths, limit)?;
@@ -74,7 +74,7 @@ pub(super) fn run_regression(
     let cached_target = repository.default_target_if_available()?;
     let (prepared, direct_history) = match cached_target {
         Some((default_ref, cached_tip)) => {
-            let prepared = prepare_cache(&repository)?;
+            let prepared = cache::prepare(&repository)?;
             let direct_history = if repository.is_ancestor(&target.bad_revision, &cached_tip)? {
                 None
             } else {
@@ -130,7 +130,7 @@ pub(super) fn run_why(
     let repository = Repository::discover()?;
     let target = repository.pin_why_target(&revision, &path, anchor)?;
     let prepared = if repository.default_target_if_available()?.is_some() {
-        prepare_cache(&repository)?
+        cache::prepare(&repository)?
     } else {
         let report = analysis::why_without_cache(&target, limit)?;
         return Ok(Outcome {
@@ -167,7 +167,7 @@ pub(super) fn run_trace_fix(
             notices: report.notices.clone(),
         });
     };
-    let prepared = prepare_cache_at(&repository, default_ref, default_tip.clone())?;
+    let prepared = cache::prepare_at(&repository, default_ref, default_tip.clone())?;
     let reachable = repository
         .reachable_commits(&default_tip)?
         .into_iter()
