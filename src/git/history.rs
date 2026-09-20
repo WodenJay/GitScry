@@ -75,6 +75,60 @@ pub(super) fn read_incremental(
     read_selected(git, target, &graph, &selected, known_missing_objects)
 }
 
+type TraceFixData = (Commit, Vec<Change>, Option<Vec<Hunk>>);
+
+pub(super) fn read_trace_fix(
+    git: &Git,
+    fix_oid: &str,
+    parent: Option<&str>,
+) -> Result<TraceFixData, AppError> {
+    let commits = read_commits(git, &[fix_oid.to_owned()])?;
+    let commit = commits
+        .into_iter()
+        .next()
+        .ok_or_else(|| parse_error("fix commit was not returned"))?;
+    let input = match parent {
+        Some(parent) => format!("{fix_oid} {parent}\n"),
+        None => format!("{fix_oid}\n"),
+    };
+    let known = [fix_oid].into_iter().collect::<HashSet<_>>();
+    let changes = match git.output(
+        [
+            "diff-tree",
+            "--stdin",
+            "--root",
+            "-r",
+            "-M",
+            "--raw",
+            "-z",
+            "--full-index",
+        ],
+        input.as_bytes(),
+    ) {
+        Ok(raw) => parse_changes(&raw, &known)?,
+        Err(_) => Vec::new(),
+    };
+    let hunks = match git.output(
+        [
+            "diff-tree",
+            "--stdin",
+            "--root",
+            "-r",
+            "-M",
+            "-p",
+            "--full-index",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+        ],
+        input.as_bytes(),
+    ) {
+        Ok(patch) => Some(parse_hunks(&patch, &known)?),
+        Err(_) => None,
+    };
+    Ok((commit, changes, hunks))
+}
+
 fn read_graph(git: &Git, tip: &str) -> Result<Vec<String>, AppError> {
     let graph = git.output(["rev-list", "--reverse", "--topo-order", tip], &[])?;
     parse_graph(&graph)

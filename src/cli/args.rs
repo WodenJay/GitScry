@@ -72,6 +72,16 @@ pub(crate) enum Command {
         #[arg(long, default_value = "10", value_parser = parse_limit)]
         limit: usize,
     },
+    /// Trace a fix back to the introducing change and observed failure.
+    TraceFix {
+        /// Local revision containing the fix commit.
+        fix_revision: String,
+        /// Repository-relative path changed by the fix; repeatable.
+        #[arg(long = "path", value_name = "PATH")]
+        paths: Vec<String>,
+        #[arg(long, default_value = "10", value_parser = parse_limit)]
+        limit: usize,
+    },
 }
 
 fn parse_line(value: &str) -> Result<usize, String> {

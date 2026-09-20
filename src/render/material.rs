@@ -19,6 +19,7 @@ fn empty_message(kind: ReportKind) -> &'static str {
         ReportKind::Related => "No historical relations found.",
         ReportKind::Tests => "No historically related tests found.",
         ReportKind::Why => "No explanatory history found.",
+        ReportKind::TraceFix => "No introducing change could be traced.",
     }
 }
 
@@ -36,7 +37,8 @@ pub(crate) fn format_report(report: &Report) -> String {
                 ReportKind::Search
                 | ReportKind::Examples
                 | ReportKind::Failures
-                | ReportKind::Why => "matching commits",
+                | ReportKind::Why
+                | ReportKind::TraceFix => "matching commits",
             };
             lines.push(format!(
                 "Showing {} of {} {noun}; results truncated.",
@@ -57,6 +59,7 @@ fn header(report: &Report) -> String {
         ReportKind::Related => "Related paths",
         ReportKind::Tests => "Historical test candidates",
         ReportKind::Why => "Why history",
+        ReportKind::TraceFix => "Fix lineage",
     };
     format!(
         "{noun} ({} match{}):",
@@ -151,6 +154,19 @@ fn render_detail(lines: &mut Vec<String>, detail: &Option<Detail>) {
                 escape::subject(&why.revision),
                 why.line
             ));
+        }
+        Some(Detail::TraceFix(trace)) => {
+            lines.push(format!(
+                "  trace: {} at fix {}",
+                trace.role,
+                escape::subject(&trace.fix_revision),
+            ));
+            if let Some(parent) = &trace.parent_revision {
+                lines.push(format!("  parent: {}", escape::subject(parent)));
+            }
+            if let Some(line) = trace.line {
+                lines.push(format!("  deleted line: {line}"));
+            }
         }
         None => {}
     }

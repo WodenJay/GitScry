@@ -26,7 +26,7 @@ pub(in crate::analysis) use store::{
     ChangeSet, change_sets, corrective_follow_up, steps, text as commit_text,
 };
 pub(in crate::analysis) use why::{
-    HistoryCommit, HistoryHunk, has_missing_objects, hunks, path_history,
+    HistoryCommit, HistoryHunk, ancestors, has_missing_objects, hunks, path_history,
 };
 /// How deep the lexical pool reaches relative to the caller's `--limit`.
 const CANDIDATE_MULTIPLIER: usize = 20;
