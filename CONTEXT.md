@@ -11,3 +11,7 @@ _Avoid_: index, database, repository memory
 **material**:
 Information returned from the cache that is traceable to its underlying commits, paths, or diffs and helps an Agent reason about a change.
 _Avoid_: evidence, answer, recommendation
+
+**suspect**:
+A commit that may have introduced a regression, supported by material from its path, symbol, diff, or history.
+_Avoid_: culprit, root cause
