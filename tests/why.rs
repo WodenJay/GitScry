@@ -3,7 +3,7 @@ mod support;
 use std::{fs, path::Path, process::Command};
 
 use rusqlite::Connection;
-use support::{TestRepo, git};
+use support::{TestRepo, git, git_command};
 
 impl TestRepo {
     fn commit(&self, path: &str, contents: &[u8], subject: &str, body: Option<&str>) {
@@ -14,10 +14,8 @@ impl TestRepo {
         git(self.dir.path(), ["add", path]);
         git(self.dir.path(), ["commit", "-m", subject]);
         if let Some(body) = body {
-            let amend = Command::new("git")
+            let amend = git_command(self.dir.path())
                 .args(["commit", "--amend", "-m", subject, "-m", body])
-                .current_dir(self.dir.path())
-                .env("GIT_CONFIG_NOSYSTEM", "1")
                 .output()
                 .expect("amend commit");
             assert!(amend.status.success());
@@ -387,11 +385,10 @@ fn why_warns_for_shallow_history() {
     source.commit("target.txt", b"target\n", "Target history", None);
     let parent = tempfile::tempdir().expect("create clone parent");
     let clone = parent.path().join("clone");
-    let cloned = Command::new("git")
+    let cloned = git_command(parent.path())
         .args(["clone", "--depth", "1", "--no-local"])
         .arg(source.dir.path())
         .arg(&clone)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
         .output()
         .expect("clone shallow repository");
     assert!(cloned.status.success());

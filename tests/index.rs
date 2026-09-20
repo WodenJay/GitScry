@@ -8,7 +8,7 @@ use std::{
     time::Duration,
 };
 
-use support::{TestRepo, git, git_stdout};
+use support::{TestRepo, git, git_command, git_stdout};
 
 use rusqlite::Connection;
 
@@ -266,11 +266,10 @@ fn shallow_merge_keeps_parents_and_reindexes_after_deepening() {
 
     let parent = tempfile::tempdir().unwrap();
     let clone = parent.path().join("clone");
-    let cloned = Command::new("git")
+    let cloned = git_command(parent.path())
         .args(["clone", "--depth", "1", "--no-local"])
         .arg(source.dir.path())
         .arg(&clone)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
         .output()
         .unwrap();
     assert!(
@@ -711,11 +710,10 @@ fn reduced_shallow_history_rebuilds_without_reusing_rows() {
 
     let parent = tempfile::tempdir().unwrap();
     let clone = parent.path().join("clone");
-    let cloned = Command::new("git")
+    let cloned = git_command(parent.path())
         .args(["clone", "--depth", "2", "--no-local"])
         .arg(source.dir.path())
         .arg(&clone)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
         .output()
         .unwrap();
     assert!(cloned.status.success());

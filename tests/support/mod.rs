@@ -47,18 +47,21 @@ impl TestRepo {
     }
 }
 
+pub(crate) fn git_command(cwd: &Path) -> Command {
+    let mut command = Command::new("git");
+    command
+        .current_dir(cwd)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", cwd.join("global-config"));
+    command
+}
+
 pub(crate) fn git<I, S>(cwd: &Path, args: I)
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", cwd.join("global-config"))
-        .output()
-        .expect("run git");
+    let output = git_command(cwd).args(args).output().expect("run git");
     assert!(
         output.status.success(),
         "git failed: {}",
@@ -71,13 +74,7 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", cwd.join("global-config"))
-        .output()
-        .expect("run git");
+    let output = git_command(cwd).args(args).output().expect("run git");
     assert!(
         output.status.success(),
         "git failed: {}",

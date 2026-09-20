@@ -1,8 +1,8 @@
 mod support;
 
-use std::{fs, path::Path, process::Command};
+use std::{fs, path::Path};
 
-use support::{TestRepo, git};
+use support::{TestRepo, git, git_command};
 
 impl TestRepo {
     fn commit(&self, path: &str, contents: &[u8], subject: &str, body: Option<&str>) {
@@ -32,11 +32,8 @@ impl TestRepo {
 
     fn remove_blob(&self, revision: &str, path: &str) {
         let spec = format!("{revision}:{path}");
-        let output = Command::new("git")
+        let output = git_command(self.dir.path())
             .args(["rev-parse", &spec])
-            .current_dir(self.dir.path())
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", self.dir.path().join("global-config"))
             .output()
             .expect("resolve blob");
         assert!(output.status.success());
@@ -52,11 +49,8 @@ impl TestRepo {
         .expect("remove loose blob");
     }
     fn remove_commit(&self, revision: &str) {
-        let output = Command::new("git")
+        let output = git_command(self.dir.path())
             .args(["rev-parse", revision])
-            .current_dir(self.dir.path())
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", self.dir.path().join("global-config"))
             .output()
             .expect("resolve commit");
         assert!(output.status.success());

@@ -1,8 +1,8 @@
 mod support;
 
-use std::{fs, path::Path, process::Command};
+use std::{fs, path::Path};
 
-use support::{TestRepo, git, git_stdout};
+use support::{TestRepo, git, git_command, git_stdout};
 
 impl TestRepo {
     /// Commit with an explicit author and committer date, so ordering never depends on
@@ -13,10 +13,8 @@ impl TestRepo {
         }
         fs::write(self.dir.path().join(path), contents).expect("write tracked file");
         git(self.dir.path(), ["add", "--all"]);
-        let output = Command::new("git")
+        let output = git_command(self.dir.path())
             .args(["commit", "-m", message])
-            .current_dir(self.dir.path())
-            .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_AUTHOR_DATE", date)
             .env("GIT_COMMITTER_DATE", date)
             .output()

@@ -3,7 +3,7 @@ mod support;
 use std::{fs, path::Path, process::Command};
 
 use rusqlite::Connection;
-use support::{TestRepo, git, git_stdout};
+use support::{TestRepo, git, git_command, git_stdout};
 
 impl TestRepo {
     fn commit(&self, path: &str, contents: &[u8], message: &str) {
@@ -21,10 +21,8 @@ impl TestRepo {
         }
         fs::write(self.dir.path().join(path), contents).expect("write tracked file");
         git(self.dir.path(), ["add", path]);
-        let output = Command::new("git")
+        let output = git_command(self.dir.path())
             .args(["commit", "-m", message])
-            .current_dir(self.dir.path())
-            .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_AUTHOR_DATE", date)
             .env("GIT_COMMITTER_DATE", date)
             .output()
@@ -92,11 +90,10 @@ fn search_refreshes_cache_after_shallow_history_deepens() {
 
     let parent = tempfile::tempdir().expect("create clone parent");
     let clone = parent.path().join("clone");
-    let cloned = Command::new("git")
+    let cloned = git_command(parent.path())
         .args(["clone", "--depth", "1", "--no-local"])
         .arg(source.dir.path())
         .arg(&clone)
-        .env("GIT_CONFIG_NOSYSTEM", "1")
         .output()
         .expect("clone shallow repository");
     assert!(
