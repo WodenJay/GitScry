@@ -38,6 +38,9 @@ fn write_outcome(outcome: Outcome) -> io::Result<()> {
     for progress in outcome.progress {
         writeln!(stderr, "{progress}")?;
     }
+    for notice in outcome.notices {
+        writeln!(stderr, "{notice}")?;
+    }
     writeln!(io::stdout().lock(), "{}", outcome.message)
 }
 

@@ -18,29 +18,34 @@ fn empty_message(kind: ReportKind) -> &'static str {
         ReportKind::Failures => "No failed approaches found.",
         ReportKind::Related => "No historical relations found.",
         ReportKind::Tests => "No historically related tests found.",
+        ReportKind::Why => "No explanatory history found.",
     }
 }
 
 pub(crate) fn format_report(report: &Report) -> String {
-    if report.materials.is_empty() {
-        return empty_message(report.kind).to_owned();
-    }
-
-    let mut lines = vec![header(report)];
-    for material in &report.materials {
-        render_material(&mut lines, material);
-    }
-    if report.truncated {
-        let noun = match report.kind {
-            ReportKind::Related | ReportKind::Tests => "matching paths",
-            ReportKind::Search | ReportKind::Examples | ReportKind::Failures => "matching commits",
-        };
-        lines.push(format!(
-            "Showing {} of {} {noun}; results truncated.",
-            report.materials.len(),
-            report.matched_count,
-        ));
-    }
+    let lines = if report.materials.is_empty() {
+        vec![empty_message(report.kind).to_owned()]
+    } else {
+        let mut lines = vec![header(report)];
+        for material in &report.materials {
+            render_material(&mut lines, material);
+        }
+        if report.truncated {
+            let noun = match report.kind {
+                ReportKind::Related | ReportKind::Tests => "matching paths",
+                ReportKind::Search
+                | ReportKind::Examples
+                | ReportKind::Failures
+                | ReportKind::Why => "matching commits",
+            };
+            lines.push(format!(
+                "Showing {} of {} {noun}; results truncated.",
+                report.materials.len(),
+                report.matched_count,
+            ));
+        }
+        lines
+    };
     lines.join("\n")
 }
 
@@ -51,6 +56,7 @@ fn header(report: &Report) -> String {
         ReportKind::Failures => "Failed approaches",
         ReportKind::Related => "Related paths",
         ReportKind::Tests => "Historical test candidates",
+        ReportKind::Why => "Why history",
     };
     format!(
         "{noun} ({} match{}):",
@@ -138,6 +144,14 @@ fn render_detail(lines: &mut Vec<String>, detail: &Option<Detail>) {
             }
         }
         Some(Detail::Relation(_)) => {}
+        Some(Detail::Why(why)) => {
+            lines.push(format!(
+                "  target: {} at {} (line {})",
+                escape::subject(&why.anchor),
+                escape::subject(&why.revision),
+                why.line
+            ));
+        }
         None => {}
     }
 }

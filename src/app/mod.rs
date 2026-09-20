@@ -11,6 +11,7 @@ pub(crate) use error::AppError;
 pub(crate) struct Outcome {
     pub(crate) progress: Vec<String>,
     pub(crate) message: String,
+    pub(crate) notices: Vec<String>,
 }
 
 pub(crate) struct PreparedCache {
@@ -274,5 +275,19 @@ pub(crate) fn execute(command: Command) -> Result<Outcome, AppError> {
         } => query::run(query, paths, limit, analysis::failures),
         Command::Related { paths, limit } => query::run_paths(paths, limit, analysis::related),
         Command::Tests { paths, limit } => query::run_paths(paths, limit, analysis::tests),
+        Command::Why {
+            path,
+            line,
+            symbol,
+            at,
+            limit,
+        } => {
+            let anchor = match (line, symbol) {
+                (Some(number), None) => crate::git::WhyAnchor::Line { number },
+                (None, Some(name)) => crate::git::WhyAnchor::Symbol { name, number: 0 },
+                _ => unreachable!("clap enforces exactly one why anchor"),
+            };
+            query::run_why(at, path, anchor, limit)
+        }
     }
 }

@@ -1,5 +1,4 @@
-use clap::{Parser, Subcommand};
-
+use clap::{ArgGroup, Parser, Subcommand};
 #[derive(Debug, Parser)]
 #[command(name = "gitscry", version, color = clap::ColorChoice::Never)]
 pub(super) struct Cli {
@@ -52,6 +51,36 @@ pub(crate) enum Command {
         #[arg(long, default_value = "10", value_parser = parse_limit)]
         limit: usize,
     },
+    /// Explain the local history behind one line or symbol.
+    #[command(group(
+        ArgGroup::new("anchor")
+            .required(true)
+            .args(["line", "symbol"]),
+    ))]
+    Why {
+        /// Repository-relative path at the target revision.
+        path: String,
+        /// One-based line number to explain.
+        #[arg(long, conflicts_with = "symbol", value_parser = parse_line)]
+        line: Option<usize>,
+        /// Symbol name to explain.
+        #[arg(long, conflicts_with = "line")]
+        symbol: Option<String>,
+        /// Local revision containing the target; defaults to HEAD.
+        #[arg(long, default_value = "HEAD")]
+        at: String,
+        #[arg(long, default_value = "10", value_parser = parse_limit)]
+        limit: usize,
+    },
+}
+
+fn parse_line(value: &str) -> Result<usize, String> {
+    let line = value
+        .parse::<usize>()
+        .map_err(|_| "line must be a positive integer".to_owned())?;
+    (line > 0)
+        .then_some(line)
+        .ok_or_else(|| "line must be greater than zero".to_owned())
 }
 
 fn parse_limit(value: &str) -> Result<usize, String> {
