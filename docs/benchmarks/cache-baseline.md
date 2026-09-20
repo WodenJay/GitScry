@@ -14,13 +14,13 @@ rendered material, ordering, confidence, citations, provenance, and escaping; it
 SQLite tables or indexes.
 
 ```bash
-cargo test --test cli_contract
+cargo test --test cli_contract --jobs 1
 ```
 
 If an intentional behavior change is approved, regenerate the fixture and review the diff:
 
 ```bash
-GITSCRY_UPDATE_CLI_CONTRACT=1 cargo test --test cli_contract
+GITSCRY_UPDATE_CLI_CONTRACT=1 cargo test --test cli_contract --jobs 1
 ```
 
 ## Release benchmark
@@ -89,9 +89,10 @@ unit/integration tests.
 
 ## Before reference
 
-The large-repository reference from [#21](https://github.com/WodenJay/GitScry/issues/21) is kept in
+The historical reference from [#21](https://github.com/WodenJay/GitScry/issues/21) is kept in
 the JSON report beside new measurements: approximately 38,306 commits, 1.45 GB cache, 4.5 s
 ordinary query preparation, and known slow cases of 31.8 s for `failures`, 61.5 s cold for
-`related`, and 13.1 s cold for `tests`. These are approximate historical values, not fabricated
-measurements from the current checkout; replace them only with a new source-of-truth issue or
-report.
+`related`, and 13.1 s cold for `tests`. This reference corpus is intentionally labelled separately
+from the `large` rust validation checkout: the report never presents cross-corpus values as a
+before/after comparison. The values are approximate historical measurements, not fabricated from
+the current checkout.

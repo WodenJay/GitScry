@@ -16,6 +16,7 @@ import os
 import platform
 import shutil
 import sqlite3
+import statistics
 import subprocess
 import sys
 import time
@@ -37,7 +38,7 @@ DEFAULT_PROBES = {
 # each run so a report cannot accidentally lose the before comparison when the cache changes.
 REFERENCE_BASELINE = {
     "source": "#21",
-    "large_repository": "38,306 commits",
+    "corpus": "#21 reference corpus (38,306 commits; not assigned to the large probe)",
     "cache_bytes": 1_450_000_000,
     "cache_objects": {
         "commits": "731.8 MiB",
@@ -231,27 +232,41 @@ def cache_metrics(repository: Path) -> dict[str, object]:
             file.stat().st_size for file in cache_directory.rglob("*") if file.is_file()
         )
     objects: dict[str, int] = {}
+    object_sizes_available = False
+    warning = None
     database = cache_directory / "cache.sqlite"
     if database.exists():
         try:
             uri = database.resolve().as_uri() + "?mode=ro"
             with sqlite3.connect(uri, uri=True) as connection:
-                rows = connection.execute(
-                    "SELECT name, SUM(pgsize) FROM dbstat GROUP BY name"
-                )
-                objects = {
-                    str(name): int(size or 0)
-                    for name, size in rows
-                    if name is not None
-                }
-        except sqlite3.DatabaseError:
-            # dbstat is a reporting aid, not part of GitScry's cache contract.
-            objects = {}
-    return {
+                try:
+                    rows = connection.execute(
+                        "SELECT name, SUM(pgsize) FROM dbstat GROUP BY name"
+                    )
+                    objects = {
+                        str(name): int(size or 0)
+                        for name, size in rows
+                        if name is not None
+                    }
+                    object_sizes_available = True
+                except sqlite3.DatabaseError as error:
+                    page_count = connection.execute("PRAGMA page_count").fetchone()[0]
+                    page_size = connection.execute("PRAGMA page_size").fetchone()[0]
+                    objects = {"<database pages>": int(page_count * page_size)}
+                    warning = (
+                        "SQLite dbstat is unavailable; reported database pages only: "
+                        f"{error}"
+                    )
+        except sqlite3.DatabaseError as error:
+            warning = f"SQLite object sizes unavailable: {error}"
+    metrics = {
         "total_bytes": total_bytes,
         "objects": dict(sorted(objects.items(), key=lambda item: (-item[1], item[0]))),
+        "object_sizes_available": object_sizes_available,
     }
-
+    if warning:
+        metrics["warning"] = warning
+    return metrics
 
 def output_hash(result: ProcessResult) -> str:
     return hashlib.sha256(result.stdout + b"\0" + result.stderr).hexdigest()
@@ -269,25 +284,18 @@ def aggregate(samples: list[ProcessResult]) -> dict[str, object]:
     return {
         "sample_count": len(samples),
         "wall_seconds": {
-            "median": statistics_median(walls),
+            "median": statistics.median(walls),
             "p95": percentile(walls, 0.95),
             "samples": walls,
         },
         "peak_rss_bytes": max(
-            (sample.peak_rss_bytes or 0 for sample in samples), default=None
+            (sample.peak_rss_bytes for sample in samples if sample.peak_rss_bytes is not None),
+            default=None,
         ),
         "return_codes": sorted({sample.returncode for sample in samples}),
         "output_sha256": hashes,
         "output_stable": len(hashes) == 1,
     }
-
-
-def statistics_median(values: list[float]) -> float:
-    ordered = sorted(values)
-    middle = len(ordered) // 2
-    if len(ordered) % 2:
-        return ordered[middle]
-    return (ordered[middle - 1] + ordered[middle]) / 2
 
 
 def run_scenario(
@@ -301,11 +309,13 @@ def run_scenario(
     reset_before_run: bool,
 ) -> dict[str, object]:
     samples: list[ProcessResult] = []
+    cold_cache_method = None
     for iteration in range(runs + 1):
         if reset_before_run:
             reset_cache(repository)
         if state == "cold":
-            drop_filesystem_cache(cold_command, repository)
+            method = drop_filesystem_cache(cold_command, repository)
+            cold_cache_method = cold_cache_method or method
         result = run_process([binary, *command.args], repository, timeout)
         if result.returncode != 0:
             raise BenchmarkError(
@@ -317,6 +327,8 @@ def run_scenario(
     result = aggregate(samples)
     result["warmup_runs"] = 1
     result["state"] = state
+    if cold_cache_method:
+        result["cold_cache_method"] = cold_cache_method
     return result
 
 
@@ -339,6 +351,13 @@ def command_specs(probe_path: str) -> tuple[CommandSpec, ...]:
 def git_output(repository: Path, *args: str) -> str:
     result = subprocess.run(
         ["git", *args], cwd=repository, check=True, capture_output=True, text=True
+    )
+    return result.stdout.strip()
+
+
+def host_git_version() -> str:
+    result = subprocess.run(
+        ["git", "--version"], check=True, capture_output=True, text=True
     )
     return result.stdout.strip()
 
@@ -402,6 +421,7 @@ def benchmark_repository(
         "commit_count": int(git_output(repository, "rev-list", "--count", "HEAD")),
         "git_version": git_output(repository, "--version"),
         "cache_after_index": measured_cache,
+        "cold_cache_method": index_states["cold"].get("cold_cache_method"),
         "index": index_states,
         "commands": command_states,
     }
@@ -477,34 +497,32 @@ def main() -> None:
             "python": sys.version,
             "machine": platform.machine(),
             "processor": platform.processor(),
-            "git_version": subprocess.run(
-                ["git", "--version"], check=True, capture_output=True, text=True
-            ).stdout.strip(),
+            "git_version": host_git_version(),
             "binary": str(arguments.binary.resolve()),
             "runs": arguments.runs,
             "timeout_seconds": arguments.timeout,
             "cold_cache_method": cold_method,
         },
-        "reproduction": " ".join(
-            subprocess.list2cmdline([sys.executable, *sys.argv]).split()
-        ),
+        "reproduction": subprocess.list2cmdline([sys.executable, *sys.argv]),
         "repositories": [],
     }
 
     for name, raw_path in sorted(repositories.items()):
         repository = Path(raw_path).resolve()
-        report["repositories"].append(
-            benchmark_repository(
-                arguments.binary.resolve(),
-                name,
-                repository,
-                probe_paths.get(name, ""),
-                arguments.runs,
-                arguments.timeout,
-                arguments.cold_command,
-            )
+        repository_report = benchmark_repository(
+            arguments.binary.resolve(),
+            name,
+            repository,
+            probe_paths.get(name, ""),
+            arguments.runs,
+            arguments.timeout,
+            arguments.cold_command,
         )
-
+        if repository_report["cold_cache_method"]:
+            report["environment"]["cold_cache_method"] = repository_report[
+                "cold_cache_method"
+            ]
+        report["repositories"].append(repository_report)
     rendered = json.dumps(report, indent=2, sort_keys=True) + "\n"
     print(rendered, end="")
     if arguments.output:
