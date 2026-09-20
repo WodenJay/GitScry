@@ -1,11 +1,6 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
-use rusqlite::Connection;
-
-use crate::{
-    app::AppError,
-    git::{Change, RegressionTarget, Snapshot},
-};
+use crate::{app::AppError, git::RegressionTarget};
 
 use super::super::retrieval;
 use super::super::{Citation, Confidence, Intent, Material, Report, ReportKind};
@@ -14,24 +9,16 @@ const BISECT_NOTICE: &str =
     "Regression suspects are historical candidates; they do not replace executable git bisect.";
 
 pub(crate) fn run(
-    connection: &Connection,
+    history_source: &retrieval::HistorySource<'_>,
     intent: &Intent,
     target: &RegressionTarget,
-    direct_history: Option<&Snapshot>,
     limit: usize,
 ) -> Result<Report, AppError> {
-    let history = match direct_history {
-        Some(snapshot) => direct_path_history(snapshot, &target.path, &target.range),
-        None => retrieval::path_history(connection, &target.path, &target.range)?,
-    };
-    let missing_objects = match direct_history {
-        Some(snapshot) => snapshot_missing_objects(snapshot, &history),
-        None => retrieval::has_missing_objects(connection, &history)?,
-    };
+    let history = history_source.path(&target.path, &target.range)?;
+    let missing_objects = history_source.has_missing_objects(&history)?;
     let symbol_matches = match (target.symbol_line, target.symbol_end) {
         (Some(symbol_line), Some(symbol_end)) => Some(symbol_matches(
-            connection,
-            direct_history,
+            history_source,
             &history,
             symbol_line,
             symbol_end,
@@ -48,7 +35,7 @@ pub(crate) fn run(
         {
             continue;
         }
-        let hunks = commit_hunks(connection, direct_history, &commit.oid)?;
+        let hunks = history_source.hunks(&commit.oid)?;
         let (lexical_hits, hunk_hits) = symptom_hits(intent, &commit, &hunks);
         let test_paths = commit
             .paths
@@ -193,8 +180,7 @@ fn has_path_boundary(commit: &retrieval::HistoryCommit) -> bool {
         .any(|change| change.status.starts_with('R') || change.status.starts_with('C'))
 }
 fn symbol_matches(
-    connection: &Connection,
-    direct_history: Option<&Snapshot>,
+    history_source: &retrieval::HistorySource<'_>,
     history: &[retrieval::HistoryCommit],
     symbol_line: usize,
     symbol_end: usize,
@@ -203,7 +189,7 @@ fn symbol_matches(
     let mut end_line = symbol_end as i64;
     let mut matches = HashSet::new();
     for commit in history {
-        let hunks = commit_hunks(connection, direct_history, &commit.oid)?;
+        let hunks = history_source.hunks(&commit.oid)?;
         let overlaps_symbol = hunks.iter().any(|hunk| {
             commit.anchored_ordinals.contains(&hunk.change_ordinal)
                 && hunk_overlaps_symbol(hunk, line.min(end_line), line.max(end_line))
@@ -304,29 +290,6 @@ fn trace_line(
     false
 }
 
-fn commit_hunks(
-    connection: &Connection,
-    direct_history: Option<&Snapshot>,
-    oid: &str,
-) -> Result<Vec<retrieval::HistoryHunk>, AppError> {
-    match direct_history {
-        Some(snapshot) => Ok(snapshot
-            .hunks
-            .iter()
-            .filter(|hunk| hunk.commit_oid == oid)
-            .map(|hunk| retrieval::HistoryHunk {
-                change_ordinal: hunk.change_ordinal,
-                old_start: hunk.old_start,
-                old_lines: hunk.old_lines,
-                new_start: hunk.new_start,
-                new_lines: hunk.new_lines,
-                text: hunk.text.clone(),
-            })
-            .collect()),
-        None => retrieval::hunks(connection, oid),
-    }
-}
-
 fn temporal_score(index: usize, history_len: usize) -> f64 {
     if history_len == 0 {
         return 0.0;
@@ -348,123 +311,4 @@ fn is_test_path(path: &[u8]) -> bool {
         || stem.ends_with("_spec")
         || name.contains(".test.")
         || name.contains(".spec.")
-}
-
-fn snapshot_missing_objects(snapshot: &Snapshot, history: &[retrieval::HistoryCommit]) -> bool {
-    let missing = snapshot.missing_objects.iter().collect::<HashSet<_>>();
-    history.iter().any(|commit| {
-        commit
-            .changes
-            .iter()
-            .filter(|change| commit.anchored_ordinals.contains(&change.ordinal))
-            .flat_map(|change| [&change.old_blob, &change.new_blob])
-            .flatten()
-            .any(|blob| missing.contains(blob))
-    })
-}
-
-fn direct_path_history(
-    snapshot: &Snapshot,
-    path: &[u8],
-    reachable: &HashSet<String>,
-) -> Vec<retrieval::HistoryCommit> {
-    let mut changes_by_path = HashMap::<Vec<u8>, Vec<&Change>>::new();
-    let mut changes_by_commit = HashMap::<String, Vec<&Change>>::new();
-    for change in &snapshot.changes {
-        if !reachable.contains(&change.commit_oid) {
-            continue;
-        }
-        for changed_path in [&change.old_path, &change.new_path].into_iter().flatten() {
-            changes_by_path
-                .entry(changed_path.clone())
-                .or_default()
-                .push(change);
-        }
-        changes_by_commit
-            .entry(change.commit_oid.clone())
-            .or_default()
-            .push(change);
-    }
-
-    let mut pending = vec![path.to_vec()];
-    let mut visited_paths = HashSet::new();
-    let mut anchored = HashMap::<String, HashSet<i64>>::new();
-    while let Some(current) = pending.pop() {
-        if !visited_paths.insert(current.clone()) {
-            continue;
-        }
-        for change in changes_by_path.get(&current).into_iter().flatten() {
-            anchored
-                .entry(change.commit_oid.clone())
-                .or_default()
-                .insert(change.ordinal);
-            if (change.status.starts_with('R') || change.status.starts_with('C'))
-                && change.new_path.as_deref() == Some(current.as_slice())
-                && let Some(old_path) = &change.old_path
-            {
-                pending.push(old_path.clone());
-            } else if (change.status.starts_with('R') || change.status.starts_with('C'))
-                && change.old_path.as_deref() == Some(current.as_slice())
-                && let Some(new_path) = &change.new_path
-            {
-                pending.push(new_path.clone());
-            }
-        }
-    }
-
-    let positions = snapshot
-        .commits
-        .iter()
-        .enumerate()
-        .map(|(position, commit)| (commit.oid.as_str(), position as i64))
-        .collect::<HashMap<_, _>>();
-    let commits = snapshot
-        .commits
-        .iter()
-        .map(|commit| (commit.oid.as_str(), commit))
-        .collect::<HashMap<_, _>>();
-    let mut result = anchored
-        .into_iter()
-        .filter_map(|(oid, anchored_ordinals)| {
-            let commit = commits.get(oid.as_str())?;
-            let changes = changes_by_commit.get(&oid)?;
-            let (subject, body) = retrieval::message_parts(&commit.message);
-            let mut paths = Vec::new();
-            let mut all_changes = Vec::new();
-            for change in changes {
-                for changed_path in [&change.old_path, &change.new_path].into_iter().flatten() {
-                    if !paths.contains(changed_path) {
-                        paths.push(changed_path.clone());
-                    }
-                }
-                all_changes.push(retrieval::PathChange {
-                    ordinal: change.ordinal,
-                    status: change.status.clone(),
-                    old_path: change.old_path.clone(),
-                    new_path: change.new_path.clone(),
-                    old_blob: change.old_blob.clone(),
-                    new_blob: change.new_blob.clone(),
-                });
-            }
-            all_changes.sort_by_key(|change| change.ordinal);
-            Some(retrieval::HistoryCommit {
-                position: *positions.get(oid.as_str())?,
-                oid,
-                commit_time: commit.time,
-                subject,
-                body,
-                paths,
-                changes: all_changes,
-                anchored_ordinals: anchored_ordinals.into_iter().collect(),
-                parent_count: commit.parents.len(),
-            })
-        })
-        .collect::<Vec<_>>();
-    result.sort_by(|left, right| {
-        right
-            .position
-            .cmp(&left.position)
-            .then_with(|| left.oid.cmp(&right.oid))
-    });
-    result
 }

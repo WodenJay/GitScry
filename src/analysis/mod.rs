@@ -196,7 +196,11 @@ pub(crate) fn regression(
     limit: usize,
 ) -> Result<Report, AppError> {
     validate_limit(limit)?;
-    capabilities::regression(connection, intent, target, direct_history, limit)
+    let history = match direct_history {
+        Some(snapshot) => retrieval::HistorySource::direct(snapshot),
+        None => retrieval::HistorySource::cached(connection),
+    };
+    capabilities::regression(&history, intent, target, limit)
 }
 
 pub(crate) fn trace_fix(
