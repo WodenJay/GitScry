@@ -1,6 +1,6 @@
 # Cache and CLI baseline
 
-This is the reproducible before/after harness for [#22](https://github.com/WodenJay/GitScry/issues/22).
+This is the reproducible before/after harness for [#23](https://github.com/WodenJay/GitScry/issues/23), extending the cache measurements from [#22](https://github.com/WodenJay/GitScry/issues/22).
 It measures a release binary against the two validation repositories selected in
 [`validation-repositories.md`](../research/validation-repositories.md): `medium` is
 `NousResearch/hermes-agent`, and `large` is `rust-lang/rust`.
@@ -45,6 +45,10 @@ sample; warm mode leaves the filesystem cache alone. `index` removes `.gitscry` 
 so its result is a rebuild measurement. The ordinary commands use the published cache left by the
 last index run.
 
+The report also measures `query_session_setup`: a warm, cache-only startup probe that sets the internal
+`GITSCRY_BENCHMARK_QUERY_SETUP=1` benchmark switch. It opens the published cache session and exits
+before capability analysis, so its timing excludes target-specific Git work and is the measurement used
+for the issue's 100 ms setup gate.
 On Linux, the default cold-cache hook writes `/proc/sys/vm/drop_caches` and therefore needs the
 usual privilege. On Windows or macOS, pass the host's approved privileged cache-drop command;
 the harness refuses to label an uncontrolled run as cold.
@@ -78,6 +82,7 @@ cache after indexing. Cache size is the total `.gitscry` bytes; the SQLite `dbst
 physical table/index objects for diagnosis only. The report also records:
 
 - `index` wall-time median/p95 for cold and warm filesystem-cache states;
+- the warm cache-only `query_session_setup` median/p95 used for the 100 ms setup gate;
 - every ordinary command's cold and warm wall-time samples, median, and p95;
 - the maximum sampled peak resident set size for each scenario;
 - return codes and SHA-256 hashes of stdout/stderr, so unstable output is visible;

@@ -31,6 +31,14 @@ impl TestRepo {
     {
         Self::run_at(self.dir.path(), args)
     }
+    pub(crate) fn index(&self) {
+        let output = self.run(["index"]);
+        assert!(
+            output.status.success(),
+            "index failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
     pub(crate) fn run_at<I, S>(cwd: &Path, args: I) -> std::process::Output
     where

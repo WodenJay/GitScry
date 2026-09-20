@@ -1,4 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+};
 
 use rusqlite::Connection;
 
@@ -10,6 +13,17 @@ use super::super::{Citation, Confidence, Detail, Intent, Material, Relation, Rep
 const MASS_CHANGE_PATH_LIMIT: usize = 50;
 const MAX_SUPPORTING_CITATIONS: usize = 5;
 
+#[cfg(unix)]
+fn current_path_is_file(root: &Path, path: &[u8]) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+
+    root.join(std::ffi::OsStr::from_bytes(path)).is_file()
+}
+
+#[cfg(not(unix))]
+fn current_path_is_file(root: &Path, path: &[u8]) -> bool {
+    root.join(String::from_utf8_lossy(path).as_ref()).is_file()
+}
 struct Support {
     oid: String,
     commit_time: i64,
@@ -34,33 +48,29 @@ struct RankedCandidate {
 pub(crate) fn related(
     connection: &Connection,
     intent: &Intent,
-    worktree_paths: &[Vec<u8>],
+    worktree_root: &Path,
     limit: usize,
 ) -> Result<Report, AppError> {
-    run(connection, intent, worktree_paths, limit, false)
+    run(connection, intent, worktree_root, limit, false)
 }
 
 pub(crate) fn tests(
     connection: &Connection,
     intent: &Intent,
-    worktree_paths: &[Vec<u8>],
+    worktree_root: &Path,
     limit: usize,
 ) -> Result<Report, AppError> {
-    run(connection, intent, worktree_paths, limit, true)
+    run(connection, intent, worktree_root, limit, true)
 }
 
 fn run(
     connection: &Connection,
     intent: &Intent,
-    worktree_paths: &[Vec<u8>],
+    worktree_root: &Path,
     limit: usize,
     tests_only: bool,
 ) -> Result<Report, AppError> {
     let seed_keys = intent.anchors().iter().cloned().collect::<HashSet<_>>();
-    let current_keys = worktree_paths
-        .iter()
-        .map(|path| retrieval::normalize_path(path))
-        .collect::<HashSet<_>>();
     let changes = retrieval::change_sets(connection)?;
     let (candidates, seed_touch_commits, eligible_commits, mass_changes_filtered) =
         collect_candidates(&changes, &seed_keys);
@@ -77,7 +87,7 @@ fn run(
             if !is_test {
                 continue;
             }
-            if !current_keys.contains(&candidate.key) {
+            if !current_path_is_file(worktree_root, &candidate.path) {
                 omitted_test_path = true;
                 continue;
             }

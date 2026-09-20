@@ -153,10 +153,7 @@ pub(in crate::analysis) fn path_history(
     Ok(result)
 }
 
-pub(in crate::analysis) fn ancestors(
-    connection: &Connection,
-    oid: &str,
-) -> Result<HashSet<String>, AppError> {
+pub(crate) fn ancestors(connection: &Connection, oid: &str) -> Result<HashSet<String>, AppError> {
     let mut statement = connection
         .prepare("SELECT parent_oid FROM commit_parents WHERE commit_oid = ?1 ORDER BY position")
         .map_err(|error| search_error("preparing commit ancestry", error))?;

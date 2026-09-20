@@ -83,6 +83,7 @@ fn examples_returns_analogous_changes_with_reusable_steps() {
         "Retire BraveProvider while preserving migration guidance",
         "2021-01-01T00:00:00+0000",
     );
+    repo.index();
 
     let output = repo.run(["examples", "retire", "provider"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
@@ -117,6 +118,7 @@ fn examples_accepts_an_anchored_path_and_prefers_overlapping_change() {
         "Retire provider references from the documentation",
         "2021-02-01T00:00:00+0000",
     );
+    repo.index();
 
     let unanchored = repo.run(["examples", "retire", "provider"]);
     assert_eq!(unanchored.status.code(), Some(0));
@@ -173,6 +175,7 @@ fn examples_demotes_reverted_work_and_cites_the_revert() {
         ),
         "2021-03-01T00:00:00+0000",
     );
+    repo.index();
 
     let output = repo.run(["examples", "retire", "tavily", "provider", "registration"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
@@ -237,6 +240,7 @@ fn failures_reports_the_stated_reason_and_the_corrective_follow_up() {
         "fix(db): gate the cron session exclusion to its own writer",
         "2020-03-01T00:00:00+0000",
     );
+    repo.index();
 
     let output = repo.run(["failures", "exclude", "cron", "sessions"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
@@ -283,6 +287,7 @@ fn failures_prints_reason_unknown_rather_than_inventing_one() {
         ),
         "2020-02-01T00:00:00+0000",
     );
+    repo.index();
 
     let output = repo.run(["failures", "exclude", "cron", "sessions"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
@@ -321,6 +326,7 @@ fn examples_and_failures_accept_a_path_that_exists_only_in_history() {
     );
     assert!(!repo.dir.path().join("src/db/legacy_index.rs").exists());
     assert!(!removed.is_empty());
+    repo.index();
 
     let examples = repo.run([
         "examples",
@@ -356,6 +362,7 @@ fn examples_and_failures_accept_a_path_that_exists_only_in_history() {
 fn examples_and_failures_report_their_fixed_empty_results() {
     let repo = provider_retirements();
 
+    repo.index();
     let examples = repo.run(["examples", "term-that-does-not-exist"]);
     assert_eq!(examples.status.code(), Some(0));
     assert_eq!(stdout(&examples), "No historical examples found.\n");
@@ -379,6 +386,7 @@ fn examples_truncates_deterministically_and_rejects_invalid_input() {
             &format!("{date}T00:00:00+0000"),
         );
     }
+    repo.index();
 
     let first = repo.run(["examples", "retire", "provider", "--limit", "2"]);
     assert_eq!(first.status.code(), Some(0), "{}", stderr(&first));
@@ -419,9 +427,10 @@ fn examples_and_failures_reuse_the_cache_without_preparation_noise() {
         "2021-01-01T00:00:00+0000",
     );
 
+    repo.index();
     let first = repo.run(["examples", "retire", "provider"]);
     assert_eq!(first.status.code(), Some(0));
-    assert!(stderr(&first).contains("Indexing local history"));
+    assert!(stderr(&first).is_empty(), "{}", stderr(&first));
 
     let second = repo.run(["examples", "retire", "provider"]);
     assert_eq!(second.status.code(), Some(0));
@@ -461,7 +470,7 @@ fn missing_history_objects_fail_with_the_git_diagnosis_and_publish_nothing() {
         .join(&tree[2..]);
     fs::remove_file(object).expect("remove tree object");
 
-    let output = repo.run(["examples", "initial"]);
+    let output = repo.run(["index"]);
     assert_eq!(output.status.code(), Some(1), "{}", stderr(&output));
     let message = stderr(&output);
     assert!(message.contains("unable to read tree"), "{message}");
@@ -502,6 +511,7 @@ this one gates the exclusion to the single writer that needs it.",
         ),
         "2020-03-01T00:00:00+0000",
     );
+    repo.index();
 
     let output = repo.run(["failures", "cron", "exclusion"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
@@ -542,6 +552,7 @@ fn failures_reads_a_reason_and_retry_written_across_wrapped_lines() {
         ),
         "2020-02-01T00:00:00+0000",
     );
+    repo.index();
 
     let output = repo.run(["failures", "exclude", "cron", "sessions"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
@@ -587,6 +598,7 @@ fn examples_bounds_the_steps_it_offers() {
             "Retire BulkProvider across registration and aliases",
         ],
     );
+    repo.index();
 
     let output = repo.run(["examples", "retire", "bulk", "provider", "registration"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
@@ -623,6 +635,7 @@ Cron sessions are noisy in search results, so we filter them here.",
         ),
         "2020-02-01T00:00:00+0000",
     );
+    repo.index();
 
     let output = repo.run(["failures", "exclude", "cron", "sessions"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
@@ -660,6 +673,7 @@ fn failures_links_a_revert_whose_named_commit_is_absent() {
 ",
         "2020-02-01T00:00:00+0000",
     );
+    repo.index();
 
     let output = repo.run(["failures", "exclude", "cron", "sessions"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));

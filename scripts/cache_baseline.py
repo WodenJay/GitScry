@@ -80,14 +80,18 @@ def parse_assignment(value: str, option: str) -> tuple[str, str]:
     return name, path
 
 
-def run_process(argv: Iterable[str | Path], cwd: Path, timeout: float) -> ProcessResult:
+def run_process(
+    argv: Iterable[str | Path], cwd: Path, timeout: float, extra_env: dict[str, str] | None = None
+) -> ProcessResult:
     command = [str(argument) for argument in argv]
+    environment = {**os.environ, **extra_env} if extra_env else None
     started = time.perf_counter()
     process = subprocess.Popen(
         command,
         cwd=cwd,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        env=environment,
     )
     peak_rss = 0
     stdout = b""
@@ -307,6 +311,7 @@ def run_scenario(
     timeout: float,
     cold_command: str | None,
     reset_before_run: bool,
+    extra_env: dict[str, str] | None = None,
 ) -> dict[str, object]:
     samples: list[ProcessResult] = []
     cold_cache_method = None
@@ -316,7 +321,7 @@ def run_scenario(
         if state == "cold":
             method = drop_filesystem_cache(cold_command, repository)
             cold_cache_method = cold_cache_method or method
-        result = run_process([binary, *command.args], repository, timeout)
+        result = run_process([binary, *command.args], repository, timeout, extra_env)
         if result.returncode != 0:
             raise BenchmarkError(
                 f"{command.name} failed in {repository} with status {result.returncode}: "
@@ -396,6 +401,17 @@ def benchmark_repository(
         for state in ("cold", "warm")
     }
     measured_cache = cache_metrics(repository)
+    query_session_setup = run_scenario(
+        binary,
+        repository,
+        CommandSpec("query-session-setup", ("search", "benchmark")),
+        "warm",
+        runs,
+        timeout,
+        cold_command,
+        reset_before_run=False,
+        extra_env={"GITSCRY_BENCHMARK_QUERY_SETUP": "1"},
+    )
 
     command_states: dict[str, dict[str, object]] = {}
     for command in commands:
@@ -423,6 +439,7 @@ def benchmark_repository(
         "cache_after_index": measured_cache,
         "cold_cache_method": index_states["cold"].get("cold_cache_method"),
         "index": index_states,
+        "query_session_setup": query_session_setup,
         "commands": command_states,
     }
 
@@ -493,7 +510,7 @@ def main() -> None:
         else "platform default (requires privileged cache drop)"
     )
     report = {
-        "schema": 1,
+        "schema": 2,
         "reference_baseline": REFERENCE_BASELINE,
         "environment": {
             "timestamp_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),

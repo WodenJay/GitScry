@@ -248,12 +248,12 @@ fn evaluate(
 }
 
 fn add_warnings(progress: &mut Vec<String>, expected: &Expected, missing_objects: &[String]) {
-    if let Some(warning) = super::shallow_warning(&expected.shallow_boundaries)
+    if let Some(warning) = super::shallow_warning(!expected.shallow_boundaries.is_empty())
         && !progress.contains(&warning)
     {
         progress.push(warning);
     }
-    if let Some(warning) = super::missing_warning(missing_objects)
+    if let Some(warning) = super::missing_warning(!missing_objects.is_empty())
         && !progress.contains(&warning)
     {
         progress.push(warning);

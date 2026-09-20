@@ -78,6 +78,7 @@ fn trace_fix_reports_the_introducing_change_and_fix_as_one_chain() {
         "Fix observed failure #19",
         Some("The old behavior failed in the production test."),
     );
+    repo.index();
 
     let output = repo.run(["trace-fix", "HEAD", "--path", "./app.txt", "--limit", "1"]);
     assert_eq!(output.status.code(), Some(0));
@@ -106,6 +107,7 @@ fn trace_fix_keeps_failure_context_on_the_blamed_path() {
         &[("a.txt", b"fixed-a\n"), ("b.txt", b"fixed-b\n")],
         "Fix #19",
     );
+    repo.index();
 
     let output = repo.run(["trace-fix", "HEAD", "--limit", "10"]);
     assert_eq!(output.status.code(), Some(0));
@@ -126,6 +128,7 @@ fn trace_fix_limit_truncates_introducing_chains() {
     repo.commit("app.txt", b"x\nb\n", "Introduce first change", None);
     repo.commit("app.txt", b"x\ny\n", "Introduce second change", None);
     repo.commit("app.txt", b"fixed\nfixed\n", "Fix both changes", None);
+    repo.index();
 
     let output = repo.run(["trace-fix", "HEAD", "--path", "app.txt", "--limit", "1"]);
     assert_eq!(output.status.code(), Some(0));
@@ -147,6 +150,7 @@ fn trace_fix_uses_the_first_parent_of_a_merge_fix() {
         repo.dir.path(),
         ["merge", "--no-ff", "fix-branch", "-m", "Merge fix branch"],
     );
+    repo.index();
 
     let output = repo.run(["trace-fix", "HEAD", "--path", "app.txt"]);
     assert_eq!(output.status.code(), Some(0));
@@ -166,6 +170,7 @@ fn trace_fix_follows_renamed_code_before_the_fix() {
     git(repo.dir.path(), ["mv", "old.txt", "new.txt"]);
     git(repo.dir.path(), ["commit", "-m", "Move app code"]);
     repo.commit("new.txt", b"fixed\n", "Fix moved app", None);
+    repo.index();
 
     let output = repo.run(["trace-fix", "HEAD", "--path", "new.txt"]);
     assert_eq!(output.status.code(), Some(0));
@@ -177,10 +182,11 @@ fn trace_fix_follows_renamed_code_before_the_fix() {
 }
 
 #[test]
-fn trace_fix_keeps_an_explicit_fix_outside_the_default_cache() {
+fn trace_fix_rejects_an_explicit_fix_outside_the_default_cache() {
     let repo = TestRepo::new();
     repo.commit("app.txt", b"safe\n", "Initial app", None);
     repo.commit("app.txt", b"buggy\n", "Introduce bug", None);
+    repo.index();
     git(repo.dir.path(), ["checkout", "-b", "fix-branch"]);
     repo.commit(
         "app.txt",
@@ -190,12 +196,9 @@ fn trace_fix_keeps_an_explicit_fix_outside_the_default_cache() {
     );
 
     let output = repo.run(["trace-fix", "HEAD", "--path", "app.txt"]);
-    assert_eq!(output.status.code(), Some(0));
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Introduce bug"));
-    assert!(stdout.contains("Fix branch failure"));
+    assert_eq!(output.status.code(), Some(1));
     assert!(
-        !String::from_utf8_lossy(&output.stderr).contains("no introducing commit is available")
+        String::from_utf8_lossy(&output.stderr).contains("outside the published cache generation")
     );
 }
 
@@ -211,6 +214,7 @@ fn trace_fix_scopes_paths_and_movement_to_the_blame_path() {
     git(repo.dir.path(), ["add", "app.txt"]);
     git(repo.dir.path(), ["commit", "-m", "Move unrelated file"]);
     repo.commit("app.txt", b"fixed\n", "Fix app", None);
+    repo.index();
 
     let output = repo.run(["trace-fix", "HEAD", "--path", "app.txt"]);
     assert_eq!(output.status.code(), Some(0));
@@ -237,6 +241,7 @@ fn trace_fix_ignore_revs_warning_does_not_lower_unrelated_confidence() {
         format!("{initial}\n"),
     )
     .expect("write blame ignore file");
+    repo.index();
 
     let output = repo.run(["trace-fix", "HEAD", "--path", "app.txt"]);
     assert_eq!(output.status.code(), Some(0));
@@ -259,6 +264,7 @@ fn trace_fix_uses_only_pre_fix_failure_context_and_does_not_invent_one() {
     repo.commit("app.txt", b"fixed\nreported\n", "Fix #19", None);
     let fix = repo.head();
     repo.commit("app.txt", b"fixed\npost-fix\n", "Post-fix note #19", None);
+    repo.index();
 
     let output = repo.run(["trace-fix", &fix, "--path", "app.txt"]);
     assert_eq!(output.status.code(), Some(0));
@@ -275,28 +281,25 @@ fn trace_fix_keeps_direct_fix_facts_without_a_default_branch() {
     repo.commit("app.txt", b"buggy\n", "Introduce bug", None);
     repo.commit("app.txt", b"fixed\n", "Fix without default branch", None);
     let fix = repo.head();
+    repo.index();
     git(repo.dir.path(), ["branch", "-m", "trunk"]);
 
     let output = repo.run(["trace-fix", &fix, "--path", "app.txt"]);
     assert_eq!(output.status.code(), Some(0));
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Fix without default branch"));
-    assert!(stdout.contains("confidence: low"));
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("introducing candidates are unavailable")
-    );
+    assert!(stdout.contains("confidence: medium"));
 }
 
 #[test]
 fn trace_fix_degrades_when_the_fix_parent_commit_is_missing() {
     let repo = TestRepo::new();
     repo.commit("app.txt", b"safe\n", "Initial app", None);
-    git(repo.dir.path(), ["checkout", "-b", "fix-branch"]);
     repo.commit("app.txt", b"buggy\n", "Introduce bug", None);
     let missing_parent = repo.head();
     repo.commit("app.txt", b"fixed\n", "Fix app", None);
     let fix = repo.head();
-    git(repo.dir.path(), ["checkout", "main"]);
+    repo.index();
     repo.remove_commit(&missing_parent);
 
     let output = repo.run(["trace-fix", &fix, "--path", "app.txt"]);
@@ -330,6 +333,13 @@ fn trace_fix_reports_shallow_parent_degradation() {
     );
     let clone = clone_holder.path().join("clone");
 
+    let indexed = TestRepo::run_at(&clone, ["index"]);
+    assert!(
+        indexed.status.success(),
+        "index failed: {}",
+        String::from_utf8_lossy(&indexed.stderr)
+    );
+
     let output = TestRepo::run_at(&clone, ["trace-fix", "HEAD", "--path", "app.txt"]);
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(
@@ -346,6 +356,7 @@ fn trace_fix_reports_missing_blob_degradation() {
     repo.commit("app.txt", b"safe\n", "Initial app", None);
     repo.commit("app.txt", b"buggy\n", "Introduce bug", None);
     repo.commit("app.txt", b"fixed\n", "Fix app", None);
+    repo.index();
     repo.remove_blob("HEAD^", "app.txt");
 
     let output = repo.run(["trace-fix", "HEAD", "--path", "app.txt"]);
@@ -364,6 +375,7 @@ fn trace_fix_degrades_pure_additions_without_fabricating_lineage() {
     let repo = TestRepo::new();
     repo.commit("app.txt", b"safe\n", "Initial app", None);
     repo.commit("app.txt", b"safe\nnew\n", "Add behavior", None);
+    repo.index();
 
     let output = repo.run(["trace-fix", "HEAD", "--path", "app.txt"]);
     assert_eq!(output.status.code(), Some(0));

@@ -9,14 +9,14 @@ mod capabilities;
 mod provenance;
 mod retrieval;
 
-use std::collections::HashSet;
+use std::{collections::HashSet, path::Path};
 
 use rusqlite::Connection;
 
 use crate::app::AppError;
 use crate::git::{TraceFixTarget, WhyTarget};
 
-pub(crate) use retrieval::{Intent, message_parts, searchable_text};
+pub(crate) use retrieval::{Intent, ancestors, message_parts, searchable_text};
 
 /// The complete `material` one capability returns.
 pub(crate) struct Report {
@@ -178,29 +178,22 @@ pub(crate) fn examples(
 pub(crate) fn why(
     connection: &Connection,
     target: &WhyTarget,
+    reachable: &HashSet<String>,
     limit: usize,
 ) -> Result<Report, AppError> {
     validate_limit(limit)?;
-    capabilities::why(connection, target, limit)
+    capabilities::why(connection, target, reachable, limit)
 }
 
-pub(crate) fn why_without_cache(target: &WhyTarget, limit: usize) -> Result<Report, AppError> {
-    validate_limit(limit)?;
-    capabilities::without_cache(target, limit)
-}
 pub(crate) fn regression(
     connection: &Connection,
     intent: &Intent,
     target: &crate::git::RegressionTarget,
-    direct_history: Option<&crate::git::Snapshot>,
+    reachable: &HashSet<String>,
     limit: usize,
 ) -> Result<Report, AppError> {
     validate_limit(limit)?;
-    let history = match direct_history {
-        Some(snapshot) => retrieval::HistorySource::direct(snapshot),
-        None => retrieval::HistorySource::cached(connection),
-    };
-    capabilities::regression(&history, intent, target, limit)
+    capabilities::regression(connection, intent, target, reachable, limit)
 }
 
 pub(crate) fn trace_fix(
@@ -213,13 +206,6 @@ pub(crate) fn trace_fix(
     capabilities::trace_fix(connection, target, reachable, limit)
 }
 
-pub(crate) fn trace_fix_without_cache(
-    target: &TraceFixTarget,
-    limit: usize,
-) -> Result<Report, AppError> {
-    validate_limit(limit)?;
-    capabilities::trace_fix_without_cache(target, limit)
-}
 pub(crate) fn failures(
     connection: &Connection,
     intent: &Intent,
@@ -232,21 +218,21 @@ pub(crate) fn failures(
 pub(crate) fn related(
     connection: &Connection,
     intent: &Intent,
-    worktree_paths: &[Vec<u8>],
+    worktree_root: &Path,
     limit: usize,
 ) -> Result<Report, AppError> {
     validate_limit(limit)?;
-    capabilities::related(connection, intent, worktree_paths, limit)
+    capabilities::related(connection, intent, worktree_root, limit)
 }
 
 pub(crate) fn tests(
     connection: &Connection,
     intent: &Intent,
-    worktree_paths: &[Vec<u8>],
+    worktree_root: &Path,
     limit: usize,
 ) -> Result<Report, AppError> {
     validate_limit(limit)?;
-    capabilities::tests(connection, intent, worktree_paths, limit)
+    capabilities::tests(connection, intent, worktree_root, limit)
 }
 
 fn validate_limit(limit: usize) -> Result<(), AppError> {

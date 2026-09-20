@@ -9,22 +9,21 @@ mod intent;
 mod lexical;
 mod rank;
 mod reverts;
-mod source;
 mod store;
 mod text;
 
 use rusqlite::Connection;
 
 use crate::app::AppError;
+pub(crate) use history::ancestors;
 
 pub(in crate::analysis) use history::{
-    HistoryCommit, HistoryHunk, ancestors, has_missing_objects, hunks, path_history,
+    HistoryCommit, HistoryHunk, has_missing_objects, hunks, path_history,
 };
 pub(crate) use intent::Intent;
 pub(in crate::analysis) use lexical::Signals;
 pub(in crate::analysis) use rank::{Ranked, assign_citations, sort};
 pub(in crate::analysis) use reverts::{Revert, RevertIndex, index as reverts};
-pub(in crate::analysis) use source::HistorySource;
 pub(in crate::analysis) use store::{
     ChangeSet, change_sets, corrective_follow_up, steps, text as commit_text,
 };

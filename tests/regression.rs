@@ -43,6 +43,7 @@ fn regression_reports_a_historical_suspect() {
         "Refactor Matrix stop chat key matching",
         Some("Matrix stop fails for chat ids containing a colon."),
     );
+    repo.index();
 
     let output = repo.run([
         "regression",
@@ -113,6 +114,7 @@ fn regression_narrows_to_symbol_and_reports_test_history() {
             "The Matrix stop command must preserve chat ids.",
         ],
     );
+    repo.index();
 
     let output = repo.run([
         "regression",
@@ -150,6 +152,7 @@ fn regression_symbol_span_excludes_following_non_symbol_lines() {
         "Change version only",
         None,
     );
+    repo.index();
 
     let output = repo.run([
         "regression",
@@ -187,6 +190,7 @@ fn regression_symbol_tracking_survives_overlapping_newest_change() {
         "Shift file and tweak alpha bug",
         None,
     );
+    repo.index();
 
     let output = repo.run([
         "regression",
@@ -228,6 +232,7 @@ fn regression_symbol_tracking_keeps_unrelated_shifted_changes_out() {
         "Shift file",
         None,
     );
+    repo.index();
 
     let output = repo.run([
         "regression",
@@ -245,7 +250,7 @@ fn regression_symbol_tracking_keeps_unrelated_shifted_changes_out() {
 }
 
 #[test]
-fn regression_uses_out_of_cache_bad_revision_without_indexing_it() {
+fn regression_rejects_out_of_cache_bad_revision() {
     let repo = TestRepo::new();
     repo.commit("main.txt", b"main\n", "Main history", None);
     git(repo.dir.path(), ["switch", "-c", "feature"]);
@@ -257,6 +262,7 @@ fn regression_uses_out_of_cache_bad_revision_without_indexing_it() {
     );
     let feature = repo.head();
     git(repo.dir.path(), ["switch", "main"]);
+    repo.index();
 
     let output = repo.run([
         "regression",
@@ -267,8 +273,10 @@ fn regression_uses_out_of_cache_bad_revision_without_indexing_it() {
         "--bad",
         "feature",
     ]);
-    assert_eq!(output.status.code(), Some(0));
-    assert!(String::from_utf8_lossy(&output.stdout).contains("Introduce feature regression"));
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("outside the published cache generation")
+    );
 
     let cache = rusqlite::Connection::open(repo.dir.path().join(".gitscry/cache.sqlite"))
         .expect("open cache");
@@ -286,6 +294,7 @@ fn regression_uses_out_of_cache_bad_revision_without_indexing_it() {
 fn regression_uses_word_boundaries_for_symptom_terms() {
     let repo = TestRepo::new();
     repo.commit("target.txt", b"hidden video\n", "Show hidden video", None);
+    repo.index();
 
     let output = repo.run(["regression", "id", "--path", "target.txt"]);
     assert_eq!(output.status.code(), Some(0));
@@ -302,6 +311,7 @@ fn regression_works_without_a_default_branch_for_explicit_target() {
         None,
     );
     let bad = repo.head();
+    repo.index();
     git(repo.dir.path(), ["branch", "-m", "dev"]);
 
     let output = repo.run([
@@ -319,7 +329,7 @@ fn regression_works_without_a_default_branch_for_explicit_target() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("Introduce target regression"));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("no default branch"));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("no default branch"));
 }
 
 #[test]
@@ -329,6 +339,7 @@ fn regression_rejects_invalid_inputs_and_reports_no_result() {
     let good = repo.head();
     repo.commit("other.txt", b"other\n", "Unrelated change", None);
     let bad = repo.head();
+    repo.index();
 
     let no_result = repo.run([
         "regression",
@@ -378,6 +389,7 @@ fn regression_warns_when_path_history_crosses_a_rename() {
     repo.commit("old.txt", b"old\n", "Create old path", None);
     repo.rename("old.txt", "new.txt", "Move regression path");
 
+    repo.index();
     let output = repo.run(["regression", "path moved", "--path", "new.txt"]);
     assert_eq!(output.status.code(), Some(0));
     assert!(String::from_utf8_lossy(&output.stdout).contains("move/rename boundary"));
@@ -398,6 +410,13 @@ fn regression_warns_for_shallow_history() {
         .output()
         .expect("clone shallow repository");
     assert!(cloned.status.success());
+
+    let indexed = TestRepo::run_at(&clone, ["index"]);
+    assert!(
+        indexed.status.success(),
+        "index failed: {}",
+        String::from_utf8_lossy(&indexed.stderr)
+    );
 
     let output = Command::new(env!("CARGO_BIN_EXE_gitscry"))
         .args(["regression", "target", "--path", "target.txt"])
@@ -444,6 +463,7 @@ fn regression_warns_when_cached_history_has_missing_objects() {
 fn regression_treats_path_like_symptoms_as_text() {
     let repo = TestRepo::new();
     repo.commit("target.txt", b"timeout\n", "Fix /api/health timeout", None);
+    repo.index();
 
     let output = repo.run([
         "regression",

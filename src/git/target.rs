@@ -15,7 +15,6 @@ pub(crate) struct WhyTarget {
     pub(crate) path: Vec<u8>,
     pub(crate) anchor: WhyAnchor,
     pub(crate) blame: Option<Blame>,
-    pub(crate) reachable: HashSet<String>,
     pub(crate) warnings: Vec<String>,
     pub(crate) anchor_valid: bool,
 }
@@ -27,7 +26,6 @@ pub(crate) struct RegressionTarget {
     pub(crate) symbol: Option<String>,
     pub(crate) symbol_line: Option<usize>,
     pub(crate) symbol_end: Option<usize>,
-    pub(crate) range: HashSet<String>,
     pub(crate) warnings: Vec<String>,
 }
 
@@ -253,7 +251,6 @@ pub(super) fn pin(
         return Err(AppError::input("revision must not contain a NUL byte"));
     }
     let revision = resolve_revision(git, requested_revision)?;
-    let reachable = read_reachable(git, &revision)?;
     let shallow = !read_shallow_boundaries(git)?.is_empty();
     let mut warnings = Vec::new();
     if shallow {
@@ -272,7 +269,6 @@ pub(super) fn pin(
             path: path.as_bytes().to_vec(),
             anchor,
             blame: None,
-            reachable,
             anchor_valid: false,
             warnings,
         });
@@ -320,7 +316,6 @@ pub(super) fn pin(
         path: path.as_bytes().to_vec(),
         anchor,
         blame,
-        reachable,
         anchor_valid: true,
         warnings,
     })
@@ -376,13 +371,6 @@ pub(super) fn pin_regression(
         None => (None, None, None),
     };
 
-    let bad_reachable = read_reachable(git, &bad_revision)?;
-    let range = if let Some(good_revision) = &good_revision {
-        let good_reachable = read_reachable(git, good_revision)?;
-        bad_reachable.difference(&good_reachable).cloned().collect()
-    } else {
-        bad_reachable
-    };
     let shallow = read_shallow_boundaries(git)?;
     let mut warnings = Vec::new();
     if !shallow.is_empty() {
@@ -398,7 +386,6 @@ pub(super) fn pin_regression(
         symbol,
         symbol_line,
         symbol_end,
-        range,
         warnings,
     })
 }
@@ -510,22 +497,6 @@ fn resolve_revision(git: &Git, requested: &str) -> Result<String, AppError> {
         Ok(value) => Ok(value.trim().to_owned()),
         Err(_) => Err(AppError::input(format!("invalid revision: {requested}"))),
     }
-}
-
-fn read_reachable(git: &Git, revision: &str) -> Result<HashSet<String>, AppError> {
-    let output = git.text(["rev-list", "--topo-order", revision])?;
-    output
-        .lines()
-        .map(|oid| {
-            if is_oid(oid.as_bytes()) {
-                Ok(oid.to_owned())
-            } else {
-                Err(AppError::operational(
-                    "error: Git revision graph contained an invalid object ID",
-                ))
-            }
-        })
-        .collect()
 }
 
 struct TreeEntry {

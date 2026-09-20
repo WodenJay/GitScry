@@ -1,16 +1,15 @@
 mod generation;
 mod schema;
-pub(crate) use generation::{prepare, prepare_at};
+pub(crate) use generation::prepare;
 
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params, params_from_iter};
 use std::{
     collections::{HashMap, HashSet},
     fs::{self, File, OpenOptions},
-    path::Path,
+    path::{Path, PathBuf},
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-
-use rusqlite::{Connection, OpenFlags, OptionalExtension, params, params_from_iter};
 
 use crate::{
     analysis,
@@ -48,6 +47,44 @@ struct ExclusiveLock {
 impl Drop for SharedLock {
     fn drop(&mut self) {
         let _ = self.file.unlock();
+    }
+}
+
+pub(crate) struct QuerySession {
+    root: PathBuf,
+    connection: Connection,
+    _lock: SharedLock,
+    progress: Vec<String>,
+}
+
+impl QuerySession {
+    pub(crate) fn connection(&self) -> &Connection {
+        &self.connection
+    }
+
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub(crate) fn progress(&self) -> &[String] {
+        &self.progress
+    }
+
+    pub(crate) fn require_revision(&self, revision: &str) -> Result<(), AppError> {
+        let present: i64 = self
+            .connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM commits WHERE oid = ?1)",
+                [revision],
+                |row| row.get(0),
+            )
+            .map_err(|error| query_error(format!("checking requested revision: {error}")))?;
+        if present == 0 {
+            return Err(query_error(format!(
+                "revision {revision} is outside the published cache generation"
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -245,27 +282,126 @@ fn count(connection: &Connection, query: &str) -> Result<i64, ()> {
         .map_err(|_| ())
 }
 
-fn shallow_warning(shallow_boundaries: &[String]) -> Option<String> {
-    (!shallow_boundaries.is_empty())
+fn shallow_warning(has_boundaries: bool) -> Option<String> {
+    has_boundaries
         .then_some("warning: local history is shallow; cache material is incomplete.".to_owned())
 }
-
-fn missing_warning(missing_objects: &[String]) -> Option<String> {
-    (!missing_objects.is_empty()).then_some(
+fn missing_warning(has_missing_objects: bool) -> Option<String> {
+    has_missing_objects.then_some(
         "warning: some local objects are missing; cache material is incomplete.".to_owned(),
     )
 }
 
-pub(crate) fn open(root: &Path) -> Result<Connection, AppError> {
-    Connection::open_with_flags(
+pub(crate) fn open_query() -> Result<QuerySession, AppError> {
+    let cwd = std::env::current_dir()
+        .map_err(|error| query_error(format!("reading current directory: {error}")))?;
+    let root = find_query_root(&cwd)
+        .ok_or_else(|| query_error("no published cache found; run `gitscry index` first"))?;
+    let mut progress = Vec::new();
+    let lock = acquire_query_shared(&root, &mut progress)?;
+    let connection = Connection::open_with_flags(
         root.join(".gitscry/cache.sqlite"),
         OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
-    .map_err(|error| cache_error("opening cache", error))
+    .map_err(|error| query_error(format!("opening published cache: {error}")))?;
+    validate_query_metadata(&connection)?;
+    progress.extend(query_progress(&connection)?);
+    Ok(QuerySession {
+        root,
+        connection,
+        _lock: lock,
+        progress,
+    })
 }
 
-pub(crate) fn open_in_memory() -> Result<Connection, AppError> {
-    Connection::open_in_memory().map_err(|error| cache_error("opening in-memory cache", error))
+fn find_query_root(start: &Path) -> Option<PathBuf> {
+    let mut current = start.to_owned();
+    loop {
+        if current.join(".gitscry/cache.sqlite").is_file() {
+            return Some(current);
+        }
+        if !current.pop() {
+            return None;
+        }
+    }
+}
+
+fn acquire_query_shared(root: &Path, progress: &mut Vec<String>) -> Result<SharedLock, AppError> {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(root.join(".gitscry/cache.lock"))
+        .map_err(|error| query_error(format!("opening published cache lock: {error}")))?;
+    loop {
+        match file.try_lock_shared() {
+            Ok(()) => return Ok(SharedLock { file }),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                report_wait(progress);
+                thread::sleep(Duration::from_millis(25));
+            }
+            Err(std::fs::TryLockError::Error(error)) => {
+                return Err(lock_error("shared", error));
+            }
+        }
+    }
+}
+
+fn validate_query_metadata(connection: &Connection) -> Result<(), AppError> {
+    let schema_version = query_metadata(connection, "schema_version")?;
+    if schema_version.as_deref() != Some(SCHEMA_VERSION) {
+        return Err(query_error(
+            "published cache schema is stale or unsupported",
+        ));
+    }
+    let completed_tip = query_metadata(connection, "completed_tip")?;
+    let completed_count = query_metadata(connection, "completed_commit_count")?;
+    let default_ref = query_metadata(connection, "default_ref")?;
+    let object_format = query_metadata(connection, "object_format")?;
+    let valid_tip = completed_tip.as_deref().is_some_and(valid_object_id);
+    let valid_count = completed_count
+        .as_deref()
+        .and_then(|value| value.parse::<usize>().ok())
+        .is_some_and(|count| count > 0);
+    let valid_default_ref = default_ref
+        .as_deref()
+        .is_some_and(|value| !value.is_empty());
+    let valid_object_format = matches!(object_format.as_deref(), Some("sha1" | "sha256"));
+    if !valid_tip || !valid_count || !valid_default_ref || !valid_object_format {
+        return Err(query_error(
+            "published cache completion metadata is invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn query_progress(connection: &Connection) -> Result<Vec<String>, AppError> {
+    let (has_shallow, has_missing): (i64, i64) = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM shallow_boundaries), EXISTS(SELECT 1 FROM missing_objects)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|error| query_error(format!("reading cache completeness metadata: {error}")))?;
+    let mut progress = Vec::new();
+    if let Some(warning) = shallow_warning(has_shallow != 0) {
+        progress.push(warning);
+    }
+    if let Some(warning) = missing_warning(has_missing != 0) {
+        progress.push(warning);
+    }
+    Ok(progress)
+}
+fn query_metadata(connection: &Connection, key: &str) -> Result<Option<String>, AppError> {
+    connection
+        .query_row("SELECT value FROM metadata WHERE key = ?1", [key], |row| {
+            row.get(0)
+        })
+        .optional()
+        .map_err(|error| query_error(format!("reading published cache metadata: {error}")))
+}
+
+fn valid_object_id(value: &str) -> bool {
+    matches!(value.len(), 40 | 64) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn preserve_damaged(root: &Path) -> Result<(), AppError> {
@@ -737,4 +873,8 @@ fn cache_error(operation: &str, error: impl std::fmt::Display) -> AppError {
     AppError::operational(format!(
         "error: {operation}: {error}; delete .gitscry and retry"
     ))
+}
+
+fn query_error(reason: impl std::fmt::Display) -> AppError {
+    AppError::operational(format!("error: {reason}; run `gitscry index` first"))
 }

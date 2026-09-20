@@ -39,6 +39,7 @@ fn why_reports_blame_and_explanation_for_a_line() {
         Some("Because callers need a stable target, keep this line explicit."),
     );
 
+    repo.index();
     let output = repo.run(["why", "target.txt", "--line", "1", "--limit", "1"]);
     assert_eq!(output.status.code(), Some(0));
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -66,6 +67,7 @@ fn why_resolves_symbols_and_pins_an_explicit_revision() {
         None,
     );
 
+    repo.index();
     let output = repo.run([
         "why",
         "src/lib.rs",
@@ -82,7 +84,7 @@ fn why_resolves_symbols_and_pins_an_explicit_revision() {
 }
 
 #[test]
-fn why_keeps_explicit_out_of_cache_targets_in_memory() {
+fn why_rejects_explicit_out_of_cache_targets() {
     let repo = TestRepo::new();
     repo.commit("main.txt", b"main\n", "Main history", None);
     git(repo.dir.path(), ["switch", "-c", "feature"]);
@@ -90,10 +92,12 @@ fn why_keeps_explicit_out_of_cache_targets_in_memory() {
     let feature_oid = repo.head();
     git(repo.dir.path(), ["switch", "main"]);
 
+    repo.index();
     let output = repo.run(["why", "feature.txt", "--line", "1", "--at", "feature"]);
-    assert_eq!(output.status.code(), Some(0));
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Feature-only history"));
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("outside the published cache generation")
+    );
 
     let cache = Connection::open(repo.dir.path().join(".gitscry/cache.sqlite")).unwrap();
     let indexed: i64 = cache
@@ -112,6 +116,7 @@ fn why_exposes_rename_boundary_and_rejects_invalid_anchors() {
     repo.commit("old.txt", b"kept\n", "Add old path", None);
     repo.rename("old.txt", "new.txt", "Move old path");
 
+    repo.index();
     let output = repo.run(["why", "new.txt", "--line", "1"]);
     assert_eq!(output.status.code(), Some(0));
     assert!(String::from_utf8_lossy(&output.stdout).contains("rename boundary"));
@@ -141,6 +146,7 @@ fn why_does_not_report_unrelated_renames_as_boundaries() {
         ["commit", "-m", "Modify target and rename unrelated file"],
     );
 
+    repo.index();
     let output = repo.run(["why", "target.txt", "--line", "1"]);
     assert_eq!(output.status.code(), Some(0));
     assert!(!String::from_utf8_lossy(&output.stdout).contains("rename boundary"));
@@ -162,6 +168,7 @@ fn why_does_not_treat_hunk_context_as_line_ownership() {
         None,
     );
 
+    repo.index();
     let output = repo.run(["why", "context.txt", "--line", "1", "--limit", "1"]);
     assert_eq!(output.status.code(), Some(0));
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -186,6 +193,7 @@ fn why_does_not_promote_an_adjacent_line_rewrite() {
         None,
     );
 
+    repo.index();
     let output = repo.run(["why", "target.txt", "--line", "2", "--limit", "10"]);
     assert_eq!(output.status.code(), Some(0));
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -225,6 +233,7 @@ fn why_does_not_mark_unrelated_multihunk_changes_as_direct() {
         None,
     );
 
+    repo.index();
     let output = repo.run(["why", "f.txt", "--line", "20", "--limit", "10"]);
     assert_eq!(output.status.code(), Some(0));
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -242,6 +251,7 @@ fn why_blames_paths_with_literal_metacharacters() {
     repo.commit("a1.txt", b"wrong\n", "Wrong file", None);
     repo.commit("a[1].txt", b"right\n", "Bracket file", None);
 
+    repo.index();
     let output = repo.run(["why", "a[1].txt", "--line", "1"]);
     assert_eq!(output.status.code(), Some(0));
     assert!(!String::from_utf8_lossy(&output.stdout).contains("Wrong file"));
@@ -269,6 +279,7 @@ fn why_does_not_run_textconv_during_blame() {
         ],
     );
 
+    repo.index();
     let output = repo.run(["why", "target.txt", "--line", "1"]);
     assert_eq!(output.status.code(), Some(0));
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -285,6 +296,7 @@ fn why_does_not_run_textconv_during_blame() {
 fn why_works_without_a_main_or_master_default_branch() {
     let repo = TestRepo::new();
     repo.commit("target.txt", b"target\n", "Create target", None);
+    repo.index();
     git(repo.dir.path(), ["branch", "-m", "trunk"]);
 
     let output = repo.run(["why", "target.txt", "--line", "1"]);
@@ -305,6 +317,7 @@ fn why_warns_for_configured_blame_ignore_file() {
         ["config", "blame.ignoreRevsFile", "myignores"],
     );
 
+    repo.index();
     let output = repo.run(["why", "target.txt", "--line", "1"]);
     assert_eq!(output.status.code(), Some(0));
     assert!(String::from_utf8_lossy(&output.stderr).contains("blame ignored revisions"));
@@ -320,6 +333,7 @@ fn why_symbol_anchor_ignores_a_prose_mention() {
         None,
     );
 
+    repo.index();
     let output = repo.run(["why", "src/lib.rs", "--symbol", "explain"]);
     assert_eq!(output.status.code(), Some(0));
     assert!(String::from_utf8_lossy(&output.stdout).contains("target: symbol explain (line 3)"));
@@ -337,6 +351,7 @@ fn why_scores_cochanged_paths_without_confusing_renames() {
         ["commit", "-m", "Change target and related files"],
     );
 
+    repo.index();
     let output = repo.run(["why", "target.txt", "--line", "1"]);
     assert_eq!(output.status.code(), Some(0));
     assert!(String::from_utf8_lossy(&output.stdout).contains("co-changed paths (1)"));
@@ -356,6 +371,7 @@ fn why_handles_binary_files_without_failing() {
     let repo = TestRepo::new();
     repo.commit("binary.bin", b"\0\xffbinary\0", "Create binary", None);
 
+    repo.index();
     let output = repo.run(["why", "binary.bin", "--line", "1"]);
     assert_eq!(output.status.code(), Some(0));
     assert!(String::from_utf8_lossy(&output.stdout).contains("Create binary"));
@@ -373,6 +389,7 @@ fn why_degrades_cleanly_at_a_submodule_boundary() {
     );
     git(repo.dir.path(), ["commit", "-m", "Add submodule boundary"]);
 
+    repo.index();
     let output = repo.run(["why", "module", "--line", "1"]);
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(output.stdout, b"No explanatory history found.\n");
@@ -393,6 +410,12 @@ fn why_warns_for_shallow_history() {
         .expect("clone shallow repository");
     assert!(cloned.status.success());
 
+    let indexed = Command::new(env!("CARGO_BIN_EXE_gitscry"))
+        .arg("index")
+        .current_dir(&clone)
+        .output()
+        .expect("index shallow repository");
+    assert!(indexed.status.success());
     let output = Command::new(env!("CARGO_BIN_EXE_gitscry"))
         .args(["why", "target.txt", "--line", "1"])
         .current_dir(&clone)
@@ -415,11 +438,13 @@ fn why_marks_merge_boundaries_and_honors_limit() {
         ["merge", "--no-ff", "feature", "-m", "Merge feature target"],
     );
 
+    repo.index();
     let merge_output = repo.run(["why", "target.txt", "--line", "1"]);
     assert_eq!(merge_output.status.code(), Some(0));
     assert!(String::from_utf8_lossy(&merge_output.stdout).contains("merge boundary"));
 
     repo.commit("target.txt", b"latest\n", "Latest target change", None);
+    repo.index();
     let limited = repo.run(["why", "target.txt", "--line", "1", "--limit", "1"]);
     let stdout = String::from_utf8_lossy(&limited.stdout);
     assert!(stdout.contains("results truncated"));
@@ -437,6 +462,7 @@ fn why_warns_when_blame_ignores_a_revision() {
     )
     .expect("write ignore-revs file");
 
+    repo.index();
     let output = repo.run(["why", "target.txt", "--line", "1"]);
     assert_eq!(output.status.code(), Some(0));
     assert!(String::from_utf8_lossy(&output.stderr).contains("blame ignored revisions"));

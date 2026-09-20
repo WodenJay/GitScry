@@ -102,6 +102,13 @@ fn ordinary_commands_have_a_byte_exact_cli_contract() {
         "Fix provider regression by restoring normalization after callers migrate.",
         "2000-01-04T00:00:00+0000",
     );
+    let indexed = repo.run(["index"]);
+    assert_eq!(
+        indexed.status.code(),
+        Some(0),
+        "index: {}",
+        String::from_utf8_lossy(&indexed.stderr)
+    );
 
     let commands: [(&str, &[&str]); 8] = [
         ("search", &["search", "provider"]),

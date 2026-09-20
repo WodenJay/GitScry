@@ -69,13 +69,6 @@ impl Repository {
         Ok((default_ref, tip))
     }
 
-    pub(crate) fn default_target_if_available(&self) -> Result<Option<(String, String)>, AppError> {
-        let Some(default_ref) = self.resolve_default_branch()? else {
-            return Ok(None);
-        };
-        Ok(Some((default_ref.clone(), self.tip_for(&default_ref)?)))
-    }
-
     pub(crate) fn object_format(&self) -> Result<String, AppError> {
         Ok(self
             .git
@@ -95,24 +88,6 @@ impl Repository {
         self.git.missing_objects(object_ids)
     }
 
-    pub(crate) fn worktree_paths(&self) -> Result<Vec<Vec<u8>>, AppError> {
-        let output = self.git.output(
-            [
-                "ls-files",
-                "-z",
-                "--cached",
-                "--others",
-                "--exclude-standard",
-            ],
-            &[],
-        )?;
-        Ok(output
-            .split(|byte| *byte == 0)
-            .filter(|path| !path.is_empty())
-            .filter(|path| path_exists(&self.root, path))
-            .map(ToOwned::to_owned)
-            .collect())
-    }
     pub(crate) fn reachable_commits(&self, tip: &str) -> Result<Vec<String>, AppError> {
         self.git
             .text(["rev-list", tip])?
@@ -215,17 +190,6 @@ impl Repository {
         }
         Ok(None)
     }
-}
-
-#[cfg(unix)]
-fn path_exists(root: &std::path::Path, path: &[u8]) -> bool {
-    use std::os::unix::ffi::OsStrExt;
-    root.join(std::ffi::OsStr::from_bytes(path)).exists()
-}
-
-#[cfg(not(unix))]
-fn path_exists(root: &std::path::Path, path: &[u8]) -> bool {
-    root.join(String::from_utf8_lossy(path).as_ref()).exists()
 }
 
 fn default_branch_error(reason: &str) -> AppError {

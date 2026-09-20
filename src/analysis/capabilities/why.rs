@@ -34,44 +34,10 @@ struct Entry {
     citations: Vec<Citation>,
 }
 
-pub(crate) fn without_cache(target: &WhyTarget, limit: usize) -> Result<Report, AppError> {
-    let mut materials = Vec::new();
-    if target.anchor_valid
-        && let Some(blame) = &target.blame
-    {
-        let subject = if blame.subject.is_empty() {
-            "Target line owner (subject unavailable)".to_owned()
-        } else {
-            blame.subject.clone()
-        };
-        materials.push(Material {
-            subject,
-            paths: vec![target.path.clone()],
-            confidence: Confidence::Low,
-            basis: vec!["target line blame identifies this commit".to_owned()],
-            citations: vec![Citation::new(blame.oid.clone(), blame.subject.clone())],
-            detail: Some(Detail::Why(WhyDetail {
-                anchor: anchor_description(&target.anchor),
-                revision: target.revision.clone(),
-                line: anchor_line(&target.anchor),
-            })),
-        });
-    }
-    retrieval::assign_citations(&mut materials);
-    let mut report = super::super::report(
-        ReportKind::Why,
-        materials,
-        usize::from(target.blame.is_some() && target.anchor_valid),
-        limit,
-    );
-    report.notices.extend(target.warnings.iter().cloned());
-    report.notices.push(REMOTE_CONTEXT_NOTICE.to_owned());
-    Ok(report)
-}
-
 pub(crate) fn run(
     connection: &Connection,
     target: &WhyTarget,
+    reachable: &HashSet<String>,
     limit: usize,
 ) -> Result<Report, AppError> {
     if !target.anchor_valid {
@@ -80,7 +46,7 @@ pub(crate) fn run(
         report.notices.push(REMOTE_CONTEXT_NOTICE.to_owned());
         return Ok(report);
     }
-    let commits = retrieval::path_history(connection, &target.path, &target.reachable)?;
+    let commits = retrieval::path_history(connection, &target.path, reachable)?;
     let missing_objects = retrieval::has_missing_objects(connection, &commits)?;
     let target_line = anchor_line(&target.anchor);
     let mut historical_line = target_line as i64;

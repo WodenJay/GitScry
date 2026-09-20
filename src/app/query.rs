@@ -1,14 +1,12 @@
-use std::collections::HashSet;
-
+use super::{AppError, Outcome};
 use crate::{
     analysis, cache,
-    git::{HistoryTarget, Repository, WhyAnchor},
+    git::{Repository, WhyAnchor},
     render,
 };
+use std::path::Path;
 
-use super::{AppError, Outcome};
-
-/// One query command: build the intent, prepare the cache, run the capability, render it.
+/// One query command: build the intent, open the published cache, run the capability, render it.
 pub(super) fn run(
     words: Vec<String>,
     paths: Vec<String>,
@@ -20,11 +18,17 @@ pub(super) fn run(
     ) -> Result<analysis::Report, AppError>,
 ) -> Result<Outcome, AppError> {
     let intent = analysis::Intent::parse(&words, &paths)?;
-    let repository = Repository::discover()?;
-    let prepared = cache::prepare(&repository)?;
-    let connection = cache::open(&repository.root)?;
-    let mut report = capability(&connection, &intent, limit)?;
-    let mut progress = prepared.progress;
+    let session = cache::open_query()?;
+    // The benchmark harness uses this switch to isolate cache-session setup.
+    if std::env::var_os("GITSCRY_BENCHMARK_QUERY_SETUP").is_some() {
+        return Ok(Outcome {
+            progress: session.progress().to_vec(),
+            message: String::new(),
+            notices: Vec::new(),
+        });
+    }
+    let mut report = capability(session.connection(), &intent, limit)?;
+    let mut progress = session.progress().to_vec();
     progress.append(&mut report.warnings);
     Ok(Outcome {
         progress,
@@ -33,24 +37,21 @@ pub(super) fn run(
     })
 }
 
-/// One path query: build the intent, prepare the cache, run the capability, render it.
+/// One path query: build the intent, open the published cache, run the capability, render it.
 pub(super) fn run_paths(
     paths: Vec<String>,
     limit: usize,
     capability: impl FnOnce(
         &rusqlite::Connection,
         &analysis::Intent,
-        &[Vec<u8>],
+        &Path,
         usize,
     ) -> Result<analysis::Report, AppError>,
 ) -> Result<Outcome, AppError> {
     let intent = analysis::Intent::paths(&paths)?;
-    let repository = Repository::discover()?;
-    let prepared = cache::prepare(&repository)?;
-    let connection = cache::open(&repository.root)?;
-    let worktree_paths = repository.worktree_paths()?;
-    let mut report = capability(&connection, &intent, &worktree_paths, limit)?;
-    let mut progress = prepared.progress;
+    let session = cache::open_query()?;
+    let mut report = capability(session.connection(), &intent, session.root(), limit)?;
+    let mut progress = session.progress().to_vec();
     progress.append(&mut report.warnings);
     Ok(Outcome {
         progress,
@@ -71,49 +72,21 @@ pub(super) fn run_regression(
     let repository = Repository::discover()?;
     let target =
         repository.pin_regression_target(&bad, good.as_deref(), &path, symbol.as_deref())?;
-    let cached_target = repository.default_target_if_available()?;
-    let (prepared, direct_history) = match cached_target {
-        Some((default_ref, cached_tip)) => {
-            let prepared = cache::prepare(&repository)?;
-            let direct_history = if repository.is_ancestor(&target.bad_revision, &cached_tip)? {
-                None
-            } else {
-                Some(repository.read_default_history_at(HistoryTarget {
-                    default_ref,
-                    tip: target.bad_revision.clone(),
-                    object_format: repository.object_format()?,
-                    shallow_boundaries: repository.shallow_boundaries()?,
-                })?)
-            };
-            (Some(prepared), direct_history)
-        }
-        None => (
-            None,
-            Some(repository.read_default_history_at(HistoryTarget {
-                default_ref: target.bad_revision.clone(),
-                tip: target.bad_revision.clone(),
-                object_format: repository.object_format()?,
-                shallow_boundaries: repository.shallow_boundaries()?,
-            })?),
-        ),
+    let session = cache::open_query()?;
+    session.require_revision(&target.bad_revision)?;
+    if let Some(good_revision) = &target.good_revision {
+        session.require_revision(good_revision)?;
+    }
+    let bad_reachable = analysis::ancestors(session.connection(), &target.bad_revision)?;
+    let reachable = if let Some(good_revision) = &target.good_revision {
+        let good_reachable = analysis::ancestors(session.connection(), good_revision)?;
+        bad_reachable.difference(&good_reachable).cloned().collect()
+    } else {
+        bad_reachable
     };
-    let connection = match prepared.as_ref() {
-        Some(_) => cache::open(&repository.root)?,
-        None => cache::open_in_memory()?,
-    };
-    let mut report = analysis::regression(
-        &connection,
-        &intent,
-        &target,
-        direct_history.as_ref(),
-        limit,
-    )?;
-    let mut progress = prepared
-        .as_ref()
-        .map(|cache| cache.progress.clone())
-        .unwrap_or_else(|| {
-            vec!["warning: no default branch; using target-specific history only.".to_owned()]
-        });
+    let mut report =
+        analysis::regression(session.connection(), &intent, &target, &reachable, limit)?;
+    let mut progress = session.progress().to_vec();
     progress.append(&mut report.warnings);
     Ok(Outcome {
         progress,
@@ -129,22 +102,14 @@ pub(super) fn run_why(
 ) -> Result<Outcome, AppError> {
     let repository = Repository::discover()?;
     let target = repository.pin_why_target(&revision, &path, anchor)?;
-    let prepared = if repository.default_target_if_available()?.is_some() {
-        cache::prepare(&repository)?
-    } else {
-        let report = analysis::why_without_cache(&target, limit)?;
-        return Ok(Outcome {
-            progress: vec![
-                "warning: no default branch; using target-specific blame only.".to_owned(),
-            ],
-            message: render::format_report(&report),
-            notices: report.notices.clone(),
-        });
-    };
-    let connection = cache::open(&repository.root)?;
-    let report = analysis::why(&connection, &target, limit)?;
+    let session = cache::open_query()?;
+    session.require_revision(&target.revision)?;
+    let reachable = analysis::ancestors(session.connection(), &target.revision)?;
+    let mut report = analysis::why(session.connection(), &target, &reachable, limit)?;
+    let mut progress = session.progress().to_vec();
+    progress.append(&mut report.warnings);
     Ok(Outcome {
-        progress: prepared.progress,
+        progress,
         message: render::format_report(&report),
         notices: report.notices.clone(),
     })
@@ -157,25 +122,14 @@ pub(super) fn run_trace_fix(
 ) -> Result<Outcome, AppError> {
     let repository = Repository::discover()?;
     let target = repository.pin_trace_fix(&revision, &paths)?;
-    let Some((default_ref, default_tip)) = repository.default_target_if_available()? else {
-        let report = analysis::trace_fix_without_cache(&target, limit)?;
-        return Ok(Outcome {
-            progress: vec![
-                "warning: no default branch; introducing candidates are unavailable.".to_owned(),
-            ],
-            message: render::format_report(&report),
-            notices: report.notices.clone(),
-        });
-    };
-    let prepared = cache::prepare_at(&repository, default_ref, default_tip.clone())?;
-    let reachable = repository
-        .reachable_commits(&default_tip)?
-        .into_iter()
-        .collect::<HashSet<_>>();
-    let connection = cache::open(&repository.root)?;
-    let report = analysis::trace_fix(&connection, &target, &reachable, limit)?;
+    let session = cache::open_query()?;
+    session.require_revision(&target.revision)?;
+    let reachable = analysis::ancestors(session.connection(), &target.revision)?;
+    let mut report = analysis::trace_fix(session.connection(), &target, &reachable, limit)?;
+    let mut progress = session.progress().to_vec();
+    progress.append(&mut report.warnings);
     Ok(Outcome {
-        progress: prepared.progress,
+        progress,
         message: render::format_report(&report),
         notices: report.notices.clone(),
     })

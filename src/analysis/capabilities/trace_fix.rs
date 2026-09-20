@@ -165,55 +165,6 @@ pub(crate) fn run(
     Ok(report)
 }
 
-pub(crate) fn without_cache(target: &TraceFixTarget, limit: usize) -> Result<Report, AppError> {
-    let (subject, _) = retrieval::message_parts(&target.fix.message);
-    let mut paths = Vec::new();
-    for deleted in &target.deleted_lines {
-        if !paths.iter().any(|path| path == &deleted.path) {
-            paths.push(deleted.path.clone());
-        }
-    }
-    let deleted_line = target.deleted_lines.first().map(|deleted| deleted.line);
-    let mut report = super::super::report(
-        ReportKind::TraceFix,
-        vec![Material {
-            subject,
-            paths,
-            confidence: Confidence::Low,
-            basis: {
-                let mut basis = Vec::new();
-                if target.parent.is_some() && !target.deleted_lines.is_empty() {
-                    basis.push("fix-parent deleted-line facts are available in memory".to_owned());
-                } else {
-                    basis.push("fix-parent deleted-line facts are unavailable locally".to_owned());
-                }
-                basis.push(
-                    "introducing candidates are unavailable without a default-branch cache"
-                        .to_owned(),
-                );
-                basis
-            },
-            citations: vec![
-                Citation::new(target.fix.oid.clone(), "".to_owned()).noting("fix context"),
-            ],
-            detail: Some(Detail::TraceFix(TraceFixDetail {
-                role: "fix context",
-                fix_revision: target.revision.clone(),
-                parent_revision: target.parent.clone(),
-                line: deleted_line,
-            })),
-        }],
-        1,
-        limit,
-    );
-    retrieval::assign_citations(&mut report.materials);
-    report.notices.extend(target.warnings.iter().cloned());
-    report
-        .notices
-        .push("Remote context unavailable from local history.".to_owned());
-    Ok(report)
-}
-
 fn candidate_history(
     connection: &Connection,
     deleted_lines: &[DeletedLine],

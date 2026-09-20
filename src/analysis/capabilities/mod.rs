@@ -17,9 +17,8 @@ pub(crate) use relations::{related, tests};
 pub(crate) use search::run as search;
 
 pub(crate) use regression::run as regression;
-pub(crate) use trace_fix::{run as trace_fix, without_cache as trace_fix_without_cache};
+pub(crate) use trace_fix::run as trace_fix;
 pub(crate) use why::run as why;
-pub(crate) use why::without_cache;
 /// The confidence a result carries when nothing beyond the lexical match supports it.
 pub(super) fn lexical_confidence(signals: &super::retrieval::Signals) -> super::Confidence {
     if signals.strong() {

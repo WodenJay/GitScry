@@ -89,6 +89,7 @@ fn related_merges_multiple_seeds_and_cites_one_candidate_once() {
     );
     repo.remove("src/alpha.rs", "remove alpha");
 
+    repo.index();
     let output = repo.run(["related", "src/alpha.rs", "src/beta.rs"]);
 
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
@@ -118,6 +119,7 @@ fn related_keeps_historical_seeds_and_ignores_mass_change_noise() {
     );
     repo.commit_mass_change("src/legacy.rs", "src/shared.rs");
     repo.remove("src/legacy.rs", "remove legacy");
+    repo.index();
 
     let output = repo.run(["related", "src/legacy.rs"]);
 
@@ -141,6 +143,7 @@ fn related_does_not_claim_unrelated_mass_changes() {
     );
     repo.commit_unrelated_mass_change();
     repo.remove("src/seed.rs", "remove seed");
+    repo.index();
 
     let output = repo.run(["related", "src/seed.rs"]);
 
@@ -179,6 +182,7 @@ fn tests_filter_deleted_candidates_and_warn_about_rename_continuity() {
         "tests/test_renamed_widget.py",
         "rename widget test",
     );
+    repo.index();
 
     let output = repo.run(["tests", "src/widget.py"]);
 
@@ -233,6 +237,7 @@ fn related_does_not_double_count_merge_replays() {
         ["merge", "--no-ff", "feature", "-m", "merge feature"],
     );
     repo.remove("src/seed.rs", "remove seed");
+    repo.index();
 
     let output = repo.run(["related", "src/seed.rs"]);
 
@@ -248,6 +253,7 @@ fn related_does_not_double_count_merge_replays() {
 fn relation_commands_have_fixed_empty_results() {
     let repo = TestRepo::new();
     repo.commit_files(&[("src/only.rs", b"only\n")], "only");
+    repo.index();
 
     let related = repo.run(["related", "src/only.rs"]);
     assert_eq!(related.status.code(), Some(0));
