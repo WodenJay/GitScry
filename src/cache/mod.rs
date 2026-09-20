@@ -269,6 +269,10 @@ pub(crate) fn open(root: &Path) -> Result<Connection, AppError> {
     .map_err(|error| cache_error("opening cache", error))
 }
 
+pub(crate) fn open_in_memory() -> Result<Connection, AppError> {
+    Connection::open_in_memory().map_err(|error| cache_error("opening in-memory cache", error))
+}
+
 pub(crate) fn preserve_damaged(root: &Path) -> Result<(), AppError> {
     let directory = root.join(".gitscry");
     let path = directory.join("cache.sqlite");

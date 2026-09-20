@@ -97,9 +97,7 @@ pub(super) fn run_regression(
     };
     let connection = match prepared.as_ref() {
         Some(_) => cache::open(&repository.root)?,
-        None => rusqlite::Connection::open_in_memory().map_err(|error| {
-            AppError::operational(format!("error: opening in-memory cache: {error}"))
-        })?,
+        None => cache::open_in_memory()?,
     };
     let mut report = analysis::regression(
         &connection,
