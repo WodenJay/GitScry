@@ -471,9 +471,13 @@ def main() -> None:
         raise BenchmarkError(f"--runs must be at least {MIN_RUNS}")
     if arguments.timeout <= 0:
         raise BenchmarkError("--timeout must be positive")
-    if not arguments.binary.is_file():
+    binary = arguments.binary
+    if not binary.is_file() and os.name == "nt":
+        windows_binary = Path(f"{binary}.exe")
+        if windows_binary.is_file():
+            binary = windows_binary
+    if not binary.is_file():
         raise BenchmarkError(f"release binary does not exist: {arguments.binary}")
-
     repositories = dict(parse_assignment(value, "--repo") for value in arguments.repo)
     missing = {"medium", "large"} - repositories.keys()
     if missing:
@@ -498,7 +502,7 @@ def main() -> None:
             "machine": platform.machine(),
             "processor": platform.processor(),
             "git_version": host_git_version(),
-            "binary": str(arguments.binary.resolve()),
+            "binary": str(binary.resolve()),
             "runs": arguments.runs,
             "timeout_seconds": arguments.timeout,
             "cold_cache_method": cold_method,
@@ -510,7 +514,7 @@ def main() -> None:
     for name, raw_path in sorted(repositories.items()):
         repository = Path(raw_path).resolve()
         repository_report = benchmark_repository(
-            arguments.binary.resolve(),
+            binary.resolve(),
             name,
             repository,
             probe_paths.get(name, ""),
