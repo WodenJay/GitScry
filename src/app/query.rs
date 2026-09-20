@@ -1,10 +1,12 @@
+use std::collections::HashSet;
+
 use crate::{
     analysis, cache,
     git::{HistoryTarget, Repository, WhyAnchor},
     render,
 };
 
-use super::{AppError, Outcome, prepare_cache};
+use super::{AppError, Outcome, prepare_cache, prepare_cache_at};
 
 /// One query command: build the intent, prepare the cache, run the capability, render it.
 pub(super) fn run(
@@ -141,6 +143,37 @@ pub(super) fn run_why(
     };
     let connection = cache::open(&repository.root)?;
     let report = analysis::why(&connection, &target, limit)?;
+    Ok(Outcome {
+        progress: prepared.progress,
+        message: render::format_report(&report),
+        notices: report.notices.clone(),
+    })
+}
+
+pub(super) fn run_trace_fix(
+    revision: String,
+    paths: Vec<String>,
+    limit: usize,
+) -> Result<Outcome, AppError> {
+    let repository = Repository::discover()?;
+    let target = repository.pin_trace_fix(&revision, &paths)?;
+    let Some((default_ref, default_tip)) = repository.default_target_if_available()? else {
+        let report = analysis::trace_fix_without_cache(&target, limit)?;
+        return Ok(Outcome {
+            progress: vec![
+                "warning: no default branch; introducing candidates are unavailable.".to_owned(),
+            ],
+            message: render::format_report(&report),
+            notices: report.notices.clone(),
+        });
+    };
+    let prepared = prepare_cache_at(&repository, default_ref, default_tip.clone())?;
+    let reachable = repository
+        .reachable_commits(&default_tip)?
+        .into_iter()
+        .collect::<HashSet<_>>();
+    let connection = cache::open(&repository.root)?;
+    let report = analysis::trace_fix(&connection, &target, &reachable, limit)?;
     Ok(Outcome {
         progress: prepared.progress,
         message: render::format_report(&report),

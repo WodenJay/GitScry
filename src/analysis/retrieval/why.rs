@@ -153,6 +153,29 @@ pub(in crate::analysis) fn path_history(
     Ok(result)
 }
 
+pub(in crate::analysis) fn ancestors(
+    connection: &Connection,
+    oid: &str,
+) -> Result<HashSet<String>, AppError> {
+    let mut statement = connection
+        .prepare("SELECT parent_oid FROM commit_parents WHERE commit_oid = ?1 ORDER BY position")
+        .map_err(|error| search_error("preparing commit ancestry", error))?;
+    let mut pending = vec![oid.to_owned()];
+    let mut ancestors = HashSet::new();
+    while let Some(current) = pending.pop() {
+        if !ancestors.insert(current.clone()) {
+            continue;
+        }
+        let parents = statement
+            .query_map([current.as_str()], |row| row.get::<_, String>(0))
+            .map_err(|error| search_error("reading commit ancestry", error))?;
+        for parent in parents {
+            pending.push(parent.map_err(|error| search_error("reading commit ancestry", error))?);
+        }
+    }
+    Ok(ancestors)
+}
+
 pub(in crate::analysis) fn hunks(
     connection: &Connection,
     oid: &str,

@@ -26,7 +26,7 @@ pub(in crate::analysis) use store::{
 pub(in crate::analysis) use text::tokenize;
 pub(crate) use text::{message_parts, normalize_path, searchable_text};
 pub(in crate::analysis) use why::{
-    HistoryCommit, HistoryHunk, PathChange, has_missing_objects, hunks, path_history,
+    HistoryCommit, HistoryHunk, PathChange, ancestors, has_missing_objects, hunks, path_history,
 };
 /// How deep the lexical pool reaches relative to the caller's `--limit`.
 const CANDIDATE_MULTIPLIER: usize = 20;

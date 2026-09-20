@@ -44,6 +44,14 @@ enum Plan {
 
 pub(crate) fn prepare_cache(repository: &git::Repository) -> Result<PreparedCache, AppError> {
     let (default_ref, tip) = repository.default_target()?;
+    prepare_cache_at(repository, default_ref, tip)
+}
+
+pub(crate) fn prepare_cache_at(
+    repository: &git::Repository,
+    default_ref: String,
+    tip: String,
+) -> Result<PreparedCache, AppError> {
     let expected = Expected {
         default_ref,
         tip,
@@ -297,5 +305,10 @@ pub(crate) fn execute(command: Command) -> Result<Outcome, AppError> {
             };
             query::run_why(at, path, anchor, limit)
         }
+        Command::TraceFix {
+            fix_revision,
+            paths,
+            limit,
+        } => query::run_trace_fix(fix_revision, paths, limit),
     }
 }

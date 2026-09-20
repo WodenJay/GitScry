@@ -8,7 +8,7 @@ use crate::app::AppError;
 
 pub(crate) use history::{Change, Commit, HistoryTarget, Hunk, Snapshot};
 use process::Git;
-pub(crate) use target::{RegressionTarget, WhyAnchor, WhyTarget};
+pub(crate) use target::{DeletedLine, RegressionTarget, TraceFixTarget, WhyAnchor, WhyTarget};
 
 pub(crate) struct Repository {
     pub(crate) root: PathBuf,
@@ -51,6 +51,14 @@ impl Repository {
         symbol: Option<&str>,
     ) -> Result<RegressionTarget, AppError> {
         target::pin_regression(&self.git, bad_revision, good_revision, path, symbol)
+    }
+
+    pub(crate) fn pin_trace_fix(
+        &self,
+        revision: &str,
+        paths: &[String],
+    ) -> Result<TraceFixTarget, AppError> {
+        target::pin_trace_fix(&self.git, revision, paths)
     }
 
     pub(crate) fn default_target(&self) -> Result<(String, String), AppError> {

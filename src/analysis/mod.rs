@@ -9,10 +9,12 @@ mod capabilities;
 mod provenance;
 mod retrieval;
 
+use std::collections::HashSet;
+
 use rusqlite::Connection;
 
 use crate::app::AppError;
-use crate::git::WhyTarget;
+use crate::git::{TraceFixTarget, WhyTarget};
 
 pub(crate) use retrieval::{Intent, message_parts, searchable_text};
 
@@ -34,6 +36,7 @@ pub(crate) enum ReportKind {
     Tests,
     Why,
     Regression,
+    TraceFix,
 }
 
 /// One result: the analogous or abandoned change, why it was selected, and its citations.
@@ -57,12 +60,21 @@ pub(crate) enum Detail {
     Relation(Relation),
     /// The target anchor and revision behind a why explanation.
     Why(WhyDetail),
+    /// The fix, introducing change, and deleted-line evidence behind trace-fix.
+    TraceFix(TraceFixDetail),
 }
 
 pub(crate) struct WhyDetail {
     pub(crate) anchor: String,
     pub(crate) revision: String,
     pub(crate) line: usize,
+}
+
+pub(crate) struct TraceFixDetail {
+    pub(crate) role: &'static str,
+    pub(crate) fix_revision: String,
+    pub(crate) parent_revision: Option<String>,
+    pub(crate) line: Option<usize>,
 }
 
 /// One move a historical change made. Paths stay raw bytes for lossless rendering.
@@ -187,6 +199,23 @@ pub(crate) fn regression(
     capabilities::regression(connection, intent, target, direct_history, limit)
 }
 
+pub(crate) fn trace_fix(
+    connection: &Connection,
+    target: &TraceFixTarget,
+    reachable: &HashSet<String>,
+    limit: usize,
+) -> Result<Report, AppError> {
+    validate_limit(limit)?;
+    capabilities::trace_fix(connection, target, reachable, limit)
+}
+
+pub(crate) fn trace_fix_without_cache(
+    target: &TraceFixTarget,
+    limit: usize,
+) -> Result<Report, AppError> {
+    validate_limit(limit)?;
+    capabilities::trace_fix_without_cache(target, limit)
+}
 pub(crate) fn failures(
     connection: &Connection,
     intent: &Intent,
