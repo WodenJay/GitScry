@@ -19,6 +19,7 @@ fn empty_message(kind: ReportKind) -> &'static str {
         ReportKind::Related => "No historical relations found.",
         ReportKind::Tests => "No historically related tests found.",
         ReportKind::Why => "No explanatory history found.",
+        ReportKind::Regression => "No supported regression suspects found.",
     }
 }
 
@@ -33,10 +34,11 @@ pub(crate) fn format_report(report: &Report) -> String {
         if report.truncated {
             let noun = match report.kind {
                 ReportKind::Related | ReportKind::Tests => "matching paths",
+                ReportKind::Why => "matching commits",
                 ReportKind::Search
                 | ReportKind::Examples
                 | ReportKind::Failures
-                | ReportKind::Why => "matching commits",
+                | ReportKind::Regression => "matching suspects",
             };
             lines.push(format!(
                 "Showing {} of {} {noun}; results truncated.",
@@ -57,6 +59,7 @@ fn header(report: &Report) -> String {
         ReportKind::Related => "Related paths",
         ReportKind::Tests => "Historical test candidates",
         ReportKind::Why => "Why history",
+        ReportKind::Regression => "Regression suspects",
     };
     format!(
         "{noun} ({} match{}):",

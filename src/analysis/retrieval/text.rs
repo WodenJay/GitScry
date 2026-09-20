@@ -22,7 +22,7 @@ pub(crate) fn searchable_text(value: &str) -> String {
     }
 }
 
-pub(super) fn tokenize(input: &str) -> Vec<String> {
+pub(in crate::analysis) fn tokenize(input: &str) -> Vec<String> {
     let chars = input.chars().collect::<Vec<_>>();
     let mut terms = Vec::new();
     let mut current = String::new();

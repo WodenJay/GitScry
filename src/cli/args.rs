@@ -51,12 +51,31 @@ pub(crate) enum Command {
         #[arg(long, default_value = "10", value_parser = parse_limit)]
         limit: usize,
     },
-    /// Explain the local history behind one line or symbol.
+    /// Locate historical commits that may have introduced a regression.
+    Regression {
+        #[arg(required = true, num_args = 1..)]
+        symptom: Vec<String>,
+        /// Repository-relative path affected by the regression.
+        #[arg(long = "path", required = true, value_name = "PATH")]
+        path: String,
+        /// Symbol in the affected path to narrow the suspect history.
+        #[arg(long)]
+        symbol: Option<String>,
+        /// Last known good revision; suspects are limited to the good..bad range.
+        #[arg(long)]
+        good: Option<String>,
+        /// Last known bad revision; defaults to HEAD.
+        #[arg(long, default_value = "HEAD")]
+        bad: String,
+        #[arg(long, default_value = "10", value_parser = parse_limit)]
+        limit: usize,
+    },
     #[command(group(
         ArgGroup::new("anchor")
             .required(true)
             .args(["line", "symbol"]),
     ))]
+    /// Explain the local history behind one line or symbol.
     Why {
         /// Repository-relative path at the target revision.
         path: String,

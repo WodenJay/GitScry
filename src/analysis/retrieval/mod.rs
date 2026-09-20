@@ -17,16 +17,16 @@ use rusqlite::Connection;
 use crate::app::AppError;
 
 pub(crate) use intent::Intent;
-pub(crate) use text::{message_parts, normalize_path, searchable_text};
-
 pub(in crate::analysis) use lexical::Signals;
 pub(in crate::analysis) use rank::{Ranked, assign_citations, sort};
 pub(in crate::analysis) use reverts::{Revert, RevertIndex, index as reverts};
 pub(in crate::analysis) use store::{
     ChangeSet, change_sets, corrective_follow_up, steps, text as commit_text,
 };
+pub(in crate::analysis) use text::tokenize;
+pub(crate) use text::{message_parts, normalize_path, searchable_text};
 pub(in crate::analysis) use why::{
-    HistoryCommit, HistoryHunk, has_missing_objects, hunks, path_history,
+    HistoryCommit, HistoryHunk, PathChange, has_missing_objects, hunks, path_history,
 };
 /// How deep the lexical pool reaches relative to the caller's `--limit`.
 const CANDIDATE_MULTIPLIER: usize = 20;

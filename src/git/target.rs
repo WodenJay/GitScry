@@ -20,6 +20,17 @@ pub(crate) struct WhyTarget {
     pub(crate) anchor_valid: bool,
 }
 
+pub(crate) struct RegressionTarget {
+    pub(crate) bad_revision: String,
+    pub(crate) good_revision: Option<String>,
+    pub(crate) path: Vec<u8>,
+    pub(crate) symbol: Option<String>,
+    pub(crate) symbol_line: Option<usize>,
+    pub(crate) symbol_end: Option<usize>,
+    pub(crate) range: HashSet<String>,
+    pub(crate) warnings: Vec<String>,
+}
+
 pub(crate) struct Blame {
     pub(crate) oid: String,
     pub(crate) subject: String,
@@ -109,6 +120,143 @@ pub(super) fn pin(
         anchor_valid: true,
         warnings,
     })
+}
+
+pub(super) fn pin_regression(
+    git: &Git,
+    bad_revision: &str,
+    good_revision: Option<&str>,
+    path: &str,
+    symbol: Option<&str>,
+) -> Result<RegressionTarget, AppError> {
+    validate_path(path)?;
+    let bad_revision = resolve_revision(git, bad_revision)?;
+    let good_revision = good_revision
+        .map(|revision| resolve_revision(git, revision))
+        .transpose()?;
+    if let Some(good_revision) = &good_revision
+        && (good_revision == &bad_revision
+            || !git.success(["merge-base", "--is-ancestor", good_revision, &bad_revision])?)
+    {
+        return Err(AppError::input(
+            "good revision must be an ancestor of bad revision",
+        ));
+    }
+
+    let entry = read_tree_entry(git, &bad_revision, path)?;
+    if entry.kind != "blob" {
+        return Err(AppError::input(format!(
+            "path is not a file at bad revision: {path}",
+        )));
+    }
+    let content = git.output(["cat-file", "blob", &format!("{bad_revision}:{path}")], &[])?;
+    let (symbol, symbol_line, symbol_end) = match symbol {
+        Some(name) => {
+            let (resolved, number) = resolve_anchor(
+                &WhyAnchor::Symbol {
+                    name: name.to_owned(),
+                    number: 0,
+                },
+                &content,
+                path,
+            )?;
+            let WhyAnchor::Symbol { name, .. } = resolved else {
+                unreachable!("symbol anchor resolves to a symbol");
+            };
+            (
+                Some(name),
+                Some(number),
+                Some(symbol_span_end(&content, number)),
+            )
+        }
+        None => (None, None, None),
+    };
+
+    let bad_reachable = read_reachable(git, &bad_revision)?;
+    let range = if let Some(good_revision) = &good_revision {
+        let good_reachable = read_reachable(git, good_revision)?;
+        bad_reachable.difference(&good_reachable).cloned().collect()
+    } else {
+        bad_reachable
+    };
+    let shallow = read_shallow_boundaries(git)?;
+    let mut warnings = Vec::new();
+    if !shallow.is_empty() {
+        warnings.push(
+            "warning: local history is shallow; regression material may be incomplete.".to_owned(),
+        );
+    }
+
+    Ok(RegressionTarget {
+        bad_revision,
+        good_revision,
+        path: path.as_bytes().to_vec(),
+        symbol,
+        symbol_line,
+        symbol_end,
+        range,
+        warnings,
+    })
+}
+
+fn symbol_span_end(content: &[u8], start: usize) -> usize {
+    let lines = content.split(|byte| *byte == b'\n').collect::<Vec<_>>();
+    let start_index = start.saturating_sub(1).min(lines.len().saturating_sub(1));
+    let start_line = lines.get(start_index).copied().unwrap_or_default();
+    let start_indent = leading_indent(start_line);
+    let mut braces = brace_delta(start_line);
+    if start_line.contains(&b'{') && start_line.contains(&b'}') {
+        return start;
+    }
+    if braces > 0 {
+        for (index, line) in lines.iter().enumerate().skip(start_index + 1) {
+            braces += brace_delta(line);
+            if braces <= 0 {
+                return index + 1;
+            }
+        }
+    }
+    for (index, line) in lines.iter().enumerate().skip(start_index + 1) {
+        if line.is_empty() || leading_indent(line) > start_indent {
+            continue;
+        }
+        if is_symbol_declaration(line) {
+            return index.max(start_index);
+        }
+    }
+    lines.len().max(start)
+}
+
+fn leading_indent(line: &[u8]) -> usize {
+    line.iter()
+        .take_while(|byte| matches!(byte, b' ' | b'\t'))
+        .count()
+}
+
+fn brace_delta(line: &[u8]) -> i32 {
+    line.iter().fold(0, |balance, byte| match byte {
+        b'{' => balance + 1,
+        b'}' => balance - 1,
+        _ => balance,
+    })
+}
+
+fn is_symbol_declaration(line: &[u8]) -> bool {
+    let line = String::from_utf8_lossy(line);
+    let trimmed = line.trim_start();
+    [
+        "fn ",
+        "pub fn ",
+        "pub(crate) fn ",
+        "async fn ",
+        "def ",
+        "async def ",
+        "class ",
+        "struct ",
+        "function ",
+    ]
+    .iter()
+    .any(|prefix| trimmed.starts_with(prefix))
 }
 
 fn validate_path(path: &str) -> Result<(), AppError> {

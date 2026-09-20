@@ -33,6 +33,7 @@ pub(crate) enum ReportKind {
     Related,
     Tests,
     Why,
+    Regression,
 }
 
 /// One result: the analogous or abandoned change, why it was selected, and its citations.
@@ -175,6 +176,17 @@ pub(crate) fn why_without_cache(target: &WhyTarget, limit: usize) -> Result<Repo
     validate_limit(limit)?;
     capabilities::without_cache(target, limit)
 }
+pub(crate) fn regression(
+    connection: &Connection,
+    intent: &Intent,
+    target: &crate::git::RegressionTarget,
+    direct_history: Option<&crate::git::Snapshot>,
+    limit: usize,
+) -> Result<Report, AppError> {
+    validate_limit(limit)?;
+    capabilities::regression(connection, intent, target, direct_history, limit)
+}
+
 pub(crate) fn failures(
     connection: &Connection,
     intent: &Intent,

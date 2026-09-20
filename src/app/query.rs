@@ -1,6 +1,6 @@
 use crate::{
     analysis, cache,
-    git::{Repository, WhyAnchor},
+    git::{HistoryTarget, Repository, WhyAnchor},
     render,
 };
 
@@ -57,6 +57,70 @@ pub(super) fn run_paths(
     })
 }
 
+pub(super) fn run_regression(
+    words: Vec<String>,
+    path: String,
+    symbol: Option<String>,
+    good: Option<String>,
+    bad: String,
+    limit: usize,
+) -> Result<Outcome, AppError> {
+    let intent = analysis::Intent::symptom(&words, &path)?;
+    let repository = Repository::discover()?;
+    let target =
+        repository.pin_regression_target(&bad, good.as_deref(), &path, symbol.as_deref())?;
+    let cached_target = repository.default_target_if_available()?;
+    let (prepared, direct_history) = match cached_target {
+        Some((default_ref, cached_tip)) => {
+            let prepared = prepare_cache(&repository)?;
+            let direct_history = if repository.is_ancestor(&target.bad_revision, &cached_tip)? {
+                None
+            } else {
+                Some(repository.read_default_history_at(HistoryTarget {
+                    default_ref,
+                    tip: target.bad_revision.clone(),
+                    object_format: repository.object_format()?,
+                    shallow_boundaries: repository.shallow_boundaries()?,
+                })?)
+            };
+            (Some(prepared), direct_history)
+        }
+        None => (
+            None,
+            Some(repository.read_default_history_at(HistoryTarget {
+                default_ref: target.bad_revision.clone(),
+                tip: target.bad_revision.clone(),
+                object_format: repository.object_format()?,
+                shallow_boundaries: repository.shallow_boundaries()?,
+            })?),
+        ),
+    };
+    let connection = match prepared.as_ref() {
+        Some(_) => cache::open(&repository.root)?,
+        None => rusqlite::Connection::open_in_memory().map_err(|error| {
+            AppError::operational(format!("error: opening in-memory cache: {error}"))
+        })?,
+    };
+    let mut report = analysis::regression(
+        &connection,
+        &intent,
+        &target,
+        direct_history.as_ref(),
+        limit,
+    )?;
+    let mut progress = prepared
+        .as_ref()
+        .map(|cache| cache.progress.clone())
+        .unwrap_or_else(|| {
+            vec!["warning: no default branch; using target-specific history only.".to_owned()]
+        });
+    progress.append(&mut report.warnings);
+    Ok(Outcome {
+        progress,
+        message: render::format_report(&report),
+        notices: report.notices.clone(),
+    })
+}
 pub(super) fn run_why(
     revision: String,
     path: String,

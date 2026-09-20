@@ -8,7 +8,7 @@ use crate::app::AppError;
 
 pub(crate) use history::{Change, Commit, HistoryTarget, Hunk, Snapshot};
 use process::Git;
-pub(crate) use target::{WhyAnchor, WhyTarget};
+pub(crate) use target::{RegressionTarget, WhyAnchor, WhyTarget};
 
 pub(crate) struct Repository {
     pub(crate) root: PathBuf,
@@ -41,6 +41,16 @@ impl Repository {
         anchor: WhyAnchor,
     ) -> Result<WhyTarget, AppError> {
         target::pin(&self.git, Some(revision), path, anchor)
+    }
+
+    pub(crate) fn pin_regression_target(
+        &self,
+        bad_revision: &str,
+        good_revision: Option<&str>,
+        path: &str,
+        symbol: Option<&str>,
+    ) -> Result<RegressionTarget, AppError> {
+        target::pin_regression(&self.git, bad_revision, good_revision, path, symbol)
     }
 
     pub(crate) fn default_target(&self) -> Result<(String, String), AppError> {

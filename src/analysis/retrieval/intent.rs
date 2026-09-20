@@ -26,6 +26,17 @@ impl Intent {
         })
     }
 
+    pub(crate) fn symptom(words: &[String], path: &str) -> Result<Self, AppError> {
+        let input = words.join(" ");
+        if input.trim().is_empty() {
+            return Err(AppError::input("query must not be empty"));
+        }
+        Ok(Self {
+            terms: tokenize(&input),
+            anchors: normalize_anchors([path.to_owned()])?,
+        })
+    }
+
     pub(crate) fn paths(paths: &[String]) -> Result<Self, AppError> {
         if paths.is_empty() {
             return Err(AppError::input("at least one path is required"));
@@ -36,7 +47,7 @@ impl Intent {
         })
     }
 
-    pub(super) fn terms(&self) -> &[String] {
+    pub(in crate::analysis) fn terms(&self) -> &[String] {
         &self.terms
     }
 
