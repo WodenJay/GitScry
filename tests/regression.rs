@@ -248,7 +248,7 @@ fn regression_symbol_tracking_survives_overlapping_newest_change() {
     repo.commit(
         "lib.rs",
         b"// shifted\n// shifted\n// shifted\n// shifted\nfn alpha(key: &str) -> &str {\n    key.trim_end()\n}\n\nfn beta(key: &str) -> &str {\n    key\n}\n",
-        "Shift file and tweak alpha",
+        "Shift file and tweak alpha bug",
         None,
     );
 
@@ -261,10 +261,13 @@ fn regression_symbol_tracking_survives_overlapping_newest_change() {
         "alpha",
         "--good",
         good.as_str(),
+        "--limit",
+        "1",
     ]);
     assert_eq!(output.status.code(), Some(0));
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Introduce alpha bug"));
+    assert!(!stdout.contains("Shift file and tweak alpha"));
 }
 
 #[test]
@@ -443,6 +446,63 @@ fn regression_warns_when_path_history_crosses_a_rename() {
     assert_eq!(output.status.code(), Some(0));
     assert!(String::from_utf8_lossy(&output.stdout).contains("move/rename boundary"));
     assert!(String::from_utf8_lossy(&output.stderr).contains("move/rename boundary"));
+}
+
+#[test]
+fn regression_warns_for_shallow_history() {
+    let source = TestRepo::new();
+    source.commit("target.txt", b"first\n", "First target", None);
+    source.commit("target.txt", b"second\n", "Second target", None);
+    let parent = tempfile::tempdir().expect("create clone parent");
+    let clone = parent.path().join("clone");
+    let cloned = Command::new("git")
+        .args(["clone", "--depth", "1", "--no-local"])
+        .arg(source.dir.path())
+        .arg(&clone)
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .expect("clone shallow repository");
+    assert!(cloned.status.success());
+
+    let output = Command::new(env!("CARGO_BIN_EXE_gitscry"))
+        .args(["regression", "target", "--path", "target.txt"])
+        .current_dir(&clone)
+        .output()
+        .expect("run regression on shallow repository");
+    assert_eq!(output.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("local history is shallow"));
+}
+
+#[test]
+fn regression_warns_when_cached_history_has_missing_objects() {
+    let repo = TestRepo::new();
+    repo.commit("target.txt", b"first\n", "First target", None);
+    let first = repo.head();
+    repo.commit(
+        "target.txt",
+        b"second\n",
+        "Introduce target regression",
+        None,
+    );
+    let blob = git_stdout(repo.dir.path(), ["ls-tree", &first, "target.txt"]);
+    let blob = blob.split_whitespace().nth(2).expect("target blob");
+    let object_path = repo
+        .dir
+        .path()
+        .join(".git/objects")
+        .join(&blob[..2])
+        .join(&blob[2..]);
+    fs::remove_file(object_path).expect("remove historical blob");
+
+    let indexed = repo.run(["index"]);
+    assert_eq!(indexed.status.code(), Some(0));
+    let output = repo.run(["regression", "target", "--path", "target.txt"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("some local objects are missing") || stderr.contains("missing Git objects"),
+        "{stderr}"
+    );
 }
 
 #[test]

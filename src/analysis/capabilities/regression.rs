@@ -331,7 +331,7 @@ fn temporal_score(index: usize, history_len: usize) -> f64 {
     if history_len == 0 {
         return 0.0;
     }
-    (history_len.saturating_sub(index)) as f64 / (history_len as f64 + 1.0)
+    (index + 1) as f64 / (history_len as f64 + 1.0)
 }
 
 fn is_test_path(path: &[u8]) -> bool {
