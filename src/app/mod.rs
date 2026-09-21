@@ -6,15 +6,27 @@ use crate::{analysis, cli::Command};
 
 pub(crate) use error::AppError;
 
+#[derive(Clone, Copy)]
+pub(crate) enum IndexStage {
+    ReadingCommits,
+    ReadingChanges,
+    ReadingPatches,
+    WritingCache,
+    Complete,
+}
+
 pub(crate) struct Outcome {
     pub(crate) progress: Vec<String>,
     pub(crate) message: String,
     pub(crate) notices: Vec<String>,
 }
 
-pub(crate) fn execute(command: Command) -> Result<Outcome, AppError> {
+pub(crate) fn execute(
+    command: Command,
+    report: &mut dyn FnMut(IndexStage),
+) -> Result<Outcome, AppError> {
     match command {
-        Command::Index => index::run(),
+        Command::Index => index::run(report),
         Command::Search { query, limit } => query::run(query, Vec::new(), limit, analysis::search),
         Command::Examples {
             query,

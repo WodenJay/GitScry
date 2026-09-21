@@ -1,10 +1,10 @@
 use crate::{cache, git};
 
-use super::{AppError, Outcome};
+use super::{AppError, IndexStage, Outcome};
 
-pub(super) fn run() -> Result<Outcome, AppError> {
+pub(super) fn run(report: &mut dyn FnMut(IndexStage)) -> Result<Outcome, AppError> {
     let repository = git::Repository::discover()?;
-    let prepared = cache::prepare(&repository)?;
+    let prepared = cache::prepare(&repository, report)?;
 
     Ok(Outcome {
         progress: prepared.progress,

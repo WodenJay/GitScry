@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use crate::{
-    app::AppError,
+    app::{AppError, IndexStage},
     git::{HistoryTarget, Repository},
 };
 
@@ -35,15 +35,19 @@ enum Plan {
     },
 }
 
-pub(crate) fn prepare(repository: &Repository) -> Result<PreparedCache, AppError> {
+pub(crate) fn prepare(
+    repository: &Repository,
+    report: &mut dyn FnMut(IndexStage),
+) -> Result<PreparedCache, AppError> {
     let (default_ref, tip) = repository.default_target()?;
-    prepare_at(repository, default_ref, tip)
+    prepare_at(repository, default_ref, tip, report)
 }
 
-pub(crate) fn prepare_at(
+fn prepare_at(
     repository: &Repository,
     default_ref: String,
     tip: String,
+    report: &mut dyn FnMut(IndexStage),
 ) -> Result<PreparedCache, AppError> {
     let expected = Expected {
         default_ref,
@@ -91,14 +95,18 @@ pub(crate) fn prepare_at(
             if damaged {
                 super::preserve_damaged(&repository.root)?;
             }
-            progress.push("Indexing local history...".to_owned());
-            let snapshot = repository.read_default_history_at(HistoryTarget {
-                default_ref: expected.default_ref.clone(),
-                tip: expected.tip.clone(),
-                object_format: expected.object_format.clone(),
-                shallow_boundaries: expected.shallow_boundaries.clone(),
-            })?;
+            report(IndexStage::ReadingCommits);
+            let snapshot = repository.read_default_history_at(
+                HistoryTarget {
+                    default_ref: expected.default_ref.clone(),
+                    tip: expected.tip.clone(),
+                    object_format: expected.object_format.clone(),
+                    shallow_boundaries: expected.shallow_boundaries.clone(),
+                },
+                report,
+            )?;
             let count = snapshot.commits.len();
+            report(IndexStage::WritingCache);
             super::publish(&repository.root, &snapshot)?;
             count
         }
@@ -107,7 +115,7 @@ pub(crate) fn prepare_at(
             missing_objects,
             newly_available,
         } => {
-            progress.push("Indexing local history...".to_owned());
+            report(IndexStage::ReadingCommits);
             let mut refresh = Vec::new();
             if state.shallow_boundaries != expected.shallow_boundaries {
                 refresh.extend(super::boundary_refreshes(&repository.root)?);
@@ -128,7 +136,9 @@ pub(crate) fn prepare_at(
                 &state.commits,
                 &refresh,
                 missing_objects,
+                report,
             )?;
+            report(IndexStage::WritingCache);
             super::append(&repository.root, &snapshot)?
         }
         Plan::Fresh { .. } => unreachable!("fresh plans return before publishing"),
@@ -152,6 +162,7 @@ pub(crate) fn prepare_at(
         }
     };
     add_warnings(&mut progress, &expected, &state.missing_objects);
+    report(IndexStage::Complete);
     Ok(PreparedCache {
         progress,
         commit_count: state.commit_count,

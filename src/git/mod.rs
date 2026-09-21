@@ -4,7 +4,7 @@ mod target;
 
 use std::path::PathBuf;
 
-use crate::app::AppError;
+use crate::app::{AppError, IndexStage};
 
 pub(crate) use history::{Change, Commit, HistoryTarget, Hunk, Snapshot};
 use process::Git;
@@ -113,8 +113,9 @@ impl Repository {
     pub(crate) fn read_default_history_at(
         &self,
         target: HistoryTarget,
+        report: &mut dyn FnMut(IndexStage),
     ) -> Result<Snapshot, AppError> {
-        history::read(&self.git, target)
+        history::read(&self.git, target, report)
     }
 
     pub(crate) fn read_incremental_history_at(
@@ -123,6 +124,7 @@ impl Repository {
         cached_commits: &[String],
         refresh_commits: &[String],
         known_missing_objects: Vec<String>,
+        report: &mut dyn FnMut(IndexStage),
     ) -> Result<Snapshot, AppError> {
         history::read_incremental(
             &self.git,
@@ -130,6 +132,7 @@ impl Repository {
             cached_commits,
             refresh_commits,
             known_missing_objects,
+            report,
         )
     }
 

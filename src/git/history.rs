@@ -1,6 +1,6 @@
 use std::{collections::HashSet, fs, path::PathBuf};
 
-use crate::app::AppError;
+use crate::app::{AppError, IndexStage};
 
 use super::process::Git;
 
@@ -51,10 +51,13 @@ pub(crate) struct Hunk {
     pub(crate) new_lines: i64,
     pub(crate) text: Vec<u8>,
 }
-
-pub(super) fn read(git: &Git, target: HistoryTarget) -> Result<Snapshot, AppError> {
+pub(super) fn read(
+    git: &Git,
+    target: HistoryTarget,
+    report: &mut dyn FnMut(IndexStage),
+) -> Result<Snapshot, AppError> {
     let graph = read_graph(git, &target.tip)?;
-    read_selected(git, target, &graph, &graph, Vec::new())
+    read_selected(git, target, &graph, &graph, Vec::new(), report)
 }
 
 pub(super) fn read_incremental(
@@ -63,6 +66,7 @@ pub(super) fn read_incremental(
     cached_commits: &[String],
     refresh_commits: &[String],
     known_missing_objects: Vec<String>,
+    report: &mut dyn FnMut(IndexStage),
 ) -> Result<Snapshot, AppError> {
     let graph = read_graph(git, &target.tip)?;
     let cached = cached_commits.iter().collect::<HashSet<_>>();
@@ -72,7 +76,14 @@ pub(super) fn read_incremental(
         .filter(|oid| !cached.contains(oid) || refresh.contains(oid))
         .cloned()
         .collect::<Vec<_>>();
-    read_selected(git, target, &graph, &selected, known_missing_objects)
+    read_selected(
+        git,
+        target,
+        &graph,
+        &selected,
+        known_missing_objects,
+        report,
+    )
 }
 
 type TraceFixData = (Commit, Option<Vec<Change>>, Option<Vec<Hunk>>);
@@ -136,8 +147,10 @@ fn read_selected(
     graph: &[String],
     selected: &[String],
     known_missing_objects: Vec<String>,
+    report: &mut dyn FnMut(IndexStage),
 ) -> Result<Snapshot, AppError> {
     let commits = read_commits(git, selected)?;
+    report(IndexStage::ReadingChanges);
     let graph_set = graph.iter().map(String::as_str).collect::<HashSet<_>>();
     let selected_set = selected.iter().map(String::as_str).collect::<HashSet<_>>();
     let diff_specs = commits
@@ -182,6 +195,7 @@ fn read_selected(
     missing_objects.sort();
     missing_objects.dedup();
 
+    report(IndexStage::ReadingPatches);
     let missing_set = selected_missing
         .iter()
         .map(String::as_str)
