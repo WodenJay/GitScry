@@ -101,3 +101,35 @@ ordinary query preparation, and known slow cases of 31.8 s for `failures`, 61.5 
 from the `large` rust validation checkout: the report never presents cross-corpus values as a
 before/after comparison. The values are approximate historical measurements, not fabricated from
 the current checkout.
+
+## Issue #24 Hermes-agent measurement
+
+This is a focused fresh-rebuild comparison on the 39,651-commit Hermes-agent checkout. Both generations reported the same missing-object warning; the v4 baseline was built from `HEAD^`, and the v5 result is the working tree generation. The cache was rebuilt from an empty `.gitscry` directory.
+
+| SQLite dbstat object | v4 before (bytes) | v5 after (bytes) |
+| --- | ---: | ---: |
+| `changes` | 54530048 | 54530048 |
+| `commit_parents` | 643072 | 643072 |
+| `commits` | 88383488 | 59863040 |
+| `hunks` | 1192742912 | 27238400 |
+| `hunk_line_blocks` | — | 189730816 |
+| `hunk_payloads` | — | 19984384 |
+| `hunk_token_blocks` | — | 122142720 |
+| `metadata` | 4096 | 4096 |
+| `missing_objects` | 4096 | 4096 |
+| `search_fts_config` | 4096 | 4096 |
+| `search_fts_data` | 40235008 | 40235008 |
+| `search_fts_docsize` | 561152 | 561152 |
+| `search_fts_idx` | 94208 | 94208 |
+| `shallow_boundaries` | 4096 | 4096 |
+| `sqlite_autoindex_changes_1` | 4677632 | 4677632 |
+| `sqlite_autoindex_commit_parents_1` | 557056 | 557056 |
+| `sqlite_autoindex_commits_1` | 475136 | 475136 |
+| `sqlite_autoindex_commits_2` | 2158592 | 2158592 |
+| `sqlite_autoindex_hunks_1` | 15671296 | 15671296 |
+| `sqlite_autoindex_metadata_1` | 4096 | 4096 |
+| `sqlite_autoindex_missing_objects_1` | 4096 | 4096 |
+| `sqlite_autoindex_shallow_boundaries_1` | 4096 | 4096 |
+| `sqlite_schema` | 4096 | 4096 |
+
+The total cache fell from `1405886464` to `543727616` bytes: **61.32% smaller** (38.68% of the measured baseline). One fresh release rebuild measured v4 at 493 s and 4429082624-byte peak RSS, versus v5 at 432.773 s and 4320530432-byte peak RSS: wall time improved 12.22% and peak RSS improved 2.45%. This focused measurement is separate from the five-sample cross-repository harness above.
