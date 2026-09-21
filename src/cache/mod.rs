@@ -1,22 +1,22 @@
 mod generation;
+mod payload;
 mod schema;
-pub(crate) use generation::prepare;
-
-use rusqlite::{Connection, OpenFlags, OptionalExtension, params, params_from_iter};
-use std::{
-    collections::{HashMap, HashSet},
-    fs::{self, File, OpenOptions},
-    path::{Path, PathBuf},
-    thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
-
 use crate::{
     analysis,
     app::AppError,
     git::{Change, Commit, Hunk, Snapshot},
 };
-const SCHEMA_VERSION: &str = "3";
+pub(crate) use generation::prepare;
+use payload::encode;
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params, params_from_iter};
+use std::collections::{HashMap, HashSet};
+use std::{
+    fs::{self, File, OpenOptions},
+    path::{Path, PathBuf},
+    thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+const SCHEMA_VERSION: &str = "4";
 const WAITING_MESSAGE: &str = "Waiting for another GitScry process...";
 
 struct CacheState {
@@ -32,6 +32,7 @@ struct CacheState {
 
 enum Inspection {
     Missing,
+    Stale,
     Damaged,
     Ready(CacheState),
 }
@@ -160,6 +161,13 @@ fn inspect(root: &Path) -> Inspection {
     else {
         return Inspection::Damaged;
     };
+    if metadata(&connection, "schema_version")
+        .ok()
+        .flatten()
+        .is_some_and(|version| version != SCHEMA_VERSION)
+    {
+        return Inspection::Stale;
+    }
     match inspect_connection(&connection) {
         Ok(state) => Inspection::Ready(state),
         Err(()) => Inspection::Damaged,
@@ -186,7 +194,6 @@ fn inspect_connection(connection: &Connection) -> Result<CacheState, ()> {
         "shallow_boundaries",
         "missing_objects",
         "commits",
-        "search_documents",
         "search_fts",
         "commit_parents",
         "changes",
@@ -231,11 +238,9 @@ fn inspect_connection(connection: &Connection) -> Result<CacheState, ()> {
     )?;
 
     let commit_count = count(connection, "SELECT COUNT(*) FROM commits")?;
-    let document_count = count(connection, "SELECT COUNT(*) FROM search_documents")?;
     let fts_count = count(connection, "SELECT COUNT(*) FROM search_fts")?;
     let fts_document_count = count(connection, "SELECT COUNT(*) FROM search_fts_docsize")?;
     if commit_count != completed_count as i64
-        || document_count != commit_count
         || fts_count != commit_count
         || fts_document_count != commit_count
     {
@@ -350,7 +355,7 @@ fn validate_query_metadata(connection: &Connection) -> Result<(), AppError> {
     let schema_version = query_metadata(connection, "schema_version")?;
     if schema_version.as_deref() != Some(SCHEMA_VERSION) {
         return Err(query_error(
-            "published cache schema is stale or unsupported",
+            "published cache schema is stale or unsupported; run `gitscry index`",
         ));
     }
     let completed_tip = query_metadata(connection, "completed_tip")?;
@@ -462,19 +467,12 @@ fn append(root: &Path, snapshot: &Snapshot) -> Result<usize, AppError> {
     let transaction = connection
         .transaction()
         .map_err(|error| cache_error("starting cache transaction", error))?;
-    let mut paths_by_commit = HashMap::<String, Vec<Vec<u8>>>::new();
-    for change in &snapshot.changes {
-        let paths = paths_by_commit
-            .entry(change.commit_oid.clone())
-            .or_default();
-        for path in [&change.old_path, &change.new_path].into_iter().flatten() {
-            if !paths.iter().any(|existing| existing == path) {
-                paths.push(path.clone());
-            }
-        }
-    }
+    let paths_by_commit = paths_by_commit(snapshot);
     for commit in &snapshot.commits {
         replace_commit(&transaction, commit)?;
+    }
+    for commit in &snapshot.commits {
+        insert_parents(&transaction, commit)?;
         insert_document(
             &transaction,
             commit,
@@ -508,8 +506,8 @@ fn append(root: &Path, snapshot: &Snapshot) -> Result<usize, AppError> {
             .map_err(|error| cache_error("writing missing object", error))?;
     }
     transaction
-        .execute("INSERT INTO search_fts(search_fts) VALUES ('rebuild')", [])
-        .map_err(|error| cache_error("updating search index", error))?;
+        .execute("INSERT INTO search_fts(search_fts) VALUES ('optimize')", [])
+        .map_err(|error| cache_error("optimizing search index", error))?;
     let commit_count = count_connection(&transaction, "SELECT COUNT(*) FROM commits")?;
     validate_connection(&transaction, commit_count)?;
     transaction
@@ -535,20 +533,12 @@ fn build(path: &Path, snapshot: &Snapshot) -> Result<(), AppError> {
         .transaction()
         .map_err(|error| cache_error("starting cache transaction", error))?;
     replace_metadata(&transaction, snapshot)?;
-
-    let mut paths_by_commit = HashMap::<String, Vec<Vec<u8>>>::new();
-    for change in &snapshot.changes {
-        let paths = paths_by_commit
-            .entry(change.commit_oid.clone())
-            .or_default();
-        for path in [&change.old_path, &change.new_path].into_iter().flatten() {
-            if !paths.iter().any(|existing| existing == path) {
-                paths.push(path.clone());
-            }
-        }
-    }
+    let paths_by_commit = paths_by_commit(snapshot);
     for commit in &snapshot.commits {
         insert_commit(&transaction, commit)?;
+    }
+    for commit in &snapshot.commits {
+        insert_parents(&transaction, commit)?;
         insert_document(
             &transaction,
             commit,
@@ -575,14 +565,29 @@ fn build(path: &Path, snapshot: &Snapshot) -> Result<(), AppError> {
             .map_err(|error| cache_error("writing missing object", error))?;
     }
     transaction
-        .execute("INSERT INTO search_fts(search_fts) VALUES ('rebuild')", [])
-        .map_err(|error| cache_error("building search index", error))?;
+        .execute("INSERT INTO search_fts(search_fts) VALUES ('optimize')", [])
+        .map_err(|error| cache_error("optimizing search index", error))?;
     transaction
         .commit()
         .map_err(|error| cache_error("committing staging cache", error))?;
     connection
         .close()
         .map_err(|(_, error)| cache_error("closing staging cache", error))
+}
+
+fn paths_by_commit(snapshot: &Snapshot) -> HashMap<String, Vec<Vec<u8>>> {
+    let mut paths_by_commit = HashMap::<String, Vec<Vec<u8>>>::new();
+    for change in &snapshot.changes {
+        let paths = paths_by_commit
+            .entry(change.commit_oid.clone())
+            .or_default();
+        for path in [&change.old_path, &change.new_path].into_iter().flatten() {
+            if !paths.iter().any(|existing| existing == path) {
+                paths.push(path.clone());
+            }
+        }
+    }
+    paths_by_commit
 }
 
 fn replace_metadata(connection: &Connection, snapshot: &Snapshot) -> Result<(), AppError> {
@@ -605,61 +610,106 @@ fn replace_metadata(connection: &Connection, snapshot: &Snapshot) -> Result<(), 
 }
 
 fn replace_commit(connection: &Connection, commit: &Commit) -> Result<(), AppError> {
-    connection
-        .execute("DELETE FROM hunks WHERE commit_oid = ?1", [&commit.oid])
-        .map_err(|error| cache_error("removing old hunks", error))?;
-    connection
-        .execute("DELETE FROM changes WHERE commit_oid = ?1", [&commit.oid])
-        .map_err(|error| cache_error("removing old changes", error))?;
-    connection
-        .execute(
-            "DELETE FROM search_documents WHERE commit_oid = ?1",
+    let existing: Option<i64> = connection
+        .query_row(
+            "SELECT commit_id FROM commits WHERE oid = ?1",
             [&commit.oid],
+            |row| row.get(0),
         )
-        .map_err(|error| cache_error("removing old search document", error))?;
-    connection
-        .execute(
-            "DELETE FROM commit_parents WHERE commit_oid = ?1",
-            [&commit.oid],
-        )
-        .map_err(|error| cache_error("removing old commit parents", error))?;
-    let updated = connection
-        .execute(
-            "UPDATE commits SET message = ?2, commit_time = ?3 WHERE oid = ?1",
-            params![commit.oid, commit.message, commit.time],
-        )
-        .map_err(|error| cache_error("updating commit", error))?;
-    if updated == 0 {
+        .optional()
+        .map_err(|error| cache_error("looking up commit", error))?;
+    if let Some(commit_id) = existing {
         connection
             .execute(
-                "INSERT INTO commits(oid, message, commit_time) VALUES (?1, ?2, ?3)",
-                params![commit.oid, commit.message, commit.time],
+                "DELETE FROM hunks WHERE change_id IN (
+                    SELECT change_id FROM changes WHERE commit_id = ?1
+                )",
+                [commit_id],
             )
-            .map_err(|error| cache_error("writing commit", error))?;
+            .map_err(|error| cache_error("removing old hunks", error))?;
+        connection
+            .execute("DELETE FROM changes WHERE commit_id = ?1", [commit_id])
+            .map_err(|error| cache_error("removing old changes", error))?;
+        connection
+            .execute("DELETE FROM search_fts WHERE rowid = ?1", [commit_id])
+            .map_err(|error| cache_error("removing old search document", error))?;
+        connection
+            .execute(
+                "DELETE FROM commit_parents WHERE commit_id = ?1",
+                [commit_id],
+            )
+            .map_err(|error| cache_error("removing old commit parents", error))?;
+        connection
+            .execute(
+                "UPDATE commits SET message = ?2, commit_time = ?3 WHERE commit_id = ?1",
+                params![commit_id, commit.message, commit.time],
+            )
+            .map_err(|error| cache_error("updating commit", error))?;
+    } else {
+        insert_commit(connection, commit)?;
     }
-    insert_parents(connection, commit)
+    Ok(())
 }
 
 fn insert_commit(connection: &Connection, commit: &Commit) -> Result<(), AppError> {
     connection
         .execute(
-            "INSERT INTO commits(oid, message, commit_time) VALUES (?1, ?2, ?3)",
+            "INSERT INTO commits(position, oid, message, commit_time)
+             VALUES ((SELECT COALESCE(MAX(position), -1) + 1 FROM commits), ?1, ?2, ?3)",
             params![commit.oid, commit.message, commit.time],
         )
         .map_err(|error| cache_error("writing commit", error))?;
-    insert_parents(connection, commit)
+    Ok(())
 }
 
 fn insert_parents(connection: &Connection, commit: &Commit) -> Result<(), AppError> {
+    let commit_id = commit_id(connection, &commit.oid)?;
     for (position, parent) in commit.parents.iter().enumerate() {
+        let parent_id: Option<i64> = connection
+            .query_row(
+                "SELECT commit_id FROM commits WHERE oid = ?1",
+                [parent],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| cache_error("looking up commit parent", error))?;
         connection
             .execute(
-                "INSERT INTO commit_parents(commit_oid, position, parent_oid) VALUES (?1, ?2, ?3)",
-                params![commit.oid, position as i64, parent],
+                "INSERT INTO commit_parents(commit_id, position, parent_id, external_oid)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    commit_id,
+                    position as i64,
+                    parent_id,
+                    parent_id.is_none().then_some(parent)
+                ],
             )
             .map_err(|error| cache_error("writing commit parent", error))?;
     }
     Ok(())
+}
+
+fn commit_id(connection: &Connection, oid: &str) -> Result<i64, AppError> {
+    connection
+        .query_row(
+            "SELECT commit_id FROM commits WHERE oid = ?1",
+            [oid],
+            |row| row.get(0),
+        )
+        .map_err(|error| cache_error("looking up commit", error))
+}
+
+fn change_id(connection: &Connection, oid: &str, ordinal: i64) -> Result<i64, AppError> {
+    connection
+        .query_row(
+            "SELECT ch.change_id
+             FROM changes AS ch
+             JOIN commits AS c ON c.commit_id = ch.commit_id
+             WHERE c.oid = ?1 AND ch.ordinal = ?2",
+            params![oid, ordinal],
+            |row| row.get(0),
+        )
+        .map_err(|error| cache_error("looking up change", error))
 }
 
 fn insert_document(
@@ -676,21 +726,24 @@ fn insert_document(
         .collect::<Vec<_>>()
         .join("\n");
     let paths = analysis::searchable_text(&paths);
+    let commit_id = commit_id(connection, &commit.oid)?;
     connection
         .execute(
-            "INSERT INTO search_documents(commit_oid, subject, body, paths) VALUES (?1, ?2, ?3, ?4)",
-            params![commit.oid, subject, body, paths],
+            "INSERT INTO search_fts(rowid, subject, body, paths) VALUES (?1, ?2, ?3, ?4)",
+            params![commit_id, subject, body, paths],
         )
         .map_err(|error| cache_error("writing search document", error))?;
     Ok(())
 }
 
 fn insert_change(connection: &Connection, change: &Change) -> Result<(), AppError> {
+    let commit_id = commit_id(connection, &change.commit_oid)?;
     connection
         .execute(
-            "INSERT INTO changes VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            "INSERT INTO changes(commit_id, ordinal, status, old_path, new_path, old_blob, new_blob, old_mode, new_mode)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
-                change.commit_oid,
+                commit_id,
                 change.ordinal,
                 change.status,
                 change.old_path,
@@ -706,22 +759,92 @@ fn insert_change(connection: &Connection, change: &Change) -> Result<(), AppErro
 }
 
 fn insert_hunk(connection: &Connection, hunk: &Hunk) -> Result<(), AppError> {
+    let change_id = change_id(connection, &hunk.commit_oid, hunk.change_ordinal)?;
+    let (text, text_length) = encode(&hunk.text);
     connection
         .execute(
-            "INSERT INTO hunks VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO hunks(change_id, ordinal, old_start, old_lines, new_start, new_lines, text, text_length)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
-                hunk.commit_oid,
-                hunk.change_ordinal,
+                change_id,
                 hunk.ordinal,
                 hunk.old_start,
                 hunk.old_lines,
                 hunk.new_start,
                 hunk.new_lines,
-                hunk.text,
+                text,
+                text_length,
             ],
         )
-        .map_err(|error| cache_error("writing text hunk", error))?;
+        .map_err(|error| cache_error("writing compressed text hunk", error))?;
     Ok(())
+}
+
+pub(crate) struct DecodedHunk {
+    pub(crate) change_ordinal: i64,
+    pub(crate) old_start: i64,
+    pub(crate) old_lines: i64,
+    pub(crate) new_start: i64,
+    pub(crate) new_lines: i64,
+    pub(crate) text: Vec<u8>,
+}
+
+pub(crate) fn read_hunks(connection: &Connection, oid: &str) -> Result<Vec<DecodedHunk>, AppError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT ch.ordinal, h.old_start, h.old_lines, h.new_start, h.new_lines, h.ordinal, h.text, h.text_length
+             FROM commits AS c
+             JOIN changes AS ch ON ch.commit_id = c.commit_id
+             JOIN hunks AS h ON h.change_id = ch.change_id
+             WHERE c.oid = ?1
+             ORDER BY ch.ordinal, h.ordinal",
+        )
+        .map_err(|error| cache_error("preparing compressed text hunks", error))?;
+    let rows = statement
+        .query_map([oid], |row| {
+            let change_ordinal = row.get::<_, i64>(0)?;
+            let hunk_ordinal = row.get::<_, i64>(5)?;
+            let compressed: Vec<u8> = row.get(6)?;
+            let length = row.get(7)?;
+            Ok((
+                change_ordinal,
+                hunk_ordinal,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                compressed,
+                length,
+            ))
+        })
+        .map_err(|error| cache_error("reading compressed text hunks", error))?;
+    let mut hunks = Vec::new();
+    for row in rows {
+        let (
+            change_ordinal,
+            hunk_ordinal,
+            old_start,
+            old_lines,
+            new_start,
+            new_lines,
+            compressed,
+            length,
+        ) = row.map_err(|error| cache_error("reading compressed text hunks", error))?;
+        let text = payload::decode(
+            &compressed,
+            length,
+            &format!("{oid}/change {change_ordinal}/hunk {hunk_ordinal}"),
+        )?;
+        hunks.push(DecodedHunk {
+            change_ordinal,
+            old_start,
+            old_lines,
+            new_start,
+            new_lines,
+            text,
+        });
+    }
+    Ok(hunks)
 }
 
 fn validate(path: &Path, expected_commits: usize) -> Result<(), AppError> {
@@ -744,10 +867,9 @@ fn validate_connection(connection: &Connection, expected_commits: i64) -> Result
         ));
     }
     let count = count_connection(connection, "SELECT COUNT(*) FROM commits")?;
-    let documents = count_connection(connection, "SELECT COUNT(*) FROM search_documents")?;
     let fts = count_connection(connection, "SELECT COUNT(*) FROM search_fts_docsize")?;
     let fts_rows = count_connection(connection, "SELECT COUNT(*) FROM search_fts")?;
-    if count != expected_commits || documents != count || fts != count || fts_rows != count {
+    if count != expected_commits || fts != count || fts_rows != count {
         return Err(AppError::operational(
             "error: validating cache transaction failed; retry",
         ));
@@ -814,9 +936,11 @@ fn commits_for_objects(root: &Path, objects: &[String]) -> Result<Vec<String>, A
         .collect::<Vec<_>>()
         .join(", ");
     let query = format!(
-        "SELECT DISTINCT commit_oid FROM changes
-         WHERE old_blob IN ({placeholders}) OR new_blob IN ({placeholders})
-         ORDER BY commit_oid"
+        "SELECT DISTINCT c.oid
+         FROM changes AS ch
+         JOIN commits AS c ON c.commit_id = ch.commit_id
+         WHERE ch.old_blob IN ({placeholders}) OR ch.new_blob IN ({placeholders})
+         ORDER BY c.oid",
     );
     let values = objects.iter().chain(objects.iter());
     let connection = Connection::open_with_flags(
@@ -846,10 +970,11 @@ fn boundary_refreshes(root: &Path) -> Result<Vec<String>, AppError> {
         .collect::<HashSet<_>>();
     let mut statement = connection
         .prepare(
-            "SELECT c.oid, p.parent_oid
+            "SELECT c.oid, COALESCE(parent.oid, p.external_oid)
              FROM commits AS c
              LEFT JOIN commit_parents AS p
-               ON p.commit_oid = c.oid AND p.position = 0",
+               ON p.commit_id = c.commit_id AND p.position = 0
+             LEFT JOIN commits AS parent ON parent.commit_id = p.parent_id",
         )
         .map_err(|error| cache_error("preparing boundary lookup", error))?;
     let mut refresh = statement

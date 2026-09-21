@@ -99,7 +99,10 @@ fn root_merge_and_binary_history_are_persisted() {
     );
     let root_change: (String, Option<Vec<u8>>, Vec<u8>) = cache
         .query_row(
-            "SELECT status, old_path, new_path FROM changes WHERE commit_oid = ?1",
+            "SELECT ch.status, ch.old_path, ch.new_path
+             FROM changes AS ch
+             JOIN commits AS c ON c.commit_id = ch.commit_id
+             WHERE c.oid = ?1",
             [&root],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
@@ -107,7 +110,14 @@ fn root_merge_and_binary_history_are_persisted() {
     assert_eq!(root_change, ("A".to_owned(), None, b"root.txt".to_vec()));
 
     let parents: Vec<String> = cache
-        .prepare("SELECT parent_oid FROM commit_parents WHERE commit_oid = ?1 ORDER BY position")
+        .prepare(
+            "SELECT COALESCE(parent.oid, p.external_oid)
+             FROM commit_parents AS p
+             JOIN commits AS c ON c.commit_id = p.commit_id
+             LEFT JOIN commits AS parent ON parent.commit_id = p.parent_id
+             WHERE c.oid = ?1
+             ORDER BY p.position",
+        )
         .unwrap()
         .query_map([&merge], |row| row.get(0))
         .unwrap()
@@ -115,7 +125,13 @@ fn root_merge_and_binary_history_are_persisted() {
         .unwrap();
     assert_eq!(parents, vec![main, side]);
     let merge_paths: Vec<Vec<u8>> = cache
-        .prepare("SELECT new_path FROM changes WHERE commit_oid = ?1 ORDER BY ordinal")
+        .prepare(
+            "SELECT ch.new_path
+             FROM changes AS ch
+             JOIN commits AS c ON c.commit_id = ch.commit_id
+             WHERE c.oid = ?1
+             ORDER BY ch.ordinal",
+        )
         .unwrap()
         .query_map([&merge], |row| row.get(0))
         .unwrap()
@@ -126,7 +142,10 @@ fn root_merge_and_binary_history_are_persisted() {
     assert_eq!(
         cache
             .query_row(
-                "SELECT COUNT(*) FROM changes WHERE commit_oid = ?1",
+                "SELECT COUNT(*)
+                 FROM changes AS ch
+                 JOIN commits AS c ON c.commit_id = ch.commit_id
+                 WHERE c.oid = ?1",
                 [&binary],
                 |row| row.get::<_, i64>(0),
             )
@@ -136,7 +155,11 @@ fn root_merge_and_binary_history_are_persisted() {
     assert_eq!(
         cache
             .query_row(
-                "SELECT COUNT(*) FROM hunks WHERE commit_oid = ?1",
+                "SELECT COUNT(*)
+                 FROM hunks AS h
+                 JOIN changes AS ch ON ch.change_id = h.change_id
+                 JOIN commits AS c ON c.commit_id = ch.commit_id
+                 WHERE c.oid = ?1",
                 [&binary],
                 |row| row.get::<_, i64>(0),
             )
@@ -294,7 +317,10 @@ fn shallow_merge_keeps_parents_and_reindexes_after_deepening() {
     assert_eq!(
         cache
             .query_row(
-                "SELECT COUNT(*) FROM commit_parents WHERE commit_oid = ?1",
+                "SELECT COUNT(*)
+                 FROM commit_parents AS p
+                 JOIN commits AS c ON c.commit_id = p.commit_id
+                 WHERE c.oid = ?1",
                 [&merge],
                 |row| row.get::<_, i64>(0),
             )
@@ -304,7 +330,10 @@ fn shallow_merge_keeps_parents_and_reindexes_after_deepening() {
     assert_eq!(
         cache
             .query_row(
-                "SELECT COUNT(*) FROM changes WHERE commit_oid = ?1",
+                "SELECT COUNT(*)
+                 FROM changes AS ch
+                 JOIN commits AS c ON c.commit_id = ch.commit_id
+                 WHERE c.oid = ?1",
                 [&merge],
                 |row| row.get::<_, i64>(0),
             )
@@ -334,7 +363,13 @@ fn shallow_merge_keeps_parents_and_reindexes_after_deepening() {
         4
     );
     let merge_paths: Vec<Vec<u8>> = cache
-        .prepare("SELECT new_path FROM changes WHERE commit_oid = ?1 ORDER BY ordinal")
+        .prepare(
+            "SELECT ch.new_path
+             FROM changes AS ch
+             JOIN commits AS c ON c.commit_id = ch.commit_id
+             WHERE c.oid = ?1
+             ORDER BY ch.ordinal",
+        )
         .unwrap()
         .query_map([&merge], |row| row.get(0))
         .unwrap()
@@ -389,7 +424,10 @@ fn fast_forward_updates_one_completed_generation() {
     assert_eq!(
         cache
             .query_row(
-                "SELECT COUNT(*) FROM changes WHERE commit_oid = ?1",
+                "SELECT COUNT(*)
+                 FROM changes AS ch
+                 JOIN commits AS c ON c.commit_id = ch.commit_id
+                 WHERE c.oid = ?1",
                 [&first],
                 |row| row.get::<_, i64>(0),
             )

@@ -30,7 +30,12 @@ pub(in crate::analysis) fn change_sets(
 ) -> Result<Vec<ChangeSet>, AppError> {
     let mut statement = connection
         .prepare(
-            "SELECT c.oid, c.commit_time, c.message,\n                    (SELECT COUNT(*) FROM commit_parents WHERE commit_oid = c.oid) > 1,\n                    ch.old_path, ch.new_path\n             FROM commits AS c\n             JOIN changes AS ch ON ch.commit_oid = c.oid\n             ORDER BY c.rowid, ch.ordinal",
+            "SELECT c.oid, c.commit_time, c.message,
+                    (SELECT COUNT(*) FROM commit_parents WHERE commit_id = c.commit_id) > 1,
+                    ch.old_path, ch.new_path
+             FROM commits AS c
+             JOIN changes AS ch ON ch.commit_id = c.commit_id
+             ORDER BY c.position, ch.ordinal",
         )
         .map_err(|error| search_error("preparing relation history", error))?;
     let rows = statement
@@ -97,10 +102,9 @@ pub(in crate::analysis) fn candidates(
 ) -> Result<Vec<Stored>, AppError> {
     let mut statement = connection
         .prepare(
-            "SELECT c.oid, c.commit_time, c.message, bm25(search_fts, 10.0, 3.0, 2.0), c.rowid
+            "SELECT c.oid, c.commit_time, c.message, bm25(search_fts, 10.0, 3.0, 2.0), c.position
              FROM search_fts
-             JOIN search_documents AS d ON d.rowid = search_fts.rowid
-             JOIN commits AS c ON c.oid = d.commit_oid
+             JOIN commits AS c ON c.commit_id = search_fts.rowid
              WHERE search_fts MATCH ?1
              ORDER BY bm25(search_fts, 10.0, 3.0, 2.0), c.commit_time DESC, c.oid ASC
              LIMIT ?2",
@@ -132,7 +136,13 @@ pub(in crate::analysis) fn candidates(
 
 pub(super) fn changed_paths(connection: &Connection, oid: &str) -> Result<Vec<Vec<u8>>, AppError> {
     let mut statement = connection
-        .prepare("SELECT old_path, new_path FROM changes WHERE commit_oid = ?1 ORDER BY ordinal")
+        .prepare(
+            "SELECT ch.old_path, ch.new_path
+             FROM changes AS ch
+             JOIN commits AS c ON c.commit_id = ch.commit_id
+             WHERE c.oid = ?1
+             ORDER BY ch.ordinal",
+        )
         .map_err(|error| search_error("preparing changed paths", error))?;
     let rows = statement
         .query_map([oid], |row| {
@@ -162,7 +172,11 @@ pub(in crate::analysis) fn steps(
 ) -> Result<Vec<Step>, AppError> {
     let mut statement = connection
         .prepare(
-            "SELECT status, old_path, new_path FROM changes WHERE commit_oid = ?1 ORDER BY ordinal",
+            "SELECT ch.status, ch.old_path, ch.new_path
+             FROM changes AS ch
+             JOIN commits AS c ON c.commit_id = ch.commit_id
+             WHERE c.oid = ?1
+             ORDER BY ch.ordinal",
         )
         .map_err(|error| search_error("preparing change shapes", error))?;
     let rows = statement
@@ -215,7 +229,7 @@ pub(in crate::analysis) struct StoredCommit {
 /// Every cached commit, oldest first.
 pub(in crate::analysis) fn history(connection: &Connection) -> Result<Vec<StoredCommit>, AppError> {
     let mut statement = connection
-        .prepare("SELECT rowid, oid, message FROM commits ORDER BY commit_time, oid")
+        .prepare("SELECT position, oid, message FROM commits ORDER BY commit_time, oid")
         .map_err(|error| search_error("preparing history scan", error))?;
     statement
         .query_map([], |row| {
@@ -249,8 +263,8 @@ pub(in crate::analysis) fn touch_between(
     let query = format!(
         "SELECT COUNT(*)
          FROM commits AS c
-         JOIN changes AS ch ON ch.commit_oid = c.oid
-         WHERE c.rowid > ?1 AND c.rowid < ?2
+         JOIN changes AS ch ON ch.commit_id = c.commit_id
+         WHERE c.position > ?1 AND c.position < ?2
            AND (ch.old_path IN ({placeholders}) OR ch.new_path IN ({placeholders}))",
     );
     let values = [Value::Integer(from_position), Value::Integer(to_position)]
@@ -272,19 +286,21 @@ pub(in crate::analysis) fn corrective_follow_up(
     revert_oid: &str,
     paths: &[Vec<u8>],
 ) -> Result<Option<(String, String)>, AppError> {
-    // The placeholder list is interpolated twice, once per IN list.
+    if paths.is_empty() {
+        return Ok(None);
+    }
     let placeholders = std::iter::repeat_n("?", paths.len())
         .collect::<Vec<_>>()
         .join(", ");
     let query = format!(
         "SELECT c.oid, c.message
          FROM commits AS c
-         JOIN changes AS ch ON ch.commit_oid = c.oid
-         WHERE c.rowid > (SELECT rowid FROM commits WHERE oid = ?1)
-           AND c.oid NOT IN (SELECT oid FROM commits WHERE oid = ?1)
+         JOIN changes AS ch ON ch.commit_id = c.commit_id
+         WHERE c.position > (SELECT position FROM commits WHERE oid = ?1)
+           AND c.oid <> ?1
            AND (ch.old_path IN ({placeholders}) OR ch.new_path IN ({placeholders}))
-         GROUP BY c.oid
-         ORDER BY c.rowid ASC",
+         GROUP BY c.commit_id
+         ORDER BY c.position ASC",
     );
     let values = std::iter::once(Value::Text(revert_oid.to_owned()))
         .chain(paths.iter().map(|path| Value::Blob(path.clone())))

@@ -107,6 +107,59 @@ fn query_rejects_a_damaged_published_cache_without_repairing_it() {
 }
 
 #[test]
+fn index_rebuilds_stale_schema_without_preserving_it_as_corrupt() {
+    let repo = TestRepo::new();
+    repo.commit("history.txt", b"history\n", "History");
+    repo.index();
+
+    let cache = Connection::open(repo.dir.path().join(".gitscry/cache.sqlite")).unwrap();
+    cache
+        .execute(
+            "UPDATE metadata SET value = '3' WHERE key = 'schema_version'",
+            [],
+        )
+        .unwrap();
+    drop(cache);
+
+    let output = repo.run(["index"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert!(
+        !fs::read_dir(repo.dir.path().join(".gitscry"))
+            .unwrap()
+            .flatten()
+            .any(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("cache.sqlite.corrupt-")
+            })
+    );
+    let search = repo.run(["search", "history"]);
+    assert_eq!(search.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&search.stdout).contains("History"));
+}
+
+#[test]
+fn query_rejects_a_stale_schema_with_index_instruction() {
+    let repo = TestRepo::new();
+    repo.commit("history.txt", b"history\n", "History");
+    repo.index();
+
+    let cache = Connection::open(repo.dir.path().join(".gitscry/cache.sqlite")).unwrap();
+    cache
+        .execute(
+            "UPDATE metadata SET value = '3' WHERE key = 'schema_version'",
+            [],
+        )
+        .unwrap();
+    drop(cache);
+
+    let output = repo.run(["search", "history"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("run `gitscry index`"));
+}
+
+#[test]
 fn query_rejects_missing_completion_metadata_without_repairing_it() {
     let repo = TestRepo::new();
     repo.commit("history.txt", b"history\n", "History");

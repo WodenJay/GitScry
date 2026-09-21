@@ -52,17 +52,17 @@ pub(in crate::analysis) fn path_history(
         }
         let mut statement = connection
             .prepare(
-                "SELECT c.rowid, c.oid, c.commit_time, c.message,
+                "SELECT c.position, c.oid, c.commit_time, c.message,
                         ch.ordinal, ch.status, ch.old_path, ch.new_path,
                         ch.old_blob, ch.new_blob,
-                        (SELECT COUNT(*) FROM commit_parents p WHERE p.commit_oid = c.oid)
+                        (SELECT COUNT(*) FROM commit_parents p WHERE p.commit_id = c.commit_id)
                  FROM commits AS c
-                 JOIN changes AS ch ON ch.commit_oid = c.oid
-                 WHERE c.oid IN (
-                     SELECT anchored.commit_oid FROM changes AS anchored
+                 JOIN changes AS ch ON ch.commit_id = c.commit_id
+                 WHERE c.commit_id IN (
+                     SELECT anchored.commit_id FROM changes AS anchored
                      WHERE anchored.old_path = ?1 OR anchored.new_path = ?1
                  )
-                 ORDER BY c.rowid DESC, ch.ordinal",
+                 ORDER BY c.position DESC, ch.ordinal",
             )
             .map_err(|error| search_error("preparing anchored history", error))?;
         let rows = statement
@@ -155,7 +155,13 @@ pub(in crate::analysis) fn path_history(
 
 pub(crate) fn ancestors(connection: &Connection, oid: &str) -> Result<HashSet<String>, AppError> {
     let mut statement = connection
-        .prepare("SELECT parent_oid FROM commit_parents WHERE commit_oid = ?1 ORDER BY position")
+        .prepare(
+            "SELECT COALESCE(parent.oid, p.external_oid)
+             FROM commit_parents AS p
+             LEFT JOIN commits AS parent ON parent.commit_id = p.parent_id
+             WHERE p.commit_id = (SELECT commit_id FROM commits WHERE oid = ?1)
+             ORDER BY p.position",
+        )
         .map_err(|error| search_error("preparing commit ancestry", error))?;
     let mut pending = vec![oid.to_owned()];
     let mut ancestors = HashSet::new();
@@ -177,26 +183,19 @@ pub(in crate::analysis) fn hunks(
     connection: &Connection,
     oid: &str,
 ) -> Result<Vec<HistoryHunk>, AppError> {
-    let mut statement = connection
-        .prepare(
-            "SELECT change_ordinal, old_start, old_lines, new_start, new_lines, text
-             FROM hunks WHERE commit_oid = ?1 ORDER BY change_ordinal, ordinal",
-        )
-        .map_err(|error| search_error("preparing anchored hunks", error))?;
-    statement
-        .query_map([oid], |row| {
-            Ok(HistoryHunk {
-                change_ordinal: row.get(0)?,
-                old_start: row.get(1)?,
-                old_lines: row.get(2)?,
-                new_start: row.get(3)?,
-                new_lines: row.get(4)?,
-                text: row.get(5)?,
+    crate::cache::read_hunks(connection, oid).map(|hunks| {
+        hunks
+            .into_iter()
+            .map(|hunk| HistoryHunk {
+                change_ordinal: hunk.change_ordinal,
+                old_start: hunk.old_start,
+                old_lines: hunk.old_lines,
+                new_start: hunk.new_start,
+                new_lines: hunk.new_lines,
+                text: hunk.text,
             })
-        })
-        .map_err(|error| search_error("reading anchored hunks", error))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| search_error("reading anchored hunks", error))
+            .collect()
+    })
 }
 
 pub(in crate::analysis) fn has_missing_objects(
