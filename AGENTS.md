@@ -4,7 +4,7 @@
 
 - If you need to create a worktree, save it to ./.worktrees. Ask me before using worktrees.
 - After each logically self-contained change, stage and create a new commit. Follow /caveman-commit skill for commit messages.
-- If /implement skill is used, after finishing the whole task: mini-reviewer then find bugs -> add test (if possible; **never write complex and meaningless test**) -> RED -> fix bugs -> GREEN -> done. **Do NOT re-review after fixing bugs. One task, one batch review**.
+- If /implement skill is used, after finishing the whole task: reviewer then find bugs -> add test (if possible; **never write complex and meaningless test**) -> RED -> fix bugs -> GREEN -> done. **Do NOT re-review after fixing bugs. One task, one batch review**.
 - Keep code clean and intentional with /codebase-design skill; prefer clarity over compatibility. Give each module one reason to change, with a small public interface over a private implementation.
 
 ## Cargo Rules
