@@ -15,17 +15,7 @@ pub(super) struct Cli {
 const ROOT_LONG_HELP: &str = "\
 Your Git history is a treasure trove. GitScry uncovers the implementation examples, failed approaches, code relationships, and regression context hidden inside.
 
-GitScry reads the history of the repository you run it in, keeps a rebuildable local cache derived from that history, and returns material traceable to the commits, paths, and diffs behind it. Git remains the source of truth. Pick one command by intent:
-
-  - General historical material about a topic: gitscry search
-  - Reusable precedents for a change you plan to make: gitscry examples
-  - Abandoned or reverted approaches to learn from: gitscry failures
-  - Paths that historically changed together: gitscry related
-  - Current test paths for the code you are changing: gitscry tests
-  - Suspects that may have introduced a regression: gitscry regression
-  - The history behind one line or symbol: gitscry why
-  - The introducing change and observed failure behind a known fix: gitscry trace-fix
-  - Explicit construction of the local cache: gitscry index";
+Pick one command by intent, then run `gitscry <command> --help` for inputs, options, and examples.";
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
