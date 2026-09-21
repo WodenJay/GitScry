@@ -2,6 +2,7 @@ use clap::{ArgGroup, Parser, Subcommand};
 
 #[derive(Debug, Parser)]
 #[command(
+    bin_name = "gitscry",
     name = "gitscry",
     version,
     color = clap::ColorChoice::Never,
