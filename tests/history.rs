@@ -27,12 +27,7 @@ impl TestRepo {
         self.head()
     }
 
-    fn commit_files_at(
-        &self,
-        files: &[(&str, &[u8])],
-        message: &str,
-        date: &str,
-    ) -> String {
+    fn commit_files_at(&self, files: &[(&str, &[u8])], message: &str, date: &str) -> String {
         for (path, contents) in files {
             if let Some(parent) = Path::new(path).parent() {
                 fs::create_dir_all(self.dir.path().join(parent)).expect("create parent directory");
@@ -802,7 +797,10 @@ fn failures_resolve_unique_abbreviated_revert_trailers() {
     let text = stdout(&output);
     let entry = block(&text, &abandoned[..12]);
     assert!(entry.contains(&revert[..12]), "{entry}");
-    assert!(entry.contains("reason: Reason: the predicate was too broad"), "{entry}");
+    assert!(
+        entry.contains("reason: Reason: the predicate was too broad"),
+        "{entry}",
+    );
 }
 
 #[test]
