@@ -52,7 +52,7 @@ pub(in crate::analysis) fn path_history(
         }
         let mut statement = connection
             .prepare(
-                "SELECT c.position, c.oid, c.commit_time, c.message,
+                "SELECT c.position, c.oid, c.commit_time, c.message, c.message_length,
                         ch.ordinal, ch.status, ch.old_path, ch.new_path,
                         ch.old_blob, ch.new_blob,
                         (SELECT COUNT(*) FROM commit_parents p WHERE p.commit_id = c.commit_id)
@@ -67,7 +67,7 @@ pub(in crate::analysis) fn path_history(
             .map_err(|error| search_error("preparing anchored history", error))?;
         let rows = statement
             .query_map(params![path], |row| {
-                let message: Vec<u8> = row.get(3)?;
+                let message = super::decode_message_row(row, 3, 4)?;
                 let (subject, body) = message_parts(&message);
                 Ok((
                     row.get::<_, i64>(0)?,
@@ -76,14 +76,14 @@ pub(in crate::analysis) fn path_history(
                     subject,
                     body,
                     PathChange {
-                        ordinal: row.get(4)?,
-                        status: row.get(5)?,
-                        old_path: row.get(6)?,
-                        new_path: row.get(7)?,
-                        old_blob: row.get(8)?,
-                        new_blob: row.get(9)?,
+                        ordinal: row.get(5)?,
+                        status: row.get(6)?,
+                        old_path: row.get(7)?,
+                        new_path: row.get(8)?,
+                        old_blob: row.get(9)?,
+                        new_blob: row.get(10)?,
                     },
-                    row.get::<_, i64>(10)?,
+                    row.get::<_, i64>(11)?,
                 ))
             })
             .map_err(|error| search_error("reading anchored history", error))?;

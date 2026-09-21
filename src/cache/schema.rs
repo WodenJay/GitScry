@@ -17,6 +17,7 @@ CREATE TABLE commits (
     position INTEGER NOT NULL UNIQUE,
     oid TEXT NOT NULL UNIQUE,
     message BLOB NOT NULL,
+    message_length INTEGER NOT NULL CHECK (message_length >= 0),
     commit_time INTEGER NOT NULL
 ) STRICT;
 CREATE VIRTUAL TABLE search_fts USING fts5(
@@ -50,6 +51,25 @@ CREATE TABLE changes (
     new_mode TEXT NOT NULL,
     UNIQUE (commit_id, ordinal)
 ) STRICT;
+CREATE TABLE hunk_line_blocks (
+    block_id INTEGER PRIMARY KEY,
+    first_line_id INTEGER NOT NULL,
+    line_count INTEGER NOT NULL CHECK (line_count > 0),
+    text BLOB NOT NULL,
+    text_length INTEGER NOT NULL CHECK (text_length >= 0)
+) STRICT;
+CREATE TABLE hunk_token_blocks (
+    block_id INTEGER PRIMARY KEY,
+    text BLOB NOT NULL,
+    text_length INTEGER NOT NULL CHECK (text_length >= 0)
+) STRICT;
+CREATE TABLE hunk_payloads (
+    payload_id INTEGER PRIMARY KEY,
+    token_block_id INTEGER NOT NULL REFERENCES hunk_token_blocks(block_id),
+    token_offset INTEGER NOT NULL CHECK (token_offset >= 0),
+    token_length INTEGER NOT NULL CHECK (token_length > 0),
+    text_length INTEGER NOT NULL CHECK (text_length >= 0)
+) STRICT;
 CREATE TABLE hunks (
     hunk_id INTEGER PRIMARY KEY,
     change_id INTEGER NOT NULL REFERENCES changes(change_id),
@@ -58,8 +78,7 @@ CREATE TABLE hunks (
     old_lines INTEGER NOT NULL,
     new_start INTEGER NOT NULL,
     new_lines INTEGER NOT NULL,
-    text BLOB NOT NULL,
-    text_length INTEGER NOT NULL CHECK (text_length >= 0),
+    payload_id INTEGER NOT NULL REFERENCES hunk_payloads(payload_id),
     UNIQUE (change_id, ordinal)
 ) STRICT;
 "#;

@@ -7,7 +7,7 @@ use crate::{
     git::{Change, Commit, Hunk, Snapshot},
 };
 pub(crate) use generation::prepare;
-use payload::encode;
+use payload::{HunkReader, HunkWriter, encode};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params, params_from_iter};
 use std::collections::{HashMap, HashSet};
 use std::{
@@ -16,7 +16,7 @@ use std::{
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-const SCHEMA_VERSION: &str = "4";
+const SCHEMA_VERSION: &str = "5";
 const WAITING_MESSAGE: &str = "Waiting for another GitScry process...";
 
 struct CacheState {
@@ -198,6 +198,9 @@ fn inspect_connection(connection: &Connection) -> Result<CacheState, ()> {
         "commit_parents",
         "changes",
         "hunks",
+        "hunk_line_blocks",
+        "hunk_token_blocks",
+        "hunk_payloads",
     ] {
         let exists: Option<String> = connection
             .query_row(
@@ -485,9 +488,7 @@ fn append(root: &Path, snapshot: &Snapshot) -> Result<usize, AppError> {
     for change in &snapshot.changes {
         insert_change(&transaction, change)?;
     }
-    for hunk in &snapshot.hunks {
-        insert_hunk(&transaction, hunk)?;
-    }
+    write_hunks(&transaction, &snapshot.hunks)?;
     replace_metadata(&transaction, snapshot)?;
     transaction
         .execute("DELETE FROM shallow_boundaries", [])
@@ -551,9 +552,7 @@ fn build(path: &Path, snapshot: &Snapshot) -> Result<(), AppError> {
     for change in &snapshot.changes {
         insert_change(&transaction, change)?;
     }
-    for hunk in &snapshot.hunks {
-        insert_hunk(&transaction, hunk)?;
-    }
+    write_hunks(&transaction, &snapshot.hunks)?;
     for oid in &snapshot.shallow_boundaries {
         transaction
             .execute("INSERT INTO shallow_boundaries(oid) VALUES (?1)", [oid])
@@ -639,10 +638,11 @@ fn replace_commit(connection: &Connection, commit: &Commit) -> Result<(), AppErr
                 [commit_id],
             )
             .map_err(|error| cache_error("removing old commit parents", error))?;
+        let (message, length) = encode(&commit.message);
         connection
             .execute(
-                "UPDATE commits SET message = ?2, commit_time = ?3 WHERE commit_id = ?1",
-                params![commit_id, commit.message, commit.time],
+                "UPDATE commits SET message = ?2, message_length = ?3, commit_time = ?4 WHERE commit_id = ?1",
+                params![commit_id, message, length, commit.time],
             )
             .map_err(|error| cache_error("updating commit", error))?;
     } else {
@@ -652,11 +652,12 @@ fn replace_commit(connection: &Connection, commit: &Commit) -> Result<(), AppErr
 }
 
 fn insert_commit(connection: &Connection, commit: &Commit) -> Result<(), AppError> {
+    let (message, message_length) = encode(&commit.message);
     connection
         .execute(
-            "INSERT INTO commits(position, oid, message, commit_time)
-             VALUES ((SELECT COALESCE(MAX(position), -1) + 1 FROM commits), ?1, ?2, ?3)",
-            params![commit.oid, commit.message, commit.time],
+            "INSERT INTO commits(position, oid, message, message_length, commit_time)
+             VALUES ((SELECT COALESCE(MAX(position), -1) + 1 FROM commits), ?1, ?2, ?3, ?4)",
+            params![commit.oid, message, message_length, commit.time],
         )
         .map_err(|error| cache_error("writing commit", error))?;
     Ok(())
@@ -758,26 +759,16 @@ fn insert_change(connection: &Connection, change: &Change) -> Result<(), AppErro
     Ok(())
 }
 
-fn insert_hunk(connection: &Connection, hunk: &Hunk) -> Result<(), AppError> {
-    let change_id = change_id(connection, &hunk.commit_oid, hunk.change_ordinal)?;
-    let (text, text_length) = encode(&hunk.text);
-    connection
-        .execute(
-            "INSERT INTO hunks(change_id, ordinal, old_start, old_lines, new_start, new_lines, text, text_length)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![
-                change_id,
-                hunk.ordinal,
-                hunk.old_start,
-                hunk.old_lines,
-                hunk.new_start,
-                hunk.new_lines,
-                text,
-                text_length,
-            ],
-        )
-        .map_err(|error| cache_error("writing compressed text hunk", error))?;
-    Ok(())
+fn write_hunks(transaction: &rusqlite::Transaction<'_>, hunks: &[Hunk]) -> Result<(), AppError> {
+    let mut writer = HunkWriter::new(transaction)?;
+    for hunk in hunks {
+        let change_id = change_id(transaction, &hunk.commit_oid, hunk.change_ordinal)?;
+        writer.write(transaction, change_id, hunk)?;
+    }
+    writer.finish(transaction)
+}
+pub(crate) fn decode_message(compressed: &[u8], length: i64) -> Result<Vec<u8>, AppError> {
+    payload::decode(compressed, length, "commit message")
 }
 
 pub(crate) struct DecodedHunk {
@@ -792,59 +783,58 @@ pub(crate) struct DecodedHunk {
 pub(crate) fn read_hunks(connection: &Connection, oid: &str) -> Result<Vec<DecodedHunk>, AppError> {
     let mut statement = connection
         .prepare(
-            "SELECT ch.ordinal, h.old_start, h.old_lines, h.new_start, h.new_lines, h.ordinal, h.text, h.text_length
+            "SELECT ch.ordinal, h.old_start, h.old_lines, h.new_start, h.new_lines,
+                    h.ordinal, h.payload_id
              FROM commits AS c
              JOIN changes AS ch ON ch.commit_id = c.commit_id
              JOIN hunks AS h ON h.change_id = ch.change_id
              WHERE c.oid = ?1
              ORDER BY ch.ordinal, h.ordinal",
         )
-        .map_err(|error| cache_error("preparing compressed text hunks", error))?;
+        .map_err(|error| cache_error("preparing encoded text hunks", error))?;
     let rows = statement
         .query_map([oid], |row| {
-            let change_ordinal = row.get::<_, i64>(0)?;
-            let hunk_ordinal = row.get::<_, i64>(5)?;
-            let compressed: Vec<u8> = row.get(6)?;
-            let length = row.get(7)?;
             Ok((
-                change_ordinal,
-                hunk_ordinal,
-                row.get(1)?,
-                row.get(2)?,
-                row.get(3)?,
-                row.get(4)?,
-                compressed,
-                length,
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, i64>(6)?,
             ))
         })
-        .map_err(|error| cache_error("reading compressed text hunks", error))?;
-    let mut hunks = Vec::new();
-    for row in rows {
-        let (
-            change_ordinal,
-            hunk_ordinal,
-            old_start,
-            old_lines,
-            new_start,
-            new_lines,
-            compressed,
-            length,
-        ) = row.map_err(|error| cache_error("reading compressed text hunks", error))?;
-        let text = payload::decode(
-            &compressed,
-            length,
-            &format!("{oid}/change {change_ordinal}/hunk {hunk_ordinal}"),
-        )?;
-        hunks.push(DecodedHunk {
-            change_ordinal,
-            old_start,
-            old_lines,
-            new_start,
-            new_lines,
-            text,
-        });
-    }
-    Ok(hunks)
+        .map_err(|error| cache_error("reading encoded text hunks", error))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| cache_error("reading encoded text hunks", error))?;
+    drop(statement);
+    let mut reader = HunkReader::new(connection)?;
+    rows.into_iter()
+        .map(
+            |(
+                change_ordinal,
+                hunk_ordinal,
+                old_start,
+                old_lines,
+                new_start,
+                new_lines,
+                payload_id,
+            )| {
+                let text = reader.decode_payload(
+                    payload_id,
+                    &format!("{oid}/change {change_ordinal}/hunk {hunk_ordinal}"),
+                )?;
+                Ok(DecodedHunk {
+                    change_ordinal,
+                    old_start,
+                    old_lines,
+                    new_start,
+                    new_lines,
+                    text,
+                })
+            },
+        )
+        .collect()
 }
 
 fn validate(path: &Path, expected_commits: usize) -> Result<(), AppError> {

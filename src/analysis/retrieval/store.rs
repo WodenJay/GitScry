@@ -30,7 +30,7 @@ pub(in crate::analysis) fn change_sets(
 ) -> Result<Vec<ChangeSet>, AppError> {
     let mut statement = connection
         .prepare(
-            "SELECT c.oid, c.commit_time, c.message,
+            "SELECT c.oid, c.commit_time, c.message, c.message_length,
                     (SELECT COUNT(*) FROM commit_parents WHERE commit_id = c.commit_id) > 1,
                     ch.old_path, ch.new_path
              FROM commits AS c
@@ -43,10 +43,10 @@ pub(in crate::analysis) fn change_sets(
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, i64>(1)?,
-                row.get::<_, Vec<u8>>(2)?,
-                row.get::<_, bool>(3)?,
-                row.get::<_, Option<Vec<u8>>>(4)?,
+                super::decode_message_row(row, 2, 3)?,
+                row.get::<_, bool>(4)?,
                 row.get::<_, Option<Vec<u8>>>(5)?,
+                row.get::<_, Option<Vec<u8>>>(6)?,
             ))
         })
         .map_err(|error| search_error("reading relation history", error))?;
@@ -102,7 +102,8 @@ pub(in crate::analysis) fn candidates(
 ) -> Result<Vec<Stored>, AppError> {
     let mut statement = connection
         .prepare(
-            "SELECT c.oid, c.commit_time, c.message, bm25(search_fts, 10.0, 3.0, 2.0), c.position
+            "SELECT c.oid, c.commit_time, c.message, c.message_length,
+                    bm25(search_fts, 10.0, 3.0, 2.0), c.position
              FROM search_fts
              JOIN commits AS c ON c.commit_id = search_fts.rowid
              WHERE search_fts MATCH ?1
@@ -112,7 +113,7 @@ pub(in crate::analysis) fn candidates(
         .map_err(|error| search_error("preparing search", error))?;
     let rows = statement
         .query_map(params![match_query, limit], |row| {
-            let message: Vec<u8> = row.get(2)?;
+            let message = super::decode_message_row(row, 2, 3)?;
             let (subject, body) = super::text::message_parts(&message);
             Ok(Stored {
                 oid: row.get(0)?,
@@ -120,8 +121,8 @@ pub(in crate::analysis) fn candidates(
                 subject,
                 body,
                 paths: Vec::new(),
-                bm25: row.get(3)?,
-                position: row.get(4)?,
+                bm25: row.get(4)?,
+                position: row.get(5)?,
             })
         })
         .map_err(|error| search_error("running search", error))?;
@@ -207,13 +208,20 @@ pub(in crate::analysis) fn text(
     oid: &str,
 ) -> Result<Option<(String, String)>, AppError> {
     let mut statement = connection
-        .prepare("SELECT message FROM commits WHERE oid = ?1")
+        .prepare("SELECT message, message_length FROM commits WHERE oid = ?1")
         .map_err(|error| search_error("preparing commit lookup", error))?;
     let message = statement
-        .query_row([oid], |row| row.get::<_, Vec<u8>>(0))
+        .query_row([oid], |row| {
+            Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, i64>(1)?))
+        })
         .optional()
         .map_err(|error| search_error("reading commit lookup", error))?;
-    Ok(message.map(|message| super::text::message_parts(&message)))
+    message
+        .map(|(compressed, length)| {
+            crate::cache::decode_message(&compressed, length)
+                .map(|message| super::text::message_parts(&message))
+        })
+        .transpose()
 }
 
 /// A cached commit: its object ID, message, and cache position.
@@ -229,14 +237,16 @@ pub(in crate::analysis) struct StoredCommit {
 /// Every cached commit, oldest first.
 pub(in crate::analysis) fn history(connection: &Connection) -> Result<Vec<StoredCommit>, AppError> {
     let mut statement = connection
-        .prepare("SELECT position, oid, message FROM commits ORDER BY commit_time, oid")
+        .prepare(
+            "SELECT position, oid, message, message_length FROM commits ORDER BY commit_time, oid",
+        )
         .map_err(|error| search_error("preparing history scan", error))?;
     statement
         .query_map([], |row| {
             Ok(StoredCommit {
                 position: row.get(0)?,
                 oid: row.get(1)?,
-                message: row.get(2)?,
+                message: super::decode_message_row(row, 2, 3)?,
             })
         })
         .map_err(|error| search_error("reading history scan", error))?
@@ -293,7 +303,7 @@ pub(in crate::analysis) fn corrective_follow_up(
         .collect::<Vec<_>>()
         .join(", ");
     let query = format!(
-        "SELECT c.oid, c.message
+        "SELECT c.oid, c.message, c.message_length
          FROM commits AS c
          JOIN changes AS ch ON ch.commit_id = c.commit_id
          WHERE c.position > (SELECT position FROM commits WHERE oid = ?1)
@@ -310,7 +320,10 @@ pub(in crate::analysis) fn corrective_follow_up(
         .map_err(|error| search_error("preparing corrective follow-up", error))?;
     let rows = statement
         .query_map(params_from_iter(values), |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                super::decode_message_row(row, 1, 2)?,
+            ))
         })
         .map_err(|error| search_error("reading corrective follow-up", error))?;
     for row in rows {

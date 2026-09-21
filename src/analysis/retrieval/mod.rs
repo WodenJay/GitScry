@@ -29,6 +29,22 @@ pub(in crate::analysis) use store::{
 };
 pub(in crate::analysis) use text::tokenize;
 pub(crate) use text::{message_parts, normalize_path, searchable_text};
+
+pub(super) fn decode_message_row(
+    row: &rusqlite::Row<'_>,
+    compressed_index: usize,
+    length_index: usize,
+) -> Result<Vec<u8>, rusqlite::Error> {
+    let compressed: Vec<u8> = row.get(compressed_index)?;
+    let length: i64 = row.get(length_index)?;
+    crate::cache::decode_message(&compressed, length).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            compressed_index,
+            rusqlite::types::Type::Blob,
+            Box::new(error),
+        )
+    })
+}
 /// How deep the lexical pool reaches relative to the caller's `--limit`.
 const CANDIDATE_MULTIPLIER: usize = 20;
 
