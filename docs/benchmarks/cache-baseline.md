@@ -133,3 +133,19 @@ This is a focused fresh-rebuild comparison on the 39,651-commit Hermes-agent che
 | `sqlite_schema` | 4096 | 4096 |
 
 The total cache fell from `1405886464` to `543727616` bytes: **61.32% smaller** (38.68% of the measured baseline). One fresh release rebuild measured v4 at 493 s and 4429082624-byte peak RSS, versus v5 at 432.773 s and 4320530432-byte peak RSS: wall time improved 12.22% and peak RSS improved 2.45%. This focused measurement is separate from the five-sample cross-repository harness above.
+
+## Issue #25 Hermes-agent projection validation
+
+A fresh v6 rebuild was measured on the 39,651-commit Hermes-agent checkout at `afc3b7c6f3`. The previous v5 cache on the same checkout was 543,727,616 bytes; v6 is 631,656,448 bytes. The projection overhead below is the physical cache-size delta after copying the v6 database, dropping `commit_paths`, its three indexes, and `commit_path_counts`, and running `VACUUM`; it includes projection indexes.
+
+| Measurement | v6 result |
+| --- | ---: |
+| `commit_paths` rows | 309,335 |
+| `commit_path_counts` rows | 39,651 |
+| Projection tables and indexes | 95,895,552 bytes |
+| `.gitscry` generation total | 631,656,450 bytes |
+| `related gateway/run.py` warm median (5 samples) | 0.596 s |
+| `tests gateway/run.py` warm median (5 samples) | 0.660 s |
+| `related`/`tests` warm gate | pass (<2 s) |
+
+The warm samples were stable and all returned successfully. Cold medians were not claimed on this Windows host because no privileged filesystem-cache drop command was available; rerun the release harness with `--cold-command` on a host that can provide that measurement.
