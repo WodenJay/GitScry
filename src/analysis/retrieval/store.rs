@@ -8,12 +8,14 @@ use super::super::search_error;
 
 /// A lexical candidate: one cache row with the paths it changed.
 pub(super) struct Stored {
+    pub(super) commit_id: i64,
     pub(super) position: i64,
     pub(super) oid: String,
     pub(super) commit_time: i64,
     pub(super) subject: String,
     pub(super) body: String,
     pub(super) paths: Vec<Vec<u8>>,
+    pub(super) path_keys: Vec<String>,
     pub(super) bm25: f64,
 }
 
@@ -343,7 +345,7 @@ pub(in crate::analysis) fn candidates(
 ) -> Result<Vec<Stored>, AppError> {
     let mut statement = connection
         .prepare(
-            "SELECT c.oid, c.commit_time, c.message, c.message_length,
+            "SELECT c.commit_id, c.oid, c.commit_time, c.message, c.message_length,
                     bm25(search_fts, 10.0, 3.0, 2.0), c.position
              FROM search_fts
              JOIN commits AS c ON c.commit_id = search_fts.rowid
@@ -354,57 +356,118 @@ pub(in crate::analysis) fn candidates(
         .map_err(|error| search_error("preparing search", error))?;
     let rows = statement
         .query_map(params![match_query, limit], |row| {
-            let message = super::decode_message_row(row, 2, 3)?;
+            let message = super::decode_message_row(row, 3, 4)?;
             let (subject, body) = super::text::message_parts(&message);
             Ok(Stored {
-                oid: row.get(0)?,
-                commit_time: row.get(1)?,
+                commit_id: row.get(0)?,
+                oid: row.get(1)?,
+                commit_time: row.get(2)?,
                 subject,
                 body,
                 paths: Vec::new(),
-                bm25: row.get(4)?,
-                position: row.get(5)?,
+                path_keys: Vec::new(),
+                bm25: row.get(5)?,
+                position: row.get(6)?,
             })
         })
         .map_err(|error| search_error("running search", error))?;
     let mut candidates = rows
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| search_error("reading search results", error))?;
-    for candidate in &mut candidates {
-        candidate.paths = changed_paths(connection, &candidate.oid)?;
-    }
+    load_candidate_paths(connection, &mut candidates)?;
     Ok(candidates)
 }
-
-pub(super) fn changed_paths(connection: &Connection, oid: &str) -> Result<Vec<Vec<u8>>, AppError> {
-    let mut statement = connection
-        .prepare(
-            "SELECT ch.old_path, ch.new_path
-             FROM changes AS ch
-             JOIN commits AS c ON c.commit_id = ch.commit_id
-             WHERE c.oid = ?1
-             ORDER BY ch.ordinal",
-        )
-        .map_err(|error| search_error("preparing changed paths", error))?;
-    let rows = statement
-        .query_map([oid], |row| {
-            Ok((
-                row.get::<_, Option<Vec<u8>>>(0)?,
-                row.get::<_, Option<Vec<u8>>>(1)?,
-            ))
-        })
-        .map_err(|error| search_error("reading changed paths", error))?;
-    let mut paths = Vec::new();
-    for row in rows {
-        let (old_path, new_path) =
-            row.map_err(|error| search_error("reading changed paths", error))?;
-        for path in [old_path, new_path].into_iter().flatten() {
-            if !paths.contains(&path) {
-                paths.push(path);
+fn load_candidate_paths(
+    connection: &Connection,
+    candidates: &mut [Stored],
+) -> Result<(), AppError> {
+    for candidates in candidates.chunks_mut(SQL_PARAMETER_LIMIT) {
+        let commit_ids = candidates
+            .iter()
+            .map(|candidate| candidate.commit_id)
+            .collect::<Vec<_>>();
+        let placeholders = numbered_placeholders(1, commit_ids.len());
+        let query = format!(
+            "SELECT commit_id, old_path, new_path
+             FROM changes
+             WHERE commit_id IN ({placeholders})
+             ORDER BY commit_id, ordinal"
+        );
+        let values = commit_ids.iter().copied().map(Value::Integer);
+        let mut statement = connection
+            .prepare(&query)
+            .map_err(|error| search_error("preparing candidate paths", error))?;
+        let rows = statement
+            .query_map(params_from_iter(values), |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<Vec<u8>>>(1)?,
+                    row.get::<_, Option<Vec<u8>>>(2)?,
+                ))
+            })
+            .map_err(|error| search_error("reading candidate paths", error))?;
+        let mut paths_by_commit = HashMap::<i64, Vec<Vec<u8>>>::new();
+        for row in rows {
+            let (commit_id, old_path, new_path) =
+                row.map_err(|error| search_error("reading candidate paths", error))?;
+            let paths = paths_by_commit.entry(commit_id).or_default();
+            for path in [old_path, new_path].into_iter().flatten() {
+                if !paths.contains(&path) {
+                    paths.push(path);
+                }
             }
         }
+        let placeholders = numbered_placeholders(1, commit_ids.len());
+        let query = format!(
+            "SELECT commit_id, path_key
+             FROM commit_paths
+             WHERE commit_id IN ({placeholders})
+             ORDER BY commit_id, path_order"
+        );
+        let values = commit_ids.iter().copied().map(Value::Integer);
+        let mut statement = connection
+            .prepare(&query)
+            .map_err(|error| search_error("preparing candidate path projection", error))?;
+        let rows = statement
+            .query_map(params_from_iter(values), |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|error| search_error("reading candidate path projection", error))?;
+        let mut keys_by_commit = HashMap::<i64, Vec<String>>::new();
+        for row in rows {
+            let (commit_id, key) =
+                row.map_err(|error| search_error("reading candidate path projection", error))?;
+            keys_by_commit.entry(commit_id).or_default().push(key);
+        }
+        for candidate in candidates {
+            candidate.paths = paths_by_commit
+                .remove(&candidate.commit_id)
+                .unwrap_or_default();
+            candidate.path_keys = keys_by_commit
+                .remove(&candidate.commit_id)
+                .unwrap_or_default();
+        }
     }
-    Ok(paths)
+    Ok(())
+}
+pub(super) fn projected_path_keys(
+    connection: &Connection,
+    oid: &str,
+) -> Result<Vec<String>, AppError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT cp.path_key
+             FROM commit_paths AS cp
+             JOIN commits AS c ON c.commit_id = cp.commit_id
+             WHERE c.oid = ?1
+             ORDER BY cp.path_order",
+        )
+        .map_err(|error| search_error("preparing path projection", error))?;
+    statement
+        .query_map([oid], |row| row.get::<_, String>(0))
+        .map_err(|error| search_error("reading path projection", error))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| search_error("reading path projection", error))
 }
 
 /// The moves a commit made, in change order and deduplicated.
@@ -495,7 +558,7 @@ pub(in crate::analysis) fn history(connection: &Connection) -> Result<Vec<Stored
         .map_err(|error| search_error("reading history scan", error))
 }
 
-/// Whether any commit strictly between two positions touched one of `paths`.
+/// Whether any commit strictly between two positions touched one of `path_keys`.
 ///
 /// A revert only counts as undoing a candidate when that candidate was the last work on
 /// the path; otherwise the revert belongs to some later, unrelated change.
@@ -503,29 +566,27 @@ pub(in crate::analysis) fn touch_between(
     connection: &Connection,
     from_position: i64,
     to_position: i64,
-    paths: &[Vec<u8>],
+    path_keys: &[String],
 ) -> Result<bool, AppError> {
-    if paths.is_empty() || from_position >= to_position {
+    if path_keys.is_empty() || from_position >= to_position {
         return Ok(false);
     }
-    let placeholders = std::iter::repeat_n("?", paths.len())
+    let placeholders = std::iter::repeat_n("?", path_keys.len())
         .collect::<Vec<_>>()
         .join(", ");
     let query = format!(
-        "SELECT COUNT(*)
-         FROM commits AS c
-         JOIN changes AS ch ON ch.commit_id = c.commit_id
+        "SELECT EXISTS(SELECT 1 FROM commits AS c
+         JOIN commit_paths AS cp ON cp.commit_id = c.commit_id
          WHERE c.position > ?1 AND c.position < ?2
-           AND (ch.old_path IN ({placeholders}) OR ch.new_path IN ({placeholders}))",
+           AND cp.path_key IN ({placeholders}))"
     );
     let values = [Value::Integer(from_position), Value::Integer(to_position)]
         .into_iter()
-        .chain(paths.iter().map(|path| Value::Blob(path.clone())))
-        .chain(paths.iter().map(|path| Value::Blob(path.clone())));
-    let count: i64 = connection
+        .chain(path_keys.iter().cloned().map(Value::Text));
+    let touched: i64 = connection
         .query_row(&query, params_from_iter(values), |row| row.get(0))
         .map_err(|error| search_error("checking intervening history", error))?;
-    Ok(count > 0)
+    Ok(touched != 0)
 }
 
 /// The first later commit that corrects work on the abandoned paths, if history records one.
@@ -535,42 +596,38 @@ pub(in crate::analysis) fn touch_between(
 pub(in crate::analysis) fn corrective_follow_up(
     connection: &Connection,
     revert_oid: &str,
-    paths: &[Vec<u8>],
+    path_keys: &[String],
 ) -> Result<Option<(String, String)>, AppError> {
-    if paths.is_empty() {
+    if path_keys.is_empty() {
         return Ok(None);
     }
-    let placeholders = std::iter::repeat_n("?", paths.len())
+    let placeholders = std::iter::repeat_n("?", path_keys.len())
         .collect::<Vec<_>>()
         .join(", ");
     let query = format!(
-        "SELECT c.oid, c.message, c.message_length
+        "SELECT c.oid
          FROM commits AS c
-         JOIN changes AS ch ON ch.commit_id = c.commit_id
+         JOIN commit_paths AS cp ON cp.commit_id = c.commit_id
          WHERE c.position > (SELECT position FROM commits WHERE oid = ?1)
            AND c.oid <> ?1
-           AND (ch.old_path IN ({placeholders}) OR ch.new_path IN ({placeholders}))
+           AND cp.path_key IN ({placeholders})
          GROUP BY c.commit_id
-         ORDER BY c.position ASC",
+         ORDER BY c.position ASC"
     );
     let values = std::iter::once(Value::Text(revert_oid.to_owned()))
-        .chain(paths.iter().map(|path| Value::Blob(path.clone())))
-        .chain(paths.iter().map(|path| Value::Blob(path.clone())));
+        .chain(path_keys.iter().cloned().map(Value::Text));
     let mut statement = connection
         .prepare(&query)
         .map_err(|error| search_error("preparing corrective follow-up", error))?;
-    let rows = statement
-        .query_map(params_from_iter(values), |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                super::decode_message_row(row, 1, 2)?,
-            ))
-        })
+    let oids = statement
+        .query_map(params_from_iter(values), |row| row.get::<_, String>(0))
+        .map_err(|error| search_error("reading corrective follow-up", error))?
+        .collect::<Result<Vec<_>, _>>()
         .map_err(|error| search_error("reading corrective follow-up", error))?;
-    for row in rows {
-        let (oid, message) =
-            row.map_err(|error| search_error("reading corrective follow-up", error))?;
-        let (subject, _) = super::text::message_parts(&message);
+    for oid in oids {
+        let Some((subject, _)) = text(connection, &oid)? else {
+            continue;
+        };
         // Only a commit that reads as a correction counts; a later incidental touch of the
         // same path is not material about how the abandoned approach moved on.
         if super::super::provenance::is_corrective_subject(&subject) {

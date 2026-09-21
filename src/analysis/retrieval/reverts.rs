@@ -10,13 +10,13 @@ use super::text::message_parts;
 
 /// A cached commit whose subject reads like a revert, with what is needed to link it to the
 /// work it undid. The `This reverts commit` trailer is authoritative; most reverts in the
-/// wild omit it, so changed paths are recorded as the fallback link.
+/// wild omit it, so normalized path keys are recorded as the fallback link.
 pub(in crate::analysis) struct Revert {
     pub(in crate::analysis) position: i64,
     pub(in crate::analysis) oid: String,
     pub(in crate::analysis) subject: String,
     pub(in crate::analysis) body: String,
-    pub(in crate::analysis) paths: Vec<Vec<u8>>,
+    pub(in crate::analysis) path_keys: Vec<String>,
     target: Option<String>,
 }
 
@@ -45,7 +45,7 @@ impl RevertIndex {
     pub(in crate::analysis) fn undoings<'a>(
         &'a self,
         oid: &str,
-        paths: &[Vec<u8>],
+        path_keys: &[String],
         position: i64,
     ) -> impl Iterator<Item = &'a Revert> {
         self.reverts
@@ -53,8 +53,8 @@ impl RevertIndex {
             .filter(move |revert| {
                 revert.oid != oid
                     && revert.position > position
-                    && !paths.is_empty()
-                    && paths.iter().all(|path| revert.paths.contains(path))
+                    && !path_keys.is_empty()
+                    && path_keys.iter().all(|key| revert.path_keys.contains(key))
             })
             .collect::<Vec<_>>()
             .into_iter()
@@ -92,7 +92,7 @@ pub(in crate::analysis) fn index(connection: &Connection) -> Result<RevertIndex,
         let target =
             reverted_commit(&format!("{subject}\n{body}")).and_then(|hex| resolve(&known, &hex));
         reverts.push(Revert {
-            paths: store::changed_paths(connection, &commit.oid)?,
+            path_keys: store::projected_path_keys(connection, &commit.oid)?,
             oid: commit.oid,
             subject,
             body,

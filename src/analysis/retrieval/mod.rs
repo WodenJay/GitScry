@@ -56,6 +56,7 @@ pub(in crate::analysis) struct Scored {
     pub(in crate::analysis) commit_time: i64,
     pub(in crate::analysis) subject: String,
     pub(in crate::analysis) paths: Vec<Vec<u8>>,
+    pub(in crate::analysis) path_keys: Vec<String>,
     pub(in crate::analysis) signals: Signals,
 }
 
@@ -109,6 +110,7 @@ pub(in crate::analysis) fn pool(
             oid: candidate.oid,
             commit_time: candidate.commit_time,
             subject: candidate.subject,
+            path_keys: candidate.path_keys,
             paths: candidate.paths,
         })
         .collect();
@@ -128,12 +130,12 @@ pub(in crate::analysis) fn link<'a>(
     if let Some(revert) = reverts.of(&candidate.oid) {
         return Ok(Some(revert));
     }
-    for revert in reverts.undoings(&candidate.oid, &candidate.paths, candidate.position) {
+    for revert in reverts.undoings(&candidate.oid, &candidate.path_keys, candidate.position) {
         if !store::touch_between(
             connection,
             candidate.position,
             revert.position,
-            &candidate.paths,
+            &candidate.path_keys,
         )? {
             return Ok(Some(revert));
         }

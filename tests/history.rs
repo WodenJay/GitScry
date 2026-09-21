@@ -27,6 +27,33 @@ impl TestRepo {
         self.head()
     }
 
+    fn commit_files_at(
+        &self,
+        files: &[(&str, &[u8])],
+        message: &str,
+        date: &str,
+    ) -> String {
+        for (path, contents) in files {
+            if let Some(parent) = Path::new(path).parent() {
+                fs::create_dir_all(self.dir.path().join(parent)).expect("create parent directory");
+            }
+            fs::write(self.dir.path().join(path), contents).expect("write tracked file");
+        }
+        git(self.dir.path(), ["add", "--all"]);
+        let output = git_command(self.dir.path())
+            .args(["commit", "-m", message])
+            .env("GIT_AUTHOR_DATE", date)
+            .env("GIT_COMMITTER_DATE", date)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        self.head()
+    }
+
     /// Remove a path and record the removal, so it exists only in history afterwards.
     fn remove(&self, path: &str, message: &str) -> String {
         fs::remove_file(self.dir.path().join(path)).expect("remove tracked file");
@@ -693,6 +720,89 @@ fn failures_links_a_revert_whose_named_commit_is_absent() {
         "an unresolved revert was reported as its own failed approach:
 {text}"
     );
+}
+
+#[test]
+fn failures_preserve_path_fallback_coverage_and_intervening_rejection() {
+    let valid = TestRepo::new();
+    let abandoned = valid.commit_files_at(
+        &[
+            ("src/db/index.rs", b"cron sessions\n"),
+            ("src/db/query.rs", b"cron sessions query\n"),
+        ],
+        "Exclude cron sessions from the FTS index",
+        "2020-01-01T00:00:00+0000",
+    );
+    let revert = valid.commit_files_at(
+        &[
+            ("src/db/index.rs", b"cron sessions restored\n"),
+            ("src/db/query.rs", b"cron sessions query restored\n"),
+        ],
+        "Revert the old database approach",
+        "2020-02-01T00:00:00+0000",
+    );
+    valid.index();
+    let output = valid.run(["failures", "exclude", "cron", "sessions"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    let entry = block(&text, &abandoned[..12]);
+    assert!(entry.contains(&revert[..12]), "{entry}");
+
+    let rejected = TestRepo::new();
+    let abandoned = rejected.commit_files_at(
+        &[
+            ("src/db/index.rs", b"cron sessions\n"),
+            ("src/db/query.rs", b"cron sessions query\n"),
+        ],
+        "Exclude cron sessions from the FTS index",
+        "2020-01-01T00:00:00+0000",
+    );
+    rejected.commit_at(
+        "src/db/index.rs",
+        b"cron sessions maintained\n",
+        "Unrelated maintenance",
+        "2020-01-15T00:00:00+0000",
+    );
+    rejected.commit_files_at(
+        &[
+            ("src/db/index.rs", b"cron sessions restored\n"),
+            ("src/db/query.rs", b"cron sessions query restored\n"),
+        ],
+        "Revert the old database approach",
+        "2020-02-01T00:00:00+0000",
+    );
+    rejected.index();
+    let output = rejected.run(["failures", "exclude", "cron", "sessions"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert!(!stdout(&output).contains(&abandoned[..12]));
+}
+
+#[test]
+fn failures_resolve_unique_abbreviated_revert_trailers() {
+    let repo = TestRepo::new();
+    let abandoned = repo.commit_at(
+        "src/db/index.rs",
+        b"cron sessions\n",
+        "Exclude cron sessions from the FTS index",
+        "2020-01-01T00:00:00+0000",
+    );
+    let prefix = &abandoned[..8];
+    let revert = repo.commit_at(
+        "src/db/index.rs",
+        b"cron sessions restored\n",
+        &format!(
+            "Revert the old database approach\n\nThis reverts commit {prefix}.\n\nReason: the predicate was too broad."
+        ),
+        "2020-02-01T00:00:00+0000",
+    );
+    repo.index();
+
+    let output = repo.run(["failures", "exclude", "cron", "sessions"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    let entry = block(&text, &abandoned[..12]);
+    assert!(entry.contains(&revert[..12]), "{entry}");
+    assert!(entry.contains("reason: Reason: the predicate was too broad"), "{entry}");
 }
 
 #[test]
