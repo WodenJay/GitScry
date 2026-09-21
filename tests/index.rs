@@ -66,6 +66,46 @@ fn first_index_publishes_complete_cache() {
 }
 
 #[test]
+fn gitlink_entries_are_not_reported_as_missing_objects() {
+    let repo = TestRepo::new();
+    repo.commit("README.md", b"root\n", "root");
+    let gitlink_oid = "1111111111111111111111111111111111111111";
+    let gitlink = format!("160000,{gitlink_oid},vendor/submodule");
+    git(
+        repo.dir.path(),
+        ["update-index", "--add", "--cacheinfo", gitlink.as_str()],
+    );
+    git(repo.dir.path(), ["commit", "-m", "add submodule link"]);
+
+    let output = repo.run(["index"]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let all_output = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !all_output.contains("some local objects are missing"),
+        "{all_output}"
+    );
+
+    let cache = Connection::open(repo.dir.path().join(".gitscry/cache.sqlite")).unwrap();
+    assert_eq!(
+        cache
+            .query_row("SELECT COUNT(*) FROM missing_objects", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
 fn root_merge_and_binary_history_are_persisted() {
     let repo = TestRepo::new();
     repo.commit("root.txt", b"root\n", "root");

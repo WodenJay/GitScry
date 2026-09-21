@@ -403,16 +403,18 @@ fn parse_changes(bytes: &[u8], known: &HashSet<&str>) -> Result<Vec<Change>, App
             Some(_) => (Some(first_path.clone()), Some(first_path)),
             None => return Err(parse_error("raw diff omitted status")),
         };
+        let old_mode = parts[0][1..].to_owned();
+        let new_mode = parts[1].to_owned();
         changes.push(Change {
             commit_oid: oid.clone(),
             ordinal,
             status,
             old_path,
             new_path,
-            old_blob: nonzero_oid(parts[2]),
-            new_blob: nonzero_oid(parts[3]),
-            old_mode: parts[0][1..].to_owned(),
-            new_mode: parts[1].to_owned(),
+            old_blob: blob_oid(parts[2], &old_mode),
+            new_blob: blob_oid(parts[3], &new_mode),
+            old_mode,
+            new_mode,
         });
         ordinal += 1;
     }
@@ -505,6 +507,14 @@ fn parse_range(value: &str, prefix: char) -> Result<(i64, i64), AppError> {
 fn flush_hunk(active: &mut Option<Hunk>, hunks: &mut Vec<Hunk>) {
     if let Some(hunk) = active.take() {
         hunks.push(hunk);
+    }
+}
+
+fn blob_oid(value: &str, mode: &str) -> Option<String> {
+    if mode == "160000" {
+        None
+    } else {
+        nonzero_oid(value)
     }
 }
 
