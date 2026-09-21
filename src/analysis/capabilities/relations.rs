@@ -3,9 +3,7 @@ use std::{
     path::Path,
 };
 
-use rusqlite::Connection;
-
-use crate::app::AppError;
+use crate::{app::AppError, cache::QuerySession};
 
 use super::super::retrieval;
 use super::super::{Citation, Confidence, Detail, Intent, Material, Relation, Report, ReportKind};
@@ -33,25 +31,25 @@ struct RankedCandidate {
 }
 
 pub(crate) fn related(
-    connection: &Connection,
+    session: &QuerySession,
     intent: &Intent,
     worktree_root: &Path,
     limit: usize,
 ) -> Result<Report, AppError> {
-    run(connection, intent, worktree_root, limit, false)
+    run(session, intent, worktree_root, limit, false)
 }
 
 pub(crate) fn tests(
-    connection: &Connection,
+    session: &QuerySession,
     intent: &Intent,
     worktree_root: &Path,
     limit: usize,
 ) -> Result<Report, AppError> {
-    run(connection, intent, worktree_root, limit, true)
+    run(session, intent, worktree_root, limit, true)
 }
 
 fn run(
-    connection: &Connection,
+    session: &QuerySession,
     intent: &Intent,
     worktree_root: &Path,
     limit: usize,
@@ -64,7 +62,7 @@ fn run(
         seed_touch_commits,
         eligible_commits,
         mass_changes_filtered,
-    } = retrieval::relation_history(connection, &seed_list, MASS_CHANGE_PATH_LIMIT)?;
+    } = session.relation_history(&seed_list, MASS_CHANGE_PATH_LIMIT)?;
     let mut omitted_test_path = false;
     let mut ranked = Vec::new();
 
@@ -180,7 +178,7 @@ fn run(
                 let subject = if let Some(subject) = citation_subjects.get(oid) {
                     subject.clone()
                 } else {
-                    let subject = retrieval::commit_text(connection, oid)?
+                    let subject = retrieval::commit_text(session, oid)?
                         .map(|(subject, _)| subject)
                         .unwrap_or_default();
                     citation_subjects.insert(oid.clone(), subject.clone());

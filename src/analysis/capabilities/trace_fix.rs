@@ -1,9 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
-use rusqlite::Connection;
-
 use crate::{
     app::AppError,
+    cache::QuerySession,
     git::{DeletedLine, TraceFixTarget},
 };
 
@@ -27,17 +26,17 @@ struct Evidence {
 }
 
 pub(crate) fn run(
-    connection: &Connection,
+    session: &QuerySession,
     target: &TraceFixTarget,
     reachable: &HashSet<String>,
     limit: usize,
 ) -> Result<Report, AppError> {
-    let histories = candidate_history(connection, &target.deleted_lines, reachable)?;
+    let histories = candidate_history(session, &target.deleted_lines, reachable)?;
     let references = message_references(&target.fix.message);
     let pre_fix = target
         .parent
         .as_deref()
-        .map(|parent| retrieval::ancestors(connection, parent))
+        .map(|parent| session.ancestors(parent))
         .transpose()?
         .unwrap_or_default();
     let evidence = collect_evidence(
@@ -166,14 +165,14 @@ pub(crate) fn run(
 }
 
 fn candidate_history(
-    connection: &Connection,
+    session: &QuerySession,
     deleted_lines: &[DeletedLine],
     reachable: &HashSet<String>,
 ) -> Result<PathHistories, AppError> {
     let mut histories = PathHistories::new();
     for deleted in deleted_lines {
         let path_histories = histories.entry(deleted.path.clone()).or_default();
-        for commit in retrieval::path_history(connection, &deleted.path, reachable)? {
+        for commit in session.path_history(&deleted.path, reachable)? {
             path_histories.entry(commit.oid.clone()).or_insert(commit);
         }
     }

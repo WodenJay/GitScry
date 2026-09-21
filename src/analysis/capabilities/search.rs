@@ -1,17 +1,15 @@
-use rusqlite::Connection;
-
-use crate::app::AppError;
+use crate::{app::AppError, cache::QuerySession};
 
 use super::super::retrieval;
 use super::super::{Citation, Intent, Material, Report, ReportKind};
 use super::lexical_confidence;
 
 pub(crate) fn run(
-    connection: &Connection,
+    session: &QuerySession,
     intent: &Intent,
     limit: usize,
 ) -> Result<Report, AppError> {
-    let Some(pool) = retrieval::pool(connection, intent, limit)? else {
+    let Some(pool) = retrieval::pool(session, intent, limit)? else {
         return Ok(super::super::empty_report(ReportKind::Search));
     };
 

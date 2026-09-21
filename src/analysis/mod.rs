@@ -11,12 +11,10 @@ mod retrieval;
 
 use std::{collections::HashSet, path::Path};
 
-use rusqlite::Connection;
-
-use crate::app::AppError;
 use crate::git::{TraceFixTarget, WhyTarget};
+use crate::{app::AppError, cache::QuerySession};
 
-pub(crate) use retrieval::{Intent, ancestors, message_parts, normalize_path, searchable_text};
+pub(crate) use retrieval::{Intent, message_parts, normalize_path, searchable_text};
 
 /// The complete `material` one capability returns.
 pub(crate) struct Report {
@@ -158,81 +156,81 @@ impl Citation {
 }
 
 pub(crate) fn search(
-    connection: &Connection,
+    session: &QuerySession,
     intent: &Intent,
     limit: usize,
 ) -> Result<Report, AppError> {
     validate_limit(limit)?;
-    capabilities::search(connection, intent, limit)
+    capabilities::search(session, intent, limit)
 }
 
 pub(crate) fn examples(
-    connection: &Connection,
+    session: &QuerySession,
     intent: &Intent,
     limit: usize,
 ) -> Result<Report, AppError> {
     validate_limit(limit)?;
-    capabilities::examples(connection, intent, limit)
+    capabilities::examples(session, intent, limit)
 }
 
 pub(crate) fn why(
-    connection: &Connection,
+    session: &QuerySession,
     target: &WhyTarget,
     reachable: &HashSet<String>,
     limit: usize,
 ) -> Result<Report, AppError> {
     validate_limit(limit)?;
-    capabilities::why(connection, target, reachable, limit)
+    capabilities::why(session, target, reachable, limit)
 }
 
 pub(crate) fn regression(
-    connection: &Connection,
+    session: &QuerySession,
     intent: &Intent,
     target: &crate::git::RegressionTarget,
     reachable: &HashSet<String>,
     limit: usize,
 ) -> Result<Report, AppError> {
     validate_limit(limit)?;
-    capabilities::regression(connection, intent, target, reachable, limit)
+    capabilities::regression(session, intent, target, reachable, limit)
 }
 
 pub(crate) fn trace_fix(
-    connection: &Connection,
+    session: &QuerySession,
     target: &TraceFixTarget,
     reachable: &HashSet<String>,
     limit: usize,
 ) -> Result<Report, AppError> {
     validate_limit(limit)?;
-    capabilities::trace_fix(connection, target, reachable, limit)
+    capabilities::trace_fix(session, target, reachable, limit)
 }
 
 pub(crate) fn failures(
-    connection: &Connection,
+    session: &QuerySession,
     intent: &Intent,
     limit: usize,
 ) -> Result<Report, AppError> {
     validate_limit(limit)?;
-    capabilities::failures(connection, intent, limit)
+    capabilities::failures(session, intent, limit)
 }
 
 pub(crate) fn related(
-    connection: &Connection,
+    session: &QuerySession,
     intent: &Intent,
     worktree_root: &Path,
     limit: usize,
 ) -> Result<Report, AppError> {
     validate_limit(limit)?;
-    capabilities::related(connection, intent, worktree_root, limit)
+    capabilities::related(session, intent, worktree_root, limit)
 }
 
 pub(crate) fn tests(
-    connection: &Connection,
+    session: &QuerySession,
     intent: &Intent,
     worktree_root: &Path,
     limit: usize,
 ) -> Result<Report, AppError> {
     validate_limit(limit)?;
-    capabilities::tests(connection, intent, worktree_root, limit)
+    capabilities::tests(session, intent, worktree_root, limit)
 }
 
 fn validate_limit(limit: usize) -> Result<(), AppError> {
@@ -267,10 +265,4 @@ pub(crate) fn empty_report(kind: ReportKind) -> Report {
         warnings: Vec::new(),
         notices: Vec::new(),
     }
-}
-
-pub(crate) fn search_error(operation: &str, error: impl std::fmt::Display) -> AppError {
-    AppError::operational(format!(
-        "error: {operation}: {error}; delete .gitscry and retry"
-    ))
 }

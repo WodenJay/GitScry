@@ -1,12 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
-use rusqlite::Connection;
-
-use crate::app::AppError;
+use crate::{app::AppError, cache::QuerySession};
 
 use super::super::provenance::{is_revert_subject, reverted_commit};
-use super::store;
-use super::text::message_parts;
+use super::message_parts;
 
 /// A cached commit whose subject reads like a revert, with what is needed to link it to the
 /// work it undid. The `This reverts commit` trailer is authoritative; most reverts in the
@@ -77,8 +74,8 @@ impl RevertIndex {
 }
 
 /// Index every cached revert in cache order; the earliest resolved revert of a commit wins.
-pub(in crate::analysis) fn index(connection: &Connection) -> Result<RevertIndex, AppError> {
-    let commits = store::history(connection)?;
+pub(in crate::analysis) fn index(session: &QuerySession) -> Result<RevertIndex, AppError> {
+    let commits = session.commits()?;
     let known = commits
         .iter()
         .map(|commit| commit.oid.clone())
@@ -92,7 +89,7 @@ pub(in crate::analysis) fn index(connection: &Connection) -> Result<RevertIndex,
         let target =
             reverted_commit(&format!("{subject}\n{body}")).and_then(|hex| resolve(&known, &hex));
         reverts.push(Revert {
-            path_keys: store::projected_path_keys(connection, &commit.oid)?,
+            path_keys: session.projected_path_keys(&commit.oid)?,
             oid: commit.oid,
             subject,
             body,

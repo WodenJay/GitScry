@@ -1,6 +1,4 @@
-use rusqlite::Connection;
-
-use crate::app::AppError;
+use crate::{app::AppError, cache::QuerySession};
 
 use super::super::provenance::{revert_reason, stated_retry};
 use super::super::retrieval;
@@ -25,20 +23,20 @@ const REVERT_WEIGHT: f64 = 6.0;
 const FOLLOW_UP_WEIGHT: f64 = 3.0;
 
 pub(crate) fn run(
-    connection: &Connection,
+    session: &QuerySession,
     intent: &Intent,
     limit: usize,
 ) -> Result<Report, AppError> {
-    let Some(pool) = retrieval::pool(connection, intent, limit)? else {
+    let Some(pool) = retrieval::pool(session, intent, limit)? else {
         return Ok(super::super::empty_report(ReportKind::Failures));
     };
-    let reverts = retrieval::reverts(connection)?;
+    let reverts = retrieval::reverts(session)?;
 
     // Which commit history records as reverting each candidate. Computing this once keeps
     // the fold and the citation consistent.
     let mut linked = Vec::with_capacity(pool.candidates.len());
     for candidate in &pool.candidates {
-        linked.push(retrieval::link(connection, &reverts, candidate)?);
+        linked.push(retrieval::link(session, &reverts, candidate)?);
     }
 
     let mut ranked = Vec::new();
@@ -92,7 +90,7 @@ pub(crate) fn run(
             reason = revert_reason(&revert.subject, &revert.body);
             retry = stated_retry(&revert.body);
             if let Some((oid, subject, body)) =
-                retrieval::corrective_follow_up(connection, &revert.oid, &candidate.path_keys)?
+                retrieval::corrective_follow_up(session, &revert.oid, &candidate.path_keys)?
             {
                 score += FOLLOW_UP_WEIGHT;
                 basis.push("corrective follow-up".to_owned());

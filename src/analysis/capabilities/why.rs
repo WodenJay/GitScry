@@ -1,9 +1,8 @@
 use std::collections::HashSet;
 
-use rusqlite::Connection;
-
 use crate::{
     app::AppError,
+    cache::QuerySession,
     git::{WhyAnchor, WhyTarget},
 };
 
@@ -35,7 +34,7 @@ struct Entry {
 }
 
 pub(crate) fn run(
-    connection: &Connection,
+    session: &QuerySession,
     target: &WhyTarget,
     reachable: &HashSet<String>,
     limit: usize,
@@ -46,8 +45,8 @@ pub(crate) fn run(
         report.notices.push(REMOTE_CONTEXT_NOTICE.to_owned());
         return Ok(report);
     }
-    let commits = retrieval::path_history(connection, &target.path, reachable)?;
-    let missing_objects = retrieval::has_missing_objects(connection, &commits)?;
+    let commits = session.path_history(&target.path, reachable)?;
+    let missing_objects = session.has_missing_objects(&commits)?;
     let target_line = anchor_line(&target.anchor);
     let mut historical_line = target_line as i64;
     let blame_oid = target.blame.as_ref().map(|blame| blame.oid.as_str());
@@ -55,7 +54,7 @@ pub(crate) fn run(
     let mut seen_blame = false;
 
     for commit in &commits {
-        let hunks = retrieval::hunks(connection, &commit.oid)?;
+        let hunks = session.history_hunks(&commit.oid)?;
         let direct_hunk = trace_line(commit, &hunks, &mut historical_line);
         let blame_match = blame_oid == Some(commit.oid.as_str());
         seen_blame |= blame_match;

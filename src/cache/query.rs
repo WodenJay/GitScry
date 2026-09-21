@@ -3,44 +3,107 @@ use std::collections::{HashMap, HashSet};
 
 use crate::app::AppError;
 
-use super::super::Step;
-use super::super::search_error;
+use super::{QuerySession, cache_error, decode_message_row, message_parts};
 
 /// A lexical candidate: one cache row with the paths it changed.
-pub(super) struct Stored {
-    pub(super) commit_id: i64,
-    pub(super) position: i64,
-    pub(super) oid: String,
-    pub(super) commit_time: i64,
-    pub(super) subject: String,
-    pub(super) body: String,
-    pub(super) paths: Vec<Vec<u8>>,
-    pub(super) path_keys: Vec<String>,
-    pub(super) bm25: f64,
+pub(crate) struct SearchCandidate {
+    pub(crate) commit_id: i64,
+    pub(crate) position: i64,
+    pub(crate) oid: String,
+    pub(crate) commit_time: i64,
+    pub(crate) subject: String,
+    pub(crate) body: String,
+    pub(crate) paths: Vec<Vec<u8>>,
+    pub(crate) path_keys: Vec<String>,
+    pub(crate) bm25: f64,
 }
 
 /// One cached commit's deduplicated changed paths, in cache order.
-pub(in crate::analysis) struct RelationSupport {
-    pub(in crate::analysis) oid: String,
-    pub(in crate::analysis) commit_time: i64,
+pub(crate) struct RelationSupport {
+    pub(crate) oid: String,
+    pub(crate) commit_time: i64,
 }
 
-pub(in crate::analysis) struct RelationCandidate {
-    pub(in crate::analysis) path: Vec<u8>,
-    pub(in crate::analysis) key: String,
-    pub(in crate::analysis) total_touches: usize,
-    pub(in crate::analysis) supporting: Vec<RelationSupport>,
-    pub(in crate::analysis) seed_keys: HashSet<String>,
+pub(crate) struct RelationCandidate {
+    pub(crate) path: Vec<u8>,
+    pub(crate) key: String,
+    pub(crate) total_touches: usize,
+    pub(crate) supporting: Vec<RelationSupport>,
+    pub(crate) seed_keys: HashSet<String>,
 }
 
-pub(in crate::analysis) struct RelationHistory {
-    pub(in crate::analysis) candidates: HashMap<String, RelationCandidate>,
-    pub(in crate::analysis) seed_touch_commits: usize,
-    pub(in crate::analysis) eligible_commits: usize,
-    pub(in crate::analysis) mass_changes_filtered: bool,
+pub(crate) struct RelationHistory {
+    pub(crate) candidates: HashMap<String, RelationCandidate>,
+    pub(crate) seed_touch_commits: usize,
+    pub(crate) eligible_commits: usize,
+    pub(crate) mass_changes_filtered: bool,
 }
 
-pub(in crate::analysis) fn relation_history(
+pub(crate) struct StoredChange {
+    pub(crate) status: String,
+    pub(crate) old_path: Option<Vec<u8>>,
+    pub(crate) new_path: Option<Vec<u8>>,
+}
+impl QuerySession {
+    pub(crate) fn relation_history(
+        &self,
+        seed_keys: &[String],
+        mass_change_path_limit: usize,
+    ) -> Result<RelationHistory, AppError> {
+        relation_history(&self.connection, seed_keys, mass_change_path_limit)
+    }
+
+    pub(crate) fn match_count(&self, match_query: &str) -> Result<usize, AppError> {
+        match_count(&self.connection, match_query)
+    }
+
+    pub(crate) fn candidates(
+        &self,
+        match_query: &str,
+        limit: i64,
+    ) -> Result<Vec<SearchCandidate>, AppError> {
+        candidates(&self.connection, match_query, limit)
+    }
+
+    pub(crate) fn projected_path_keys(&self, oid: &str) -> Result<Vec<String>, AppError> {
+        projected_path_keys(&self.connection, oid)
+    }
+
+    pub(crate) fn changes(&self, oid: &str) -> Result<Vec<StoredChange>, AppError> {
+        changes(&self.connection, oid)
+    }
+
+    pub(crate) fn commit_message(&self, oid: &str) -> Result<Option<Vec<u8>>, AppError> {
+        commit_message(&self.connection, oid)
+    }
+
+    pub(crate) fn commits(&self) -> Result<Vec<StoredCommit>, AppError> {
+        commits(&self.connection)
+    }
+
+    pub(crate) fn touched_between(
+        &self,
+        from_position: i64,
+        to_position: i64,
+        path_keys: &[String],
+    ) -> Result<bool, AppError> {
+        touch_between(&self.connection, from_position, to_position, path_keys)
+    }
+
+    pub(crate) fn follow_ups(
+        &self,
+        revert_oid: &str,
+        path_keys: &[String],
+    ) -> Result<Vec<StoredCommit>, AppError> {
+        follow_ups(&self.connection, revert_oid, path_keys)
+    }
+}
+
+fn search_error(operation: &str, error: impl std::fmt::Display) -> AppError {
+    cache_error(operation, error)
+}
+
+fn relation_history(
     connection: &Connection,
     seed_keys: &[String],
     mass_change_path_limit: usize,
@@ -322,10 +385,7 @@ fn seed_matches_path(seed: &str, key: &str, basename: &str) -> bool {
     }
 }
 
-pub(in crate::analysis) fn match_count(
-    connection: &Connection,
-    match_query: &str,
-) -> Result<usize, AppError> {
+fn match_count(connection: &Connection, match_query: &str) -> Result<usize, AppError> {
     let count = connection
         .query_row(
             "SELECT COUNT(*) FROM search_fts WHERE search_fts MATCH ?1",
@@ -338,11 +398,11 @@ pub(in crate::analysis) fn match_count(
 }
 
 /// The strongest lexical candidates, each carrying the paths it changed.
-pub(in crate::analysis) fn candidates(
+fn candidates(
     connection: &Connection,
     match_query: &str,
     limit: i64,
-) -> Result<Vec<Stored>, AppError> {
+) -> Result<Vec<SearchCandidate>, AppError> {
     let mut statement = connection
         .prepare(
             "SELECT c.commit_id, c.oid, c.commit_time, c.message, c.message_length,
@@ -356,9 +416,9 @@ pub(in crate::analysis) fn candidates(
         .map_err(|error| search_error("preparing search", error))?;
     let rows = statement
         .query_map(params![match_query, limit], |row| {
-            let message = super::decode_message_row(row, 3, 4)?;
-            let (subject, body) = super::text::message_parts(&message);
-            Ok(Stored {
+            let message = decode_message_row(row, 3, 4)?;
+            let (subject, body) = message_parts(&message);
+            Ok(SearchCandidate {
                 commit_id: row.get(0)?,
                 oid: row.get(1)?,
                 commit_time: row.get(2)?,
@@ -379,7 +439,7 @@ pub(in crate::analysis) fn candidates(
 }
 fn load_candidate_paths(
     connection: &Connection,
-    candidates: &mut [Stored],
+    candidates: &mut [SearchCandidate],
 ) -> Result<(), AppError> {
     for candidates in candidates.chunks_mut(SQL_PARAMETER_LIMIT) {
         let commit_ids = candidates
@@ -450,10 +510,7 @@ fn load_candidate_paths(
     }
     Ok(())
 }
-pub(super) fn projected_path_keys(
-    connection: &Connection,
-    oid: &str,
-) -> Result<Vec<String>, AppError> {
+fn projected_path_keys(connection: &Connection, oid: &str) -> Result<Vec<String>, AppError> {
     let mut statement = connection
         .prepare(
             "SELECT cp.path_key
@@ -470,11 +527,8 @@ pub(super) fn projected_path_keys(
         .map_err(|error| search_error("reading path projection", error))
 }
 
-/// The moves a commit made, in change order and deduplicated.
-pub(in crate::analysis) fn steps(
-    connection: &Connection,
-    oid: &str,
-) -> Result<Vec<Step>, AppError> {
+/// The raw path changes a commit made, in change order.
+fn changes(connection: &Connection, oid: &str) -> Result<Vec<StoredChange>, AppError> {
     let mut statement = connection
         .prepare(
             "SELECT ch.status, ch.old_path, ch.new_path
@@ -484,33 +538,21 @@ pub(in crate::analysis) fn steps(
              ORDER BY ch.ordinal",
         )
         .map_err(|error| search_error("preparing change shapes", error))?;
-    let rows = statement
+    statement
         .query_map([oid], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Option<Vec<u8>>>(1)?,
-                row.get::<_, Option<Vec<u8>>>(2)?,
-            ))
+            Ok(StoredChange {
+                status: row.get(0)?,
+                old_path: row.get(1)?,
+                new_path: row.get(2)?,
+            })
         })
-        .map_err(|error| search_error("reading change shapes", error))?;
-    let mut steps: Vec<Step> = Vec::new();
-    for row in rows {
-        let (status, old_path, new_path) =
-            row.map_err(|error| search_error("reading change shapes", error))?;
-        if let Some(step) = Step::from_change(&status, old_path, new_path)
-            && !steps.contains(&step)
-        {
-            steps.push(step);
-        }
-    }
-    Ok(steps)
+        .map_err(|error| search_error("reading change shapes", error))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| search_error("reading change shapes", error))
 }
 
-/// Subject and body of one cached commit.
-pub(in crate::analysis) fn text(
-    connection: &Connection,
-    oid: &str,
-) -> Result<Option<(String, String)>, AppError> {
+/// The decoded message of one cached commit.
+fn commit_message(connection: &Connection, oid: &str) -> Result<Option<Vec<u8>>, AppError> {
     let mut statement = connection
         .prepare("SELECT message, message_length FROM commits WHERE oid = ?1")
         .map_err(|error| search_error("preparing commit lookup", error))?;
@@ -521,10 +563,7 @@ pub(in crate::analysis) fn text(
         .optional()
         .map_err(|error| search_error("reading commit lookup", error))?;
     message
-        .map(|(compressed, length)| {
-            crate::cache::decode_message(&compressed, length)
-                .map(|message| super::text::message_parts(&message))
-        })
+        .map(|(compressed, length)| super::decode_message(&compressed, length))
         .transpose()
 }
 
@@ -532,14 +571,14 @@ pub(in crate::analysis) fn text(
 ///
 /// The position orders commits the way the cache generation was built, which separates
 /// commits a repository recorded in the same second.
-pub(in crate::analysis) struct StoredCommit {
-    pub(in crate::analysis) position: i64,
-    pub(in crate::analysis) oid: String,
-    pub(in crate::analysis) message: Vec<u8>,
+pub(crate) struct StoredCommit {
+    pub(crate) position: i64,
+    pub(crate) oid: String,
+    pub(crate) message: Vec<u8>,
 }
 
 /// Every cached commit, oldest first.
-pub(in crate::analysis) fn history(connection: &Connection) -> Result<Vec<StoredCommit>, AppError> {
+fn commits(connection: &Connection) -> Result<Vec<StoredCommit>, AppError> {
     let mut statement = connection
         .prepare(
             "SELECT position, oid, message, message_length FROM commits ORDER BY commit_time, oid",
@@ -550,7 +589,7 @@ pub(in crate::analysis) fn history(connection: &Connection) -> Result<Vec<Stored
             Ok(StoredCommit {
                 position: row.get(0)?,
                 oid: row.get(1)?,
-                message: super::decode_message_row(row, 2, 3)?,
+                message: decode_message_row(row, 2, 3)?,
             })
         })
         .map_err(|error| search_error("reading history scan", error))?
@@ -562,7 +601,7 @@ pub(in crate::analysis) fn history(connection: &Connection) -> Result<Vec<Stored
 ///
 /// A revert only counts as undoing a candidate when that candidate was the last work on
 /// the path; otherwise the revert belongs to some later, unrelated change.
-pub(in crate::analysis) fn touch_between(
+fn touch_between(
     connection: &Connection,
     from_position: i64,
     to_position: i64,
@@ -594,17 +633,14 @@ pub(in crate::analysis) fn touch_between(
     Ok(false)
 }
 
-/// The first later commit that corrects work on the abandoned paths, if history records one.
-///
-/// Ordering is by cache insertion order rather than timestamp, because a repository can
-/// record a revert and its follow-up in the same second.
-pub(in crate::analysis) fn corrective_follow_up(
+/// Later commits touching the abandoned paths, in cache order.
+fn follow_ups(
     connection: &Connection,
     revert_oid: &str,
     path_keys: &[String],
-) -> Result<Option<(String, String, String)>, AppError> {
+) -> Result<Vec<StoredCommit>, AppError> {
     if path_keys.is_empty() {
-        return Ok(None);
+        return Ok(Vec::new());
     }
     let mut candidates = Vec::<(i64, String, Vec<u8>)>::new();
     let mut seen = HashSet::new();
@@ -632,7 +668,7 @@ pub(in crate::analysis) fn corrective_follow_up(
                 Ok((
                     row.get::<_, i64>(0)?,
                     row.get::<_, String>(1)?,
-                    super::decode_message_row(row, 2, 3)?,
+                    decode_message_row(row, 2, 3)?,
                 ))
             })
             .map_err(|error| search_error("reading corrective follow-up", error))?;
@@ -645,13 +681,12 @@ pub(in crate::analysis) fn corrective_follow_up(
         }
     }
     candidates.sort_unstable_by_key(|candidate| candidate.0);
-    for (_, oid, message) in candidates {
-        let (subject, body) = super::text::message_parts(&message);
-        // Only a commit that reads as a correction counts; a later incidental touch of the
-        // same path is not material about how the abandoned approach moved on.
-        if super::super::provenance::is_corrective_subject(&subject) {
-            return Ok(Some((oid, subject, body)));
-        }
-    }
-    Ok(None)
+    Ok(candidates
+        .into_iter()
+        .map(|(position, oid, message)| StoredCommit {
+            position,
+            oid,
+            message,
+        })
+        .collect())
 }

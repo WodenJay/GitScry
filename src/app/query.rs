@@ -12,14 +12,14 @@ pub(super) fn run(
     paths: Vec<String>,
     limit: usize,
     capability: impl FnOnce(
-        &rusqlite::Connection,
+        &cache::QuerySession,
         &analysis::Intent,
         usize,
     ) -> Result<analysis::Report, AppError>,
 ) -> Result<Outcome, AppError> {
     let intent = analysis::Intent::parse(&words, &paths)?;
     let session = cache::open_query()?;
-    let mut report = capability(session.connection(), &intent, limit)?;
+    let mut report = capability(&session, &intent, limit)?;
     let mut progress = session.progress().to_vec();
     progress.append(&mut report.warnings);
     Ok(Outcome {
@@ -34,7 +34,7 @@ pub(super) fn run_paths(
     paths: Vec<String>,
     limit: usize,
     capability: impl FnOnce(
-        &rusqlite::Connection,
+        &cache::QuerySession,
         &analysis::Intent,
         &Path,
         usize,
@@ -42,7 +42,7 @@ pub(super) fn run_paths(
 ) -> Result<Outcome, AppError> {
     let intent = analysis::Intent::paths(&paths)?;
     let session = cache::open_query()?;
-    let mut report = capability(session.connection(), &intent, session.root(), limit)?;
+    let mut report = capability(&session, &intent, session.root(), limit)?;
     let mut progress = session.progress().to_vec();
     progress.append(&mut report.warnings);
     Ok(Outcome {
@@ -69,15 +69,14 @@ pub(super) fn run_regression(
     if let Some(good_revision) = &target.good_revision {
         session.require_revision(good_revision)?;
     }
-    let bad_reachable = analysis::ancestors(session.connection(), &target.bad_revision)?;
+    let bad_reachable = session.ancestors(&target.bad_revision)?;
     let reachable = if let Some(good_revision) = &target.good_revision {
-        let good_reachable = analysis::ancestors(session.connection(), good_revision)?;
+        let good_reachable = session.ancestors(good_revision)?;
         bad_reachable.difference(&good_reachable).cloned().collect()
     } else {
         bad_reachable
     };
-    let mut report =
-        analysis::regression(session.connection(), &intent, &target, &reachable, limit)?;
+    let mut report = analysis::regression(&session, &intent, &target, &reachable, limit)?;
     let mut progress = session.progress().to_vec();
     progress.append(&mut report.warnings);
     Ok(Outcome {
@@ -96,8 +95,8 @@ pub(super) fn run_why(
     let target = repository.pin_why_target(&revision, &path, anchor)?;
     let session = cache::open_query()?;
     session.require_revision(&target.revision)?;
-    let reachable = analysis::ancestors(session.connection(), &target.revision)?;
-    let mut report = analysis::why(session.connection(), &target, &reachable, limit)?;
+    let reachable = session.ancestors(&target.revision)?;
+    let mut report = analysis::why(&session, &target, &reachable, limit)?;
     let mut progress = session.progress().to_vec();
     progress.append(&mut report.warnings);
     Ok(Outcome {
@@ -116,8 +115,8 @@ pub(super) fn run_trace_fix(
     let target = repository.pin_trace_fix(&revision, &paths)?;
     let session = cache::open_query()?;
     session.require_revision(&target.revision)?;
-    let reachable = analysis::ancestors(session.connection(), &target.revision)?;
-    let mut report = analysis::trace_fix(session.connection(), &target, &reachable, limit)?;
+    let reachable = session.ancestors(&target.revision)?;
+    let mut report = analysis::trace_fix(&session, &target, &reachable, limit)?;
     let mut progress = session.progress().to_vec();
     progress.append(&mut report.warnings);
     Ok(Outcome {

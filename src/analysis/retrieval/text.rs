@@ -1,16 +1,4 @@
-//! Splitting commit text and paths the way retrieval and display both need.
-
-pub(crate) fn message_parts(message: &[u8]) -> (String, String) {
-    let message = String::from_utf8_lossy(message);
-    let mut lines = message.splitn(2, '\n');
-    let subject = lines
-        .next()
-        .unwrap_or_default()
-        .trim_end_matches('\r')
-        .to_owned();
-    let body = lines.next().unwrap_or_default().to_owned();
-    (subject, body)
-}
+//! Normalizing text and paths the way retrieval and display both need.
 
 /// Prose plus the identifier terms it contains, so `MATCH` can reach inside identifiers.
 pub(crate) fn searchable_text(value: &str) -> String {

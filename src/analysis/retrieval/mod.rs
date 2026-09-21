@@ -4,47 +4,23 @@
 //! Capabilities cross this seam through [`Pool`] and [`reverts`]; everything else here
 //! stays private.
 
-mod history;
 mod intent;
 mod lexical;
 mod rank;
 mod reverts;
-mod store;
 mod text;
 
-use rusqlite::Connection;
+use super::Step;
+use crate::{app::AppError, cache::QuerySession};
 
-use crate::app::AppError;
-pub(crate) use history::ancestors;
-
-pub(in crate::analysis) use history::{
-    HistoryCommit, HistoryHunk, has_missing_objects, hunks, path_history,
-};
+pub(crate) use crate::cache::message_parts;
+pub(in crate::analysis) use crate::cache::{HistoryCommit, HistoryHunk, RelationHistory};
 pub(crate) use intent::Intent;
 pub(in crate::analysis) use lexical::Signals;
 pub(in crate::analysis) use rank::{Ranked, assign_citations, sort};
 pub(in crate::analysis) use reverts::{Revert, RevertIndex, index as reverts};
-pub(in crate::analysis) use store::{
-    RelationHistory, corrective_follow_up, relation_history, steps, text as commit_text,
-};
 pub(in crate::analysis) use text::tokenize;
-pub(crate) use text::{message_parts, normalize_path, searchable_text};
-
-pub(super) fn decode_message_row(
-    row: &rusqlite::Row<'_>,
-    compressed_index: usize,
-    length_index: usize,
-) -> Result<Vec<u8>, rusqlite::Error> {
-    let compressed: Vec<u8> = row.get(compressed_index)?;
-    let length: i64 = row.get(length_index)?;
-    crate::cache::decode_message(&compressed, length).map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(
-            compressed_index,
-            rusqlite::types::Type::Blob,
-            Box::new(error),
-        )
-    })
-}
+pub(crate) use text::{normalize_path, searchable_text};
 /// How deep the lexical pool reaches relative to the caller's `--limit`.
 const CANDIDATE_MULTIPLIER: usize = 20;
 
@@ -80,9 +56,8 @@ impl Pool {
     }
 }
 
-/// Read the candidates an intent reaches, or `None` when it reaches none.
 pub(in crate::analysis) fn pool(
-    connection: &Connection,
+    session: &QuerySession,
     intent: &Intent,
     limit: usize,
 ) -> Result<Option<Pool>, AppError> {
@@ -91,12 +66,13 @@ pub(in crate::analysis) fn pool(
         return Ok(None);
     }
     let query = match_query(terms);
-    let matched_count = store::match_count(connection, &query)?;
+    let matched_count = session.match_count(&query)?;
     if matched_count == 0 {
         return Ok(None);
     }
 
-    let candidates = store::candidates(connection, &query, candidate_limit(limit))?
+    let candidates = session
+        .candidates(&query, candidate_limit(limit))?
         .into_iter()
         .map(|candidate| Scored {
             signals: lexical::signals(
@@ -120,10 +96,45 @@ pub(in crate::analysis) fn pool(
     }))
 }
 
+pub(in crate::analysis) fn steps(session: &QuerySession, oid: &str) -> Result<Vec<Step>, AppError> {
+    let mut steps = Vec::new();
+    for change in session.changes(oid)? {
+        if let Some(step) = Step::from_change(&change.status, change.old_path, change.new_path)
+            && !steps.contains(&step)
+        {
+            steps.push(step);
+        }
+    }
+    Ok(steps)
+}
+
+pub(in crate::analysis) fn commit_text(
+    session: &QuerySession,
+    oid: &str,
+) -> Result<Option<(String, String)>, AppError> {
+    Ok(session
+        .commit_message(oid)?
+        .map(|message| message_parts(&message)))
+}
+
+pub(in crate::analysis) fn corrective_follow_up(
+    session: &QuerySession,
+    revert_oid: &str,
+    path_keys: &[String],
+) -> Result<Option<(String, String, String)>, AppError> {
+    for commit in session.follow_ups(revert_oid, path_keys)? {
+        let (subject, body) = message_parts(&commit.message);
+        if super::provenance::is_corrective_subject(&subject) {
+            return Ok(Some((commit.oid, subject, body)));
+        }
+    }
+    Ok(None)
+}
+
 /// The revert history associates with a candidate: the trailer it names first, then the
 /// earliest later revert of the same paths that no intervening commit also touched.
 pub(in crate::analysis) fn link<'a>(
-    connection: &Connection,
+    session: &QuerySession,
     reverts: &'a RevertIndex,
     candidate: &Scored,
 ) -> Result<Option<&'a Revert>, AppError> {
@@ -131,12 +142,7 @@ pub(in crate::analysis) fn link<'a>(
         return Ok(Some(revert));
     }
     for revert in reverts.undoings(&candidate.oid, &candidate.path_keys, candidate.position) {
-        if !store::touch_between(
-            connection,
-            candidate.position,
-            revert.position,
-            &candidate.path_keys,
-        )? {
+        if !session.touched_between(candidate.position, revert.position, &candidate.path_keys)? {
             return Ok(Some(revert));
         }
     }

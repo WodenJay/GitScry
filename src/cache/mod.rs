@@ -1,5 +1,7 @@
 mod generation;
+mod history;
 mod payload;
+mod query;
 mod schema;
 use crate::{
     analysis,
@@ -7,7 +9,9 @@ use crate::{
     git::{Change, Commit, Hunk, Snapshot},
 };
 pub(crate) use generation::prepare;
+pub(crate) use history::{HistoryCommit, HistoryHunk};
 use payload::{HunkReader, HunkWriter, encode};
+pub(crate) use query::RelationHistory;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params, params_from_iter};
 use std::collections::{HashMap, HashSet};
 use std::{
@@ -59,10 +63,6 @@ pub(crate) struct QuerySession {
 }
 
 impl QuerySession {
-    pub(crate) fn connection(&self) -> &Connection {
-        &self.connection
-    }
-
     pub(crate) fn root(&self) -> &Path {
         &self.root
     }
@@ -863,6 +863,34 @@ fn write_hunks(transaction: &rusqlite::Transaction<'_>, hunks: &[Hunk]) -> Resul
 }
 pub(crate) fn decode_message(compressed: &[u8], length: i64) -> Result<Vec<u8>, AppError> {
     payload::decode(compressed, length, "commit message")
+}
+
+fn decode_message_row(
+    row: &rusqlite::Row<'_>,
+    compressed_index: usize,
+    length_index: usize,
+) -> Result<Vec<u8>, rusqlite::Error> {
+    let compressed: Vec<u8> = row.get(compressed_index)?;
+    let length: i64 = row.get(length_index)?;
+    decode_message(&compressed, length).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            compressed_index,
+            rusqlite::types::Type::Blob,
+            Box::new(error),
+        )
+    })
+}
+
+pub(crate) fn message_parts(message: &[u8]) -> (String, String) {
+    let message = String::from_utf8_lossy(message);
+    let mut lines = message.splitn(2, '\n');
+    let subject = lines
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches('\r')
+        .to_owned();
+    let body = lines.next().unwrap_or_default().to_owned();
+    (subject, body)
 }
 
 pub(crate) struct DecodedHunk {

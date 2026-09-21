@@ -1,7 +1,6 @@
 use std::collections::HashSet;
 
-use crate::{app::AppError, git::RegressionTarget};
-use rusqlite::Connection;
+use crate::{app::AppError, cache::QuerySession, git::RegressionTarget};
 
 use super::super::retrieval;
 use super::super::{Citation, Confidence, Intent, Material, Report, ReportKind};
@@ -10,21 +9,18 @@ const BISECT_NOTICE: &str =
     "Regression suspects are historical candidates; they do not replace executable git bisect.";
 
 pub(crate) fn run(
-    connection: &Connection,
+    session: &QuerySession,
     intent: &Intent,
     target: &RegressionTarget,
     reachable: &HashSet<String>,
     limit: usize,
 ) -> Result<Report, AppError> {
-    let history = retrieval::path_history(connection, &target.path, reachable)?;
-    let missing_objects = retrieval::has_missing_objects(connection, &history)?;
+    let history = session.path_history(&target.path, reachable)?;
+    let missing_objects = session.has_missing_objects(&history)?;
     let symbol_matches = match (target.symbol_line, target.symbol_end) {
-        (Some(symbol_line), Some(symbol_end)) => Some(symbol_matches(
-            connection,
-            &history,
-            symbol_line,
-            symbol_end,
-        )?),
+        (Some(symbol_line), Some(symbol_end)) => {
+            Some(symbol_matches(session, &history, symbol_line, symbol_end)?)
+        }
         _ => None,
     };
 
@@ -37,7 +33,7 @@ pub(crate) fn run(
         {
             continue;
         }
-        let hunks = retrieval::hunks(connection, &commit.oid)?;
+        let hunks = session.history_hunks(&commit.oid)?;
         let (lexical_hits, hunk_hits) = symptom_hits(intent, &commit, &hunks);
         let test_paths = commit
             .paths
@@ -182,7 +178,7 @@ fn has_path_boundary(commit: &retrieval::HistoryCommit) -> bool {
         .any(|change| change.status.starts_with('R') || change.status.starts_with('C'))
 }
 fn symbol_matches(
-    connection: &Connection,
+    session: &QuerySession,
     history: &[retrieval::HistoryCommit],
     symbol_line: usize,
     symbol_end: usize,
@@ -191,7 +187,7 @@ fn symbol_matches(
     let mut end_line = symbol_end as i64;
     let mut matches = HashSet::new();
     for commit in history {
-        let hunks = retrieval::hunks(connection, &commit.oid)?;
+        let hunks = session.history_hunks(&commit.oid)?;
         let overlaps_symbol = hunks.iter().any(|hunk| {
             commit.anchored_ordinals.contains(&hunk.change_ordinal)
                 && hunk_overlaps_symbol(hunk, line.min(end_line), line.max(end_line))

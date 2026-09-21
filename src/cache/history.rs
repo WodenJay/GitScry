@@ -4,40 +4,65 @@ use rusqlite::{Connection, params};
 
 use crate::app::AppError;
 
-use super::super::search_error;
-use super::text::message_parts;
+use super::{QuerySession, cache_error, message_parts, read_hunks};
 
-pub(in crate::analysis) struct HistoryCommit {
-    pub(in crate::analysis) position: i64,
-    pub(in crate::analysis) oid: String,
-    pub(in crate::analysis) commit_time: i64,
-    pub(in crate::analysis) subject: String,
-    pub(in crate::analysis) body: String,
-    pub(in crate::analysis) paths: Vec<Vec<u8>>,
-    pub(in crate::analysis) changes: Vec<PathChange>,
-    pub(in crate::analysis) anchored_ordinals: Vec<i64>,
-    pub(in crate::analysis) parent_count: usize,
+pub(crate) struct HistoryCommit {
+    pub(crate) position: i64,
+    pub(crate) oid: String,
+    pub(crate) commit_time: i64,
+    pub(crate) subject: String,
+    pub(crate) body: String,
+    pub(crate) paths: Vec<Vec<u8>>,
+    pub(crate) changes: Vec<PathChange>,
+    pub(crate) anchored_ordinals: Vec<i64>,
+    pub(crate) parent_count: usize,
 }
 
-pub(in crate::analysis) struct PathChange {
-    pub(in crate::analysis) ordinal: i64,
-    pub(in crate::analysis) status: String,
-    pub(in crate::analysis) old_path: Option<Vec<u8>>,
-    pub(in crate::analysis) new_path: Option<Vec<u8>>,
-    pub(in crate::analysis) old_blob: Option<String>,
-    pub(in crate::analysis) new_blob: Option<String>,
+pub(crate) struct PathChange {
+    pub(crate) ordinal: i64,
+    pub(crate) status: String,
+    pub(crate) old_path: Option<Vec<u8>>,
+    pub(crate) new_path: Option<Vec<u8>>,
+    pub(crate) old_blob: Option<String>,
+    pub(crate) new_blob: Option<String>,
 }
 
-pub(in crate::analysis) struct HistoryHunk {
-    pub(in crate::analysis) change_ordinal: i64,
-    pub(in crate::analysis) old_start: i64,
-    pub(in crate::analysis) old_lines: i64,
-    pub(in crate::analysis) new_start: i64,
-    pub(in crate::analysis) new_lines: i64,
-    pub(in crate::analysis) text: Vec<u8>,
+pub(crate) struct HistoryHunk {
+    pub(crate) change_ordinal: i64,
+    pub(crate) old_start: i64,
+    pub(crate) old_lines: i64,
+    pub(crate) new_start: i64,
+    pub(crate) new_lines: i64,
+    pub(crate) text: Vec<u8>,
 }
 
-pub(in crate::analysis) fn path_history(
+impl QuerySession {
+    pub(crate) fn path_history(
+        &self,
+        path: &[u8],
+        reachable: &HashSet<String>,
+    ) -> Result<Vec<HistoryCommit>, AppError> {
+        path_history(&self.connection, path, reachable)
+    }
+
+    pub(crate) fn ancestors(&self, oid: &str) -> Result<HashSet<String>, AppError> {
+        ancestors(&self.connection, oid)
+    }
+
+    pub(crate) fn history_hunks(&self, oid: &str) -> Result<Vec<HistoryHunk>, AppError> {
+        hunks(&self.connection, oid)
+    }
+
+    pub(crate) fn has_missing_objects(&self, commits: &[HistoryCommit]) -> Result<bool, AppError> {
+        has_missing_objects(&self.connection, commits)
+    }
+}
+
+fn search_error(operation: &str, error: impl std::fmt::Display) -> AppError {
+    cache_error(operation, error)
+}
+
+fn path_history(
     connection: &Connection,
     path: &[u8],
     reachable: &HashSet<String>,
@@ -153,7 +178,7 @@ pub(in crate::analysis) fn path_history(
     Ok(result)
 }
 
-pub(crate) fn ancestors(connection: &Connection, oid: &str) -> Result<HashSet<String>, AppError> {
+fn ancestors(connection: &Connection, oid: &str) -> Result<HashSet<String>, AppError> {
     let mut statement = connection
         .prepare(
             "SELECT COALESCE(parent.oid, p.external_oid)
@@ -179,11 +204,8 @@ pub(crate) fn ancestors(connection: &Connection, oid: &str) -> Result<HashSet<St
     Ok(ancestors)
 }
 
-pub(in crate::analysis) fn hunks(
-    connection: &Connection,
-    oid: &str,
-) -> Result<Vec<HistoryHunk>, AppError> {
-    crate::cache::read_hunks(connection, oid).map(|hunks| {
+fn hunks(connection: &Connection, oid: &str) -> Result<Vec<HistoryHunk>, AppError> {
+    read_hunks(connection, oid).map(|hunks| {
         hunks
             .into_iter()
             .map(|hunk| HistoryHunk {
@@ -198,7 +220,7 @@ pub(in crate::analysis) fn hunks(
     })
 }
 
-pub(in crate::analysis) fn has_missing_objects(
+fn has_missing_objects(
     connection: &Connection,
     commits: &[HistoryCommit],
 ) -> Result<bool, AppError> {

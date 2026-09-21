@@ -1,6 +1,4 @@
-use rusqlite::Connection;
-
-use crate::app::AppError;
+use crate::{app::AppError, cache::QuerySession};
 
 use super::super::retrieval;
 use super::super::{Citation, Confidence, Detail, Intent, Material, Report, ReportKind};
@@ -16,14 +14,14 @@ const COHERENT_PATH_LIMIT: usize = 12;
 const REVERT_DEMOTION: f64 = 8.0;
 
 pub(crate) fn run(
-    connection: &Connection,
+    session: &QuerySession,
     intent: &Intent,
     limit: usize,
 ) -> Result<Report, AppError> {
-    let Some(pool) = retrieval::pool(connection, intent, limit)? else {
+    let Some(pool) = retrieval::pool(session, intent, limit)? else {
         return Ok(super::super::empty_report(ReportKind::Examples));
     };
-    let reverts = retrieval::reverts(connection)?;
+    let reverts = retrieval::reverts(session)?;
 
     let mut ranked = Vec::new();
     for (index, candidate) in pool.candidates.iter().enumerate() {
@@ -33,7 +31,7 @@ pub(crate) fn run(
         score += if coherent { COHERENT_WEIGHT } else { 0.0 };
         // Work that was later undone, and the revert itself, are not precedents to follow.
         if reverts.is_revert(&candidate.oid)
-            || retrieval::link(connection, &reverts, candidate)?.is_some()
+            || retrieval::link(session, &reverts, candidate)?.is_some()
         {
             score -= REVERT_DEMOTION;
         }
@@ -66,7 +64,7 @@ pub(crate) fn run(
         if reverts.is_revert(&candidate.oid) {
             basis.push("demoted: a revert, not a precedent".to_owned());
             confidence = Confidence::Low;
-        } else if let Some(revert) = retrieval::link(connection, &reverts, candidate)? {
+        } else if let Some(revert) = retrieval::link(session, &reverts, candidate)? {
             citations.push(
                 Citation::new(revert.oid.clone(), revert.subject.clone()).noting("later reverted"),
             );
@@ -74,7 +72,7 @@ pub(crate) fn run(
             confidence = Confidence::Low;
         }
         // Steps are only read for the results actually returned, not the whole pool.
-        let steps = retrieval::steps(connection, &candidate.oid)?;
+        let steps = retrieval::steps(session, &candidate.oid)?;
         materials.push(Material {
             subject: candidate.subject.clone(),
             paths: candidate.paths.clone(),
