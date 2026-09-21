@@ -51,6 +51,21 @@ CREATE TABLE changes (
     new_mode TEXT NOT NULL,
     UNIQUE (commit_id, ordinal)
 ) STRICT;
+CREATE TABLE commit_paths (
+    commit_id INTEGER NOT NULL REFERENCES commits(commit_id),
+    path_key TEXT NOT NULL,
+    path_basename TEXT NOT NULL CHECK (path_basename <> ''),
+    raw_path BLOB NOT NULL,
+    path_order INTEGER NOT NULL CHECK (path_order >= 0),
+    PRIMARY KEY (commit_id, path_key)
+) STRICT;
+CREATE INDEX commit_paths_by_key ON commit_paths(path_key, commit_id);
+CREATE INDEX commit_paths_by_basename ON commit_paths(path_basename, commit_id);
+CREATE INDEX commit_paths_by_commit ON commit_paths(commit_id, path_order);
+CREATE TABLE commit_path_counts (
+    commit_id INTEGER PRIMARY KEY REFERENCES commits(commit_id),
+    path_count INTEGER NOT NULL CHECK (path_count >= 0)
+ ) STRICT;
 CREATE TABLE hunk_line_blocks (
     block_id INTEGER PRIMARY KEY,
     first_line_id INTEGER NOT NULL,

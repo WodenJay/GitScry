@@ -789,3 +789,64 @@ fn reduced_shallow_history_rebuilds_without_reusing_rows() {
         1
     );
 }
+
+#[test]
+fn path_projection_preserves_rename_paths_and_commit_counts() {
+    let repo = TestRepo::new();
+    repo.commit("old.rs", b"old\n", "old");
+    repo.commit("old.rs", b"changed\n", "modify");
+    let modify_oid = repo.head();
+    git(repo.dir.path(), ["mv", "old.rs", "new.rs"]);
+    git(repo.dir.path(), ["commit", "-m", "rename"]);
+    repo.index();
+
+    let cache = Connection::open(repo.dir.path().join(".gitscry/cache.sqlite")).unwrap();
+    let rename_oid = repo.head();
+    let paths: Vec<(String, Vec<u8>)> = cache
+        .prepare(
+            "SELECT cp.path_key, cp.raw_path
+             FROM commit_paths AS cp
+             JOIN commits AS c ON c.commit_id = cp.commit_id
+             WHERE c.oid = ?1
+             ORDER BY cp.path_order",
+        )
+        .unwrap()
+        .query_map([&rename_oid], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+
+    assert_eq!(
+        paths,
+        vec![
+            ("old.rs".to_owned(), b"old.rs".to_vec()),
+            ("new.rs".to_owned(), b"new.rs".to_vec()),
+        ]
+    );
+    assert_eq!(
+        cache
+            .query_row(
+                "SELECT path_count
+                 FROM commit_path_counts AS counts
+                 JOIN commits AS c ON c.commit_id = counts.commit_id
+                 WHERE c.oid = ?1",
+                [&modify_oid],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        cache
+            .query_row(
+                "SELECT path_count
+                 FROM commit_path_counts AS counts
+                 JOIN commits AS c ON c.commit_id = counts.commit_id
+                 WHERE c.oid = ?1",
+                [&rename_oid],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        2
+    );
+}

@@ -16,7 +16,7 @@ use rusqlite::Connection;
 use crate::app::AppError;
 use crate::git::{TraceFixTarget, WhyTarget};
 
-pub(crate) use retrieval::{Intent, ancestors, message_parts, searchable_text};
+pub(crate) use retrieval::{Intent, ancestors, message_parts, normalize_path, searchable_text};
 
 /// The complete `material` one capability returns.
 pub(crate) struct Report {

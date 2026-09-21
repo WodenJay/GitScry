@@ -16,7 +16,7 @@ use std::{
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-const SCHEMA_VERSION: &str = "5";
+const SCHEMA_VERSION: &str = "6";
 const WAITING_MESSAGE: &str = "Waiting for another GitScry process...";
 
 struct CacheState {
@@ -198,6 +198,8 @@ fn inspect_connection(connection: &Connection) -> Result<CacheState, ()> {
         "commit_parents",
         "changes",
         "hunks",
+        "commit_paths",
+        "commit_path_counts",
         "hunk_line_blocks",
         "hunk_token_blocks",
         "hunk_payloads",
@@ -243,7 +245,9 @@ fn inspect_connection(connection: &Connection) -> Result<CacheState, ()> {
     let commit_count = count(connection, "SELECT COUNT(*) FROM commits")?;
     let fts_count = count(connection, "SELECT COUNT(*) FROM search_fts")?;
     let fts_document_count = count(connection, "SELECT COUNT(*) FROM search_fts_docsize")?;
+    let path_count_rows = count(connection, "SELECT COUNT(*) FROM commit_path_counts")?;
     if commit_count != completed_count as i64
+        || path_count_rows != commit_count
         || fts_count != commit_count
         || fts_document_count != commit_count
     {
@@ -471,6 +475,7 @@ fn append(root: &Path, snapshot: &Snapshot) -> Result<usize, AppError> {
         .transaction()
         .map_err(|error| cache_error("starting cache transaction", error))?;
     let paths_by_commit = paths_by_commit(snapshot);
+    let projected_paths = projected_paths_by_commit(snapshot);
     for commit in &snapshot.commits {
         replace_commit(&transaction, commit)?;
     }
@@ -487,6 +492,16 @@ fn append(root: &Path, snapshot: &Snapshot) -> Result<usize, AppError> {
     }
     for change in &snapshot.changes {
         insert_change(&transaction, change)?;
+    }
+    for commit in &snapshot.commits {
+        insert_path_projection(
+            &transaction,
+            commit,
+            projected_paths
+                .get(&commit.oid)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]),
+        )?;
     }
     write_hunks(&transaction, &snapshot.hunks)?;
     replace_metadata(&transaction, snapshot)?;
@@ -535,6 +550,7 @@ fn build(path: &Path, snapshot: &Snapshot) -> Result<(), AppError> {
         .map_err(|error| cache_error("starting cache transaction", error))?;
     replace_metadata(&transaction, snapshot)?;
     let paths_by_commit = paths_by_commit(snapshot);
+    let projected_paths = projected_paths_by_commit(snapshot);
     for commit in &snapshot.commits {
         insert_commit(&transaction, commit)?;
     }
@@ -551,6 +567,16 @@ fn build(path: &Path, snapshot: &Snapshot) -> Result<(), AppError> {
     }
     for change in &snapshot.changes {
         insert_change(&transaction, change)?;
+    }
+    for commit in &snapshot.commits {
+        insert_path_projection(
+            &transaction,
+            commit,
+            projected_paths
+                .get(&commit.oid)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]),
+        )?;
     }
     write_hunks(&transaction, &snapshot.hunks)?;
     for oid in &snapshot.shallow_boundaries {
@@ -589,6 +615,35 @@ fn paths_by_commit(snapshot: &Snapshot) -> HashMap<String, Vec<Vec<u8>>> {
     paths_by_commit
 }
 
+struct ProjectedPath {
+    key: String,
+    basename: String,
+    raw_path: Vec<u8>,
+    order: i64,
+}
+
+fn projected_paths_by_commit(snapshot: &Snapshot) -> HashMap<String, Vec<ProjectedPath>> {
+    let mut paths_by_commit = HashMap::<String, Vec<ProjectedPath>>::new();
+    for change in &snapshot.changes {
+        let paths = paths_by_commit
+            .entry(change.commit_oid.clone())
+            .or_default();
+        for path in [&change.old_path, &change.new_path].into_iter().flatten() {
+            let key = analysis::normalize_path(path);
+            if key.is_empty() || paths.iter().any(|existing| existing.key == key) {
+                continue;
+            }
+            let basename = key.rsplit('/').next().unwrap_or_default().to_owned();
+            paths.push(ProjectedPath {
+                key,
+                basename,
+                raw_path: path.clone(),
+                order: paths.len() as i64,
+            });
+        }
+    }
+    paths_by_commit
+}
 fn replace_metadata(connection: &Connection, snapshot: &Snapshot) -> Result<(), AppError> {
     for (key, value) in [
         ("schema_version", SCHEMA_VERSION.to_owned()),
@@ -618,6 +673,15 @@ fn replace_commit(connection: &Connection, commit: &Commit) -> Result<(), AppErr
         .optional()
         .map_err(|error| cache_error("looking up commit", error))?;
     if let Some(commit_id) = existing {
+        connection
+            .execute("DELETE FROM commit_paths WHERE commit_id = ?1", [commit_id])
+            .map_err(|error| cache_error("removing old commit paths", error))?;
+        connection
+            .execute(
+                "DELETE FROM commit_path_counts WHERE commit_id = ?1",
+                [commit_id],
+            )
+            .map_err(|error| cache_error("removing old commit path count", error))?;
         connection
             .execute(
                 "DELETE FROM hunks WHERE change_id IN (
@@ -734,6 +798,36 @@ fn insert_document(
             params![commit_id, subject, body, paths],
         )
         .map_err(|error| cache_error("writing search document", error))?;
+    Ok(())
+}
+
+fn insert_path_projection(
+    connection: &rusqlite::Transaction<'_>,
+    commit: &Commit,
+    paths: &[ProjectedPath],
+) -> Result<(), AppError> {
+    let commit_id = commit_id(connection, &commit.oid)?;
+    for path in paths {
+        connection
+            .execute(
+                "INSERT INTO commit_paths(commit_id, path_key, path_basename, raw_path, path_order)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    commit_id,
+                    path.key,
+                    path.basename,
+                    path.raw_path,
+                    path.order,
+                ],
+            )
+            .map_err(|error| cache_error("writing commit path projection", error))?;
+    }
+    connection
+        .execute(
+            "INSERT INTO commit_path_counts(commit_id, path_count) VALUES (?1, ?2)",
+            params![commit_id, paths.len() as i64],
+        )
+        .map_err(|error| cache_error("writing commit path count", error))?;
     Ok(())
 }
 
@@ -859,7 +953,8 @@ fn validate_connection(connection: &Connection, expected_commits: i64) -> Result
     let count = count_connection(connection, "SELECT COUNT(*) FROM commits")?;
     let fts = count_connection(connection, "SELECT COUNT(*) FROM search_fts_docsize")?;
     let fts_rows = count_connection(connection, "SELECT COUNT(*) FROM search_fts")?;
-    if count != expected_commits || fts != count || fts_rows != count {
+    let path_counts = count_connection(connection, "SELECT COUNT(*) FROM commit_path_counts")?;
+    if count != expected_commits || fts != count || fts_rows != count || path_counts != count {
         return Err(AppError::operational(
             "error: validating cache transaction failed; retry",
         ));

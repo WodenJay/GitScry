@@ -25,7 +25,7 @@ pub(in crate::analysis) use lexical::Signals;
 pub(in crate::analysis) use rank::{Ranked, assign_citations, sort};
 pub(in crate::analysis) use reverts::{Revert, RevertIndex, index as reverts};
 pub(in crate::analysis) use store::{
-    ChangeSet, change_sets, corrective_follow_up, steps, text as commit_text,
+    RelationHistory, corrective_follow_up, relation_history, steps, text as commit_text,
 };
 pub(in crate::analysis) use text::tokenize;
 pub(crate) use text::{message_parts, normalize_path, searchable_text};

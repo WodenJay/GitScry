@@ -1,4 +1,5 @@
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter, types::Value};
+use std::collections::{HashMap, HashSet};
 
 use crate::app::AppError;
 
@@ -17,66 +18,306 @@ pub(super) struct Stored {
 }
 
 /// One cached commit's deduplicated changed paths, in cache order.
-pub(in crate::analysis) struct ChangeSet {
+pub(in crate::analysis) struct RelationSupport {
     pub(in crate::analysis) oid: String,
     pub(in crate::analysis) commit_time: i64,
-    pub(in crate::analysis) is_merge: bool,
-    pub(in crate::analysis) subject: String,
-    pub(in crate::analysis) paths: Vec<Vec<u8>>,
 }
 
-pub(in crate::analysis) fn change_sets(
+pub(in crate::analysis) struct RelationCandidate {
+    pub(in crate::analysis) path: Vec<u8>,
+    pub(in crate::analysis) key: String,
+    pub(in crate::analysis) total_touches: usize,
+    pub(in crate::analysis) supporting: Vec<RelationSupport>,
+    pub(in crate::analysis) seed_keys: HashSet<String>,
+}
+
+pub(in crate::analysis) struct RelationHistory {
+    pub(in crate::analysis) candidates: HashMap<String, RelationCandidate>,
+    pub(in crate::analysis) seed_touch_commits: usize,
+    pub(in crate::analysis) eligible_commits: usize,
+    pub(in crate::analysis) mass_changes_filtered: bool,
+}
+
+pub(in crate::analysis) fn relation_history(
     connection: &Connection,
-) -> Result<Vec<ChangeSet>, AppError> {
-    let mut statement = connection
-        .prepare(
-            "SELECT c.oid, c.commit_time, c.message, c.message_length,
-                    (SELECT COUNT(*) FROM commit_parents WHERE commit_id = c.commit_id) > 1,
-                    ch.old_path, ch.new_path
-             FROM commits AS c
-             JOIN changes AS ch ON ch.commit_id = c.commit_id
-             ORDER BY c.position, ch.ordinal",
+    seed_keys: &[String],
+    mass_change_path_limit: usize,
+) -> Result<RelationHistory, AppError> {
+    if seed_keys.is_empty() {
+        return Ok(RelationHistory {
+            candidates: HashMap::new(),
+            seed_touch_commits: 0,
+            eligible_commits: 0,
+            mass_changes_filtered: false,
+        });
+    }
+    let limit = i64::try_from(mass_change_path_limit).map_err(|_| {
+        search_error(
+            "reading relation history",
+            "path limit exceeded platform limits",
         )
-        .map_err(|error| search_error("preparing relation history", error))?;
-    let rows = statement
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, i64>(1)?,
-                super::decode_message_row(row, 2, 3)?,
-                row.get::<_, bool>(4)?,
-                row.get::<_, Option<Vec<u8>>>(5)?,
-                row.get::<_, Option<Vec<u8>>>(6)?,
-            ))
-        })
-        .map_err(|error| search_error("reading relation history", error))?;
-    let mut changes = Vec::new();
-    for row in rows {
-        let (oid, commit_time, message, is_merge, old_path, new_path) =
-            row.map_err(|error| search_error("reading relation history", error))?;
-        if changes
-            .last()
-            .is_none_or(|change: &ChangeSet| change.oid != oid)
-        {
-            let (subject, _) = super::text::message_parts(&message);
-            changes.push(ChangeSet {
-                oid,
-                commit_time,
-                is_merge,
-                subject,
-                paths: Vec::new(),
-            });
+    })?;
+    let eligible_commits = relation_count(connection, limit)?;
+    let seed_matches = relation_seed_matches(connection, seed_keys, limit)?;
+    let seed_touch_commits = seed_matches.keys().copied().collect::<HashSet<_>>().len();
+    let mass_changes_filtered = relation_has_mass_change(connection, seed_keys, limit)?;
+    let mut candidates = HashMap::new();
+    let seed_commit_ids = seed_matches.keys().copied().collect::<Vec<_>>();
+    for commit_ids in seed_commit_ids.chunks(SQL_PARAMETER_LIMIT) {
+        let placeholders = numbered_placeholders(1, commit_ids.len());
+        let query = format!(
+            "SELECT cp.commit_id, cp.path_key, cp.path_basename, cp.raw_path,\n\
+             c.oid, c.commit_time\n\
+             FROM commit_paths AS cp\n\
+             JOIN commits AS c ON c.commit_id = cp.commit_id\n\
+             WHERE cp.commit_id IN ({placeholders})\n\
+             ORDER BY c.position, cp.path_order"
+        );
+        let values = commit_ids
+            .iter()
+            .copied()
+            .map(Value::Integer)
+            .collect::<Vec<_>>();
+        let mut statement = connection
+            .prepare(&query)
+            .map_err(|error| search_error("preparing relation support lookup", error))?;
+        let rows = statement
+            .query_map(params_from_iter(values), |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Vec<u8>>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            })
+            .map_err(|error| search_error("reading relation support lookup", error))?;
+        for row in rows {
+            let (commit_id, key, basename, raw_path, oid, commit_time) =
+                row.map_err(|error| search_error("reading relation support lookup", error))?;
+            let Some(touched_seeds) = seed_matches.get(&commit_id) else {
+                continue;
+            };
+            if touched_seeds
+                .iter()
+                .any(|seed| seed_matches_path(seed, &key, &basename))
+            {
+                continue;
+            }
+            let candidate = candidates
+                .entry(key.clone())
+                .or_insert_with(|| RelationCandidate {
+                    path: raw_path,
+                    key,
+                    total_touches: 0,
+                    supporting: Vec::new(),
+                    seed_keys: HashSet::new(),
+                });
+            candidate.seed_keys.extend(touched_seeds.iter().cloned());
+            candidate
+                .supporting
+                .push(RelationSupport { oid, commit_time });
         }
-        let change = changes
-            .last_mut()
-            .expect("relation change was just inserted");
-        for path in [old_path, new_path].into_iter().flatten() {
-            if !change.paths.contains(&path) {
-                change.paths.push(path);
+    }
+    for keys in candidates
+        .keys()
+        .cloned()
+        .collect::<Vec<_>>()
+        .chunks(SQL_PARAMETER_LIMIT)
+    {
+        let placeholders = numbered_placeholders(2, keys.len());
+        let query = format!(
+            "WITH eligible AS (\n\
+             SELECT pc.commit_id\n\
+             FROM commit_path_counts AS pc\n\
+             JOIN commits AS c ON c.commit_id = pc.commit_id\n\
+             WHERE pc.path_count > 1 AND pc.path_count <= ?1\n\
+               AND NOT EXISTS (\n\
+                   SELECT 1 FROM commit_parents AS parents\n\
+                   WHERE parents.commit_id = pc.commit_id AND parents.position > 0\n\
+               )\n\
+             ), ranked AS (\n\
+             SELECT cp.path_key, cp.raw_path,\n\
+                    COUNT(*) OVER (PARTITION BY cp.path_key) AS total_touches,\n\
+                    ROW_NUMBER() OVER (\n\
+                        PARTITION BY cp.path_key\n\
+                        ORDER BY c.position, cp.path_order\n\
+                    ) AS path_rank\n\
+             FROM commit_paths AS cp\n\
+             JOIN eligible ON eligible.commit_id = cp.commit_id\n\
+             JOIN commits AS c ON c.commit_id = cp.commit_id\n\
+             WHERE cp.path_key IN ({placeholders})\n\
+             )\n\
+             SELECT path_key, raw_path, total_touches\n\
+             FROM ranked\n\
+             WHERE path_rank = 1"
+        );
+        let mut values = vec![Value::Integer(limit)];
+        values.extend(keys.iter().cloned().map(Value::Text));
+        let mut statement = connection
+            .prepare(&query)
+            .map_err(|error| search_error("preparing relation touch lookup", error))?;
+        let rows = statement
+            .query_map(params_from_iter(values), |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            })
+            .map_err(|error| search_error("reading relation touch lookup", error))?;
+        for row in rows {
+            let (key, path, total_touches) =
+                row.map_err(|error| search_error("reading relation touch lookup", error))?;
+            if let Some(candidate) = candidates.get_mut(&key) {
+                candidate.path = path;
+                candidate.total_touches = usize::try_from(total_touches).map_err(|_| {
+                    search_error(
+                        "reading relation touch lookup",
+                        "touch count exceeded platform limits",
+                    )
+                })?;
             }
         }
     }
-    Ok(changes)
+    Ok(RelationHistory {
+        candidates,
+        seed_touch_commits,
+        eligible_commits: usize::try_from(eligible_commits).map_err(|_| {
+            search_error(
+                "counting relation commits",
+                "commit count exceeded platform limits",
+            )
+        })?,
+        mass_changes_filtered,
+    })
+}
+
+const SQL_PARAMETER_LIMIT: usize = 900;
+
+fn relation_count(connection: &Connection, limit: i64) -> Result<i64, AppError> {
+    connection
+        .query_row(
+            "SELECT COUNT(*)\n             FROM commit_path_counts AS pc\n             JOIN commits AS c ON c.commit_id = pc.commit_id\n             WHERE pc.path_count > 1 AND pc.path_count <= ?1\n               AND NOT EXISTS (\n                   SELECT 1 FROM commit_parents AS parents\n                   WHERE parents.commit_id = pc.commit_id AND parents.position > 0\n               )",
+            [limit],
+            |row| row.get(0),
+        )
+        .map_err(|error| search_error("counting relation commits", error))
+}
+
+fn relation_seed_matches(
+    connection: &Connection,
+    seed_keys: &[String],
+    limit: i64,
+) -> Result<HashMap<i64, HashSet<String>>, AppError> {
+    let values_clause = seed_values_clause(seed_keys, 2);
+    let query = format!(
+        "WITH seed_keys(seed_key, is_basename) AS (VALUES {values_clause}),\n\
+         eligible AS (\n\
+             SELECT pc.commit_id\n\
+             FROM commit_path_counts AS pc\n\
+             WHERE pc.path_count > 1 AND pc.path_count <= ?1\n\
+               AND NOT EXISTS (\n\
+                   SELECT 1 FROM commit_parents AS parents\n\
+                   WHERE parents.commit_id = pc.commit_id AND parents.position > 0\n\
+               )\n\
+         )\n\
+         SELECT DISTINCT cp.commit_id, seed_keys.seed_key\n\
+         FROM commit_paths AS cp\n\
+         JOIN eligible ON eligible.commit_id = cp.commit_id\n\
+         JOIN seed_keys\n\
+           ON (seed_keys.is_basename = 1 AND cp.path_basename = seed_keys.seed_key)\n\
+           OR (seed_keys.is_basename = 0 AND cp.path_key = seed_keys.seed_key)\n\
+         ORDER BY cp.commit_id, seed_keys.seed_key"
+    );
+    let values = relation_seed_values(seed_keys, limit);
+    let mut statement = connection
+        .prepare(&query)
+        .map_err(|error| search_error("preparing relation seed lookup", error))?;
+    let rows = statement
+        .query_map(params_from_iter(values), |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|error| search_error("reading relation seed lookup", error))?;
+    let mut matches = HashMap::<i64, HashSet<String>>::new();
+    for row in rows {
+        let (commit_id, seed_key) =
+            row.map_err(|error| search_error("reading relation seed lookup", error))?;
+        matches.entry(commit_id).or_default().insert(seed_key);
+    }
+    Ok(matches)
+}
+
+fn relation_has_mass_change(
+    connection: &Connection,
+    seed_keys: &[String],
+    limit: i64,
+) -> Result<bool, AppError> {
+    let values_clause = seed_values_clause(seed_keys, 2);
+    let query = format!(
+        "WITH seed_keys(seed_key, is_basename) AS (VALUES {values_clause})\n\
+         SELECT EXISTS(\n\
+             SELECT 1\n\
+             FROM commit_path_counts AS pc\n\
+             WHERE pc.path_count > ?1\n\
+               AND NOT EXISTS (\n\
+                   SELECT 1 FROM commit_parents AS parents\n\
+                   WHERE parents.commit_id = pc.commit_id AND parents.position > 0\n\
+               )\n\
+               AND EXISTS (\n\
+                   SELECT 1 FROM commit_paths AS cp\n\
+                   JOIN seed_keys\n\
+                     ON (seed_keys.is_basename = 1 AND cp.path_basename = seed_keys.seed_key)\n\
+                     OR (seed_keys.is_basename = 0 AND cp.path_key = seed_keys.seed_key)\n\
+                   WHERE cp.commit_id = pc.commit_id\n\
+               )\n\
+         )"
+    );
+    let found: i64 = connection
+        .query_row(
+            &query,
+            params_from_iter(relation_seed_values(seed_keys, limit)),
+            |row| row.get(0),
+        )
+        .map_err(|error| search_error("checking mass relation changes", error))?;
+    Ok(found != 0)
+}
+
+fn seed_values_clause(seed_keys: &[String], first_parameter: usize) -> String {
+    seed_keys
+        .iter()
+        .enumerate()
+        .map(|(index, _)| {
+            let key = first_parameter + index * 2;
+            format!("(?{key}, ?{})", key + 1)
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn relation_seed_values(seed_keys: &[String], limit: i64) -> Vec<Value> {
+    let mut values = vec![Value::Integer(limit)];
+    for seed in seed_keys {
+        values.push(Value::Text(seed.clone()));
+        values.push(Value::Integer((!seed.contains('/')) as i64));
+    }
+    values
+}
+
+fn numbered_placeholders(first: usize, count: usize) -> String {
+    (first..first + count)
+        .map(|index| format!("?{index}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn seed_matches_path(seed: &str, key: &str, basename: &str) -> bool {
+    if seed.contains('/') {
+        seed == key
+    } else {
+        seed == basename
+    }
 }
 
 pub(in crate::analysis) fn match_count(

@@ -24,24 +24,11 @@ fn current_path_is_file(root: &Path, path: &[u8]) -> bool {
 fn current_path_is_file(root: &Path, path: &[u8]) -> bool {
     root.join(String::from_utf8_lossy(path).as_ref()).is_file()
 }
-struct Support {
-    oid: String,
-    commit_time: i64,
-    subject: String,
-}
-
-struct Candidate {
-    path: Vec<u8>,
-    key: String,
-    total_touches: usize,
-    supporting: Vec<Support>,
-    seed_keys: HashSet<String>,
-}
-
 struct RankedCandidate {
     score: f64,
     latest_support_time: i64,
     key: String,
+    citation_oids: Vec<String>,
     material: Material,
 }
 
@@ -71,9 +58,13 @@ fn run(
     tests_only: bool,
 ) -> Result<Report, AppError> {
     let seed_keys = intent.anchors().iter().cloned().collect::<HashSet<_>>();
-    let changes = retrieval::change_sets(connection)?;
-    let (candidates, seed_touch_commits, eligible_commits, mass_changes_filtered) =
-        collect_candidates(&changes, &seed_keys);
+    let seed_list = seed_keys.iter().cloned().collect::<Vec<_>>();
+    let retrieval::RelationHistory {
+        candidates,
+        seed_touch_commits,
+        eligible_commits,
+        mass_changes_filtered,
+    } = retrieval::relation_history(connection, &seed_list, MASS_CHANGE_PATH_LIMIT)?;
     let mut omitted_test_path = false;
     let mut ranked = Vec::new();
 
@@ -123,10 +114,10 @@ fn run(
             .first()
             .map(|support| support.commit_time)
             .unwrap_or_default();
-        let citations = supporting
+        let citation_oids = supporting
             .iter()
             .take(MAX_SUPPORTING_CITATIONS)
-            .map(|support| Citation::new(support.oid.clone(), support.subject.clone()))
+            .map(|support| support.oid.clone())
             .collect::<Vec<_>>();
         let confidence = confidence(support_count, proportion);
         let mut basis = vec![
@@ -148,12 +139,13 @@ fn run(
             basis.push("historical support beyond mirrored test name".to_owned());
         }
 
+        let key = candidate.key;
         let material = Material {
             subject: String::new(),
             paths: vec![candidate.path],
             confidence,
             basis,
-            citations,
+            citations: Vec::new(),
             detail: Some(Detail::Relation(Relation {
                 co_change_count: support_count,
                 proportion,
@@ -163,7 +155,8 @@ fn run(
         ranked.push(RankedCandidate {
             score,
             latest_support_time,
-            key: candidate.key,
+            key,
+            citation_oids,
             material,
         });
     }
@@ -177,11 +170,29 @@ fn run(
             .then_with(|| left.key.cmp(&right.key))
     });
     let matched_count = ranked.len();
-    let mut materials = ranked
-        .into_iter()
-        .take(limit)
-        .map(|candidate| candidate.material)
-        .collect::<Vec<_>>();
+    let mut citation_subjects = HashMap::<String, String>::new();
+    let mut materials = Vec::new();
+    for candidate in ranked.into_iter().take(limit) {
+        let citations = candidate
+            .citation_oids
+            .iter()
+            .map(|oid| {
+                let subject = if let Some(subject) = citation_subjects.get(oid) {
+                    subject.clone()
+                } else {
+                    let subject = retrieval::commit_text(connection, oid)?
+                        .map(|(subject, _)| subject)
+                        .unwrap_or_default();
+                    citation_subjects.insert(oid.clone(), subject.clone());
+                    subject
+                };
+                Ok(Citation::new(oid.clone(), subject))
+            })
+            .collect::<Result<Vec<_>, AppError>>()?;
+        let mut material = candidate.material;
+        material.citations = citations;
+        materials.push(material);
+    }
     retrieval::assign_citations(&mut materials);
 
     let kind = if tests_only {
@@ -197,80 +208,6 @@ fn run(
         );
     }
     Ok(report)
-}
-
-fn collect_candidates(
-    changes: &[retrieval::ChangeSet],
-    seed_keys: &HashSet<String>,
-) -> (HashMap<String, Candidate>, usize, usize, bool) {
-    let mut candidates = HashMap::new();
-    let mut seed_touch_commits = 0;
-    let mut eligible_commits = 0;
-    let mut mass_changes_filtered = false;
-
-    for change in changes {
-        if change.is_merge {
-            continue;
-        }
-        let paths = canonical_paths(change);
-        if paths.len() <= 1 {
-            continue;
-        }
-        if paths.len() > MASS_CHANGE_PATH_LIMIT {
-            if paths.iter().any(|(key, _)| seed_keys.contains(key)) {
-                mass_changes_filtered = true;
-            }
-            continue;
-        }
-        eligible_commits += 1;
-        let touched_seeds = paths
-            .iter()
-            .filter(|(key, _)| seed_keys.contains(key))
-            .map(|(key, _)| key.clone())
-            .collect::<HashSet<_>>();
-        for (key, path) in &paths {
-            if seed_keys.contains(key) {
-                continue;
-            }
-            let candidate = candidates.entry(key.clone()).or_insert_with(|| Candidate {
-                path: path.clone(),
-                key: key.clone(),
-                total_touches: 0,
-                supporting: Vec::new(),
-                seed_keys: HashSet::new(),
-            });
-            candidate.total_touches += 1;
-            if !touched_seeds.is_empty() {
-                candidate.seed_keys.extend(touched_seeds.iter().cloned());
-                candidate.supporting.push(Support {
-                    oid: change.oid.clone(),
-                    commit_time: change.commit_time,
-                    subject: change.subject.clone(),
-                });
-            }
-        }
-        if !touched_seeds.is_empty() {
-            seed_touch_commits += 1;
-        }
-    }
-
-    (
-        candidates,
-        seed_touch_commits,
-        eligible_commits,
-        mass_changes_filtered,
-    )
-}
-
-fn canonical_paths(change: &retrieval::ChangeSet) -> Vec<(String, Vec<u8>)> {
-    let mut paths = Vec::new();
-    for path in &change.paths {
-        let key = retrieval::normalize_path(path);
-        if !key.is_empty() && !paths.iter().any(|(known, _)| known == &key) {
-            paths.push((key, path.clone()));
-        }
-    }
-    paths
 }
 
 fn relation_score(

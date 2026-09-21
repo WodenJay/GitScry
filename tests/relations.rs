@@ -263,3 +263,27 @@ fn relation_commands_have_fixed_empty_results() {
     assert_eq!(tests.status.code(), Some(0));
     assert_eq!(stdout(&tests), "No historically related tests found.\n");
 }
+
+#[test]
+fn related_matches_seed_basenames_through_the_projection() {
+    let repo = TestRepo::new();
+    repo.commit_files(
+        &[
+            ("src/widget.py", b"widget\n"),
+            ("tests/test_widget.py", b"test\n"),
+        ],
+        "widget pair",
+    );
+    repo.remove("src/widget.py", "remove widget");
+    repo.index();
+
+    let output = repo.run(["related", "widget.py"]);
+
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(
+        text.contains("candidate path: tests/test_widget.py"),
+        "{text}"
+    );
+    assert!(text.contains("co-change count: 1"), "{text}");
+}
