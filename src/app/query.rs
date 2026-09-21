@@ -19,14 +19,6 @@ pub(super) fn run(
 ) -> Result<Outcome, AppError> {
     let intent = analysis::Intent::parse(&words, &paths)?;
     let session = cache::open_query()?;
-    // The benchmark harness uses this switch to isolate cache-session setup.
-    if std::env::var_os("GITSCRY_BENCHMARK_QUERY_SETUP").is_some() {
-        return Ok(Outcome {
-            progress: session.progress().to_vec(),
-            message: String::new(),
-            notices: Vec::new(),
-        });
-    }
     let mut report = capability(session.connection(), &intent, limit)?;
     let mut progress = session.progress().to_vec();
     progress.append(&mut report.warnings);
