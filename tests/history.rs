@@ -291,6 +291,63 @@ fn failures_reports_the_stated_reason_and_the_corrective_follow_up() {
 }
 
 #[test]
+fn failures_handle_more_than_sql_parameter_limit_paths() {
+    let repo = TestRepo::new();
+    let abandoned_contents = (0..901)
+        .map(|index| {
+            (
+                format!("src/generated/module-{index}.rs"),
+                format!("generated module {index}\n").into_bytes(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let abandoned_files = abandoned_contents
+        .iter()
+        .map(|(path, contents)| (path.as_str(), contents.as_slice()))
+        .collect::<Vec<_>>();
+    let abandoned = repo.commit_files_at(
+        &abandoned_files,
+        "Exclude generated modules from the build",
+        "2020-01-01T00:00:00+0000",
+    );
+    let restored_contents = abandoned_contents
+        .iter()
+        .map(|(path, _)| (path.clone(), b"restored module\n".to_vec()))
+        .collect::<Vec<_>>();
+    let restored_files = restored_contents
+        .iter()
+        .map(|(path, contents)| (path.as_str(), contents.as_slice()))
+        .collect::<Vec<_>>();
+    repo.commit_files_at(
+        &restored_files,
+        &format!(
+            "revert: exclude generated modules from the build\n\n\
+             This reverts commit {abandoned}.\n\n\
+             The generated module set broke startup.\n\n\
+             Re-land criteria: generate only requested modules.\n"
+        ),
+        "2020-02-01T00:00:00+0000",
+    );
+    repo.commit_at(
+        &abandoned_contents[0].0,
+        b"generated module fixed\n",
+        "fix(build): generate only requested modules",
+        "2020-03-01T00:00:00+0000",
+    );
+    repo.index();
+
+    let output = repo.run(["failures", "generated", "modules"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    let entry = block(&text, &abandoned[..12]);
+    assert!(
+        entry.contains("reason: The generated module set broke startup"),
+        "{entry}"
+    );
+    assert!(entry.contains("(follow-up)"), "{entry}");
+}
+
+#[test]
 fn failures_prints_reason_unknown_rather_than_inventing_one() {
     let repo = TestRepo::new();
     let abandoned = repo.commit_at(

@@ -571,22 +571,27 @@ pub(in crate::analysis) fn touch_between(
     if path_keys.is_empty() || from_position >= to_position {
         return Ok(false);
     }
-    let placeholders = std::iter::repeat_n("?", path_keys.len())
-        .collect::<Vec<_>>()
-        .join(", ");
-    let query = format!(
-        "SELECT EXISTS(SELECT 1 FROM commits AS c
-         JOIN commit_paths AS cp ON cp.commit_id = c.commit_id
-         WHERE c.position > ?1 AND c.position < ?2
-           AND cp.path_key IN ({placeholders}))"
-    );
-    let values = [Value::Integer(from_position), Value::Integer(to_position)]
-        .into_iter()
-        .chain(path_keys.iter().cloned().map(Value::Text));
-    let touched: i64 = connection
-        .query_row(&query, params_from_iter(values), |row| row.get(0))
-        .map_err(|error| search_error("checking intervening history", error))?;
-    Ok(touched != 0)
+    for path_chunk in path_keys.chunks(SQL_PARAMETER_LIMIT) {
+        let placeholders = std::iter::repeat_n("?", path_chunk.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let query = format!(
+            "SELECT EXISTS(SELECT 1 FROM commits AS c
+             JOIN commit_paths AS cp ON cp.commit_id = c.commit_id
+             WHERE c.position > ?1 AND c.position < ?2
+               AND cp.path_key IN ({placeholders}))"
+        );
+        let values = [Value::Integer(from_position), Value::Integer(to_position)]
+            .into_iter()
+            .chain(path_chunk.iter().cloned().map(Value::Text));
+        let touched: i64 = connection
+            .query_row(&query, params_from_iter(values), |row| row.get(0))
+            .map_err(|error| search_error("checking intervening history", error))?;
+        if touched != 0 {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// The first later commit that corrects work on the abandoned paths, if history records one.
@@ -597,41 +602,55 @@ pub(in crate::analysis) fn corrective_follow_up(
     connection: &Connection,
     revert_oid: &str,
     path_keys: &[String],
-) -> Result<Option<(String, String)>, AppError> {
+) -> Result<Option<(String, String, String)>, AppError> {
     if path_keys.is_empty() {
         return Ok(None);
     }
-    let placeholders = std::iter::repeat_n("?", path_keys.len())
-        .collect::<Vec<_>>()
-        .join(", ");
-    let query = format!(
-        "SELECT c.oid
-         FROM commits AS c
-         JOIN commit_paths AS cp ON cp.commit_id = c.commit_id
-         WHERE c.position > (SELECT position FROM commits WHERE oid = ?1)
-           AND c.oid <> ?1
-           AND cp.path_key IN ({placeholders})
-         GROUP BY c.commit_id
-         ORDER BY c.position ASC"
-    );
-    let values = std::iter::once(Value::Text(revert_oid.to_owned()))
-        .chain(path_keys.iter().cloned().map(Value::Text));
-    let mut statement = connection
-        .prepare(&query)
-        .map_err(|error| search_error("preparing corrective follow-up", error))?;
-    let oids = statement
-        .query_map(params_from_iter(values), |row| row.get::<_, String>(0))
-        .map_err(|error| search_error("reading corrective follow-up", error))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| search_error("reading corrective follow-up", error))?;
-    for oid in oids {
-        let Some((subject, _)) = text(connection, &oid)? else {
-            continue;
-        };
+    let mut candidates = Vec::<(i64, String, Vec<u8>)>::new();
+    let mut seen = HashSet::new();
+    for path_chunk in path_keys.chunks(SQL_PARAMETER_LIMIT) {
+        let placeholders = std::iter::repeat_n("?", path_chunk.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let query = format!(
+            "SELECT c.position, c.oid, c.message, c.message_length
+             FROM commits AS c
+             JOIN commit_paths AS cp ON cp.commit_id = c.commit_id
+             WHERE c.position > (SELECT position FROM commits WHERE oid = ?1)
+               AND c.oid <> ?1
+               AND cp.path_key IN ({placeholders})
+             GROUP BY c.commit_id
+             ORDER BY c.position ASC"
+        );
+        let values = std::iter::once(Value::Text(revert_oid.to_owned()))
+            .chain(path_chunk.iter().cloned().map(Value::Text));
+        let mut statement = connection
+            .prepare(&query)
+            .map_err(|error| search_error("preparing corrective follow-up", error))?;
+        let rows = statement
+            .query_map(params_from_iter(values), |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    super::decode_message_row(row, 2, 3)?,
+                ))
+            })
+            .map_err(|error| search_error("reading corrective follow-up", error))?;
+        for row in rows {
+            let (position, oid, message) =
+                row.map_err(|error| search_error("reading corrective follow-up", error))?;
+            if seen.insert(oid.clone()) {
+                candidates.push((position, oid, message));
+            }
+        }
+    }
+    candidates.sort_unstable_by_key(|candidate| candidate.0);
+    for (_, oid, message) in candidates {
+        let (subject, body) = super::text::message_parts(&message);
         // Only a commit that reads as a correction counts; a later incidental touch of the
         // same path is not material about how the abandoned approach moved on.
         if super::super::provenance::is_corrective_subject(&subject) {
-            return Ok(Some((oid, subject)));
+            return Ok(Some((oid, subject, body)));
         }
     }
     Ok(None)

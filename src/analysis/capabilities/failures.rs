@@ -91,16 +91,12 @@ pub(crate) fn run(
             }
             reason = revert_reason(&revert.subject, &revert.body);
             retry = stated_retry(&revert.body);
-            if let Some((oid, subject)) =
+            if let Some((oid, subject, body)) =
                 retrieval::corrective_follow_up(connection, &revert.oid, &candidate.path_keys)?
             {
                 score += FOLLOW_UP_WEIGHT;
                 basis.push("corrective follow-up".to_owned());
-                let text = retrieval::commit_text(connection, &oid)?;
-                retry = text
-                    .map(|text| format!("{}\n{}", text.0, text.1))
-                    .and_then(|text| stated_retry(&text))
-                    .or(retry);
+                retry = stated_retry(&format!("{subject}\n{body}")).or(retry);
                 citations.push(Citation::new(oid, subject).noting("follow-up"));
                 follow_up = true;
             }
