@@ -9,12 +9,13 @@
 - *(cache)* Carry change IDs into hunks
 - *(retrieval)* Use hash set for token dedup
 - *(cache)* Skip empty hunk setup
+- *(index)* Stream patch ingestion
 
 ### 📚 Documentation
 
 - Add release install method
 - "8 cmd" in README.md
-
+- Backfill v0.1.0 changelog
 ## [0.1.0] - 2026-09-22
 
 ### 🚀 Features
