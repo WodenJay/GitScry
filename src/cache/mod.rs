@@ -1174,6 +1174,7 @@ mod tests {
     fn empty_hunks_skip_line_dictionary_setup() {
         let mut connection = Connection::open_in_memory().unwrap();
         connection.execute_batch(schema::SCHEMA).unwrap();
+        // Dictionary loading would reject this malformed row if setup ran.
         connection
             .execute(
                 "INSERT INTO hunk_line_blocks(block_id, first_line_id, line_count, text, text_length)
