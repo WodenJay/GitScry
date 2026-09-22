@@ -439,6 +439,7 @@ fn fast_forward_updates_one_completed_generation() {
     assert_eq!(repo.run(["index"]).status.code(), Some(0));
 
     repo.commit("history.txt", b"two\n", "Second history");
+    let second_tip = repo.head();
     let second = repo.run(["index"]);
     assert_eq!(second.status.code(), Some(0));
     assert!(String::from_utf8_lossy(&second.stderr).contains("Indexing local history"));
@@ -474,6 +475,54 @@ fn fast_forward_updates_one_completed_generation() {
             .unwrap(),
         1
     );
+    assert_eq!(
+        cache
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM hunks AS h
+                 JOIN changes AS ch ON ch.change_id = h.change_id
+                 JOIN commits AS c ON c.commit_id = ch.commit_id
+                 WHERE c.oid = ?1",
+                [&second_tip],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1
+    );
+}
+#[test]
+fn multiple_hunks_for_one_change_keep_one_change_id() {
+    let repo = TestRepo::new();
+    let original = (0..20)
+        .map(|line| format!("line {line:02}\n"))
+        .collect::<String>();
+    repo.commit("history.txt", original.as_bytes(), "Initial history");
+    repo.index();
+
+    let changed = original
+        .replace("line 01\n", "first replacement\n")
+        .replace("line 18\n", "second replacement\n");
+    repo.commit("history.txt", changed.as_bytes(), "Two distant edits");
+    let target = repo.head();
+    repo.index();
+
+    let cache = Connection::open(repo.dir.path().join(".gitscry/cache.sqlite")).unwrap();
+    let change_ids: Vec<i64> = cache
+        .prepare(
+            "SELECT h.change_id
+             FROM hunks AS h
+             JOIN changes AS ch ON ch.change_id = h.change_id
+             JOIN commits AS c ON c.commit_id = ch.commit_id
+             WHERE c.oid = ?1
+             ORDER BY h.ordinal",
+        )
+        .unwrap()
+        .query_map([&target], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(change_ids.len(), 2);
+    assert_eq!(change_ids[0], change_ids[1]);
 }
 
 #[test]
@@ -507,6 +556,34 @@ fn non_fast_forward_rebuild_removes_unreachable_commits() {
         cache
             .query_row(
                 "SELECT COUNT(*) FROM commits WHERE oid = ?1",
+                [&new_tip],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        cache
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM hunks AS h
+                 JOIN changes AS ch ON ch.change_id = h.change_id
+                 JOIN commits AS c ON c.commit_id = ch.commit_id
+                 WHERE c.oid = ?1",
+                [&old_tip],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        cache
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM hunks AS h
+                 JOIN changes AS ch ON ch.change_id = h.change_id
+                 JOIN commits AS c ON c.commit_id = ch.commit_id
+                 WHERE c.oid = ?1",
                 [&new_tip],
                 |row| row.get::<_, i64>(0),
             )
