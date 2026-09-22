@@ -849,6 +849,9 @@ fn write_hunks(
     hunks: &[Hunk],
     change_ids: &HashMap<(String, i64), i64>,
 ) -> Result<(), AppError> {
+    if hunks.is_empty() {
+        return Ok(());
+    }
     let mut writer = HunkWriter::new(transaction)?;
     for hunk in hunks {
         let change_id = change_ids
@@ -1129,7 +1132,7 @@ mod tests {
 
     use rusqlite::{Connection, params};
 
-    use super::{schema, write_hunks};
+    use super::{read_hunks, schema, write_hunks};
     use crate::git::Hunk;
 
     #[test]
@@ -1165,5 +1168,63 @@ mod tests {
         let error = write_hunks(&transaction, &[hunk], &HashMap::new()).unwrap_err();
 
         assert!(error.to_string().contains("outside the current snapshot"));
+    }
+
+    #[test]
+    fn hunk_writes_round_trip() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(schema::SCHEMA).unwrap();
+        connection
+            .execute(
+                "INSERT INTO commits(position, oid, message, message_length, commit_time)
+                 VALUES (0, ?1, ?2, 0, 0)",
+                params!["current", Vec::<u8>::new()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO changes(change_id, commit_id, ordinal, status, old_mode, new_mode)
+                 VALUES (1, 1, 0, 'M', '100644', '100644')",
+                [],
+            )
+            .unwrap();
+        let hunks = [Hunk {
+            commit_oid: "current".to_owned(),
+            change_ordinal: 0,
+            ordinal: 0,
+            old_start: 1,
+            old_lines: 1,
+            new_start: 1,
+            new_lines: 1,
+            text: b"@@ -1 +1 @@\n-old\n+new\n".to_vec(),
+        }];
+        let change_ids = HashMap::from([(("current".to_owned(), 0), 1)]);
+        let transaction = connection.transaction().unwrap();
+        write_hunks(&transaction, &hunks, &change_ids).unwrap();
+        transaction.commit().unwrap();
+        let decoded = read_hunks(&connection, "current").unwrap();
+        assert_eq!(decoded.len(), 1);
+        assert_eq!(decoded[0].change_ordinal, hunks[0].change_ordinal);
+        assert_eq!(decoded[0].old_start, hunks[0].old_start);
+        assert_eq!(decoded[0].old_lines, hunks[0].old_lines);
+        assert_eq!(decoded[0].new_start, hunks[0].new_start);
+        assert_eq!(decoded[0].new_lines, hunks[0].new_lines);
+        assert_eq!(decoded[0].text, hunks[0].text);
+    }
+
+    #[test]
+    fn empty_hunks_skip_line_dictionary_setup() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(schema::SCHEMA).unwrap();
+        // Dictionary loading would reject this malformed row if setup ran.
+        connection
+            .execute(
+                "INSERT INTO hunk_line_blocks(block_id, first_line_id, line_count, text, text_length)
+                 VALUES (1, 0, 1, ?1, 1)",
+                params![Vec::<u8>::new()],
+            )
+            .unwrap();
+        let transaction = connection.transaction().unwrap();
+        write_hunks(&transaction, &[], &HashMap::new()).unwrap();
     }
 }
