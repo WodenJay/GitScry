@@ -49,6 +49,8 @@ Don't want to install manually? Copy this and paste it to your agent:
 Read https://github.com/WodenJay/GitScry/blob/main/docs/INSTALL.md to install GitScry.
 ```
 
+Or download the latest prebuilt binary from [GitHub Releases](https://github.com/WodenJay/GitScry/releases/latest).
+
 ## Usage
 
 ```bash
