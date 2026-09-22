@@ -15,5 +15,7 @@ targets = ["aarch64-apple-darwin", "x86_64-unknown-linux-musl", "x86_64-pc-windo
 install-path = "~/.gitscry/bin"
 # Where to host releases
 hosting = "github"
+# Upload assets to a pre-created draft before publishing
+create-release = false
 # Whether to install an updater program
 install-updater = false
