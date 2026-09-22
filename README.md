@@ -46,7 +46,7 @@ cargo install gitscry
 Don't want to install manually? Copy this and paste it to your agent:
 
 ```text
-Read xxx
+Read https://github.com/WodenJay/GitScry/blob/main/docs/INSTALL.md to install GitScry.
 ```
 
 ## Usage
