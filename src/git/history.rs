@@ -200,16 +200,19 @@ fn read_selected(
         .iter()
         .map(String::as_str)
         .collect::<HashSet<_>>();
-    let hunk_specs = diff_specs
+    let blocked_commits = changes
         .iter()
-        .filter(|(oid, _)| {
-            !changes
-                .iter()
-                .filter(|change| change.commit_oid == *oid)
-                .flat_map(|change| [&change.old_blob, &change.new_blob])
+        .filter(|change| {
+            [&change.old_blob, &change.new_blob]
+                .into_iter()
                 .flatten()
                 .any(|blob| missing_set.contains(blob.as_str()))
         })
+        .map(|change| change.commit_oid.as_str())
+        .collect::<HashSet<_>>();
+    let hunk_specs = diff_specs
+        .iter()
+        .filter(|(oid, _)| !blocked_commits.contains(oid.as_str()))
         .collect::<Vec<_>>();
     let hunk_input = hunk_specs
         .iter()

@@ -570,6 +570,7 @@ fn restores_hunks_after_a_missing_blob_returns() {
     let first = repo.head();
     repo.commit("history.txt", b"two\n", "Second history");
     repo.commit("history.txt", b"three\n", "Third history");
+    let third = repo.head();
 
     let blob = git_stdout(repo.dir.path(), ["ls-tree", &first, "history.txt"]);
     let blob = blob.split_whitespace().nth(2).unwrap().to_owned();
@@ -585,10 +586,21 @@ fn restores_hunks_after_a_missing_blob_returns() {
     assert_eq!(first_index.status.code(), Some(0));
     let cache_path = repo.dir.path().join(".gitscry/cache.sqlite");
     let cache = Connection::open(&cache_path).unwrap();
-    let incomplete_hunks: i64 = cache
+    let incomplete_hunk_count: i64 = cache
         .query_row("SELECT COUNT(*) FROM hunks", [], |row| row.get(0))
         .unwrap();
-    assert!(incomplete_hunks < 3);
+    assert_eq!(incomplete_hunk_count, 1);
+    let incomplete_hunk_commit: String = cache
+        .query_row(
+            "SELECT c.oid
+             FROM hunks AS h
+             JOIN changes AS ch ON ch.change_id = h.change_id
+             JOIN commits AS c ON c.commit_id = ch.commit_id",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(incomplete_hunk_commit, third);
     drop(cache);
 
     fs::write(repo.dir.path().join("restore.txt"), b"one\n").unwrap();
