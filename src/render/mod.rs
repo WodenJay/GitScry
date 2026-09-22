@@ -8,7 +8,7 @@ mod escape;
 mod material;
 
 use crate::{
-    app::{self, AppError, IndexStage, Outcome},
+    app::{self, AppError, IndexStage, Outcome, Progress, UpdateStage},
     cli::Command,
 };
 use std::io::{self, IsTerminal, Write};
@@ -43,7 +43,14 @@ impl<W: Write> IndexProgress<W> {
         }
     }
 
-    fn report(&mut self, stage: IndexStage) {
+    fn report(&mut self, progress: Progress) {
+        match progress {
+            Progress::Index(stage) => self.report_index(stage),
+            Progress::Update(stage) => self.report_update(stage),
+        }
+    }
+
+    fn report_index(&mut self, stage: IndexStage) {
         if self.error.is_some() {
             return;
         }
@@ -70,6 +77,27 @@ impl<W: Write> IndexProgress<W> {
             writeln!(self.output, "Indexing local history...")
         } else {
             Ok(())
+        };
+        if let Err(error) = result {
+            self.error = Some(error);
+        }
+    }
+
+    fn report_update(&mut self, stage: UpdateStage) {
+        if self.error.is_some() {
+            return;
+        }
+        self.active = true;
+        let label = match stage {
+            UpdateStage::Checking => "Checking for updates...",
+            UpdateStage::Downloading => "Downloading update...",
+            UpdateStage::Verifying => "Verifying update...",
+            UpdateStage::Installing => "Installing update...",
+        };
+        let result = if self.is_terminal {
+            write!(self.output, "\r{label:<28}").and_then(|()| self.output.flush())
+        } else {
+            writeln!(self.output, "{label}")
         };
         if let Err(error) = result {
             self.error = Some(error);
@@ -141,7 +169,7 @@ mod tests {
             IndexStage::WritingCache,
             IndexStage::Complete,
         ] {
-            progress.report(stage);
+            progress.report(Progress::Index(stage));
         }
         progress.finish().unwrap();
 
@@ -162,7 +190,7 @@ mod tests {
             IndexStage::WritingCache,
             IndexStage::Complete,
         ] {
-            progress.report(stage);
+            progress.report(Progress::Index(stage));
         }
         progress.finish().unwrap();
 

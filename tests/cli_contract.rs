@@ -157,3 +157,22 @@ fn ordinary_commands_have_a_byte_exact_cli_contract() {
         assert_eq!(observed, CONTRACT);
     }
 }
+
+#[test]
+fn update_help_is_canonical_and_upgrade_is_an_exact_alias() {
+    let repo = TestRepo::new();
+    let update = repo.run(["update", "--help"]);
+    let upgrade = repo.run(["upgrade", "--help"]);
+
+    assert_eq!(update.status.code(), Some(0));
+    assert_eq!(upgrade.status.code(), Some(0));
+    assert_eq!(update.stderr, upgrade.stderr);
+    assert_eq!(update.stdout, upgrade.stdout);
+    assert!(String::from_utf8_lossy(&update.stdout).contains("Usage: gitscry update"));
+    assert!(String::from_utf8_lossy(&update.stdout).contains("gitscry upgrade"));
+
+    let root = repo.run(["--help"]);
+    let root_help = String::from_utf8_lossy(&root.stdout);
+    assert!(root_help.contains("update      Update GitScry"));
+    assert!(!root_help.contains("upgrade     "));
+}

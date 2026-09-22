@@ -48,7 +48,7 @@ For the first public release, the output should report `gitscry 0.1.0`. If the c
 
 ## Upgrade
 
-Rerun the same prebuilt installer to upgrade a prebuilt installation, or run `cargo install gitscry --locked` to upgrade a Cargo installation. There is no separate updater or uninstaller.
+Run `gitscry update` to install the latest stable release, or use `gitscry upgrade` as its exact alias. The command downloads the official binary for supported Apple Silicon macOS, x86-64 musl Linux, or x86-64 MSVC Windows targets, verifies its published SHA-256 checksum, and replaces the executable that is actually running. A Cargo-built installation becomes the official prebuilt binary after a successful update. Updates do not modify repositories, configuration, or the rebuildable cache, and never request elevation. There is no separate uninstaller.
 
 ## Manual artifact verification
 
