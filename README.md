@@ -14,7 +14,7 @@ GitScry turns a repository's Git history into actionable context for developers 
 
 Instead of manually digging through `git log`, `blame`, and old diffs, GitScry answers questions such as how similar changes were implemented, what approaches failed before, which files and tests tend to change together, why a line exists, and which commits may have introduced a regression.
 
-- **Purpose-built history queries** — 9 commands for common software-engineering questions.
+- **Purpose-built history queries** — 8 commands for common software-engineering questions.
 - **More than commit search** — reasons over diffs, reverts, blame, renames, symbols, and co-change history.
 - **Traceable results** — findings include the underlying commits, paths, confidence, and supporting signals.
 - **Local by design** — GitScry builds a rebuildable cache from your local Git history; Git remains the source of truth.
