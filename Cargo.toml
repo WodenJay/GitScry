@@ -11,7 +11,7 @@ homepage = "https://github.com/WodenJay/GitScry"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-lz4_flex = "0.11"
+lz4_flex = "0.14"
 lzma-rs = "0.3"
 rusqlite = { version = "0.37", features = ["bundled"] }
 semver = "1"
