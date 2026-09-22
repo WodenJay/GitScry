@@ -84,10 +84,13 @@ fn normalize_anchors(anchors: impl IntoIterator<Item = String>) -> Result<Vec<St
 /// An absolute path, a Windows drive, or a traversal escapes the repository, so it is
 /// invalid input rather than a query that silently broadens.
 fn is_repository_relative(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    let has_windows_drive = bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
     let path = std::path::Path::new(path);
     // `has_root` also catches `/etc/passwd`, which is not `is_absolute` on Windows.
     !path.is_absolute()
         && !path.has_root()
+        && !has_windows_drive
         && path
             .components()
             .all(|component| !matches!(component, std::path::Component::ParentDir))
