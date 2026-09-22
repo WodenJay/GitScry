@@ -6,6 +6,7 @@ rust-version = "1.89"
 license = "MIT"
 description = "GitScry uncovers the implementation examples, failed approaches, code relationships, and regression context hidden inside."
 repository = "https://github.com/WodenJay/GitScry"
+readme = "README.md"
 homepage = "https://github.com/WodenJay/GitScry"
 
 [dependencies]

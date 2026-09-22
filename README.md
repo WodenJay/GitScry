@@ -14,7 +14,7 @@ GitScry turns a repository's Git history into actionable context for developers 
 
 Instead of manually digging through `git log`, `blame`, and old diffs, GitScry answers questions such as how similar changes were implemented, what approaches failed before, which files and tests tend to change together, why a line exists, and which commits may have introduced a regression.
 
-- **Purpose-built history queries** — 8 commands for common software-engineering questions.
+- **Purpose-built history queries** — 9 commands for common software-engineering questions.
 - **More than commit search** — reasons over diffs, reverts, blame, renames, symbols, and co-change history.
 - **Traceable results** — findings include the underlying commits, paths, confidence, and supporting signals.
 - **Local by design** — GitScry builds a rebuildable cache from your local Git history; Git remains the source of truth.
@@ -34,13 +34,13 @@ GitScry is useful when you need to:
 
 ```bash
 # For Windows
-irm xxx
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/WodenJay/GitScry/releases/latest/download/gitscry-installer.ps1 | iex"
 
 # For Linux/macOS
-curl xxx
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/WodenJay/GitScry/releases/latest/download/gitscry-installer.sh | sh
 
 # For Cargo
-cargo xxx
+cargo install gitscry
 ```
 
 Don't want to install manually? Copy this and paste it to your agent:
@@ -85,5 +85,12 @@ Use GitScry when past changes may help you understand, implement, or debug code.
 | **`regression`** | Ranks commits that may have introduced an observed regression using affected-path history, symptom matches, diff hunks, symbols, test history, and an optional good→bad revision range. | `gitscry regression slow startup --path src/main.rs --good v0.1.0 --symbol main` |
 | **`why`** | Explains the history behind a specific line or symbol by tracing blame, diffs, path history, renames, and explanatory commit messages. | `gitscry why src/lib.rs --symbol provider` |
 | **`trace-fix`** | Starts from a known fix and traces deleted/replaced lines back to the change that introduced them, connecting the introducing change, observed failure, and fix. | `gitscry trace-fix HEAD --path src/lib.rs` |
+| **`index`** | Builds or refreshes the local cache from the repository's default-branch history. | `gitscry index` |
 
 Use `gitscry --help` to learn more.
+
+## License
+
+GitScry is available under the [MIT License](LICENSE).
+
+[GitHub repository](https://github.com/WodenJay/GitScry) · [crates.io package](https://crates.io/crates/gitscry)
