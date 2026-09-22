@@ -107,6 +107,12 @@ mod tests {
     }
 
     #[test]
+    fn large_repeated_token_input_deduplicates_once() {
+        let input = "repeated ".repeat(20_000);
+        assert_eq!(tokenize(&input), ["repeated"]);
+    }
+
+    #[test]
     fn large_unique_token_input_remains_linear() {
         let input = (0..20_000)
             .map(|index| format!("term{index}"))
