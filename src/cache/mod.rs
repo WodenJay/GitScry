@@ -6,7 +6,7 @@ mod schema;
 use crate::{
     analysis,
     app::AppError,
-    git::{Change, Commit, Hunk, Snapshot},
+    git::{Change, Commit, Hunk, PatchStream, Snapshot},
 };
 pub(crate) use generation::prepare;
 pub(crate) use history::{HistoryCommit, HistoryHunk};
@@ -501,7 +501,7 @@ fn append(root: &Path, snapshot: &Snapshot) -> Result<usize, AppError> {
                 .unwrap_or(&[]),
         )?;
     }
-    write_hunks(&transaction, &snapshot.hunks, &change_ids)?;
+    write_hunks(&transaction, &snapshot.patches, &change_ids)?;
     replace_metadata(&transaction, snapshot)?;
     transaction
         .execute("DELETE FROM shallow_boundaries", [])
@@ -574,7 +574,7 @@ fn build(path: &Path, snapshot: &Snapshot) -> Result<(), AppError> {
                 .unwrap_or(&[]),
         )?;
     }
-    write_hunks(&transaction, &snapshot.hunks, &change_ids)?;
+    write_hunks(&transaction, &snapshot.patches, &change_ids)?;
     for oid in &snapshot.shallow_boundaries {
         transaction
             .execute("INSERT INTO shallow_boundaries(oid) VALUES (?1)", [oid])
@@ -846,29 +846,36 @@ fn insert_changes(
 
 fn write_hunks(
     transaction: &rusqlite::Transaction<'_>,
-    hunks: &[Hunk],
+    patches: &PatchStream,
     change_ids: &HashMap<(String, i64), i64>,
 ) -> Result<(), AppError> {
-    if hunks.is_empty() {
+    if patches.is_empty() {
         return Ok(());
     }
     let mut writer = HunkWriter::new(transaction)?;
-    for hunk in hunks {
-        let change_id = change_ids
-            .get(&(hunk.commit_oid.clone(), hunk.change_ordinal))
-            .copied()
-            .ok_or_else(|| {
-                cache_error(
-                    "writing hunk",
-                    format!(
-                        "change {} ordinal {} is outside the current snapshot",
-                        hunk.commit_oid, hunk.change_ordinal
-                    ),
-                )
-            })?;
-        writer.write(transaction, change_id, hunk)?;
-    }
+    patches.for_each_hunk(&mut |hunk| write_hunk(transaction, &mut writer, &hunk, change_ids))?;
     writer.finish(transaction)
+}
+
+fn write_hunk(
+    transaction: &rusqlite::Transaction<'_>,
+    writer: &mut HunkWriter,
+    hunk: &Hunk,
+    change_ids: &HashMap<(String, i64), i64>,
+) -> Result<(), AppError> {
+    let change_id = change_ids
+        .get(&(hunk.commit_oid.clone(), hunk.change_ordinal))
+        .copied()
+        .ok_or_else(|| {
+            cache_error(
+                "writing hunk",
+                format!(
+                    "change {} ordinal {} is outside the current snapshot",
+                    hunk.commit_oid, hunk.change_ordinal
+                ),
+            )
+        })?;
+    writer.write(transaction, change_id, hunk)
 }
 pub(crate) fn decode_message(compressed: &[u8], length: i64) -> Result<Vec<u8>, AppError> {
     payload::decode(compressed, length, "commit message")
@@ -1132,8 +1139,8 @@ mod tests {
 
     use rusqlite::{Connection, params};
 
-    use super::{read_hunks, schema, write_hunks};
-    use crate::git::Hunk;
+    use super::{HunkWriter, read_hunks, schema, write_hunk, write_hunks};
+    use crate::git::{Hunk, PatchStream};
 
     #[test]
     fn hunk_write_rejects_change_outside_current_snapshot() {
@@ -1165,7 +1172,8 @@ mod tests {
             text: b"@@ -1 +1 @@\n-old\n+new\n".to_vec(),
         };
         let transaction = connection.transaction().unwrap();
-        let error = write_hunks(&transaction, &[hunk], &HashMap::new()).unwrap_err();
+        let mut writer = HunkWriter::new(&transaction).unwrap();
+        let error = write_hunk(&transaction, &mut writer, &hunk, &HashMap::new()).unwrap_err();
 
         assert!(error.to_string().contains("outside the current snapshot"));
     }
@@ -1200,7 +1208,9 @@ mod tests {
         }];
         let change_ids = HashMap::from([(("current".to_owned(), 0), 1)]);
         let transaction = connection.transaction().unwrap();
-        write_hunks(&transaction, &hunks, &change_ids).unwrap();
+        let mut writer = HunkWriter::new(&transaction).unwrap();
+        write_hunk(&transaction, &mut writer, &hunks[0], &change_ids).unwrap();
+        writer.finish(&transaction).unwrap();
         transaction.commit().unwrap();
         let decoded = read_hunks(&connection, "current").unwrap();
         assert_eq!(decoded.len(), 1);
@@ -1225,6 +1235,11 @@ mod tests {
             )
             .unwrap();
         let transaction = connection.transaction().unwrap();
-        write_hunks(&transaction, &[], &HashMap::new()).unwrap();
+        write_hunks(
+            &transaction,
+            &PatchStream::empty_for_test(),
+            &HashMap::new(),
+        )
+        .unwrap();
     }
 }

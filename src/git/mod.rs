@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use crate::app::{AppError, IndexStage};
 
-pub(crate) use history::{Change, Commit, HistoryTarget, Hunk, Snapshot};
+pub(crate) use history::{Change, Commit, HistoryTarget, Hunk, PatchStream, Snapshot};
 use process::Git;
 pub(crate) use target::{DeletedLine, RegressionTarget, TraceFixTarget, WhyAnchor, WhyTarget};
 
