@@ -1122,3 +1122,48 @@ fn cache_error(operation: &str, error: impl std::fmt::Display) -> AppError {
 fn query_error(reason: impl std::fmt::Display) -> AppError {
     AppError::operational(format!("error: {reason}; run `gitscry index` first"))
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use rusqlite::{Connection, params};
+
+    use super::{schema, write_hunks};
+    use crate::git::Hunk;
+
+    #[test]
+    fn hunk_write_rejects_change_outside_current_snapshot() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(schema::SCHEMA).unwrap();
+        connection
+            .execute(
+                "INSERT INTO commits(position, oid, message, message_length, commit_time)
+                 VALUES (0, ?1, ?2, 0, 0)",
+                params!["historical", Vec::<u8>::new()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO changes(change_id, commit_id, ordinal, status, old_mode, new_mode)
+                 VALUES (1, 1, 0, 'M', '100644', '100644')",
+                [],
+            )
+            .unwrap();
+
+        let hunk = Hunk {
+            commit_oid: "historical".to_owned(),
+            change_ordinal: 0,
+            ordinal: 0,
+            old_start: 1,
+            old_lines: 1,
+            new_start: 1,
+            new_lines: 1,
+            text: b"@@ -1 +1 @@\n-old\n+new\n".to_vec(),
+        };
+        let transaction = connection.transaction().unwrap();
+        let error = write_hunks(&transaction, &[hunk], &HashMap::new()).unwrap_err();
+
+        assert!(error.to_string().contains("outside the current snapshot"));
+    }
+}
