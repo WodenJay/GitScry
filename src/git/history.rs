@@ -12,7 +12,7 @@ pub(crate) struct Snapshot {
     pub(crate) missing_objects: Vec<String>,
     pub(crate) commits: Vec<Commit>,
     pub(crate) changes: Vec<Change>,
-    pub(crate) hunks: Vec<Hunk>,
+    pub(crate) patches: PatchStream,
 }
 
 pub(crate) struct HistoryTarget {
@@ -50,6 +50,54 @@ pub(crate) struct Hunk {
     pub(crate) new_start: i64,
     pub(crate) new_lines: i64,
     pub(crate) text: Vec<u8>,
+}
+
+pub(crate) struct PatchStream {
+    git: Git,
+    specs: Vec<String>,
+    known: HashSet<String>,
+}
+
+impl PatchStream {
+    #[cfg(test)]
+    pub(crate) fn empty_for_test() -> Self {
+        Self {
+            git: Git::new(PathBuf::new()),
+            specs: Vec::new(),
+            known: HashSet::new(),
+        }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.specs.is_empty()
+    }
+
+    pub(crate) fn for_each_hunk(
+        &self,
+        emit: &mut dyn FnMut(Hunk) -> Result<(), AppError>,
+    ) -> Result<(), AppError> {
+        if self.specs.is_empty() {
+            return Ok(());
+        }
+        let mut parser = PatchParser::new(&self.known, emit);
+        self.git.stream(
+            [
+                "diff-tree",
+                "--stdin",
+                "--root",
+                "-r",
+                "-M",
+                "-p",
+                "--full-index",
+                "--no-color",
+                "--no-ext-diff",
+                "--no-textconv",
+            ],
+            &self.specs,
+            |chunk| parser.feed(chunk),
+        )?;
+        parser.finish()
+    }
 }
 pub(super) fn read(
     git: &Git,
@@ -210,39 +258,15 @@ fn read_selected(
         })
         .map(|change| change.commit_oid.as_str())
         .collect::<HashSet<_>>();
-    let hunk_specs = diff_specs
-        .iter()
+    let (known, specs) = diff_specs
+        .into_iter()
         .filter(|(oid, _)| !blocked_commits.contains(oid.as_str()))
-        .collect::<Vec<_>>();
-    let hunk_input = hunk_specs
-        .iter()
-        .map(|(_, input)| input.as_str())
-        .collect::<String>();
-    let hunk_known = hunk_specs
-        .iter()
-        .map(|(oid, _)| oid.as_str())
-        .collect::<HashSet<_>>();
-    let hunks = if hunk_input.is_empty() {
-        Vec::new()
-    } else {
-        let patch = git.output(
-            [
-                "diff-tree",
-                "--stdin",
-                "--root",
-                "-r",
-                "-M",
-                "-p",
-                "--full-index",
-                "--no-color",
-                "--no-ext-diff",
-                "--no-textconv",
-            ],
-            hunk_input.as_bytes(),
-        )?;
-        parse_hunks(&patch, &hunk_known)?
+        .unzip();
+    let patches = PatchStream {
+        git: git.clone(),
+        specs,
+        known,
     };
-
     Ok(Snapshot {
         default_ref: target.default_ref,
         tip: target.tip,
@@ -251,7 +275,7 @@ fn read_selected(
         missing_objects,
         commits,
         changes,
-        hunks,
+        patches,
     })
 }
 
@@ -439,50 +463,124 @@ fn parse_changes(bytes: &[u8], known: &HashSet<&str>) -> Result<Vec<Change>, App
 }
 
 fn parse_hunks(bytes: &[u8], known: &HashSet<&str>) -> Result<Vec<Hunk>, AppError> {
-    let mut commit_oid: Option<String> = None;
-    let mut change_ordinal = -1;
-    let mut hunk_ordinal = 0;
-    let mut active: Option<Hunk> = None;
+    let known = known.iter().map(|oid| (*oid).to_owned()).collect();
     let mut hunks = Vec::new();
+    let mut emit = |hunk| {
+        hunks.push(hunk);
+        Ok(())
+    };
+    let mut parser = PatchParser::new(&known, &mut emit);
+    parser.feed(bytes)?;
+    parser.finish()?;
+    Ok(hunks)
+}
 
-    for line in bytes.split_inclusive(|byte| *byte == b'\n') {
+struct PatchParser<'a, F>
+where
+    F: FnMut(Hunk) -> Result<(), AppError>,
+{
+    known: &'a HashSet<String>,
+    emit: F,
+    line: Vec<u8>,
+    commit_oid: Option<String>,
+    change_ordinal: i64,
+    hunk_ordinal: i64,
+    active: Option<Hunk>,
+}
+
+impl<'a, F> PatchParser<'a, F>
+where
+    F: FnMut(Hunk) -> Result<(), AppError>,
+{
+    fn new(known: &'a HashSet<String>, emit: F) -> Self {
+        Self {
+            known,
+            emit,
+            line: Vec::new(),
+            commit_oid: None,
+            change_ordinal: -1,
+            hunk_ordinal: 0,
+            active: None,
+        }
+    }
+
+    fn feed(&mut self, chunk: &[u8]) -> Result<(), AppError> {
+        for fragment in chunk.split_inclusive(|byte| *byte == b'\n') {
+            self.line.extend_from_slice(fragment);
+            if self.line.ends_with(b"\n") {
+                self.process_complete_line()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn finish(mut self) -> Result<(), AppError> {
+        if !self.line.is_empty() {
+            self.process_complete_line()?;
+        }
+        self.flush_hunk()
+    }
+
+    fn process_complete_line(&mut self) -> Result<(), AppError> {
+        let mut line = std::mem::take(&mut self.line);
+        let result = self.process_line(&line);
+        line.clear();
+        self.line = line;
+        result
+    }
+
+    fn process_line(&mut self, line: &[u8]) -> Result<(), AppError> {
         let trimmed = line.strip_suffix(b"\n").unwrap_or(line);
         if let Ok(text) = std::str::from_utf8(trimmed)
-            && known.contains(text)
+            && self.known.contains(text)
         {
-            flush_hunk(&mut active, &mut hunks);
-            commit_oid = Some(text.to_owned());
-            change_ordinal = -1;
-            continue;
+            self.flush_hunk()?;
+            self.commit_oid = Some(text.to_owned());
+            self.change_ordinal = -1;
+            return Ok(());
         }
         if line.starts_with(b"diff --git ") {
-            flush_hunk(&mut active, &mut hunks);
-            change_ordinal += 1;
-            hunk_ordinal = 0;
-            continue;
+            self.flush_hunk()?;
+            if self.commit_oid.is_none() {
+                return Err(parse_error("patch diff preceded its commit header"));
+            }
+            self.change_ordinal += 1;
+            self.hunk_ordinal = 0;
+            return Ok(());
         }
         if line.starts_with(b"@@ ") {
-            flush_hunk(&mut active, &mut hunks);
+            self.flush_hunk()?;
+            let commit_oid = self
+                .commit_oid
+                .clone()
+                .ok_or_else(|| parse_error("patch hunk preceded its commit header"))?;
+            if self.change_ordinal < 0 {
+                return Err(parse_error("patch hunk preceded its diff boundary"));
+            }
             let (old_start, old_lines, new_start, new_lines) = parse_hunk_header(line)?;
-            active = Some(Hunk {
-                commit_oid: commit_oid
-                    .clone()
-                    .ok_or_else(|| parse_error("patch hunk preceded its commit header"))?,
-                change_ordinal,
-                ordinal: hunk_ordinal,
+            self.active = Some(Hunk {
+                commit_oid,
+                change_ordinal: self.change_ordinal,
+                ordinal: self.hunk_ordinal,
                 old_start,
                 old_lines,
                 new_start,
                 new_lines,
                 text: line.to_vec(),
             });
-            hunk_ordinal += 1;
-        } else if let Some(hunk) = &mut active {
+            self.hunk_ordinal += 1;
+        } else if let Some(hunk) = &mut self.active {
             hunk.text.extend_from_slice(line);
         }
+        Ok(())
     }
-    flush_hunk(&mut active, &mut hunks);
-    Ok(hunks)
+
+    fn flush_hunk(&mut self) -> Result<(), AppError> {
+        if let Some(hunk) = self.active.take() {
+            (self.emit)(hunk)?;
+        }
+        Ok(())
+    }
 }
 
 fn parse_hunk_header(line: &[u8]) -> Result<(i64, i64, i64, i64), AppError> {
@@ -521,12 +619,6 @@ fn parse_range(value: &str, prefix: char) -> Result<(i64, i64), AppError> {
     Ok((start, lines))
 }
 
-fn flush_hunk(active: &mut Option<Hunk>, hunks: &mut Vec<Hunk>) {
-    if let Some(hunk) = active.take() {
-        hunks.push(hunk);
-    }
-}
-
 fn blob_oid(value: &str, mode: &str) -> Option<String> {
     if mode == "160000" {
         None
@@ -552,4 +644,135 @@ fn find_byte(bytes: &[u8], start: usize, needle: u8) -> Option<usize> {
 
 fn parse_error(message: impl std::fmt::Display) -> AppError {
     AppError::operational(format!("error: parsing Git history: {message}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::HashSet, fs, process::Command};
+
+    use super::{Git, Hunk, PatchParser, PatchStream};
+    use crate::app::AppError;
+
+    const OID: &str = "0123456789abcdef0123456789abcdef01234567";
+
+    fn parse_fragmented(bytes: &[u8], chunk_size: usize) -> Result<Vec<Hunk>, String> {
+        let known = HashSet::from([OID.to_owned()]);
+        let mut hunks = Vec::new();
+        let mut emit = |hunk| {
+            hunks.push(hunk);
+            Ok(())
+        };
+        let mut parser = PatchParser::new(&known, &mut emit);
+        for chunk in bytes.chunks(chunk_size) {
+            parser.feed(chunk).map_err(|error| error.to_string())?;
+        }
+        parser.finish().map_err(|error| error.to_string())?;
+        Ok(hunks)
+    }
+
+    #[test]
+    fn patch_parser_handles_every_token_split_across_chunks() {
+        let patch = format!(
+            "{OID}\ndiff --git a/old b/new\nindex 111..222 100644\n--- a/old\n+++ b/new\n@@ -1,2 +1,2 @@ section\n-old\n+new\n context\n@@ -8 +8,0 @@\n-gone"
+        );
+        let hunks = parse_fragmented(patch.as_bytes(), 1).unwrap();
+
+        assert_eq!(hunks.len(), 2);
+        assert_eq!(hunks[0].commit_oid, OID);
+        assert_eq!(hunks[0].change_ordinal, 0);
+        assert_eq!(hunks[0].ordinal, 0);
+        assert_eq!((hunks[0].old_start, hunks[0].old_lines), (1, 2));
+        assert_eq!((hunks[0].new_start, hunks[0].new_lines), (1, 2));
+        assert_eq!(
+            hunks[0].text,
+            b"@@ -1,2 +1,2 @@ section\n-old\n+new\n context\n"
+        );
+        assert_eq!(hunks[1].ordinal, 1);
+        assert_eq!(hunks[1].text, b"@@ -8 +8,0 @@\n-gone");
+    }
+
+    #[test]
+    fn patch_parser_keeps_a_large_line_without_buffering_the_patch() {
+        let mut patch = format!("{OID}\ndiff --git a/a b/a\n@@ -1 +1 @@\n-removed\n+").into_bytes();
+        patch.extend(std::iter::repeat_n(b'x', 1024 * 1024));
+        patch.push(b'\n');
+        let hunks = parse_fragmented(&patch, 4093).unwrap();
+
+        assert_eq!(hunks.len(), 1);
+        assert_eq!(
+            hunks[0].text.len(),
+            "@@ -1 +1 @@\n-removed\n+\n".len() + 1024 * 1024
+        );
+        assert!(hunks[0].text.ends_with(b"xxx\n"));
+    }
+
+    #[test]
+    fn patch_parser_accepts_hunk_free_input() {
+        let patch = format!(
+            "{OID}\ndiff --git a/empty b/empty\nsimilarity index 100%\nrename from empty\nrename to empty\n"
+        );
+        assert!(parse_fragmented(patch.as_bytes(), 3).unwrap().is_empty());
+    }
+
+    #[test]
+    fn patch_parser_rejects_malformed_ordering() {
+        let without_commit = b"diff --git a/a b/a\n@@ -1 +1 @@\n-a\n+b\n";
+        let error = parse_fragmented(without_commit, 2).err().unwrap();
+        assert!(error.contains("patch diff preceded its commit header"));
+
+        let without_diff = format!("{OID}\n@@ -1 +1 @@\n-a\n+b\n");
+        let error = parse_fragmented(without_diff.as_bytes(), 5).err().unwrap();
+        assert!(error.contains("patch hunk preceded its diff boundary"));
+    }
+
+    #[test]
+    fn patch_stream_propagates_cache_write_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        run_git(root, &["init", "-q"]);
+        run_git(root, &["config", "user.name", "Test"]);
+        run_git(root, &["config", "user.email", "test@example.com"]);
+        let mut lines = (0..30)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>();
+        fs::write(root.join("file.txt"), lines.join("\n")).unwrap();
+        run_git(root, &["add", "file.txt"]);
+        run_git(root, &["commit", "-qm", "initial"]);
+        lines[0] = "changed first".to_owned();
+        lines[29] = "changed last".to_owned();
+        fs::write(root.join("file.txt"), lines.join("\n")).unwrap();
+        run_git(root, &["add", "file.txt"]);
+        run_git(root, &["commit", "-qm", "change"]);
+        let oid = git_output(root, &["rev-parse", "HEAD"]);
+        let patches = PatchStream {
+            git: Git::new(root.to_owned()),
+            specs: vec![format!("{oid}\n")],
+            known: HashSet::from([oid]),
+        };
+
+        let error = patches
+            .for_each_hunk(&mut |_| Err(AppError::operational("simulated SQLite write failure")))
+            .unwrap_err();
+
+        assert_eq!(error.to_string(), "simulated SQLite write failure");
+    }
+
+    fn run_git(root: &std::path::Path, args: &[&str]) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    fn git_output(root: &std::path::Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
 }
