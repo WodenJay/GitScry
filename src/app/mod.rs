@@ -2,6 +2,7 @@ mod error;
 mod index;
 mod query;
 
+mod update;
 use crate::{analysis, cli::Command};
 
 pub(crate) use error::AppError;
@@ -15,6 +16,20 @@ pub(crate) enum IndexStage {
     Complete,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum UpdateStage {
+    Checking,
+    Downloading,
+    Verifying,
+    Installing,
+}
+
+pub(crate) enum Progress {
+    Index(IndexStage),
+    Update(UpdateStage),
+}
+
+#[derive(Debug)]
 pub(crate) struct Outcome {
     pub(crate) progress: Vec<String>,
     pub(crate) message: String,
@@ -23,10 +38,11 @@ pub(crate) struct Outcome {
 
 pub(crate) fn execute(
     command: Command,
-    report: &mut dyn FnMut(IndexStage),
+    report: &mut dyn FnMut(Progress),
 ) -> Result<Outcome, AppError> {
     match command {
-        Command::Index => index::run(report),
+        Command::Index => index::run(&mut |stage| report(Progress::Index(stage))),
+        Command::Update => update::run(&mut |stage| report(Progress::Update(stage))),
         Command::Search { query, limit } => query::run(query, Vec::new(), limit, analysis::search),
         Command::Examples {
             query,

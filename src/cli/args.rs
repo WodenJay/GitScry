@@ -21,6 +21,13 @@ Pick one command by intent, then run `gitscry <command> --help` for inputs, opti
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
     #[command(
+        about = "Update GitScry to the latest stable release",
+        long_about = "Update GitScry to the latest stable release.\n\nUse `gitscry update` to check GitHub for a newer release, verify its SHA-256 checksum, and replace this executable. The update is refused when the release is older than the running version.\n\nExamples:\n\n  gitscry update\n\n  gitscry upgrade",
+        alias = "upgrade"
+    )]
+    Update,
+
+    #[command(
         about = "Build the local cache from the default branch history",
         long_about = "Build the local cache from the default branch history.\n\nUse `gitscry index` when you want to construct or refresh the local cache explicitly. The cache is a rebuildable local representation of the repository's Git history; Git remains the source of truth, and rerunning `index` rebuilds the cache from the current default branch tip.\n\nRequired input: none.\n\nExamples:\n\n  gitscry index"
     )]
@@ -180,4 +187,17 @@ fn parse_limit(value: &str) -> Result<usize, String> {
     (limit > 0)
         .then_some(limit)
         .ok_or_else(|| "limit must be greater than zero".to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn update_command_accepts_canonical_name_and_alias() {
+        for name in ["update", "upgrade"] {
+            let cli = Cli::try_parse_from(["gitscry", name]).unwrap();
+            assert!(matches!(cli.command, Command::Update));
+        }
+    }
 }
