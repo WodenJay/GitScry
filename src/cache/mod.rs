@@ -849,6 +849,9 @@ fn write_hunks(
     hunks: &[Hunk],
     change_ids: &HashMap<(String, i64), i64>,
 ) -> Result<(), AppError> {
+    if hunks.is_empty() {
+        return Ok(());
+    }
     let mut writer = HunkWriter::new(transaction)?;
     for hunk in hunks {
         let change_id = change_ids
@@ -1165,5 +1168,20 @@ mod tests {
         let error = write_hunks(&transaction, &[hunk], &HashMap::new()).unwrap_err();
 
         assert!(error.to_string().contains("outside the current snapshot"));
+    }
+
+    #[test]
+    fn empty_hunks_skip_line_dictionary_setup() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch(schema::SCHEMA).unwrap();
+        connection
+            .execute(
+                "INSERT INTO hunk_line_blocks(block_id, first_line_id, line_count, text, text_length)
+                 VALUES (1, 0, 1, ?1, 1)",
+                params![Vec::<u8>::new()],
+            )
+            .unwrap();
+        let transaction = connection.transaction().unwrap();
+        write_hunks(&transaction, &[], &HashMap::new()).unwrap();
     }
 }
