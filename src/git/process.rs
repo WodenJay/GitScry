@@ -145,9 +145,16 @@ impl Git {
             if streamed.is_err() {
                 let _ = child.kill();
             }
-            let status = child.wait().map_err(|error| {
-                AppError::operational(format!("error: waiting for Git: {error}"))
-            })?;
+            let status = match child.wait() {
+                Ok(status) => status,
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(AppError::operational(format!(
+                        "error: waiting for Git: {error}"
+                    )));
+                }
+            };
             let written = writer
                 .join()
                 .map_err(|_| AppError::operational("error: Git input writer panicked"))?;
@@ -162,13 +169,7 @@ impl Git {
             if !status.success() {
                 return Err(git_failure(&stderr));
             }
-            if let Err(error) = written
-                && error.kind() != std::io::ErrorKind::BrokenPipe
-            {
-                return Err(AppError::operational(format!(
-                    "error: sending input to Git: {error}"
-                )));
-            }
+            check_input_result(written)?;
             Ok(())
         })
     }
@@ -194,15 +195,7 @@ impl Git {
             let written = writer
                 .join()
                 .map_err(|_| AppError::operational("error: Git input writer panicked"))?;
-            // A broken pipe means Git stopped reading input, so its own exit status and
-            // stderr carry the real diagnosis; reporting the write error would hide it.
-            if let Err(error) = written
-                && error.kind() != std::io::ErrorKind::BrokenPipe
-            {
-                return Err(AppError::operational(format!(
-                    "error: sending input to Git: {error}"
-                )));
-            }
+            check_input_result(written)?;
         }
         Ok(output)
     }
@@ -238,7 +231,39 @@ impl Git {
     }
 }
 
+fn check_input_result(written: std::io::Result<()>) -> Result<(), AppError> {
+    match written {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        Err(error) => Err(AppError::operational(format!(
+            "error: sending input to Git: {error}"
+        ))),
+    }
+}
+
 fn git_failure(stderr: &[u8]) -> AppError {
     let detail = String::from_utf8_lossy(stderr);
     AppError::operational(format!("error: Git command failed: {}", detail.trim()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Git;
+
+    #[test]
+    fn stream_surfaces_an_early_child_failure() {
+        let git = Git::new(std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")));
+        let input = vec!["HEAD\n".to_owned()];
+        let error = git
+            .stream(["definitely-not-a-git-command"], &input, |_| Ok(()))
+            .unwrap_err();
+
+        assert!(error.to_string().contains("Git command failed"));
+    }
+
+    #[test]
+    fn broken_input_pipe_defers_to_the_child_result() {
+        let broken_pipe = std::io::Error::from(std::io::ErrorKind::BrokenPipe);
+        super::check_input_result(Err(broken_pipe)).unwrap();
+    }
 }

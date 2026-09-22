@@ -648,9 +648,10 @@ fn parse_error(message: impl std::fmt::Display) -> AppError {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use std::{collections::HashSet, fs, process::Command};
 
-    use super::{Hunk, PatchParser};
+    use super::{Git, Hunk, PatchParser, PatchStream};
+    use crate::app::AppError;
 
     const OID: &str = "0123456789abcdef0123456789abcdef01234567";
 
@@ -722,5 +723,56 @@ mod tests {
         let without_diff = format!("{OID}\n@@ -1 +1 @@\n-a\n+b\n");
         let error = parse_fragmented(without_diff.as_bytes(), 5).err().unwrap();
         assert!(error.contains("patch hunk preceded its diff boundary"));
+    }
+
+    #[test]
+    fn patch_stream_propagates_cache_write_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        run_git(root, &["init", "-q"]);
+        run_git(root, &["config", "user.name", "Test"]);
+        run_git(root, &["config", "user.email", "test@example.com"]);
+        let mut lines = (0..30)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>();
+        fs::write(root.join("file.txt"), lines.join("\n")).unwrap();
+        run_git(root, &["add", "file.txt"]);
+        run_git(root, &["commit", "-qm", "initial"]);
+        lines[0] = "changed first".to_owned();
+        lines[29] = "changed last".to_owned();
+        fs::write(root.join("file.txt"), lines.join("\n")).unwrap();
+        run_git(root, &["add", "file.txt"]);
+        run_git(root, &["commit", "-qm", "change"]);
+        let oid = git_output(root, &["rev-parse", "HEAD"]);
+        let patches = PatchStream {
+            git: Git::new(root.to_owned()),
+            specs: vec![format!("{oid}\n")],
+            known: HashSet::from([oid]),
+        };
+
+        let error = patches
+            .for_each_hunk(&mut |_| Err(AppError::operational("simulated SQLite write failure")))
+            .unwrap_err();
+
+        assert_eq!(error.to_string(), "simulated SQLite write failure");
+    }
+
+    fn run_git(root: &std::path::Path, args: &[&str]) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+
+    fn git_output(root: &std::path::Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
     }
 }
