@@ -997,4 +997,48 @@ mod tests {
         );
         assert_eq!(fs::read(&target).unwrap(), b"new executable");
     }
+
+    #[cfg(windows)]
+    #[test]
+    fn updates_verified_zip_on_windows() {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+
+        let archive_name = Target::X86_64PcWindowsMsvc.archive_name();
+        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        writer
+            .start_file(
+                "gitscry-x86_64-pc-windows-msvc/gitscry.exe",
+                SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored),
+            )
+            .unwrap();
+        writer.write_all(b"new executable").unwrap();
+        let archive = writer.finish().unwrap().into_inner();
+        let mut source = fixture_source("v0.2.0", archive, archive_name);
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("gitscry.exe");
+        fs::write(&executable, b"old executable").unwrap();
+        let mut stages = Vec::new();
+
+        let outcome = run_with(
+            &mut source,
+            &Version::parse("0.1.0").unwrap(),
+            &executable,
+            Target::X86_64PcWindowsMsvc,
+            &mut |stage| stages.push(stage),
+        )
+        .unwrap();
+
+        assert_eq!(fs::read(&executable).unwrap(), b"new executable");
+        assert_eq!(outcome.message, "Updated GitScry 0.1.0 → 0.2.0.");
+        assert_eq!(
+            stages,
+            vec![
+                UpdateStage::Checking,
+                UpdateStage::Downloading,
+                UpdateStage::Verifying,
+                UpdateStage::Installing,
+            ]
+        );
+    }
 }
