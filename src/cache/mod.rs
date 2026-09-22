@@ -490,9 +490,7 @@ fn append(root: &Path, snapshot: &Snapshot) -> Result<usize, AppError> {
                 .unwrap_or(&[]),
         )?;
     }
-    for change in &snapshot.changes {
-        insert_change(&transaction, change)?;
-    }
+    let change_ids = insert_changes(&transaction, &snapshot.changes)?;
     for commit in &snapshot.commits {
         insert_path_projection(
             &transaction,
@@ -503,7 +501,7 @@ fn append(root: &Path, snapshot: &Snapshot) -> Result<usize, AppError> {
                 .unwrap_or(&[]),
         )?;
     }
-    write_hunks(&transaction, &snapshot.hunks)?;
+    write_hunks(&transaction, &snapshot.hunks, &change_ids)?;
     replace_metadata(&transaction, snapshot)?;
     transaction
         .execute("DELETE FROM shallow_boundaries", [])
@@ -565,9 +563,7 @@ fn build(path: &Path, snapshot: &Snapshot) -> Result<(), AppError> {
                 .unwrap_or(&[]),
         )?;
     }
-    for change in &snapshot.changes {
-        insert_change(&transaction, change)?;
-    }
+    let change_ids = insert_changes(&transaction, &snapshot.changes)?;
     for commit in &snapshot.commits {
         insert_path_projection(
             &transaction,
@@ -578,7 +574,7 @@ fn build(path: &Path, snapshot: &Snapshot) -> Result<(), AppError> {
                 .unwrap_or(&[]),
         )?;
     }
-    write_hunks(&transaction, &snapshot.hunks)?;
+    write_hunks(&transaction, &snapshot.hunks, &change_ids)?;
     for oid in &snapshot.shallow_boundaries {
         transaction
             .execute("INSERT INTO shallow_boundaries(oid) VALUES (?1)", [oid])
@@ -764,19 +760,6 @@ fn commit_id(connection: &Connection, oid: &str) -> Result<i64, AppError> {
         .map_err(|error| cache_error("looking up commit", error))
 }
 
-fn change_id(connection: &Connection, oid: &str, ordinal: i64) -> Result<i64, AppError> {
-    connection
-        .query_row(
-            "SELECT ch.change_id
-             FROM changes AS ch
-             JOIN commits AS c ON c.commit_id = ch.commit_id
-             WHERE c.oid = ?1 AND ch.ordinal = ?2",
-            params![oid, ordinal],
-            |row| row.get(0),
-        )
-        .map_err(|error| cache_error("looking up change", error))
-}
-
 fn insert_document(
     connection: &Connection,
     commit: &Commit,
@@ -831,32 +814,55 @@ fn insert_path_projection(
     Ok(())
 }
 
-fn insert_change(connection: &Connection, change: &Change) -> Result<(), AppError> {
-    let commit_id = commit_id(connection, &change.commit_oid)?;
-    connection
-        .execute(
-            "INSERT INTO changes(commit_id, ordinal, status, old_path, new_path, old_blob, new_blob, old_mode, new_mode)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-            params![
-                commit_id,
-                change.ordinal,
-                change.status,
-                change.old_path,
-                change.new_path,
-                change.old_blob,
-                change.new_blob,
-                change.old_mode,
-                change.new_mode,
-            ],
-        )
-        .map_err(|error| cache_error("writing first-parent change", error))?;
-    Ok(())
+fn insert_changes(
+    connection: &Connection,
+    changes: &[Change],
+) -> Result<HashMap<(String, i64), i64>, AppError> {
+    let mut change_ids = HashMap::with_capacity(changes.len());
+    for change in changes {
+        let commit_id = commit_id(connection, &change.commit_oid)?;
+        connection
+            .execute(
+                "INSERT INTO changes(commit_id, ordinal, status, old_path, new_path, old_blob, new_blob, old_mode, new_mode)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    commit_id,
+                    change.ordinal,
+                    change.status,
+                    change.old_path,
+                    change.new_path,
+                    change.old_blob,
+                    change.new_blob,
+                    change.old_mode,
+                    change.new_mode,
+                ],
+            )
+            .map_err(|error| cache_error("writing change", error))?;
+        let change_id = connection.last_insert_rowid();
+        change_ids.insert((change.commit_oid.clone(), change.ordinal), change_id);
+    }
+    Ok(change_ids)
 }
 
-fn write_hunks(transaction: &rusqlite::Transaction<'_>, hunks: &[Hunk]) -> Result<(), AppError> {
+fn write_hunks(
+    transaction: &rusqlite::Transaction<'_>,
+    hunks: &[Hunk],
+    change_ids: &HashMap<(String, i64), i64>,
+) -> Result<(), AppError> {
     let mut writer = HunkWriter::new(transaction)?;
     for hunk in hunks {
-        let change_id = change_id(transaction, &hunk.commit_oid, hunk.change_ordinal)?;
+        let change_id = change_ids
+            .get(&(hunk.commit_oid.clone(), hunk.change_ordinal))
+            .copied()
+            .ok_or_else(|| {
+                cache_error(
+                    "writing hunk",
+                    format!(
+                        "change {} ordinal {} is outside the current snapshot",
+                        hunk.commit_oid, hunk.change_ordinal
+                    ),
+                )
+            })?;
         writer.write(transaction, change_id, hunk)?;
     }
     writer.finish(transaction)
