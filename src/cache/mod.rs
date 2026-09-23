@@ -474,33 +474,36 @@ fn append(root: &Path, snapshot: &Snapshot) -> Result<usize, AppError> {
     let transaction = connection
         .transaction()
         .map_err(|error| cache_error("starting cache transaction", error))?;
-    let paths_by_commit = paths_by_commit(snapshot);
-    let projected_paths = projected_paths_by_commit(snapshot);
-    for commit in &snapshot.commits {
-        replace_commit(&transaction, commit)?;
-    }
-    for commit in &snapshot.commits {
-        insert_parents(&transaction, commit)?;
-        insert_document(
-            &transaction,
-            commit,
-            paths_by_commit
-                .get(&commit.oid)
-                .map(Vec::as_slice)
-                .unwrap_or(&[]),
-        )?;
-    }
-    let change_ids = insert_changes(&transaction, &snapshot.changes)?;
-    for commit in &snapshot.commits {
-        insert_path_projection(
-            &transaction,
-            commit,
-            projected_paths
-                .get(&commit.oid)
-                .map(Vec::as_slice)
-                .unwrap_or(&[]),
-        )?;
-    }
+    let change_ids = {
+        let paths_by_commit = paths_by_commit(snapshot);
+        let projected_paths = projected_paths_by_commit(snapshot);
+        for commit in &snapshot.commits {
+            replace_commit(&transaction, commit)?;
+        }
+        for commit in &snapshot.commits {
+            insert_parents(&transaction, commit)?;
+            insert_document(
+                &transaction,
+                commit,
+                paths_by_commit
+                    .get(&commit.oid)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]),
+            )?;
+        }
+        let change_ids = insert_changes(&transaction, &snapshot.changes)?;
+        for commit in &snapshot.commits {
+            insert_path_projection(
+                &transaction,
+                commit,
+                projected_paths
+                    .get(&commit.oid)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]),
+            )?;
+        }
+        change_ids
+    };
     write_hunks(&transaction, &snapshot.patches, &change_ids)?;
     replace_metadata(&transaction, snapshot)?;
     transaction
@@ -547,33 +550,36 @@ fn build(path: &Path, snapshot: &Snapshot) -> Result<(), AppError> {
         .transaction()
         .map_err(|error| cache_error("starting cache transaction", error))?;
     replace_metadata(&transaction, snapshot)?;
-    let paths_by_commit = paths_by_commit(snapshot);
-    let projected_paths = projected_paths_by_commit(snapshot);
-    for commit in &snapshot.commits {
-        insert_commit(&transaction, commit)?;
-    }
-    for commit in &snapshot.commits {
-        insert_parents(&transaction, commit)?;
-        insert_document(
-            &transaction,
-            commit,
-            paths_by_commit
-                .get(&commit.oid)
-                .map(Vec::as_slice)
-                .unwrap_or(&[]),
-        )?;
-    }
-    let change_ids = insert_changes(&transaction, &snapshot.changes)?;
-    for commit in &snapshot.commits {
-        insert_path_projection(
-            &transaction,
-            commit,
-            projected_paths
-                .get(&commit.oid)
-                .map(Vec::as_slice)
-                .unwrap_or(&[]),
-        )?;
-    }
+    let change_ids = {
+        let paths_by_commit = paths_by_commit(snapshot);
+        let projected_paths = projected_paths_by_commit(snapshot);
+        for commit in &snapshot.commits {
+            insert_commit(&transaction, commit)?;
+        }
+        for commit in &snapshot.commits {
+            insert_parents(&transaction, commit)?;
+            insert_document(
+                &transaction,
+                commit,
+                paths_by_commit
+                    .get(&commit.oid)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]),
+            )?;
+        }
+        let change_ids = insert_changes(&transaction, &snapshot.changes)?;
+        for commit in &snapshot.commits {
+            insert_path_projection(
+                &transaction,
+                commit,
+                projected_paths
+                    .get(&commit.oid)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]),
+            )?;
+        }
+        change_ids
+    };
     write_hunks(&transaction, &snapshot.patches, &change_ids)?;
     for oid in &snapshot.shallow_boundaries {
         transaction
