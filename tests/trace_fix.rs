@@ -2,7 +2,7 @@ mod support;
 
 use std::{fs, path::Path};
 
-use support::{TestRepo, git, git_command};
+use support::{TestRepo, git, git_command, git_stdout};
 
 impl TestRepo {
     fn commit(&self, path: &str, contents: &[u8], subject: &str, body: Option<&str>) {
@@ -65,6 +65,46 @@ impl TestRepo {
         )
         .expect("remove loose commit");
     }
+}
+
+#[test]
+fn trace_fix_keeps_hunks_aligned_after_type_change() {
+    let repo = TestRepo::new();
+    repo.commit_files(
+        &[
+            ("a-relnotes", b"old release notes\n"),
+            ("z-app.txt", b"safe\n"),
+        ],
+        "Initial app",
+    );
+    repo.commit("z-app.txt", b"buggy\n", "Introduce bug", None);
+    fs::write(
+        repo.dir.path().join("symlink-target"),
+        b"Documentation/RelNotes/2.3.0.txt",
+    )
+    .expect("write symlink target blob");
+    let target_blob = git_stdout(repo.dir.path(), ["hash-object", "-w", "symlink-target"]);
+    fs::remove_file(repo.dir.path().join("symlink-target")).expect("remove target helper file");
+    let cacheinfo = format!("120000,{target_blob},a-relnotes");
+    git(
+        repo.dir.path(),
+        ["update-index", "--add", "--cacheinfo", cacheinfo.as_str()],
+    );
+    fs::write(repo.dir.path().join("z-app.txt"), b"fixed\n").expect("write fix");
+    git(repo.dir.path(), ["add", "z-app.txt"]);
+    git(repo.dir.path(), ["commit", "-m", "Fix #19"]);
+    let fix = repo.head();
+    repo.index();
+
+    let output = repo.run(["trace-fix", &fix, "--path", "z-app.txt"]);
+    assert!(
+        output.status.success(),
+        "trace-fix failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Introduce bug"), "{stdout}");
+    assert!(stdout.contains("Fix #19"), "{stdout}");
 }
 
 #[test]

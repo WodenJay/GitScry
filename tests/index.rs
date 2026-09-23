@@ -491,6 +491,75 @@ fn fast_forward_updates_one_completed_generation() {
     );
 }
 #[test]
+fn file_to_symlink_change_keeps_both_hunks_on_one_change() {
+    let repo = TestRepo::new();
+    repo.commit("RelNotes", b"release notes\n", "Regular RelNotes file");
+    fs::write(
+        repo.dir.path().join("symlink-target"),
+        b"Documentation/RelNotes/2.3.0.txt",
+    )
+    .unwrap();
+    let target_blob = git_stdout(repo.dir.path(), ["hash-object", "-w", "symlink-target"]);
+    fs::remove_file(repo.dir.path().join("symlink-target")).unwrap();
+    let cacheinfo = format!("120000,{target_blob},RelNotes");
+    git(
+        repo.dir.path(),
+        ["update-index", "--add", "--cacheinfo", cacheinfo.as_str()],
+    );
+    git(
+        repo.dir.path(),
+        ["commit", "-m", "Replace regular RelNotes with symlink"],
+    );
+    let type_change = repo.head();
+
+    let output = repo.run(["index"]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let cache = Connection::open(repo.dir.path().join(".gitscry/cache.sqlite")).unwrap();
+    assert_eq!(
+        cache
+            .query_row(
+                "SELECT COUNT(*)
+                 FROM changes AS ch
+                 JOIN commits AS c ON c.commit_id = ch.commit_id
+                 WHERE c.oid = ?1 AND ch.status = 'T'",
+                [&type_change],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1
+    );
+    let hunks: Vec<(i64, i64)> = cache
+        .prepare(
+            "SELECT h.change_id, h.ordinal
+             FROM hunks AS h
+             JOIN changes AS ch ON ch.change_id = h.change_id
+             JOIN commits AS c ON c.commit_id = ch.commit_id
+             WHERE c.oid = ?1
+             ORDER BY h.ordinal",
+        )
+        .unwrap()
+        .query_map([&type_change], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(hunks.len(), 2);
+    assert_eq!(hunks[0].0, hunks[1].0);
+    assert_eq!(
+        hunks
+            .iter()
+            .map(|(_, ordinal)| *ordinal)
+            .collect::<Vec<_>>(),
+        vec![0, 1]
+    );
+}
+
+#[test]
 fn multiple_hunks_for_one_change_keep_one_change_id() {
     let repo = TestRepo::new();
     let original = (0..20)

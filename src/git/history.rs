@@ -1,4 +1,8 @@
-use std::{collections::HashSet, fs, path::PathBuf};
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    path::PathBuf,
+};
 
 use crate::app::{AppError, IndexStage};
 
@@ -56,6 +60,7 @@ pub(crate) struct PatchStream {
     git: Git,
     specs: Vec<String>,
     known: HashSet<String>,
+    type_change_ordinals: HashMap<String, HashSet<i64>>,
 }
 
 impl PatchStream {
@@ -65,6 +70,7 @@ impl PatchStream {
             git: Git::new(PathBuf::new()),
             specs: Vec::new(),
             known: HashSet::new(),
+            type_change_ordinals: HashMap::new(),
         }
     }
 
@@ -79,7 +85,7 @@ impl PatchStream {
         if self.specs.is_empty() {
             return Ok(());
         }
-        let mut parser = PatchParser::new(&self.known, emit);
+        let mut parser = PatchParser::new(&self.known, &self.type_change_ordinals, emit);
         self.git.stream(
             [
                 "diff-tree",
@@ -163,6 +169,10 @@ pub(super) fn read_trace_fix(git: &Git, fix_oid: &str) -> Result<TraceFixData, A
         Ok(raw) => Some(parse_changes(&raw, &known)?),
         Err(_) => None,
     };
+    let type_change_ordinals = changes
+        .as_ref()
+        .map(|changes| collect_type_change_ordinals(changes.iter()))
+        .unwrap_or_default();
     let hunks = match git.output(
         [
             "diff-tree",
@@ -178,10 +188,23 @@ pub(super) fn read_trace_fix(git: &Git, fix_oid: &str) -> Result<TraceFixData, A
         ],
         input.as_bytes(),
     ) {
-        Ok(patch) => Some(parse_hunks(&patch, &known)?),
+        Ok(patch) => Some(parse_hunks(&patch, &known, &type_change_ordinals)?),
         Err(_) => None,
     };
     Ok((commit, changes, hunks))
+}
+
+fn collect_type_change_ordinals<'a>(
+    changes: impl IntoIterator<Item = &'a Change>,
+) -> HashMap<String, HashSet<i64>> {
+    let mut type_change_ordinals = HashMap::<String, HashSet<i64>>::new();
+    for change in changes.into_iter().filter(|change| change.status == "T") {
+        type_change_ordinals
+            .entry(change.commit_oid.clone())
+            .or_default()
+            .insert(change.ordinal);
+    }
+    type_change_ordinals
 }
 
 fn read_graph(git: &Git, tip: &str) -> Result<Vec<String>, AppError> {
@@ -262,10 +285,16 @@ fn read_selected(
         .into_iter()
         .filter(|(oid, _)| !blocked_commits.contains(oid.as_str()))
         .unzip();
+    let type_change_ordinals = collect_type_change_ordinals(
+        changes
+            .iter()
+            .filter(|change| !blocked_commits.contains(change.commit_oid.as_str())),
+    );
     let patches = PatchStream {
         git: git.clone(),
         specs,
         known,
+        type_change_ordinals,
     };
     Ok(Snapshot {
         default_ref: target.default_ref,
@@ -462,14 +491,18 @@ fn parse_changes(bytes: &[u8], known: &HashSet<&str>) -> Result<Vec<Change>, App
     Ok(changes)
 }
 
-fn parse_hunks(bytes: &[u8], known: &HashSet<&str>) -> Result<Vec<Hunk>, AppError> {
+fn parse_hunks(
+    bytes: &[u8],
+    known: &HashSet<&str>,
+    type_change_ordinals: &HashMap<String, HashSet<i64>>,
+) -> Result<Vec<Hunk>, AppError> {
     let known = known.iter().map(|oid| (*oid).to_owned()).collect();
     let mut hunks = Vec::new();
     let mut emit = |hunk| {
         hunks.push(hunk);
         Ok(())
     };
-    let mut parser = PatchParser::new(&known, &mut emit);
+    let mut parser = PatchParser::new(&known, type_change_ordinals, &mut emit);
     parser.feed(bytes)?;
     parser.finish()?;
     Ok(hunks)
@@ -480,10 +513,12 @@ where
     F: FnMut(Hunk) -> Result<(), AppError>,
 {
     known: &'a HashSet<String>,
+    type_change_ordinals: &'a HashMap<String, HashSet<i64>>,
     emit: F,
     line: Vec<u8>,
     commit_oid: Option<String>,
     change_ordinal: i64,
+    repeat_type_change_block: bool,
     hunk_ordinal: i64,
     active: Option<Hunk>,
 }
@@ -492,13 +527,19 @@ impl<'a, F> PatchParser<'a, F>
 where
     F: FnMut(Hunk) -> Result<(), AppError>,
 {
-    fn new(known: &'a HashSet<String>, emit: F) -> Self {
+    fn new(
+        known: &'a HashSet<String>,
+        type_change_ordinals: &'a HashMap<String, HashSet<i64>>,
+        emit: F,
+    ) -> Self {
         Self {
             known,
+            type_change_ordinals,
             emit,
             line: Vec::new(),
             commit_oid: None,
             change_ordinal: -1,
+            repeat_type_change_block: false,
             hunk_ordinal: 0,
             active: None,
         }
@@ -537,6 +578,7 @@ where
             self.flush_hunk()?;
             self.commit_oid = Some(text.to_owned());
             self.change_ordinal = -1;
+            self.repeat_type_change_block = false;
             return Ok(());
         }
         if line.starts_with(b"diff --git ") {
@@ -544,8 +586,18 @@ where
             if self.commit_oid.is_none() {
                 return Err(parse_error("patch diff preceded its commit header"));
             }
-            self.change_ordinal += 1;
-            self.hunk_ordinal = 0;
+            // Git's patch format splits a raw type change into delete/add blocks.
+            if self.repeat_type_change_block {
+                self.repeat_type_change_block = false;
+            } else {
+                self.change_ordinal += 1;
+                self.hunk_ordinal = 0;
+                self.repeat_type_change_block = self
+                    .commit_oid
+                    .as_ref()
+                    .and_then(|oid| self.type_change_ordinals.get(oid))
+                    .is_some_and(|ordinals| ordinals.contains(&self.change_ordinal));
+            }
             return Ok(());
         }
         if line.starts_with(b"@@ ") {
@@ -648,7 +700,11 @@ fn parse_error(message: impl std::fmt::Display) -> AppError {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashSet, fs, process::Command};
+    use std::{
+        collections::{HashMap, HashSet},
+        fs,
+        process::Command,
+    };
 
     use super::{Git, Hunk, PatchParser, PatchStream};
     use crate::app::AppError;
@@ -662,7 +718,8 @@ mod tests {
             hunks.push(hunk);
             Ok(())
         };
-        let mut parser = PatchParser::new(&known, &mut emit);
+        let type_change_ordinals = HashMap::new();
+        let mut parser = PatchParser::new(&known, &type_change_ordinals, &mut emit);
         for chunk in bytes.chunks(chunk_size) {
             parser.feed(chunk).map_err(|error| error.to_string())?;
         }
@@ -748,6 +805,7 @@ mod tests {
             git: Git::new(root.to_owned()),
             specs: vec![format!("{oid}\n")],
             known: HashSet::from([oid]),
+            type_change_ordinals: HashMap::new(),
         };
 
         let error = patches
