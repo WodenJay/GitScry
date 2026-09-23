@@ -169,6 +169,10 @@ pub(super) fn read_trace_fix(git: &Git, fix_oid: &str) -> Result<TraceFixData, A
         Ok(raw) => Some(parse_changes(&raw, &known)?),
         Err(_) => None,
     };
+    let type_change_ordinals = changes
+        .as_ref()
+        .map(|changes| collect_type_change_ordinals(changes.iter()))
+        .unwrap_or_default();
     let hunks = match git.output(
         [
             "diff-tree",
@@ -184,10 +188,23 @@ pub(super) fn read_trace_fix(git: &Git, fix_oid: &str) -> Result<TraceFixData, A
         ],
         input.as_bytes(),
     ) {
-        Ok(patch) => Some(parse_hunks(&patch, &known)?),
+        Ok(patch) => Some(parse_hunks(&patch, &known, &type_change_ordinals)?),
         Err(_) => None,
     };
     Ok((commit, changes, hunks))
+}
+
+fn collect_type_change_ordinals<'a>(
+    changes: impl IntoIterator<Item = &'a Change>,
+) -> HashMap<String, HashSet<i64>> {
+    let mut type_change_ordinals = HashMap::<String, HashSet<i64>>::new();
+    for change in changes.into_iter().filter(|change| change.status == "T") {
+        type_change_ordinals
+            .entry(change.commit_oid.clone())
+            .or_default()
+            .insert(change.ordinal);
+    }
+    type_change_ordinals
 }
 
 fn read_graph(git: &Git, tip: &str) -> Result<Vec<String>, AppError> {
@@ -268,15 +285,11 @@ fn read_selected(
         .into_iter()
         .filter(|(oid, _)| !blocked_commits.contains(oid.as_str()))
         .unzip();
-    let mut type_change_ordinals = HashMap::<String, HashSet<i64>>::new();
-    for change in changes.iter().filter(|change| {
-        change.status == "T" && !blocked_commits.contains(change.commit_oid.as_str())
-    }) {
-        type_change_ordinals
-            .entry(change.commit_oid.clone())
-            .or_default()
-            .insert(change.ordinal);
-    }
+    let type_change_ordinals = collect_type_change_ordinals(
+        changes
+            .iter()
+            .filter(|change| !blocked_commits.contains(change.commit_oid.as_str())),
+    );
     let patches = PatchStream {
         git: git.clone(),
         specs,
@@ -478,15 +491,18 @@ fn parse_changes(bytes: &[u8], known: &HashSet<&str>) -> Result<Vec<Change>, App
     Ok(changes)
 }
 
-fn parse_hunks(bytes: &[u8], known: &HashSet<&str>) -> Result<Vec<Hunk>, AppError> {
+fn parse_hunks(
+    bytes: &[u8],
+    known: &HashSet<&str>,
+    type_change_ordinals: &HashMap<String, HashSet<i64>>,
+) -> Result<Vec<Hunk>, AppError> {
     let known = known.iter().map(|oid| (*oid).to_owned()).collect();
     let mut hunks = Vec::new();
     let mut emit = |hunk| {
         hunks.push(hunk);
         Ok(())
     };
-    let type_change_ordinals = HashMap::new();
-    let mut parser = PatchParser::new(&known, &type_change_ordinals, &mut emit);
+    let mut parser = PatchParser::new(&known, type_change_ordinals, &mut emit);
     parser.feed(bytes)?;
     parser.finish()?;
     Ok(hunks)
