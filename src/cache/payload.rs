@@ -256,9 +256,6 @@ impl HunkWriter {
             token_length: tokens.len(),
             text_length: hunk.text.len(),
         });
-        if self.token_block.len() >= BLOCK_BYTES {
-            self.flush_token_block(transaction)?;
-        }
         self.pending_hunks.push(PendingHunk {
             change_id,
             ordinal: hunk.ordinal,
@@ -268,6 +265,9 @@ impl HunkWriter {
             new_lines: hunk.new_lines,
             payload_id,
         });
+        if self.token_block.len() >= BLOCK_BYTES {
+            self.flush_token_block(transaction)?;
+        }
         Ok(())
     }
 
@@ -277,23 +277,6 @@ impl HunkWriter {
         }
         if !self.token_block.is_empty() {
             self.flush_token_block(transaction)?;
-        }
-        for hunk in self.pending_hunks.drain(..) {
-            transaction
-                .execute(
-                    "INSERT INTO hunks(change_id, ordinal, old_start, old_lines, new_start, new_lines, payload_id)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                    params![
-                        hunk.change_id,
-                        hunk.ordinal,
-                        hunk.old_start,
-                        hunk.old_lines,
-                        hunk.new_start,
-                        hunk.new_lines,
-                        hunk.payload_id,
-                    ],
-                )
-                .map_err(|error| storage_error("writing hunk metadata", error))?;
         }
         Ok(())
     }
@@ -327,7 +310,7 @@ impl HunkWriter {
                 params![self.token_block_id, text, text_length],
             )
             .map_err(|error| storage_error("writing hunk token block", error))?;
-        for payload in self.pending_payloads.drain(..) {
+        for payload in &self.pending_payloads {
             transaction
                 .execute(
                     "INSERT INTO hunk_payloads(payload_id, token_block_id, token_offset, token_length, text_length)
@@ -342,6 +325,25 @@ impl HunkWriter {
                 )
                 .map_err(|error| storage_error("writing hunk payload index", error))?;
         }
+        for hunk in &self.pending_hunks {
+            transaction
+                .execute(
+                    "INSERT INTO hunks(change_id, ordinal, old_start, old_lines, new_start, new_lines, payload_id)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![
+                        hunk.change_id,
+                        hunk.ordinal,
+                        hunk.old_start,
+                        hunk.old_lines,
+                        hunk.new_start,
+                        hunk.new_lines,
+                        hunk.payload_id,
+                    ],
+                )
+                .map_err(|error| storage_error("writing hunk metadata", error))?;
+        }
+        self.pending_payloads.clear();
+        self.pending_hunks.clear();
         self.token_block_id += 1;
         reset_block(&mut self.token_block);
         Ok(())
@@ -651,6 +653,70 @@ mod tests {
                 .contains("cache corruption in hunk oid/change 0/hunk 0")
         );
     }
+
+    #[test]
+    fn failed_hunk_flush_rolls_back_token_and_payload_rows() {
+        use super::{BLOCK_BYTES, HunkWriter};
+        use crate::git::Hunk;
+        use rusqlite::{Connection, params};
+
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(super::super::schema::SCHEMA)
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO commits(position, oid, message, message_length, commit_time)
+                 VALUES (0, ?1, ?2, 0, 0)",
+                params!["oid", Vec::<u8>::new()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO changes(change_id, commit_id, ordinal, status, old_mode, new_mode)
+                 VALUES (1, 1, 0, 'M', '100644', '100644')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER reject_hunk_metadata BEFORE INSERT ON hunks
+                 BEGIN SELECT RAISE(ABORT, 'forced hunk metadata failure'); END;",
+            )
+            .unwrap();
+
+        let mut text = b"@@ -1 +1 @@\n".to_vec();
+        for _ in 0..100 {
+            text.extend_from_slice(b"+same\n");
+        }
+        assert!(text.len() > BLOCK_BYTES);
+        let hunk = Hunk {
+            commit_oid: "oid".to_owned(),
+            change_ordinal: 0,
+            ordinal: 0,
+            old_start: 1,
+            old_lines: 1,
+            new_start: 1,
+            new_lines: 1,
+            text,
+        };
+
+        let transaction = connection.transaction().unwrap();
+        let mut writer = HunkWriter::new(&transaction).unwrap();
+        let error = writer.write(&transaction, 1, &hunk).unwrap_err();
+        assert!(error.to_string().contains("writing hunk metadata"));
+        drop(writer);
+        drop(transaction);
+
+        for table in ["hunk_token_blocks", "hunk_payloads", "hunks"] {
+            let count: i64 = connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 0, "{table} should roll back with the failed flush");
+        }
+    }
     #[test]
     fn writer_splits_both_blocks_without_splitting_payloads() {
         use super::{BLOCK_BYTES, HunkReader, HunkWriter};
@@ -725,6 +791,14 @@ mod tests {
                 assert_eq!(writer.line_block.capacity(), 0);
             }
         }
+        let flushed_hunks: i64 = transaction
+            .query_row("SELECT COUNT(*) FROM hunks", [], |row| row.get(0))
+            .unwrap();
+        let flushed_payloads: i64 = transaction
+            .query_row("SELECT COUNT(*) FROM hunk_payloads", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(flushed_hunks, 4);
+        assert_eq!(flushed_payloads, 4);
         writer.finish(&transaction).unwrap();
         transaction.commit().unwrap();
 
