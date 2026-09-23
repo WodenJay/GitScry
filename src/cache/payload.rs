@@ -6,7 +6,10 @@ use rusqlite::{Connection, Transaction, params};
 use crate::{app::AppError, git::Hunk};
 
 const MAX_HUNK_BYTES: usize = 1 << 30;
-const BLOCK_BYTES: usize = 64 * 1024 * 1024;
+#[cfg(not(test))]
+const BLOCK_BYTES: usize = 8 * 1024 * 1024;
+#[cfg(test)]
+const BLOCK_BYTES: usize = 64;
 
 pub(super) fn encode(bytes: &[u8]) -> (Vec<u8>, i64) {
     (compress(bytes), bytes.len() as i64)
@@ -210,6 +213,16 @@ impl HunkWriter {
             let line_id = if let Some(line_id) = self.line_ids.get(line) {
                 *line_id
             } else {
+                let line_length = u32::try_from(line.len())
+                    .map_err(|_| storage_error("encoding line dictionary", "line exceeds 4 GiB"))?;
+                let entry_length = line.len().checked_add(4).ok_or_else(|| {
+                    storage_error("encoding line dictionary", "line is too large")
+                })?;
+                if !self.line_block.is_empty()
+                    && entry_length > BLOCK_BYTES.saturating_sub(self.line_block.len())
+                {
+                    self.flush_line_block(transaction)?;
+                }
                 let line_id = self.next_line_id;
                 self.next_line_id = self
                     .next_line_id
@@ -219,15 +232,21 @@ impl HunkWriter {
                 if self.line_block.is_empty() {
                     self.line_block_first_id = line_id;
                 }
-                let line_length = u32::try_from(line.len())
-                    .map_err(|_| storage_error("encoding line dictionary", "line exceeds 4 GiB"))?;
                 self.line_block
                     .extend_from_slice(&line_length.to_le_bytes());
                 self.line_block.extend_from_slice(line);
                 self.line_block_line_count += 1;
+                if self.line_block.len() >= BLOCK_BYTES {
+                    self.flush_line_block(transaction)?;
+                }
                 line_id
             };
             put_varint(line_id, &mut tokens);
+        }
+        if !self.token_block.is_empty()
+            && tokens.len() > BLOCK_BYTES.saturating_sub(self.token_block.len())
+        {
+            self.flush_token_block(transaction)?;
         }
         let token_offset = self.token_block.len();
         self.token_block.extend_from_slice(&tokens);
@@ -239,9 +258,6 @@ impl HunkWriter {
         });
         if self.token_block.len() >= BLOCK_BYTES {
             self.flush_token_block(transaction)?;
-        }
-        if self.line_block.len() >= BLOCK_BYTES {
-            self.flush_line_block(transaction)?;
         }
         self.pending_hunks.push(PendingHunk {
             change_id,
@@ -298,7 +314,7 @@ impl HunkWriter {
             )
             .map_err(|error| storage_error("writing hunk line dictionary", error))?;
         self.line_block_id += 1;
-        self.line_block.clear();
+        reset_block(&mut self.line_block);
         self.line_block_line_count = 0;
         Ok(())
     }
@@ -327,8 +343,16 @@ impl HunkWriter {
                 .map_err(|error| storage_error("writing hunk payload index", error))?;
         }
         self.token_block_id += 1;
-        self.token_block.clear();
+        reset_block(&mut self.token_block);
         Ok(())
+    }
+}
+
+fn reset_block(buffer: &mut Vec<u8>) {
+    if buffer.capacity() > BLOCK_BYTES {
+        *buffer = Vec::new();
+    } else {
+        buffer.clear();
     }
 }
 
@@ -626,5 +650,159 @@ mod tests {
                 .to_string()
                 .contains("cache corruption in hunk oid/change 0/hunk 0")
         );
+    }
+    #[test]
+    fn writer_splits_both_blocks_without_splitting_payloads() {
+        use super::{BLOCK_BYTES, HunkReader, HunkWriter};
+        use crate::git::Hunk;
+        use rusqlite::{Connection, params};
+
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(super::super::schema::SCHEMA)
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO commits(position, oid, message, message_length, commit_time)
+                 VALUES (0, ?1, ?2, 0, 0)",
+                params!["oid", Vec::<u8>::new()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO changes(change_id, commit_id, ordinal, status, old_mode, new_mode)
+                 VALUES (1, 1, 0, 'M', '100644', '100644')",
+                [],
+            )
+            .unwrap();
+
+        let mut first = b"@@ -1,3 +1,3 @@\n".to_vec();
+        for index in 0..3 {
+            first.extend_from_slice(format!("+unique-{index}-padding\n").as_bytes());
+        }
+        let repeated_hunk = || {
+            let mut text = b"@@ -1 +1 @@\n".to_vec();
+            for _ in 0..50 {
+                text.extend_from_slice(b"+same\n");
+            }
+            text
+        };
+        let mut oversized_tokens = b"@@ -1 +1 @@\n".to_vec();
+        for _ in 0..100 {
+            oversized_tokens.extend_from_slice(b"+same\n");
+        }
+        let mut oversized_line = b"@@ -1 +1 @@\n+".to_vec();
+        oversized_line.extend(std::iter::repeat_n(b'x', BLOCK_BYTES + 1));
+        oversized_line.push(b'\n');
+        let final_partial = b"@@ -1 +1 @@\n+tail\n".to_vec();
+        let hunk_texts = [
+            first,
+            repeated_hunk(),
+            repeated_hunk(),
+            oversized_tokens,
+            oversized_line,
+            final_partial,
+        ];
+
+        let transaction = connection.transaction().unwrap();
+        let mut writer = HunkWriter::new(&transaction).unwrap();
+        for (ordinal, text) in hunk_texts.iter().enumerate() {
+            let hunk = Hunk {
+                commit_oid: "oid".to_owned(),
+                change_ordinal: 0,
+                ordinal: ordinal as i64,
+                old_start: 1,
+                old_lines: 1,
+                new_start: 1,
+                new_lines: 1,
+                text: text.clone(),
+            };
+            writer.write(&transaction, 1, &hunk).unwrap();
+            if ordinal == 3 {
+                assert_eq!(writer.token_block.capacity(), 0);
+            }
+            if ordinal == 4 {
+                assert_eq!(writer.line_block.capacity(), 0);
+            }
+        }
+        writer.finish(&transaction).unwrap();
+        transaction.commit().unwrap();
+
+        let line_block_lengths: Vec<i64> = connection
+            .prepare("SELECT text_length FROM hunk_line_blocks ORDER BY block_id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(line_block_lengths.len() > 1);
+        assert_eq!(
+            line_block_lengths
+                .iter()
+                .filter(|length| **length > BLOCK_BYTES as i64)
+                .count(),
+            1
+        );
+
+        let token_block_lengths: Vec<i64> = connection
+            .prepare("SELECT text_length FROM hunk_token_blocks ORDER BY block_id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(token_block_lengths.len() > 1);
+        assert_eq!(
+            token_block_lengths
+                .iter()
+                .filter(|length| **length > BLOCK_BYTES as i64)
+                .count(),
+            1
+        );
+
+        let payload_rows: Vec<(i64, i64, i64, i64, i64)> = connection
+            .prepare(
+                "SELECT h.ordinal, p.token_block_id, p.token_offset, p.token_length, b.text_length
+                 FROM hunks AS h
+                 JOIN hunk_payloads AS p ON p.payload_id = h.payload_id
+                 JOIN hunk_token_blocks AS b ON b.block_id = p.token_block_id
+                 ORDER BY h.ordinal",
+            )
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(payload_rows.len(), hunk_texts.len());
+        assert_eq!(payload_rows[0].1, payload_rows[1].1);
+        assert_ne!(payload_rows[1].1, payload_rows[2].1);
+        assert_ne!(payload_rows[2].1, payload_rows[3].1);
+        assert_eq!(payload_rows[3].2, 0);
+        assert!(payload_rows[3].3 > BLOCK_BYTES as i64);
+        assert_eq!(payload_rows[3].3, payload_rows[3].4);
+        assert_eq!(payload_rows[4].1, payload_rows[5].1);
+
+        let mut reader = HunkReader::new(&connection).unwrap();
+        for (ordinal, expected) in hunk_texts.iter().enumerate() {
+            let payload_id: i64 = connection
+                .query_row(
+                    "SELECT payload_id FROM hunks WHERE ordinal = ?1",
+                    [ordinal as i64],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let decoded = reader
+                .decode_payload(payload_id, &format!("oid/hunk {ordinal}"))
+                .unwrap();
+            assert_eq!(&decoded, expected);
+        }
     }
 }
