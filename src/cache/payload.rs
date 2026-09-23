@@ -718,6 +718,107 @@ mod tests {
         }
     }
     #[test]
+    fn writer_reuses_existing_dictionary_for_empty_and_binary_lines() {
+        use super::{BLOCK_BYTES, HunkReader, HunkWriter};
+        use crate::git::Hunk;
+        use rusqlite::{Connection, params};
+
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(super::super::schema::SCHEMA)
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO commits(position, oid, message, message_length, commit_time)
+                 VALUES (0, ?1, ?2, 0, 0)",
+                params!["oid", Vec::<u8>::new()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO changes(change_id, commit_id, ordinal, status, old_mode, new_mode)
+                 VALUES (1, 1, 0, 'M', '100644', '100644')",
+                [],
+            )
+            .unwrap();
+
+        let long_line = vec![b'x'; BLOCK_BYTES + 1];
+        let mut first_text = b"\n+\xff\0\n+".to_vec();
+        first_text.extend_from_slice(&long_line);
+        first_text.extend_from_slice(b"\n\n");
+        let mut second_text = b"\n+\xff\0\n+".to_vec();
+        second_text.extend_from_slice(&long_line);
+        second_text.extend_from_slice(b"\n+new\n");
+
+        let transaction = connection.transaction().unwrap();
+        {
+            let mut writer = HunkWriter::new(&transaction).unwrap();
+            writer
+                .write(
+                    &transaction,
+                    1,
+                    &Hunk {
+                        commit_oid: "oid".to_owned(),
+                        change_ordinal: 0,
+                        ordinal: 0,
+                        old_start: 1,
+                        old_lines: 1,
+                        new_start: 1,
+                        new_lines: 1,
+                        text: first_text.clone(),
+                    },
+                )
+                .unwrap();
+            writer.finish(&transaction).unwrap();
+        }
+        transaction.commit().unwrap();
+
+        let transaction = connection.transaction().unwrap();
+        {
+            let mut writer = HunkWriter::new(&transaction).unwrap();
+            writer
+                .write(
+                    &transaction,
+                    1,
+                    &Hunk {
+                        commit_oid: "oid".to_owned(),
+                        change_ordinal: 0,
+                        ordinal: 1,
+                        old_start: 1,
+                        old_lines: 1,
+                        new_start: 1,
+                        new_lines: 1,
+                        text: second_text.clone(),
+                    },
+                )
+                .unwrap();
+            writer.finish(&transaction).unwrap();
+        }
+        transaction.commit().unwrap();
+
+        let unique_lines: i64 = connection
+            .query_row("SELECT SUM(line_count) FROM hunk_line_blocks", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(unique_lines, 4);
+        let mut reader = HunkReader::new(&connection).unwrap();
+        for (ordinal, expected) in [first_text, second_text].iter().enumerate() {
+            let payload_id: i64 = connection
+                .query_row(
+                    "SELECT payload_id FROM hunks WHERE ordinal = ?1",
+                    [ordinal as i64],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let decoded = reader
+                .decode_payload(payload_id, &format!("oid/hunk {ordinal}"))
+                .unwrap();
+            assert_eq!(&decoded, expected);
+        }
+    }
+
+    #[test]
     fn writer_splits_both_blocks_without_splitting_payloads() {
         use super::{BLOCK_BYTES, HunkReader, HunkWriter};
         use crate::git::Hunk;
