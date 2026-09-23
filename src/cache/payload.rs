@@ -112,7 +112,7 @@ struct PendingHunk {
 }
 
 pub(crate) struct HunkWriter {
-    line_ids: HashMap<Vec<u8>, u32>,
+    line_ids: HashMap<Box<[u8]>, u32>,
     next_line_id: u32,
     line_block_id: i64,
     line_block_first_id: u32,
@@ -170,7 +170,7 @@ impl HunkWriter {
                 let line = bytes
                     .get(cursor..end)
                     .ok_or_else(|| corruption("line dictionary", "truncated line"))?;
-                line_ids.insert(line.to_vec(), first_line_id + offset);
+                line_ids.insert(Box::<[u8]>::from(line), first_line_id + offset);
                 cursor = end;
             }
             if cursor != bytes.len() {
@@ -228,7 +228,7 @@ impl HunkWriter {
                     .next_line_id
                     .checked_add(1)
                     .ok_or_else(|| storage_error("encoding line dictionary", "line ID overflow"))?;
-                self.line_ids.insert(line.to_vec(), line_id);
+                self.line_ids.insert(Box::<[u8]>::from(line), line_id);
                 if self.line_block.is_empty() {
                     self.line_block_first_id = line_id;
                 }
