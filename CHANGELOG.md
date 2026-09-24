@@ -1,3 +1,18 @@
+## [0.2.1] - 2026-09-24
+
+### 🐛 Bug Fixes
+
+- *(ci)* Allow manual crate publish
+- *(ci)* Chain release publishing
+- *(index)* Align type-change patch blocks
+- *(trace-fix)* Align hunks after type changes
+
+### ⚡ Performance
+
+- *(cache)* Cap hunk buffers at 8 MiB
+- *(cache)* Flush hunk metadata per block
+- *(cache)* Box line dictionary keys
+- *(cache)* Drop path maps before hunks
 ## [0.2.0] - 2026-09-22
 
 ### 🚀 Features
