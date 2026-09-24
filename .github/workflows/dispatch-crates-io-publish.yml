@@ -1,0 +1,20 @@
+name: Dispatch crates.io publish
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-22.04
+    permissions:
+      actions: write
+    steps:
+      - name: Dispatch trusted publishing
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: gh workflow run publish.yml --repo "$GITHUB_REPOSITORY" --ref main --field tag="$RELEASE_TAG"

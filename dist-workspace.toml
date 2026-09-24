@@ -19,3 +19,6 @@ hosting = "github"
 create-release = false
 # Whether to install an updater program
 install-updater = false
+# Run crates.io Trusted Publishing after the GitHub release is created.
+post-announce-jobs = ["./dispatch-crates-io-publish"]
+github-custom-job-permissions = { "dispatch-crates-io-publish" = { actions = "write" } }

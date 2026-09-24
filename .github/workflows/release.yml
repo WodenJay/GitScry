@@ -292,3 +292,14 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
+
+  custom-dispatch-crates-io-publish:
+    needs:
+      - plan
+      - announce
+    uses: ./.github/workflows/dispatch-crates-io-publish.yml
+    with:
+      plan: ${{ needs.plan.outputs.val }}
+    secrets: inherit
+    permissions:
+      "actions": "write"

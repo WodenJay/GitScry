@@ -3,9 +3,6 @@ name: Publish crate
 on:
   release:
     types: [published]
-  workflow_run:
-    workflows: [Release]
-    types: [completed]
   workflow_dispatch:
     inputs:
       tag:
@@ -18,11 +15,6 @@ jobs:
     # v0.1.0 is bootstrapped manually; later releases use trusted publishing.
     if: >-
       (github.event_name == 'release' && github.event.release.tag_name != 'v0.1.0')
-      || (github.event_name == 'workflow_run'
-          && github.event.workflow_run.event == 'push'
-          && github.event.workflow_run.conclusion == 'success'
-          && startsWith(github.event.workflow_run.head_branch, 'v')
-          && github.event.workflow_run.head_branch != 'v0.1.0')
       || (github.event_name == 'workflow_dispatch' && inputs.tag != 'v0.1.0')
     runs-on: ubuntu-22.04
     permissions:
@@ -31,7 +23,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ github.event.release.tag_name || github.event.workflow_run.head_branch || inputs.tag }}
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
           persist-credentials: false
 
       - name: Authenticate with crates.io
