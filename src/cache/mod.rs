@@ -474,37 +474,7 @@ fn append(root: &Path, snapshot: &Snapshot) -> Result<usize, AppError> {
     let transaction = connection
         .transaction()
         .map_err(|error| cache_error("starting cache transaction", error))?;
-    let change_ids = {
-        let paths_by_commit = paths_by_commit(snapshot);
-        let projected_paths = projected_paths_by_commit(snapshot);
-        for commit in &snapshot.commits {
-            replace_commit(&transaction, commit)?;
-        }
-        for commit in &snapshot.commits {
-            insert_parents(&transaction, commit)?;
-            insert_document(
-                &transaction,
-                commit,
-                paths_by_commit
-                    .get(&commit.oid)
-                    .map(Vec::as_slice)
-                    .unwrap_or(&[]),
-            )?;
-        }
-        let change_ids = insert_changes(&transaction, &snapshot.changes)?;
-        for commit in &snapshot.commits {
-            insert_path_projection(
-                &transaction,
-                commit,
-                projected_paths
-                    .get(&commit.oid)
-                    .map(Vec::as_slice)
-                    .unwrap_or(&[]),
-            )?;
-        }
-        change_ids
-    };
-    write_hunks(&transaction, &snapshot.patches, &change_ids)?;
+    write_snapshot_rows(&transaction, snapshot, replace_commit)?;
     replace_metadata(&transaction, snapshot)?;
     transaction
         .execute("DELETE FROM shallow_boundaries", [])
@@ -550,37 +520,7 @@ fn build(path: &Path, snapshot: &Snapshot) -> Result<(), AppError> {
         .transaction()
         .map_err(|error| cache_error("starting cache transaction", error))?;
     replace_metadata(&transaction, snapshot)?;
-    let change_ids = {
-        let paths_by_commit = paths_by_commit(snapshot);
-        let projected_paths = projected_paths_by_commit(snapshot);
-        for commit in &snapshot.commits {
-            insert_commit(&transaction, commit)?;
-        }
-        for commit in &snapshot.commits {
-            insert_parents(&transaction, commit)?;
-            insert_document(
-                &transaction,
-                commit,
-                paths_by_commit
-                    .get(&commit.oid)
-                    .map(Vec::as_slice)
-                    .unwrap_or(&[]),
-            )?;
-        }
-        let change_ids = insert_changes(&transaction, &snapshot.changes)?;
-        for commit in &snapshot.commits {
-            insert_path_projection(
-                &transaction,
-                commit,
-                projected_paths
-                    .get(&commit.oid)
-                    .map(Vec::as_slice)
-                    .unwrap_or(&[]),
-            )?;
-        }
-        change_ids
-    };
-    write_hunks(&transaction, &snapshot.patches, &change_ids)?;
+    write_snapshot_rows(&transaction, snapshot, insert_commit)?;
     for oid in &snapshot.shallow_boundaries {
         transaction
             .execute("INSERT INTO shallow_boundaries(oid) VALUES (?1)", [oid])
@@ -600,6 +540,44 @@ fn build(path: &Path, snapshot: &Snapshot) -> Result<(), AppError> {
     connection
         .close()
         .map_err(|(_, error)| cache_error("closing staging cache", error))
+}
+
+fn write_snapshot_rows(
+    transaction: &rusqlite::Transaction<'_>,
+    snapshot: &Snapshot,
+    write_commit: fn(&Connection, &Commit) -> Result<(), AppError>,
+) -> Result<(), AppError> {
+    let change_ids = {
+        let paths_by_commit = paths_by_commit(snapshot);
+        let projected_paths = projected_paths_by_commit(snapshot);
+        for commit in &snapshot.commits {
+            write_commit(transaction, commit)?;
+        }
+        for commit in &snapshot.commits {
+            insert_parents(transaction, commit)?;
+            insert_document(
+                transaction,
+                commit,
+                paths_by_commit
+                    .get(&commit.oid)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]),
+            )?;
+        }
+        let change_ids = insert_changes(transaction, &snapshot.changes)?;
+        for commit in &snapshot.commits {
+            insert_path_projection(
+                transaction,
+                commit,
+                projected_paths
+                    .get(&commit.oid)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]),
+            )?;
+        }
+        change_ids
+    };
+    write_hunks(transaction, &snapshot.patches, &change_ids)
 }
 
 fn paths_by_commit(snapshot: &Snapshot) -> HashMap<String, Vec<Vec<u8>>> {
