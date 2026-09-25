@@ -73,7 +73,15 @@ Use GitScry when past changes may help you understand, implement, or debug code.
 
 ## Benchmark
 
-<!-- TODO -->
+| Command | Repository | Result |
+|---|---|---|
+| `search` | `NousResearch/hermes-agent` | Both relevant prior changes ranked in the Top 5 (ranks 3 and 4). |
+| `examples` | `curl/curl` | Matching precedent ranked #2; shared source file cited. |
+| `tests` | `NousResearch/hermes-agent` | Relevant test file ranked #1. |
+| `related` | `git/git` | Related test file ranked #1. |
+| `regression` | `git/git` | Relevant change ranked #2. |
+| `why` | `git/git` | Correct explanation ranked #1. |
+| `trace-fix` | `rust-lang/rust` | Introducing change ranked #2. |
 
 ## Detailed Features
 
