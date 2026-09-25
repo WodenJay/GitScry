@@ -190,102 +190,15 @@ fn symbol_matches(
         let hunks = session.history_hunks(&commit.oid)?;
         let overlaps_symbol = hunks.iter().any(|hunk| {
             commit.anchored_ordinals.contains(&hunk.change_ordinal)
-                && hunk_overlaps_symbol(hunk, line.min(end_line), line.max(end_line))
+                && retrieval::hunk_overlaps_symbol(hunk, line.min(end_line), line.max(end_line))
         });
-        let line_changed = trace_line(commit, &hunks, &mut line);
-        let end_changed = trace_line(commit, &hunks, &mut end_line);
+        let line_changed = retrieval::trace_line(commit, &hunks, &mut line);
+        let end_changed = retrieval::trace_line(commit, &hunks, &mut end_line);
         if overlaps_symbol || line_changed || end_changed {
             matches.insert(commit.oid.clone());
         }
     }
     Ok(matches)
-}
-
-fn hunk_overlaps_symbol(hunk: &retrieval::HistoryHunk, start: i64, end: i64) -> bool {
-    let mut line = hunk.new_start;
-    for diff_line in hunk.text.split_inclusive(|byte| *byte == b'\n') {
-        let Some(marker) = diff_line.first() else {
-            continue;
-        };
-        match marker {
-            b'+' => {
-                if (start..=end).contains(&line) {
-                    return true;
-                }
-                line += 1;
-            }
-            b'-' => {
-                if (start..=end).contains(&line) {
-                    return true;
-                }
-            }
-            b' ' => line += 1,
-            b'\\' | b'@' => {}
-            _ => {}
-        }
-    }
-    false
-}
-
-fn trace_line(
-    commit: &retrieval::HistoryCommit,
-    hunks: &[retrieval::HistoryHunk],
-    line: &mut i64,
-) -> bool {
-    let relevant = commit
-        .anchored_ordinals
-        .iter()
-        .copied()
-        .collect::<HashSet<_>>();
-    let mut ordered = hunks
-        .iter()
-        .filter(|hunk| relevant.contains(&hunk.change_ordinal))
-        .collect::<Vec<_>>();
-    ordered.sort_by_key(|hunk| std::cmp::Reverse(hunk.new_start));
-    for hunk in ordered {
-        let new_end = hunk.new_start + hunk.new_lines - 1;
-        if *line > new_end {
-            *line += hunk.old_lines - hunk.new_lines;
-            continue;
-        }
-        if *line < hunk.new_start || hunk.new_lines == 0 {
-            continue;
-        }
-        let mut old_line = hunk.old_start;
-        let mut new_line = hunk.new_start;
-        let mut deleted_start = None;
-        let mut direct = false;
-        for diff_line in hunk.text.split_inclusive(|byte| *byte == b'\n') {
-            let Some(marker) = diff_line.first() else {
-                continue;
-            };
-            match marker {
-                b'+' => {
-                    if new_line == *line {
-                        direct = true;
-                        *line = deleted_start.unwrap_or(old_line);
-                    }
-                    new_line += 1;
-                }
-                b'-' => {
-                    deleted_start.get_or_insert(old_line);
-                    old_line += 1;
-                }
-                b' ' => {
-                    if new_line == *line {
-                        *line = old_line;
-                    }
-                    old_line += 1;
-                    new_line += 1;
-                    deleted_start = None;
-                }
-                b'\\' | b'@' => {}
-                _ => {}
-            }
-        }
-        return direct;
-    }
-    false
 }
 
 fn temporal_score(index: usize, history_len: usize) -> f64 {

@@ -55,7 +55,7 @@ pub(crate) fn run(
 
     for commit in &commits {
         let hunks = session.history_hunks(&commit.oid)?;
-        let direct_hunk = trace_line(commit, &hunks, &mut historical_line);
+        let direct_hunk = retrieval::trace_line(commit, &hunks, &mut historical_line);
         let blame_match = blame_oid == Some(commit.oid.as_str());
         seen_blame |= blame_match;
         let explanation = explanation_strength(&commit.subject, &commit.body);
@@ -232,65 +232,4 @@ fn cochanged_paths(commit: &retrieval::HistoryCommit, target: &[u8]) -> usize {
             })
         })
         .count()
-}
-
-fn trace_line(
-    commit: &retrieval::HistoryCommit,
-    hunks: &[retrieval::HistoryHunk],
-    line: &mut i64,
-) -> bool {
-    let relevant = commit
-        .anchored_ordinals
-        .iter()
-        .copied()
-        .collect::<HashSet<_>>();
-    let mut ordered = hunks
-        .iter()
-        .filter(|hunk| relevant.contains(&hunk.change_ordinal))
-        .collect::<Vec<_>>();
-    ordered.sort_by_key(|hunk| std::cmp::Reverse(hunk.new_start));
-    for hunk in ordered {
-        let new_end = hunk.new_start + hunk.new_lines - 1;
-        if *line > new_end {
-            *line += hunk.old_lines - hunk.new_lines;
-            continue;
-        }
-        if *line < hunk.new_start || hunk.new_lines == 0 {
-            continue;
-        }
-        let mut old_line = hunk.old_start;
-        let mut new_line = hunk.new_start;
-        let mut deleted_start = None;
-        let mut direct = false;
-        for diff_line in hunk.text.split_inclusive(|byte| *byte == b'\n') {
-            let Some(marker) = diff_line.first() else {
-                continue;
-            };
-            match marker {
-                b'+' => {
-                    if new_line == *line {
-                        direct = true;
-                        *line = deleted_start.unwrap_or(old_line);
-                    }
-                    new_line += 1;
-                }
-                b'-' => {
-                    deleted_start.get_or_insert(old_line);
-                    old_line += 1;
-                }
-                b' ' => {
-                    if new_line == *line {
-                        *line = old_line;
-                    }
-                    old_line += 1;
-                    new_line += 1;
-                    deleted_start = None;
-                }
-                b'\\' | b'@' => {}
-                _ => {}
-            }
-        }
-        return direct;
-    }
-    false
 }

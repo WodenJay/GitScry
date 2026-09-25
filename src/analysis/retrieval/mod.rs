@@ -6,6 +6,7 @@
 
 mod intent;
 mod lexical;
+mod line_history;
 mod rank;
 mod reverts;
 mod text;
@@ -17,6 +18,7 @@ pub(crate) use crate::cache::message_parts;
 pub(in crate::analysis) use crate::cache::{HistoryCommit, HistoryHunk, RelationHistory};
 pub(crate) use intent::Intent;
 pub(in crate::analysis) use lexical::Signals;
+pub(in crate::analysis) use line_history::{hunk_overlaps_symbol, trace_line};
 pub(in crate::analysis) use rank::{Ranked, assign_citations, sort};
 pub(in crate::analysis) use reverts::{Revert, RevertIndex, index as reverts};
 pub(in crate::analysis) use text::tokenize;
