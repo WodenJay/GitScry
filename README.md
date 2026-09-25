@@ -73,15 +73,15 @@ Use GitScry when past changes may help you understand, implement, or debug code.
 
 ## Benchmark
 
-| Command | Repository | Result |
-|---|---|---|
-| `search` | `NousResearch/hermes-agent` | Both relevant prior changes ranked in the Top 5 (ranks 3 and 4). |
-| `examples` | `curl/curl` | Matching precedent ranked #2; shared source file cited. |
-| `tests` | `NousResearch/hermes-agent` | Relevant test file ranked #1. |
-| `related` | `git/git` | Related test file ranked #1. |
-| `regression` | `git/git` | Relevant change ranked #2. |
-| `why` | `git/git` | Correct explanation ranked #1. |
-| `trace-fix` | `rust-lang/rust` | Introducing change ranked #2. |
+| Command | Repository | Test command | Result |
+|---|---|---|---|
+| `search` | `NousResearch/hermes-agent` | `gitscry search "stealth ox-alpha model catalog" --limit 5` | Both relevant prior changes ranked in the Top 5 (ranks 3 and 4). |
+| `examples` | `curl/curl` | `gitscry examples "digest quote the digest-uri param as well" --limit 5` | Matching precedent ranked #2; shared source file cited. |
+| `tests` | `NousResearch/hermes-agent` | `gitscry tests agent/reasoning_timeouts.py --limit 5` | Relevant test file ranked #1. |
+| `related` | `git/git` | `gitscry related builtin/gc.c --limit 5` | Related test file ranked #1. |
+| `regression` | `git/git` | `gitscry regression "worktree add dwim when b or B is given" --path builtin/worktree.c --good <good-revision> --bad <bad-revision> --limit 5` | Relevant change ranked #2. |
+| `why` | `git/git` | `gitscry why builtin/name-rev.c --line 99 --at <historical-revision> --limit 5` | Correct explanation ranked #1. |
+| `trace-fix` | `rust-lang/rust` | `gitscry trace-fix <fix-commit> --path library/stdarch/crates/core_arch/src/x86/avx2.rs --limit 5` | Introducing change ranked #2. |
 
 ## Detailed Features
 
