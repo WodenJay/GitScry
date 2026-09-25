@@ -1,8 +1,8 @@
 //! Reading and scoring candidates out of the completed cache generation.
 //!
-//! One reason to change: how history is read and how strongly it answers an intent.
-//! Capabilities cross this seam through [`Pool`] and [`reverts`]; everything else here
-//! stays private.
+//! One reason to change: how cached history is interpreted and scored.
+//! Capabilities share candidate retrieval, ranking, and line-history interpretation here;
+//! storage stays in `cache`, and report wording stays in `capabilities`.
 
 mod intent;
 mod lexical;
