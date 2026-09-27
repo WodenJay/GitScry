@@ -23,9 +23,9 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Run Clippy
-        run: cargo clippy --locked --all-targets --all-features --jobs 1 -- -D warnings
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - name: Run tests
-        run: cargo test --locked --all-targets --all-features --jobs 1
+        run: cargo test --locked --all-targets --all-features
 
   msrv:
     name: Minimum Rust version
@@ -37,7 +37,7 @@ jobs:
       - name: Install Rust 1.89
         uses: dtolnay/rust-toolchain@1.89.0
       - name: Run tests on the declared MSRV
-        run: cargo test --locked --all-targets --all-features --jobs 1
+        run: cargo test --locked --all-targets --all-features
 
   release-targets:
     name: Test ${{ matrix.name }}
@@ -68,4 +68,4 @@ jobs:
         with:
           target: ${{ matrix.target }}
       - name: Run target tests
-        run: cargo test --locked --all-targets --all-features --target ${{ matrix.target }} --jobs 1
+        run: cargo test --locked --all-targets --all-features --target ${{ matrix.target }}
