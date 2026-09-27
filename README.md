@@ -69,6 +69,17 @@ Historical test candidates (1 match):
 
 These examples are from GitScry's own repository history.
 
+## Contents
+
+- [What GitScry answers](#what-gitscry-answers)
+- [Installation](#installation)
+- [Quick start](#quick-start)
+- [Coding agent integration](#coding-agent-integration)
+- [Benchmark](#benchmark)
+- [Commands](#commands)
+- [Feedback & Issues](#feedback--issues)
+- [License](#license)
+
 ## What GitScry answers
 
 Instead of manually stitching together `git log`, `blame`, old diffs, reverts, and path history, GitScry provides purpose-built queries for questions such as:
