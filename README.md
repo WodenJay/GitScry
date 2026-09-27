@@ -10,6 +10,17 @@ Find how similar changes were implemented before, why code looks the way it does
 
 </div>
 
+## Contents
+
+- [What GitScry answers](#what-gitscry-answers)
+- [Installation](#installation)
+- [Quick start](#quick-start)
+- [Coding agent integration](#coding-agent-integration)
+- [Benchmark](#benchmark)
+- [Commands](#commands)
+- [Feedback & Issues](#feedback--issues)
+- [License](#license)
+
 ## See it in action
 
 GitScry turns repository history into answers you can use while implementing, debugging, and reviewing code.
@@ -68,17 +79,6 @@ Historical test candidates (1 match):
 ```
 
 These examples are from GitScry's own repository history.
-
-## Contents
-
-- [What GitScry answers](#what-gitscry-answers)
-- [Installation](#installation)
-- [Quick start](#quick-start)
-- [Coding agent integration](#coding-agent-integration)
-- [Benchmark](#benchmark)
-- [Commands](#commands)
-- [Feedback & Issues](#feedback--issues)
-- [License](#license)
 
 ## What GitScry answers
 
