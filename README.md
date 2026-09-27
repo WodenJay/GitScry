@@ -167,6 +167,12 @@ GitScry is designed to give coding agents access to implementation context that 
 
 Use `gitscry --help` to learn more.
 
+## Feedback & Issues
+
+GitScry is still evolving, and real-world Git histories can contain many edge cases.
+
+If you encounter incorrect results, unsupported scenarios, or have ideas for improvement, please feel free to [open an issue](https://github.com/WodenJay/GitScry/issues). Bug reports with a reproducible repository or commit example are especially helpful.
+
 ## License
 
 GitScry is available under the [MIT License](LICENSE).
