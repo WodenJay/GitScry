@@ -14,12 +14,7 @@ Find how similar changes were implemented before, why code looks the way it does
 
 GitScry turns repository history into answers you can use while implementing, debugging, and reviewing code.
 
-<div align="center">
-  <img src="docs/assets/gitscry_example.gif" width="45%" alt="GitScry demo" />
-  <a href="docs/assets/gitscry_60s_en_voice.mp4">
-    <img src="docs/assets/thumbnail_en.png" width="45%" alt="Watch the 60-second GitScry overview" />
-  </a>
-</div>
+https://github.com/user-attachments/assets/cfbff097-3226-444a-aa37-4859b9586aae
 
 ### Find precedent before making a change
 
