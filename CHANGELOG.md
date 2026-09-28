@@ -1,3 +1,8 @@
+## [0.3.1] - 2026-09-28
+
+### 🐛 Bug Fixes
+
+- *(package)* Exclude unused docs assets
 ## [0.3.0] - 2026-09-28
 
 ### 🚀 Features
