@@ -19,13 +19,13 @@ pub(super) fn run(
 ) -> Result<Outcome, AppError> {
     let intent = analysis::Intent::parse(&words, &paths)?;
     let session = cache::open_query()?;
-    let mut report = capability(&session, &intent, limit)?;
-    let mut progress = session.progress().to_vec();
-    progress.append(&mut report.warnings);
+    let report = capability(&session, &intent, limit)?;
+    let progress = session.progress().to_vec();
     Ok(Outcome {
         progress,
         message: render::format_report(&report),
         notices: report.notices.clone(),
+        report: Some(report),
     })
 }
 
@@ -42,13 +42,13 @@ pub(super) fn run_paths(
 ) -> Result<Outcome, AppError> {
     let intent = analysis::Intent::paths(&paths)?;
     let session = cache::open_query()?;
-    let mut report = capability(&session, &intent, session.root(), limit)?;
-    let mut progress = session.progress().to_vec();
-    progress.append(&mut report.warnings);
+    let report = capability(&session, &intent, session.root(), limit)?;
+    let progress = session.progress().to_vec();
     Ok(Outcome {
         progress,
         message: render::format_report(&report),
         notices: report.notices.clone(),
+        report: Some(report),
     })
 }
 
@@ -76,13 +76,13 @@ pub(super) fn run_regression(
     } else {
         bad_reachable
     };
-    let mut report = analysis::regression(&session, &intent, &target, &reachable, limit)?;
-    let mut progress = session.progress().to_vec();
-    progress.append(&mut report.warnings);
+    let report = analysis::regression(&session, &intent, &target, &reachable, limit)?;
+    let progress = session.progress().to_vec();
     Ok(Outcome {
         progress,
         message: render::format_report(&report),
         notices: report.notices.clone(),
+        report: Some(report),
     })
 }
 pub(super) fn run_why(
@@ -96,13 +96,13 @@ pub(super) fn run_why(
     let session = cache::open_query()?;
     session.require_revision(&target.revision)?;
     let reachable = session.ancestors(&target.revision)?;
-    let mut report = analysis::why(&session, &target, &reachable, limit)?;
-    let mut progress = session.progress().to_vec();
-    progress.append(&mut report.warnings);
+    let report = analysis::why(&session, &target, &reachable, limit)?;
+    let progress = session.progress().to_vec();
     Ok(Outcome {
         progress,
         message: render::format_report(&report),
         notices: report.notices.clone(),
+        report: Some(report),
     })
 }
 
@@ -116,12 +116,12 @@ pub(super) fn run_trace_fix(
     let session = cache::open_query()?;
     session.require_revision(&target.revision)?;
     let reachable = session.ancestors(&target.revision)?;
-    let mut report = analysis::trace_fix(&session, &target, &reachable, limit)?;
-    let mut progress = session.progress().to_vec();
-    progress.append(&mut report.warnings);
+    let report = analysis::trace_fix(&session, &target, &reachable, limit)?;
+    let progress = session.progress().to_vec();
     Ok(Outcome {
         progress,
         message: render::format_report(&report),
         notices: report.notices.clone(),
+        report: Some(report),
     })
 }

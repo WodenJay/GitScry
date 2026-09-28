@@ -352,6 +352,7 @@ dependencies = [
 name = "gitscry"
 version = "0.2.1"
 dependencies = [
+ "base64",
  "clap",
  "lz4_flex",
  "lzma-rs",

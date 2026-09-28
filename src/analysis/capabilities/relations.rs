@@ -9,7 +9,6 @@ use super::super::retrieval;
 use super::super::{Citation, Confidence, Detail, Intent, Material, Relation, Report, ReportKind};
 
 const MASS_CHANGE_PATH_LIMIT: usize = 50;
-const MAX_SUPPORTING_CITATIONS: usize = 5;
 
 #[cfg(unix)]
 fn current_path_is_file(root: &Path, path: &[u8]) -> bool {
@@ -114,7 +113,6 @@ fn run(
             .unwrap_or_default();
         let citation_oids = supporting
             .iter()
-            .take(MAX_SUPPORTING_CITATIONS)
             .map(|support| support.oid.clone())
             .collect::<Vec<_>>();
         let confidence = confidence(support_count, proportion);

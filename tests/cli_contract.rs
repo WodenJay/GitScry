@@ -110,28 +110,39 @@ fn ordinary_commands_have_a_byte_exact_cli_contract() {
         String::from_utf8_lossy(&indexed.stderr)
     );
 
-    let commands: [(&str, &[&str]); 8] = [
-        ("search", &["search", "provider"]),
+    let commands: [(&str, &[&str], &str); 8] = [
+        ("search", &["search", "provider"], "search"),
         (
             "examples",
             &["examples", "retire", "provider", "--path", "src/lib.rs"],
+            "examples",
         ),
         (
             "failures",
             &["failures", "provider", "--path", "src/lib.rs"],
+            "failures",
         ),
-        ("related", &["related", "src/lib.rs"]),
-        ("tests", &["tests", "src/lib.rs"]),
-        ("why", &["why", "src/lib.rs", "--line", "1", "--limit", "3"]),
+        ("related", &["related", "src/lib.rs"], "related"),
+        ("tests", &["tests", "src/lib.rs"], "tests"),
+        (
+            "why",
+            &["why", "src/lib.rs", "--line", "1", "--limit", "3"],
+            "why",
+        ),
         (
             "regression",
             &["regression", "provider regression", "--path", "src/lib.rs"],
+            "regression",
         ),
-        ("trace-fix", &["trace-fix", "HEAD", "--path", "src/lib.rs"]),
+        (
+            "trace-fix",
+            &["trace-fix", "HEAD", "--path", "src/lib.rs"],
+            "trace-fix",
+        ),
     ];
 
     let mut observed = String::new();
-    for (name, args) in commands {
+    for (name, args, _) in commands {
         let output = repo.run(args);
         assert_eq!(
             output.status.code(),
@@ -146,6 +157,85 @@ fn ordinary_commands_have_a_byte_exact_cli_contract() {
             escaped(&output.stderr),
         ));
     }
+    for (name, args, expected_kind) in commands {
+        let mut json_args = args.to_vec();
+        json_args.push("--json");
+        let output = repo.run(json_args);
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{name} --json: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value: serde_json::Value =
+            serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+                panic!(
+                    "{name} emitted invalid JSON: {error}\n{}",
+                    String::from_utf8_lossy(&output.stdout)
+                )
+            });
+        assert_eq!(value["schema_version"], 1, "{name}");
+        assert_eq!(value["kind"], expected_kind, "{name}");
+        assert!(value["matched_count"].as_u64().is_some(), "{name}");
+        assert!(value["truncated"].is_boolean(), "{name}");
+        assert!(value["materials"].is_array(), "{name}");
+        assert!(value["warnings"].is_array(), "{name}");
+        assert!(value["notices"].is_array(), "{name}");
+        let materials = value["materials"].as_array().unwrap();
+        assert!(
+            !materials.is_empty(),
+            "{name} should have matching materials"
+        );
+        for material in materials {
+            assert!(material["subject"].is_string(), "{name}");
+            assert!(material["paths"].is_array(), "{name}");
+            assert!(material["confidence"].is_string(), "{name}");
+            assert!(material["basis"].is_array(), "{name}");
+            let citations = material["citations"].as_array().unwrap();
+            for citation in citations {
+                assert_eq!(citation["oid"].as_str().unwrap().len(), 40, "{name}");
+                assert!(citation["abbreviation"].is_string(), "{name}");
+                assert!(citation["subject"].is_string(), "{name}");
+            }
+        }
+        let expected_detail = match name {
+            "examples" => Some("steps"),
+            "failures" => Some("failure"),
+            "related" | "tests" => Some("relation"),
+            "why" => Some("why"),
+            "trace-fix" => Some("trace_fix"),
+            _ => None,
+        };
+        if let Some(expected_detail) = expected_detail {
+            assert_eq!(
+                materials[0]["detail"]["type"].as_str(),
+                Some(expected_detail),
+                "{name}"
+            );
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        for diagnostic in value["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(value["notices"].as_array().unwrap())
+        {
+            assert!(!stderr.contains(diagnostic.as_str().unwrap()), "{name}");
+        }
+        if name == "why" {
+            assert!(!value["notices"].as_array().unwrap().is_empty());
+        }
+    }
+
+    let empty = repo.run(["search", "no-matching-material-733", "--json"]);
+    assert_eq!(empty.status.code(), Some(0));
+    let empty: serde_json::Value = serde_json::from_slice(&empty.stdout).unwrap();
+    assert_eq!(empty["matched_count"], 0);
+    assert_eq!(empty["materials"], serde_json::json!([]));
+
+    let invalid = repo.run(["search", "--json"]);
+    assert_eq!(invalid.status.code(), Some(2));
+    assert!(invalid.stdout.is_empty());
 
     if std::env::var_os("GITSCRY_UPDATE_CLI_CONTRACT").is_some() {
         fs::write(
@@ -156,6 +246,191 @@ fn ordinary_commands_have_a_byte_exact_cli_contract() {
     } else {
         assert_eq!(observed, CONTRACT);
     }
+}
+
+#[test]
+fn json_flag_is_available_only_for_query_commands() {
+    let repo = TestRepo::new();
+    let root = repo.run(["--help"]);
+    assert_eq!(root.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&root.stdout).contains("--json"));
+
+    for name in [
+        "search",
+        "examples",
+        "failures",
+        "related",
+        "tests",
+        "why",
+        "regression",
+        "trace-fix",
+    ] {
+        let help = repo.run([name, "--help"]);
+        assert_eq!(help.status.code(), Some(0), "{name}");
+        assert!(
+            String::from_utf8_lossy(&help.stdout).contains("--json"),
+            "{name} help must document --json"
+        );
+    }
+
+    for name in ["index", "update"] {
+        let help = repo.run([name, "--help"]);
+        assert_eq!(help.status.code(), Some(0), "{name}");
+        assert!(!String::from_utf8_lossy(&help.stdout).contains("--json"));
+
+        let rejected = repo.run([name, "--json"]);
+        assert_eq!(rejected.status.code(), Some(2), "{name}");
+        assert!(rejected.stdout.is_empty(), "{name}");
+    }
+}
+
+#[test]
+fn json_preserves_unclipped_paths_steps_and_complete_citations() {
+    let repo = TestRepo::new();
+    let paths = (0..9)
+        .map(|index| format!("src/module_{index}.rs"))
+        .collect::<Vec<_>>();
+    let files = paths
+        .iter()
+        .map(|path| (path.as_str(), b"pub fn provider() {}".as_slice()))
+        .collect::<Vec<_>>();
+
+    #[cfg(unix)]
+    {
+        use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
+
+        let path = Path::new(OsStr::from_bytes(b"src/bad-\xff.rs"));
+        fs::create_dir_all(repo.dir.path().join("src")).expect("create source directory");
+        fs::write(repo.dir.path().join(path), b"pub fn provider() {}")
+            .expect("write non-UTF-8 path");
+    }
+
+    commit(
+        &repo,
+        &files,
+        "Add provider integration modules",
+        "Add provider integration across all modules.",
+        "2000-01-01T00:00:00+0000",
+    );
+    let indexed = repo.run(["index"]);
+    assert_eq!(indexed.status.code(), Some(0));
+
+    let output = repo.run(["examples", "provider", "integration", "--json"]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let material = &value["materials"][0];
+    let paths = material["paths"].as_array().unwrap();
+    let steps = material["detail"]["steps"].as_array().unwrap();
+    #[cfg(unix)]
+    let expected_count = 10;
+    #[cfg(not(unix))]
+    let expected_count = 9;
+    assert_eq!(paths.len(), expected_count);
+    assert_eq!(steps.len(), expected_count);
+    let citations = material["citations"].as_array().unwrap();
+    assert!(!citations.is_empty());
+    assert!(
+        citations
+            .iter()
+            .all(|citation| { citation["oid"].as_str().is_some_and(|oid| oid.len() == 40) })
+    );
+
+    #[cfg(unix)]
+    {
+        let invalid_path = paths
+            .iter()
+            .find(|path| path["base64"].is_string())
+            .expect("non-UTF-8 path is represented as Base64");
+        assert_eq!(invalid_path["base64"], "c3JjL2JhZC3/LnJz");
+    }
+}
+
+#[test]
+fn json_keeps_every_relation_citation_while_text_stays_clipped() {
+    let repo = TestRepo::new();
+    for index in 1..=7 {
+        let provider = format!("pub fn provider() -> usize {{ {index} }}");
+        let codec = format!("pub fn codec() -> usize {{ {index} }}");
+        let subject = format!("Update provider codec {index}");
+        let date = format!("2000-01-0{index}T00:00:00+0000");
+        commit(
+            &repo,
+            &[
+                ("src/provider.rs", provider.as_bytes()),
+                ("src/codec.rs", codec.as_bytes()),
+            ],
+            &subject,
+            "",
+            &date,
+        );
+    }
+    let indexed = repo.run(["index"]);
+    assert_eq!(indexed.status.code(), Some(0));
+
+    let json = repo.run(["related", "src/provider.rs", "--json"]);
+    assert_eq!(json.status.code(), Some(0));
+    let json: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    let material = &json["materials"][0];
+    let citations = material["citations"].as_array().unwrap();
+    assert_eq!(citations.len(), 7);
+    assert!(
+        citations
+            .iter()
+            .all(|citation| citation["oid"].as_str().is_some_and(|oid| oid.len() == 40))
+    );
+
+    let text = repo.run(["related", "src/provider.rs"]);
+    assert_eq!(text.status.code(), Some(0));
+    let text = String::from_utf8_lossy(&text.stdout);
+    assert_eq!(text.matches("  supporting commit:").count(), 5);
+    assert!(text.contains("... 2 more supporting commits"));
+}
+
+#[test]
+fn json_contains_query_warnings_without_repeating_them_on_stderr() {
+    let repo = TestRepo::new();
+    commit(
+        &repo,
+        &[
+            ("src/provider.rs", b"pub fn provider() {}"),
+            ("tests/provider.rs", b"#[test] fn provider_works() {}"),
+        ],
+        "Add provider implementation and tests",
+        "",
+        "2000-01-01T00:00:00+0000",
+    );
+    fs::remove_file(repo.dir.path().join("tests/provider.rs")).expect("remove old test");
+    commit(
+        &repo,
+        &[],
+        "Remove obsolete provider test",
+        "",
+        "2000-01-02T00:00:00+0000",
+    );
+    let indexed = repo.run(["index"]);
+    assert_eq!(indexed.status.code(), Some(0));
+
+    let output = repo.run(["tests", "src/provider.rs", "--json"]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(value["warnings"].as_array().unwrap().iter().any(|warning| {
+        warning
+            .as_str()
+            .unwrap()
+            .contains("absent from the current worktree")
+    }));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("absent from the current worktree"));
 }
 
 #[test]

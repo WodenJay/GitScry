@@ -14,5 +14,6 @@ pub(super) fn run(report: &mut dyn FnMut(IndexStage)) -> Result<Outcome, AppErro
             if prepared.commit_count == 1 { "" } else { "s" }
         ),
         notices: Vec::new(),
+        report: None,
     })
 }

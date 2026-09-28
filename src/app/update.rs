@@ -70,6 +70,7 @@ fn run_with<S: ReleaseSource>(
                 progress: Vec::new(),
                 message: format!("GitScry {current} is already up to date."),
                 notices: Vec::new(),
+                report: None,
             });
         }
         std::cmp::Ordering::Greater => {}
@@ -94,6 +95,7 @@ fn run_with<S: ReleaseSource>(
         progress: Vec::new(),
         message: format!("Updated GitScry {current} → {latest}."),
         notices: Vec::new(),
+        report: None,
     })
 }
 
