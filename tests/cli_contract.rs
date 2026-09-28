@@ -302,7 +302,7 @@ fn json_preserves_unclipped_paths_steps_and_complete_citations() {
         .map(|path| (path.as_str(), b"pub fn provider() {}".as_slice()))
         .collect::<Vec<_>>();
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     {
         use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
 
@@ -333,9 +333,9 @@ fn json_preserves_unclipped_paths_steps_and_complete_citations() {
     let material = &value["materials"][0];
     let paths = material["paths"].as_array().unwrap();
     let steps = material["detail"]["steps"].as_array().unwrap();
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     let expected_count = 10;
-    #[cfg(not(unix))]
+    #[cfg(not(target_os = "linux"))]
     let expected_count = 9;
     assert_eq!(paths.len(), expected_count);
     assert_eq!(steps.len(), expected_count);
@@ -347,7 +347,7 @@ fn json_preserves_unclipped_paths_steps_and_complete_citations() {
             .all(|citation| { citation["oid"].as_str().is_some_and(|oid| oid.len() == 40) })
     );
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     {
         let invalid_path = paths
             .iter()
