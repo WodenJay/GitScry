@@ -7,6 +7,12 @@ license = "MIT"
 description = "GitScry uncovers the implementation examples, failed approaches, code relationships, and regression context hidden inside."
 repository = "https://github.com/WodenJay/GitScry"
 readme = "README.md"
+exclude = [
+    "docs/assets/gitscry_60s_*.mp4",
+    "docs/assets/*.gif",
+    "docs/assets/thumbnail_*.png",
+    "docs/assets/trace-fix_example.png",
+]
 homepage = "https://github.com/WodenJay/GitScry"
 
 [dependencies]
