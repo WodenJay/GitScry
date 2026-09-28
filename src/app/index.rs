@@ -8,6 +8,7 @@ pub(super) fn run(report: &mut dyn FnMut(IndexStage)) -> Result<Outcome, AppErro
 
     Ok(Outcome {
         progress: prepared.progress,
+        warnings: Vec::new(),
         message: format!(
             "Indexed {} commit{}.",
             prepared.commit_count,

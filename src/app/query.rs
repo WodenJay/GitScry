@@ -6,6 +6,19 @@ use crate::{
 };
 use std::path::Path;
 
+fn query_outcome(session: &cache::QuerySession, report: analysis::Report) -> Outcome {
+    let progress = session.progress().to_vec();
+    let warnings = session.warnings().to_vec();
+    let message = render::format_report(&report);
+    let notices = report.notices.clone();
+    Outcome {
+        progress,
+        warnings,
+        message,
+        notices,
+        report: Some(report),
+    }
+}
 /// One query command: build the intent, open the published cache, run the capability, render it.
 pub(super) fn run(
     words: Vec<String>,
@@ -20,36 +33,32 @@ pub(super) fn run(
     let intent = analysis::Intent::parse(&words, &paths)?;
     let session = cache::open_query()?;
     let report = capability(&session, &intent, limit)?;
-    let progress = session.progress().to_vec();
-    Ok(Outcome {
-        progress,
-        message: render::format_report(&report),
-        notices: report.notices.clone(),
-        report: Some(report),
-    })
+    Ok(query_outcome(&session, report))
 }
 
 /// One path query: build the intent, open the published cache, run the capability, render it.
 pub(super) fn run_paths(
     paths: Vec<String>,
     limit: usize,
+    include_all_citations: bool,
     capability: impl FnOnce(
         &cache::QuerySession,
         &analysis::Intent,
         &Path,
         usize,
+        bool,
     ) -> Result<analysis::Report, AppError>,
 ) -> Result<Outcome, AppError> {
     let intent = analysis::Intent::paths(&paths)?;
     let session = cache::open_query()?;
-    let report = capability(&session, &intent, session.root(), limit)?;
-    let progress = session.progress().to_vec();
-    Ok(Outcome {
-        progress,
-        message: render::format_report(&report),
-        notices: report.notices.clone(),
-        report: Some(report),
-    })
+    let report = capability(
+        &session,
+        &intent,
+        session.root(),
+        limit,
+        include_all_citations,
+    )?;
+    Ok(query_outcome(&session, report))
 }
 
 pub(super) fn run_regression(
@@ -77,13 +86,7 @@ pub(super) fn run_regression(
         bad_reachable
     };
     let report = analysis::regression(&session, &intent, &target, &reachable, limit)?;
-    let progress = session.progress().to_vec();
-    Ok(Outcome {
-        progress,
-        message: render::format_report(&report),
-        notices: report.notices.clone(),
-        report: Some(report),
-    })
+    Ok(query_outcome(&session, report))
 }
 pub(super) fn run_why(
     revision: String,
@@ -97,13 +100,7 @@ pub(super) fn run_why(
     session.require_revision(&target.revision)?;
     let reachable = session.ancestors(&target.revision)?;
     let report = analysis::why(&session, &target, &reachable, limit)?;
-    let progress = session.progress().to_vec();
-    Ok(Outcome {
-        progress,
-        message: render::format_report(&report),
-        notices: report.notices.clone(),
-        report: Some(report),
-    })
+    Ok(query_outcome(&session, report))
 }
 
 pub(super) fn run_trace_fix(
@@ -117,11 +114,5 @@ pub(super) fn run_trace_fix(
     session.require_revision(&target.revision)?;
     let reachable = session.ancestors(&target.revision)?;
     let report = analysis::trace_fix(&session, &target, &reachable, limit)?;
-    let progress = session.progress().to_vec();
-    Ok(Outcome {
-        progress,
-        message: render::format_report(&report),
-        notices: report.notices.clone(),
-        report: Some(report),
-    })
+    Ok(query_outcome(&session, report))
 }

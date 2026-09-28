@@ -7,14 +7,18 @@ use crate::analysis::{
 
 const SCHEMA_VERSION: u8 = 1;
 
-pub(crate) fn format_json_report(report: &Report) -> Result<String, serde_json::Error> {
+pub(crate) fn format_json_report(
+    report: &Report,
+    additional_warnings: &[String],
+) -> Result<String, serde_json::Error> {
+    let warnings = additional_warnings.iter().chain(&report.warnings).collect();
     serde_json::to_string(&JsonReport {
         schema_version: SCHEMA_VERSION,
         kind: report_kind(report.kind),
         matched_count: report.matched_count,
         truncated: report.truncated,
         materials: report.materials.iter().map(json_material).collect(),
-        warnings: &report.warnings,
+        warnings,
         notices: &report.notices,
     })
 }
@@ -26,7 +30,7 @@ struct JsonReport<'a> {
     matched_count: usize,
     truncated: bool,
     materials: Vec<JsonMaterial<'a>>,
-    warnings: &'a [String],
+    warnings: Vec<&'a String>,
     notices: &'a [String],
 }
 

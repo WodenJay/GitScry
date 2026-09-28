@@ -227,6 +227,13 @@ fn ordinary_commands_have_a_byte_exact_cli_contract() {
         }
     }
 
+    let limited = repo.run(["search", "provider", "--limit", "1", "--json"]);
+    assert_eq!(limited.status.code(), Some(0));
+    let limited: serde_json::Value = serde_json::from_slice(&limited.stdout).unwrap();
+    assert_eq!(limited["matched_count"], 4);
+    assert_eq!(limited["materials"].as_array().unwrap().len(), 1);
+    assert!(limited["truncated"].as_bool().unwrap());
+
     let empty = repo.run(["search", "no-matching-material-733", "--json"]);
     assert_eq!(empty.status.code(), Some(0));
     let empty: serde_json::Value = serde_json::from_slice(&empty.stdout).unwrap();
@@ -431,6 +438,49 @@ fn json_contains_query_warnings_without_repeating_them_on_stderr() {
     }));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!stderr.contains("absent from the current worktree"));
+}
+#[test]
+fn json_surfaces_cache_completeness_warnings_without_stderr_duplication() {
+    let repo = TestRepo::new();
+    commit(
+        &repo,
+        &[("src/provider.rs", b"pub fn provider() {}")],
+        "Add provider implementation",
+        "",
+        "2000-01-01T00:00:00+0000",
+    );
+    let shallow = repo.head();
+    fs::write(repo.dir.path().join(".git/shallow"), format!("{shallow}\n"))
+        .expect("mark repository shallow");
+    let indexed = repo.run(["index"]);
+    assert_eq!(
+        indexed.status.code(),
+        Some(0),
+        "index: {}",
+        String::from_utf8_lossy(&indexed.stderr)
+    );
+
+    let output = repo.run(["search", "provider", "--json"]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "search --json: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let warning = "warning: local history is shallow; cache material is incomplete.";
+    assert!(
+        value["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry == warning)
+    );
+    assert!(!String::from_utf8_lossy(&output.stderr).contains(warning));
+
+    let text = repo.run(["search", "provider"]);
+    assert_eq!(text.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&text.stderr).contains(warning));
 }
 
 #[test]

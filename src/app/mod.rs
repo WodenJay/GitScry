@@ -31,6 +31,7 @@ pub(crate) enum Progress {
 
 pub(crate) struct Outcome {
     pub(crate) progress: Vec<String>,
+    pub(crate) warnings: Vec<String>,
     pub(crate) message: String,
     pub(crate) notices: Vec<String>,
     pub(crate) report: Option<analysis::Report>,
@@ -38,6 +39,7 @@ pub(crate) struct Outcome {
 
 pub(crate) fn execute(
     command: Command,
+    json_output: bool,
     report: &mut dyn FnMut(Progress),
 ) -> Result<Outcome, AppError> {
     match command {
@@ -58,8 +60,12 @@ pub(crate) fn execute(
             limit,
             ..
         } => query::run(query, paths, limit, analysis::failures),
-        Command::Related { paths, limit, .. } => query::run_paths(paths, limit, analysis::related),
-        Command::Tests { paths, limit, .. } => query::run_paths(paths, limit, analysis::tests),
+        Command::Related { paths, limit, .. } => {
+            query::run_paths(paths, limit, json_output, analysis::related)
+        }
+        Command::Tests { paths, limit, .. } => {
+            query::run_paths(paths, limit, json_output, analysis::tests)
+        }
         Command::Regression {
             symptom,
             path,

@@ -21,7 +21,7 @@ pub(crate) fn run(command: Command) -> i32 {
     let stderr = io::stderr();
     let is_terminal = stderr.is_terminal();
     let mut progress = IndexProgress::new(stderr.lock(), is_terminal);
-    let result = app::execute(command, &mut |stage| progress.report(stage));
+    let result = app::execute(command, json_output, &mut |stage| progress.report(stage));
     match progress.finish() {
         Ok(()) => finish_with_format(result, json_output),
         Err(error) => output_error(error),
@@ -155,10 +155,13 @@ fn write_outcome(outcome: Outcome, json_output: bool) -> io::Result<()> {
                 "JSON output requires a query report",
             )
         })?;
-        let json = format_json_report(report)
+        let json = format_json_report(report, &outcome.warnings)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         writeln!(io::stdout().lock(), "{json}")
     } else {
+        for warning in &outcome.warnings {
+            writeln!(stderr, "{warning}")?;
+        }
         if let Some(report) = &outcome.report {
             for warning in &report.warnings {
                 writeln!(stderr, "{warning}")?;
