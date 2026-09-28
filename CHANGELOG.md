@@ -1,3 +1,41 @@
+## [0.3.0] - 2026-09-28
+
+### 🚀 Features
+
+- *(cli)* Add structured JSON query output
+
+### 🐛 Bug Fixes
+
+- *(cli)* Complete JSON query data
+
+### 🚜 Refactor
+
+- *(history)* Share line tracing
+- *(cache)* Share snapshot row writes
+
+### 📚 Documentation
+
+- *(readme)* Add benchmark highlights
+- *(readme)* Add benchmark test commands
+- *(retrieval)* Describe line-history seam
+- Sharpen README positioning and add real demos
+- Add trace-fix example
+- Add long gif example
+- Add GitScry demo GIF to README
+- Enhance image tag with alt attribute
+- Invite feedback and issue reports
+- Add contributing guide
+- Add security policy
+- Add intro vedio
+- Add video preview card
+- Show demo and overview video side by side
+- Add thumbnail
+- Use video thumbnail in README
+- Remove obsolete video preview
+- Add video in README
+- Add README contents
+- Move README contents before demo
+- Fix issue read command
 ## [0.2.1] - 2026-09-24
 
 ### 🐛 Bug Fixes
