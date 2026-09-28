@@ -1,4 +1,4 @@
-use std::cmp::Ordering;
+use std::{cmp::Ordering, collections::HashMap};
 
 use super::super::Material;
 
@@ -28,25 +28,65 @@ pub(in crate::analysis) fn assign_citations(materials: &mut [Material]) {
         .iter()
         .flat_map(|material| material.citations.iter())
         .map(|citation| citation.oid.clone())
-        .collect::<Vec<String>>();
+        .collect::<Vec<_>>();
+    let abbreviations = unique_prefixes(oids);
     for material in materials.iter_mut() {
         for citation in &mut material.citations {
-            citation.abbreviation = unique_prefix(&oids, &citation.oid);
+            citation.abbreviation = abbreviations
+                .get(&citation.oid)
+                .expect("citation object ID was collected")
+                .clone();
         }
     }
 }
 
-fn unique_prefix(oids: &[String], oid: &str) -> String {
-    if oid.is_empty() {
-        return String::new();
+fn unique_prefixes(mut oids: Vec<String>) -> HashMap<String, String> {
+    oids.sort_unstable();
+    oids.dedup();
+
+    oids.iter()
+        .enumerate()
+        .map(|(index, oid)| {
+            let mut shared_prefix = 0;
+            if let Some(previous) = index.checked_sub(1).and_then(|index| oids.get(index)) {
+                shared_prefix = shared_prefix.max(common_prefix_len(oid, previous));
+            }
+            if let Some(next) = oids.get(index + 1) {
+                shared_prefix = shared_prefix.max(common_prefix_len(oid, next));
+            }
+            let prefix_length = 12.max(shared_prefix + 1).min(oid.len());
+            (oid.clone(), oid[..prefix_length].to_owned())
+        })
+        .collect()
+}
+
+fn common_prefix_len(left: &str, right: &str) -> usize {
+    left.bytes()
+        .zip(right.bytes())
+        .take_while(|(left, right)| left == right)
+        .count()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unique_prefixes;
+
+    #[test]
+    fn prefixes_are_shortest_unique_and_deduplicate_oids() {
+        let common = "0123456789abcdef";
+        let first = format!("{common}{}", "0".repeat(24));
+        let second = format!("{common}1{}", "0".repeat(23));
+        let other = format!("fedcba9876543210{}", "0".repeat(24));
+        let abbreviations = unique_prefixes(vec![
+            first.clone(),
+            second.clone(),
+            other.clone(),
+            second.clone(),
+        ]);
+
+        assert_eq!(abbreviations.len(), 3);
+        assert_eq!(abbreviations[&first], first[..17]);
+        assert_eq!(abbreviations[&second], second[..17]);
+        assert_eq!(abbreviations[&other], other[..12]);
     }
-    let mut length = 12.min(oid.len());
-    while length < oid.len()
-        && oids
-            .iter()
-            .any(|other| other != oid && other.len() >= length && other[..length] == oid[..length])
-    {
-        length += 1;
-    }
-    oid[..length].to_owned()
 }

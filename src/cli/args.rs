@@ -16,7 +16,7 @@ pub(super) struct Cli {
 const ROOT_LONG_HELP: &str = "\
 Your Git history is a treasure trove. GitScry uncovers the implementation examples, failed approaches, code relationships, and regression context hidden inside.
 
-Pick one command by intent, then run `gitscry <command> --help` for inputs, options, and examples.";
+Pick one command by intent, then run `gitscry <command> --help` for inputs, options, and examples.\n\nQuery commands support `--json` for structured output.";
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
@@ -44,6 +44,9 @@ pub(crate) enum Command {
         /// Maximum number of matches to return.
         #[arg(long, default_value = "10", value_parser = parse_limit)]
         limit: usize,
+        /// Output a stable structured JSON report instead of human-readable text.
+        #[arg(long)]
+        json: bool,
     },
 
     #[command(
@@ -60,6 +63,9 @@ pub(crate) enum Command {
         /// Maximum number of matches to return.
         #[arg(long, default_value = "10", value_parser = parse_limit)]
         limit: usize,
+        /// Output a stable structured JSON report instead of human-readable text.
+        #[arg(long)]
+        json: bool,
     },
 
     #[command(
@@ -76,6 +82,9 @@ pub(crate) enum Command {
         /// Maximum number of matches to return.
         #[arg(long, default_value = "10", value_parser = parse_limit)]
         limit: usize,
+        /// Output a stable structured JSON report instead of human-readable text.
+        #[arg(long)]
+        json: bool,
     },
 
     #[command(
@@ -89,6 +98,9 @@ pub(crate) enum Command {
         /// Maximum number of matches to return.
         #[arg(long, default_value = "10", value_parser = parse_limit)]
         limit: usize,
+        /// Output a stable structured JSON report instead of human-readable text.
+        #[arg(long)]
+        json: bool,
     },
 
     #[command(
@@ -102,6 +114,9 @@ pub(crate) enum Command {
         /// Maximum number of matches to return.
         #[arg(long, default_value = "10", value_parser = parse_limit)]
         limit: usize,
+        /// Output a stable structured JSON report instead of human-readable text.
+        #[arg(long)]
+        json: bool,
     },
 
     #[command(
@@ -127,6 +142,9 @@ pub(crate) enum Command {
         /// Maximum number of matches to return.
         #[arg(long, default_value = "10", value_parser = parse_limit)]
         limit: usize,
+        /// Output a stable structured JSON report instead of human-readable text.
+        #[arg(long)]
+        json: bool,
     },
 
     #[command(group(
@@ -153,6 +171,9 @@ pub(crate) enum Command {
         /// Maximum number of matches to return.
         #[arg(long, default_value = "10", value_parser = parse_limit)]
         limit: usize,
+        /// Output a stable structured JSON report instead of human-readable text.
+        #[arg(long)]
+        json: bool,
     },
 
     #[command(
@@ -168,7 +189,26 @@ pub(crate) enum Command {
         /// Maximum number of matches to return.
         #[arg(long, default_value = "10", value_parser = parse_limit)]
         limit: usize,
+        /// Output a stable structured JSON report instead of human-readable text.
+        #[arg(long)]
+        json: bool,
     },
+}
+
+impl Command {
+    pub(crate) fn uses_json(&self) -> bool {
+        match self {
+            Self::Search { json, .. }
+            | Self::Examples { json, .. }
+            | Self::Failures { json, .. }
+            | Self::Related { json, .. }
+            | Self::Tests { json, .. }
+            | Self::Regression { json, .. }
+            | Self::Why { json, .. }
+            | Self::TraceFix { json, .. } => *json,
+            Self::Update | Self::Index => false,
+        }
+    }
 }
 
 fn parse_line(value: &str) -> Result<usize, String> {

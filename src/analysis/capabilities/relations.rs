@@ -35,8 +35,16 @@ pub(crate) fn related(
     intent: &Intent,
     worktree_root: &Path,
     limit: usize,
+    include_all_citations: bool,
 ) -> Result<Report, AppError> {
-    run(session, intent, worktree_root, limit, false)
+    run(
+        session,
+        intent,
+        worktree_root,
+        limit,
+        false,
+        include_all_citations,
+    )
 }
 
 pub(crate) fn tests(
@@ -44,8 +52,16 @@ pub(crate) fn tests(
     intent: &Intent,
     worktree_root: &Path,
     limit: usize,
+    include_all_citations: bool,
 ) -> Result<Report, AppError> {
-    run(session, intent, worktree_root, limit, true)
+    run(
+        session,
+        intent,
+        worktree_root,
+        limit,
+        true,
+        include_all_citations,
+    )
 }
 
 fn run(
@@ -54,6 +70,7 @@ fn run(
     worktree_root: &Path,
     limit: usize,
     tests_only: bool,
+    include_all_citations: bool,
 ) -> Result<Report, AppError> {
     let seed_keys = intent.anchors().iter().cloned().collect::<HashSet<_>>();
     let seed_list = seed_keys.iter().cloned().collect::<Vec<_>>();
@@ -112,9 +129,14 @@ fn run(
             .first()
             .map(|support| support.commit_time)
             .unwrap_or_default();
+        let citation_limit = if include_all_citations {
+            supporting.len()
+        } else {
+            MAX_SUPPORTING_CITATIONS
+        };
         let citation_oids = supporting
             .iter()
-            .take(MAX_SUPPORTING_CITATIONS)
+            .take(citation_limit)
             .map(|support| support.oid.clone())
             .collect::<Vec<_>>();
         let confidence = confidence(support_count, proportion);

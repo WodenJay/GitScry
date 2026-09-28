@@ -1,10 +1,10 @@
 //! The only place GitScry writes to stdout and stderr.
 //!
-//! One reason to change: the user-visible text contract. Progress and warnings go to
-//! stderr, material and no-result messages to stdout, and every result is human-readable
-//! English rather than a stable machine format.
+//! One reason to change: user-visible output formats. Process progress and warnings stay on
+//! stderr; query reports go to stdout as either human-readable English or schema-versioned JSON.
 
 mod escape;
+mod json;
 mod material;
 
 use crate::{
@@ -13,15 +13,17 @@ use crate::{
 };
 use std::io::{self, IsTerminal, Write};
 
+pub(crate) use json::format_json_report;
 pub(crate) use material::format_report;
 
 pub(crate) fn run(command: Command) -> i32 {
+    let json_output = command.uses_json();
     let stderr = io::stderr();
     let is_terminal = stderr.is_terminal();
     let mut progress = IndexProgress::new(stderr.lock(), is_terminal);
-    let result = app::execute(command, &mut |stage| progress.report(stage));
+    let result = app::execute(command, json_output, &mut |stage| progress.report(stage));
     match progress.finish() {
-        Ok(()) => finish(result),
+        Ok(()) => finish_with_format(result, json_output),
         Err(error) => output_error(error),
     }
 }
@@ -120,8 +122,12 @@ fn output_error(error: io::Error) -> i32 {
     1
 }
 pub(crate) fn finish(result: Result<Outcome, AppError>) -> i32 {
+    finish_with_format(result, false)
+}
+
+fn finish_with_format(result: Result<Outcome, AppError>, json_output: bool) -> i32 {
     match result {
-        Ok(outcome) => match write_outcome(outcome) {
+        Ok(outcome) => match write_outcome(outcome, json_output) {
             Ok(()) => 0,
             Err(error) => output_error(error),
         },
@@ -136,15 +142,36 @@ pub(crate) fn finish(result: Result<Outcome, AppError>) -> i32 {
     }
 }
 
-fn write_outcome(outcome: Outcome) -> io::Result<()> {
+fn write_outcome(outcome: Outcome, json_output: bool) -> io::Result<()> {
     let mut stderr = io::stderr().lock();
-    for progress in outcome.progress {
+    for progress in &outcome.progress {
         writeln!(stderr, "{progress}")?;
     }
-    for notice in outcome.notices {
-        writeln!(stderr, "{notice}")?;
+
+    if json_output {
+        let report = outcome.report.as_ref().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "JSON output requires a query report",
+            )
+        })?;
+        let json = format_json_report(report, &outcome.warnings)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        writeln!(io::stdout().lock(), "{json}")
+    } else {
+        for warning in &outcome.warnings {
+            writeln!(stderr, "{warning}")?;
+        }
+        if let Some(report) = &outcome.report {
+            for warning in &report.warnings {
+                writeln!(stderr, "{warning}")?;
+            }
+        }
+        for notice in &outcome.notices {
+            writeln!(stderr, "{notice}")?;
+        }
+        writeln!(io::stdout().lock(), "{}", outcome.message)
     }
-    writeln!(io::stdout().lock(), "{}", outcome.message)
 }
 
 pub(crate) fn display(text: &str) -> i32 {

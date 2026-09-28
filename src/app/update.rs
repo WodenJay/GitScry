@@ -69,7 +69,9 @@ fn run_with<S: ReleaseSource>(
             return Ok(Outcome {
                 progress: Vec::new(),
                 message: format!("GitScry {current} is already up to date."),
+                warnings: Vec::new(),
                 notices: Vec::new(),
+                report: None,
             });
         }
         std::cmp::Ordering::Greater => {}
@@ -93,7 +95,9 @@ fn run_with<S: ReleaseSource>(
     Ok(Outcome {
         progress: Vec::new(),
         message: format!("Updated GitScry {current} → {latest}."),
+        warnings: Vec::new(),
         notices: Vec::new(),
+        report: None,
     })
 }
 
@@ -864,7 +868,9 @@ mod tests {
             calls: Vec::new(),
         };
 
-        let error = run_fixture(&mut source, "0.2.0", &executable).unwrap_err();
+        let error = run_fixture(&mut source, "0.2.0", &executable)
+            .err()
+            .expect("expected update error");
 
         assert!(error.to_string().contains("refusing to downgrade"));
         assert_eq!(fs::read(&executable).unwrap(), b"old executable");
@@ -882,7 +888,9 @@ mod tests {
         );
         let (_directory, executable) = executable();
 
-        let error = run_fixture(&mut source, "0.1.0", &executable).unwrap_err();
+        let error = run_fixture(&mut source, "0.1.0", &executable)
+            .err()
+            .expect("expected update error");
 
         assert!(error.to_string().contains("checksum asset"));
         assert_eq!(fs::read(&executable).unwrap(), b"old executable");
@@ -895,7 +903,9 @@ mod tests {
         let mut source = fixture_source("v0.2.0", archive, archive_name);
         let (_directory, executable) = executable();
 
-        let error = run_fixture(&mut source, "0.1.0", &executable).unwrap_err();
+        let error = run_fixture(&mut source, "0.1.0", &executable)
+            .err()
+            .expect("expected update error");
 
         assert!(error.to_string().contains("unsafe path"));
         assert_eq!(fs::read(&executable).unwrap(), b"old executable");
@@ -915,7 +925,9 @@ mod tests {
             .retain(|asset| asset.name != checksum_name);
         let (_directory, executable) = executable();
 
-        let error = run_fixture(&mut source, "0.1.0", &executable).unwrap_err();
+        let error = run_fixture(&mut source, "0.1.0", &executable)
+            .err()
+            .expect("expected update error");
 
         assert!(error.to_string().contains("missing required asset"));
         assert_eq!(fs::read(&executable).unwrap(), b"old executable");
@@ -928,7 +940,9 @@ mod tests {
         let mut source = fixture_source("v0.2.0", archive, archive_name);
         let (_directory, executable) = executable();
 
-        let error = run_fixture(&mut source, "0.1.0", &executable).unwrap_err();
+        let error = run_fixture(&mut source, "0.1.0", &executable)
+            .err()
+            .expect("expected update error");
 
         assert!(error.to_string().contains("does not contain"));
         assert_eq!(fs::read(&executable).unwrap(), b"old executable");
@@ -949,7 +963,9 @@ mod tests {
         );
         let (_directory, executable) = executable();
 
-        let error = run_fixture(&mut source, "0.1.0", &executable).unwrap_err();
+        let error = run_fixture(&mut source, "0.1.0", &executable)
+            .err()
+            .expect("expected update error");
 
         assert!(
             error

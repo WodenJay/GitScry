@@ -60,6 +60,7 @@ pub(crate) struct QuerySession {
     connection: Connection,
     _lock: SharedLock,
     progress: Vec<String>,
+    warnings: Vec<String>,
 }
 
 impl QuerySession {
@@ -69,6 +70,10 @@ impl QuerySession {
 
     pub(crate) fn progress(&self) -> &[String] {
         &self.progress
+    }
+
+    pub(crate) fn warnings(&self) -> &[String] {
+        &self.warnings
     }
 
     pub(crate) fn require_revision(&self, revision: &str) -> Result<(), AppError> {
@@ -317,12 +322,13 @@ pub(crate) fn open_query() -> Result<QuerySession, AppError> {
     )
     .map_err(|error| query_error(format!("opening published cache: {error}")))?;
     validate_query_metadata(&connection)?;
-    progress.extend(query_progress(&connection)?);
+    let warnings = query_warnings(&connection)?;
     Ok(QuerySession {
         root,
         connection,
         _lock: lock,
         progress,
+        warnings,
     })
 }
 
@@ -386,7 +392,7 @@ fn validate_query_metadata(connection: &Connection) -> Result<(), AppError> {
     Ok(())
 }
 
-fn query_progress(connection: &Connection) -> Result<Vec<String>, AppError> {
+fn query_warnings(connection: &Connection) -> Result<Vec<String>, AppError> {
     let (has_shallow, has_missing): (i64, i64) = connection
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM shallow_boundaries), EXISTS(SELECT 1 FROM missing_objects)",
@@ -394,14 +400,14 @@ fn query_progress(connection: &Connection) -> Result<Vec<String>, AppError> {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .map_err(|error| query_error(format!("reading cache completeness metadata: {error}")))?;
-    let mut progress = Vec::new();
+    let mut warnings = Vec::new();
     if let Some(warning) = shallow_warning(has_shallow != 0) {
-        progress.push(warning);
+        warnings.push(warning);
     }
     if let Some(warning) = missing_warning(has_missing != 0) {
-        progress.push(warning);
+        warnings.push(warning);
     }
-    Ok(progress)
+    Ok(warnings)
 }
 fn query_metadata(connection: &Connection, key: &str) -> Result<Option<String>, AppError> {
     connection

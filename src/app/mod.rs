@@ -29,33 +29,43 @@ pub(crate) enum Progress {
     Update(UpdateStage),
 }
 
-#[derive(Debug)]
 pub(crate) struct Outcome {
     pub(crate) progress: Vec<String>,
+    pub(crate) warnings: Vec<String>,
     pub(crate) message: String,
     pub(crate) notices: Vec<String>,
+    pub(crate) report: Option<analysis::Report>,
 }
 
 pub(crate) fn execute(
     command: Command,
+    json_output: bool,
     report: &mut dyn FnMut(Progress),
 ) -> Result<Outcome, AppError> {
     match command {
         Command::Index => index::run(&mut |stage| report(Progress::Index(stage))),
         Command::Update => update::run(&mut |stage| report(Progress::Update(stage))),
-        Command::Search { query, limit } => query::run(query, Vec::new(), limit, analysis::search),
+        Command::Search { query, limit, .. } => {
+            query::run(query, Vec::new(), limit, analysis::search)
+        }
         Command::Examples {
             query,
             paths,
             limit,
+            ..
         } => query::run(query, paths, limit, analysis::examples),
         Command::Failures {
             query,
             paths,
             limit,
+            ..
         } => query::run(query, paths, limit, analysis::failures),
-        Command::Related { paths, limit } => query::run_paths(paths, limit, analysis::related),
-        Command::Tests { paths, limit } => query::run_paths(paths, limit, analysis::tests),
+        Command::Related { paths, limit, .. } => {
+            query::run_paths(paths, limit, json_output, analysis::related)
+        }
+        Command::Tests { paths, limit, .. } => {
+            query::run_paths(paths, limit, json_output, analysis::tests)
+        }
         Command::Regression {
             symptom,
             path,
@@ -63,6 +73,7 @@ pub(crate) fn execute(
             good,
             bad,
             limit,
+            ..
         } => query::run_regression(symptom, path, symbol, good, bad, limit),
         Command::Why {
             path,
@@ -70,6 +81,7 @@ pub(crate) fn execute(
             symbol,
             at,
             limit,
+            ..
         } => {
             let anchor = match (line, symbol) {
                 (Some(number), None) => crate::git::WhyAnchor::Line { number },
@@ -82,6 +94,7 @@ pub(crate) fn execute(
             fix_revision,
             paths,
             limit,
+            ..
         } => query::run_trace_fix(fix_revision, paths, limit),
     }
 }

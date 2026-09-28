@@ -10,6 +10,8 @@ const PATHS_PER_RESULT: usize = 5;
 /// Steps shown per result; more would bury the reusable pattern in a file listing.
 const STEPS_PER_RESULT: usize = 8;
 
+/// Supporting commits shown per related path before the remainder is summarized.
+const RELATION_CITATIONS_PER_RESULT: usize = 5;
 /// Fixed no-result text, so absence of history is distinguished from a failure.
 fn empty_message(kind: ReportKind) -> &'static str {
     match kind {
@@ -110,15 +112,20 @@ fn render_relation(lines: &mut Vec<String>, material: &Material, relation: &Rela
         "  supporting commits: {}",
         relation.supporting_count
     ));
-    for citation in &material.citations {
+    for citation in material
+        .citations
+        .iter()
+        .take(RELATION_CITATIONS_PER_RESULT)
+    {
         let subject = escape::subject(citation.subject.trim());
         lines.push(format!(
             "  supporting commit: {} {}",
             citation.abbreviation, subject,
         ));
     }
-    if material.citations.len() < relation.supporting_count {
-        let remaining = relation.supporting_count - material.citations.len();
+    let shown_citations = material.citations.len().min(RELATION_CITATIONS_PER_RESULT);
+    let remaining = relation.supporting_count.saturating_sub(shown_citations);
+    if remaining > 0 {
         lines.push(format!(
             "  ... {remaining} more supporting commit{}",
             if remaining == 1 { "" } else { "s" }
