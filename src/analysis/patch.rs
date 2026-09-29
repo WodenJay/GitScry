@@ -1,9 +1,9 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use super::{Detail, Intent, Material, Report, anchors_overlap};
 use crate::{
     app::AppError,
-    cache::{PatchHistory, PatchHistoryHunk, QuerySession},
+    cache::{HunkId, PatchHistory, PatchHistoryHunk, QuerySession},
 };
 
 const MAX_SCANNED_HUNKS: usize = 64;
@@ -50,6 +50,8 @@ pub(crate) struct PatchHunk {
     pub(crate) truncated: bool,
 }
 
+pub(crate) type HunkPriorities = HashMap<String, HashMap<HunkId, usize>>;
+
 pub(crate) fn attach_patch_excerpts(
     session: &QuerySession,
     intent: &Intent,
@@ -61,17 +63,18 @@ pub(crate) fn attach_patch_excerpts(
         .iter()
         .map(|path| super::normalize_path(path.as_bytes()))
         .collect::<Vec<_>>();
-    attach_patch_excerpts_with(session, report, |_, cached| {
+    attach_patch_excerpts_using(session, report, |_, _, cached| {
         let path_match = cached_path_matches(cached, intent, &path_anchors);
         let text_matches = cached
             .text
             .as_deref()
             .is_some_and(|text| hunk_matches_terms(text, intent));
-        if path_only {
+        let relevant = if path_only {
             path_match && text_matches
         } else {
             path_match || text_matches
-        }
+        };
+        relevant.then_some(0)
     })
 }
 
@@ -79,24 +82,37 @@ pub(crate) fn attach_trace_fix_patch_excerpts(
     session: &QuerySession,
     report: &mut Report,
 ) -> Result<(), AppError> {
-    attach_patch_excerpts_with(session, report, |material, cached| {
+    attach_patch_excerpts_using(session, report, |material, _, cached| {
         let Some(Detail::TraceFix(trace)) = material.detail.as_ref() else {
-            return false;
+            return None;
         };
-        trace.patch_anchors.iter().any(|anchor| {
+        let relevant = trace.patch_anchors.iter().any(|anchor| {
             cached
                 .new_path
                 .as_ref()
                 .is_some_and(|new_path| anchor.paths.iter().any(|path| path == new_path))
                 && hunk_contains_line(cached, anchor.line)
-        })
+        });
+        relevant.then_some(0)
     })
 }
 
-fn attach_patch_excerpts_with(
+pub(crate) fn attach_selected_patch_excerpts(
     session: &QuerySession,
     report: &mut Report,
-    mut is_relevant: impl FnMut(&Material, &PatchHistoryHunk) -> bool,
+    priorities: &HunkPriorities,
+) -> Result<(), AppError> {
+    attach_patch_excerpts_using(session, report, |_, oid, cached| {
+        priorities
+            .get(oid)
+            .and_then(|hunks| hunks.get(&cached.id()).copied())
+    })
+}
+
+fn attach_patch_excerpts_using(
+    session: &QuerySession,
+    report: &mut Report,
+    mut priority_for: impl FnMut(&Material, &str, &PatchHistoryHunk) -> Option<usize>,
 ) -> Result<(), AppError> {
     report.patch_mode = true;
     for material in &mut report.materials {
@@ -117,11 +133,16 @@ fn attach_patch_excerpts_with(
         let mut hunks = Vec::new();
         let mut remaining_bytes = MAX_RESULT_EXCERPT_BYTES;
         let mut excerpt_paths = HashSet::new();
+        let mut selected = history
+            .hunks
+            .into_iter()
+            .filter_map(|cached| {
+                priority_for(material, &citation.oid, &cached).map(|priority| (priority, cached))
+            })
+            .collect::<Vec<_>>();
+        selected.sort_by_key(|(priority, _)| *priority);
 
-        for cached in history.hunks {
-            if !is_relevant(material, &cached) {
-                continue;
-            }
+        for (_, cached) in selected {
             if hunks.len() == MAX_EXCERPTS {
                 truncated = true;
                 break;

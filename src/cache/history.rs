@@ -31,11 +31,27 @@ pub(crate) struct PathChange {
 
 pub(crate) struct HistoryHunk {
     pub(crate) change_ordinal: i64,
+    pub(crate) hunk_ordinal: i64,
     pub(crate) old_start: i64,
     pub(crate) old_lines: i64,
     pub(crate) new_start: i64,
     pub(crate) new_lines: i64,
     pub(crate) text: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct HunkId {
+    pub(crate) change_ordinal: i64,
+    pub(crate) hunk_ordinal: i64,
+}
+
+impl HistoryHunk {
+    pub(crate) fn id(&self) -> HunkId {
+        HunkId {
+            change_ordinal: self.change_ordinal,
+            hunk_ordinal: self.hunk_ordinal,
+        }
+    }
 }
 
 pub(crate) struct PatchHistory {
@@ -45,13 +61,24 @@ pub(crate) struct PatchHistory {
 }
 
 pub(crate) struct PatchHistoryHunk {
+    pub(crate) change_ordinal: i64,
     pub(crate) old_path: Option<Vec<u8>>,
     pub(crate) new_path: Option<Vec<u8>>,
     pub(crate) old_start: i64,
     pub(crate) old_lines: i64,
     pub(crate) new_start: i64,
     pub(crate) new_lines: i64,
+    pub(crate) hunk_ordinal: i64,
     pub(crate) text: Option<Vec<u8>>,
+}
+
+impl PatchHistoryHunk {
+    pub(crate) fn id(&self) -> HunkId {
+        HunkId {
+            change_ordinal: self.change_ordinal,
+            hunk_ordinal: self.hunk_ordinal,
+        }
+    }
 }
 
 pub(crate) struct CodeHunk {
@@ -301,6 +328,7 @@ fn hunks(connection: &Connection, oid: &str) -> Result<Vec<HistoryHunk>, AppErro
             .into_iter()
             .map(|hunk| HistoryHunk {
                 change_ordinal: hunk.change_ordinal,
+                hunk_ordinal: hunk.hunk_ordinal,
                 old_start: hunk.old_start,
                 old_lines: hunk.old_lines,
                 new_start: hunk.new_start,
@@ -386,6 +414,8 @@ fn patch_history(
         reader.clear_decoded_blocks();
         hunks.push(PatchHistoryHunk {
             old_path,
+            change_ordinal,
+            hunk_ordinal,
             new_path,
             old_start,
             old_lines,

@@ -188,6 +188,9 @@ Examples:
         /// Maximum number of matches to return.
         #[arg(long, default_value = "10", value_parser = parse_limit)]
         limit: usize,
+        /// Include bounded cached hunks matching the symptom or selected symbol.
+        #[arg(long)]
+        patch: bool,
         /// Output a stable structured JSON report instead of human-readable text.
         #[arg(long)]
         json: bool,
@@ -217,6 +220,9 @@ Examples:
         /// Maximum number of matches to return.
         #[arg(long, default_value = "10", value_parser = parse_limit)]
         limit: usize,
+        /// Include bounded cached hunks tied to the target line or symbol.
+        #[arg(long)]
+        patch: bool,
         /// Output a stable structured JSON report instead of human-readable text.
         #[arg(long)]
         json: bool,

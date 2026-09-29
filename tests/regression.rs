@@ -476,3 +476,191 @@ fn regression_treats_path_like_symptoms_as_text() {
     assert_eq!(output.status.code(), Some(0));
     assert!(String::from_utf8_lossy(&output.stdout).contains("Fix /api/health timeout"));
 }
+
+fn json(repo: &TestRepo, args: &[&str]) -> serde_json::Value {
+    let output = repo.run(args);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "gitscry failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("parse JSON report")
+}
+
+#[test]
+fn regression_patch_excerpts_prioritize_symptom_and_symbol_hunks() {
+    let repo = TestRepo::new();
+    let initial = concat!(
+        "fn run() {\n",
+        "    let state = \"healthy\";\n",
+        "    let run_keep = 0;\n",
+        "}\n\n",
+        "fn connection() {\n",
+        "    let gap_0 = 0;\n",
+        "    let gap_1 = 1;\n",
+        "    let gap_2 = 2;\n",
+        "    let gap_3 = 3;\n",
+        "    let gap_4 = 4;\n",
+        "    let gap_5 = 5;\n",
+        "    let gap_6 = 6;\n",
+        "    let gap_7 = 7;\n",
+        "    let timeout_ms = 100;\n",
+        "}\n\n",
+        "\n",
+        "\n",
+        "\n",
+        "\n",
+        "\n",
+        "\n",
+        "\n",
+        "\n",
+        "fn helper() {\n",
+        "    let helper_value = 1;\n",
+        "}\n",
+    );
+    repo.commit("src/engine.rs", initial.as_bytes(), "Create engine", None);
+    let good = repo.head();
+    let changed = initial
+        .replace("state = \"healthy\"", "state = \"regressed\"")
+        .replace("timeout_ms = 100", "timeout_ms = 10")
+        .replace("helper_value = 1", "helper_value = 2");
+    repo.commit(
+        "src/engine.rs",
+        changed.as_bytes(),
+        "Introduce timeout regression",
+        None,
+    );
+    fs::write(repo.dir.path().join("README.md"), "unrelated docs\n").expect("write unrelated docs");
+    git(repo.dir.path(), ["add", "README.md"]);
+    let amended = git_command(repo.dir.path())
+        .args(["commit", "--amend", "--no-edit"])
+        .output()
+        .expect("amend target commit with docs");
+    assert!(amended.status.success());
+    repo.index();
+
+    let plain = json(
+        &repo,
+        &[
+            "regression",
+            "timeout",
+            "--path",
+            "src/engine.rs",
+            "--symbol",
+            "run",
+            "--good",
+            good.as_str(),
+            "--limit",
+            "10",
+            "--json",
+        ],
+    );
+    let patched = json(
+        &repo,
+        &[
+            "regression",
+            "timeout",
+            "--path",
+            "src/engine.rs",
+            "--symbol",
+            "run",
+            "--good",
+            good.as_str(),
+            "--limit",
+            "10",
+            "--patch",
+            "--json",
+        ],
+    );
+    assert_eq!(plain["schema_version"], 1);
+    assert_eq!(patched["schema_version"], 2);
+    assert_eq!(patched["matched_count"], plain["matched_count"]);
+    let material = &patched["materials"][0];
+    assert_eq!(material["subject"], "Introduce timeout regression");
+    let patch = &material["patch"];
+    assert_eq!(patch["status"], "available");
+    assert_eq!(patch["commit_oid"], material["citations"][0]["oid"]);
+    let hunks = patch["hunks"].as_array().unwrap();
+    assert_eq!(hunks.len(), 2);
+    let hunk_texts = hunks
+        .iter()
+        .map(|hunk| hunk["text"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(
+        hunk_texts
+            .iter()
+            .any(|text| text.contains("state = \"regressed\""))
+    );
+    assert!(
+        hunk_texts
+            .iter()
+            .any(|text| text.contains("timeout_ms = 10"))
+    );
+    assert!(hunk_texts.iter().all(|text| !text.contains("helper_value")));
+    assert!(hunks.iter().all(|hunk| hunk["new_path"] == "src/engine.rs"));
+    assert!(plain["materials"][0].get("patch").is_none());
+
+    let text = repo.run([
+        "regression",
+        "timeout",
+        "--path",
+        "src/engine.rs",
+        "--symbol",
+        "run",
+        "--good",
+        good.as_str(),
+        "--patch",
+    ]);
+    assert_eq!(text.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&text.stdout).contains("patch excerpt: available"));
+    let plain_text = repo.run([
+        "regression",
+        "timeout",
+        "--path",
+        "src/engine.rs",
+        "--symbol",
+        "run",
+        "--good",
+        good.as_str(),
+    ]);
+    assert!(!String::from_utf8_lossy(&plain_text.stdout).contains("patch excerpt:"));
+}
+
+#[test]
+fn regression_patch_reports_no_relevant_hunks() {
+    let repo = TestRepo::new();
+    let initial = "fn run() {\n    let value = 1;\n}\n";
+    repo.commit("src/engine.rs", initial.as_bytes(), "Create engine", None);
+    let good = repo.head();
+    let changed = initial.replace("value = 1", "value = 2");
+    repo.commit(
+        "src/engine.rs",
+        changed.as_bytes(),
+        "Investigate timeout report",
+        None,
+    );
+    repo.index();
+
+    let patched = json(
+        &repo,
+        &[
+            "regression",
+            "timeout",
+            "--path",
+            "src/engine.rs",
+            "--good",
+            good.as_str(),
+            "--patch",
+            "--json",
+        ],
+    );
+    let material = patched["materials"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|material| material["subject"] == "Investigate timeout report")
+        .expect("symptom-matching material");
+    assert_eq!(material["patch"]["status"], "no_relevant_hunks");
+    assert_eq!(material["patch"]["hunks"], serde_json::json!([]));
+}

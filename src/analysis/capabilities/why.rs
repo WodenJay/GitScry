@@ -6,6 +6,7 @@ use crate::{
     git::{WhyAnchor, WhyTarget},
 };
 
+use super::super::patch::HunkPriorities;
 use super::super::retrieval;
 use super::super::{Citation, Confidence, Detail, Material, Report, ReportKind, WhyDetail};
 
@@ -55,7 +56,7 @@ pub(crate) fn run(
 
     for commit in &commits {
         let hunks = session.history_hunks(&commit.oid)?;
-        let direct_hunk = retrieval::trace_line(commit, &hunks, &mut historical_line);
+        let direct_hunk = retrieval::trace_line(commit, &hunks, &mut historical_line).is_some();
         let blame_match = blame_oid == Some(commit.oid.as_str());
         seen_blame |= blame_match;
         let explanation = explanation_strength(&commit.subject, &commit.body);
@@ -183,6 +184,60 @@ pub(crate) fn run(
         );
     }
     Ok(report)
+}
+
+pub(crate) fn patch_hunk_priorities(
+    session: &QuerySession,
+    target: &WhyTarget,
+    reachable: &HashSet<String>,
+) -> Result<HunkPriorities, AppError> {
+    let mut priorities = HunkPriorities::new();
+    if !target.anchor_valid {
+        return Ok(priorities);
+    }
+
+    let commits = session.path_history(&target.path, reachable)?;
+    match &target.anchor {
+        WhyAnchor::Line { number } => {
+            let mut line = *number as i64;
+            for commit in commits {
+                let hunks = session.history_hunks(&commit.oid)?;
+                if let Some(id) = retrieval::trace_line(&commit, &hunks, &mut line) {
+                    priorities.entry(commit.oid).or_default().insert(id, 0);
+                    break;
+                }
+            }
+        }
+        WhyAnchor::Symbol { number, .. } => {
+            let mut start = *number as i64;
+            let mut end = target.symbol_end.unwrap_or(*number) as i64;
+            for commit in commits {
+                let hunks = session.history_hunks(&commit.oid)?;
+                let anchored = commit
+                    .anchored_ordinals
+                    .iter()
+                    .copied()
+                    .collect::<HashSet<_>>();
+                for hunk in &hunks {
+                    if anchored.contains(&hunk.change_ordinal)
+                        && retrieval::hunk_overlaps_symbol(hunk, start.min(end), start.max(end))
+                    {
+                        priorities
+                            .entry(commit.oid.clone())
+                            .or_default()
+                            .insert(hunk.id(), 0);
+                    }
+                }
+                let start_changed = retrieval::trace_line(&commit, &hunks, &mut start).is_some();
+                let end_changed = retrieval::trace_line(&commit, &hunks, &mut end).is_some();
+                // A signature-only edit changes one boundary without ending symbol history.
+                if start_changed && end_changed {
+                    break;
+                }
+            }
+        }
+    }
+    Ok(priorities)
 }
 
 fn anchor_line(anchor: &WhyAnchor) -> usize {

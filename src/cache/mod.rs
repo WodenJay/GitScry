@@ -9,6 +9,7 @@ use crate::{
     git::{Change, Commit, Hunk, PatchStream, Snapshot},
 };
 pub(crate) use generation::prepare;
+pub(crate) use history::HunkId;
 pub(crate) use history::{CodeHunk, HistoryCommit, HistoryHunk, PatchHistory, PatchHistoryHunk};
 use payload::{HunkReader, HunkWriter, encode};
 pub(crate) use query::{RelationHistory, SearchFilter};
@@ -917,6 +918,7 @@ pub(crate) fn message_parts(message: &[u8]) -> (String, String) {
 
 pub(crate) struct DecodedHunk {
     pub(crate) change_ordinal: i64,
+    pub(crate) hunk_ordinal: i64,
     pub(crate) old_start: i64,
     pub(crate) old_lines: i64,
     pub(crate) new_start: i64,
@@ -970,6 +972,7 @@ pub(crate) fn read_hunks(connection: &Connection, oid: &str) -> Result<Vec<Decod
                 )?;
                 Ok(DecodedHunk {
                     change_ordinal,
+                    hunk_ordinal,
                     old_start,
                     old_lines,
                     new_start,

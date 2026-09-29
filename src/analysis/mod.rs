@@ -269,6 +269,16 @@ pub(crate) fn why(
     capabilities::why(session, target, reachable, limit)
 }
 
+pub(crate) fn attach_why_patch_excerpts(
+    session: &QuerySession,
+    target: &WhyTarget,
+    reachable: &HashSet<String>,
+    report: &mut Report,
+) -> Result<(), AppError> {
+    let priorities = capabilities::why_patch_hunk_priorities(session, target, reachable)?;
+    patch::attach_selected_patch_excerpts(session, report, &priorities)
+}
+
 pub(crate) fn regression(
     session: &QuerySession,
     intent: &Intent,
@@ -278,6 +288,18 @@ pub(crate) fn regression(
 ) -> Result<Report, AppError> {
     validate_limit(limit)?;
     capabilities::regression(session, intent, target, reachable, limit)
+}
+
+pub(crate) fn attach_regression_patch_excerpts(
+    session: &QuerySession,
+    intent: &Intent,
+    target: &crate::git::RegressionTarget,
+    reachable: &HashSet<String>,
+    report: &mut Report,
+) -> Result<(), AppError> {
+    let priorities =
+        capabilities::regression_patch_hunk_priorities(session, intent, target, reachable)?;
+    patch::attach_selected_patch_excerpts(session, report, &priorities)
 }
 
 pub(crate) fn trace_fix(
