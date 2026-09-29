@@ -241,11 +241,11 @@ fn relation_history(
         .collect::<Vec<_>>()
         .chunks(SQL_PARAMETER_LIMIT)
     {
-        let scope_cte = relation_scope_cte_prefix(scope);
-        let scope_parameter_count = relation_scope_parameter_count(scope);
-        let limit_parameter = scope_parameter_count + 1;
-        let placeholders = numbered_placeholders(limit_parameter + 1, keys.len());
-        let scope_predicate = relation_scope_predicate(scope);
+        let query_bindings = RelationQueryBindings::new(scope, &[], limit);
+        let scope_cte = &query_bindings.cte_prefix;
+        let limit_parameter = query_bindings.limit_parameter;
+        let placeholders = numbered_placeholders(query_bindings.first_seed_parameter, keys.len());
+        let scope_predicate = query_bindings.scope_predicate;
         let query = format!(
             "{scope_cte}\n\
              relation_eligible AS (\n\
@@ -274,7 +274,7 @@ fn relation_history(
              FROM ranked\n\
              WHERE path_rank = 1"
         );
-        let mut values = relation_seed_values(scope, &[], limit);
+        let mut values = query_bindings.values;
         values.extend(keys.iter().cloned().map(Value::Text));
         let mut statement = connection
             .prepare(&query)
@@ -316,23 +316,60 @@ fn relation_history(
 }
 
 const SQL_PARAMETER_LIMIT: usize = 900;
-fn relation_scope_cte_prefix(scope: Option<&SearchFilter>) -> String {
-    if scope.is_some() {
-        format!("{SEARCH_SCOPE_CTE},")
-    } else {
-        "WITH".to_owned()
-    }
-}
-
 fn relation_scope_parameter_count(scope: Option<&SearchFilter>) -> usize {
     if scope.is_some() { 4 } else { 0 }
 }
 
-fn relation_scope_predicate(scope: Option<&SearchFilter>) -> &'static str {
-    if scope.is_some() {
-        "AND pc.commit_id IN (SELECT commit_id FROM eligible)"
-    } else {
-        ""
+struct RelationQueryBindings {
+    cte_prefix: String,
+    limit_parameter: usize,
+    first_seed_parameter: usize,
+    scope_predicate: &'static str,
+    values: Vec<Value>,
+}
+
+impl RelationQueryBindings {
+    fn new(scope: Option<&SearchFilter>, seed_keys: &[String], limit: i64) -> Self {
+        let scope_parameter_count = relation_scope_parameter_count(scope);
+        let limit_parameter = scope_parameter_count + 1;
+        let first_seed_parameter = limit_parameter + 1;
+        let cte_prefix = if scope.is_some() {
+            format!("{SEARCH_SCOPE_CTE},")
+        } else {
+            "WITH".to_owned()
+        };
+        let scope_predicate = if scope.is_some() {
+            "AND pc.commit_id IN (SELECT commit_id FROM eligible)"
+        } else {
+            ""
+        };
+
+        let mut values = Vec::new();
+        if let Some(scope) = scope {
+            values.push(Value::Text(scope.to_oid.clone()));
+            values.push(
+                scope
+                    .from_oid
+                    .clone()
+                    .map(Value::Text)
+                    .unwrap_or(Value::Null),
+            );
+            values.push(scope.since.map(Value::Integer).unwrap_or(Value::Null));
+            values.push(scope.until.map(Value::Integer).unwrap_or(Value::Null));
+        }
+        values.push(Value::Integer(limit));
+        for seed in seed_keys {
+            values.push(Value::Text(seed.clone()));
+            values.push(Value::Integer((!seed.contains('/')) as i64));
+        }
+
+        Self {
+            cte_prefix,
+            limit_parameter,
+            first_seed_parameter,
+            scope_predicate,
+            values,
+        }
     }
 }
 
@@ -341,10 +378,10 @@ fn relation_count(
     limit: i64,
     scope: Option<&SearchFilter>,
 ) -> Result<i64, AppError> {
-    let scope_cte = relation_scope_cte_prefix(scope);
-    let scope_parameter_count = relation_scope_parameter_count(scope);
-    let limit_parameter = scope_parameter_count + 1;
-    let scope_predicate = relation_scope_predicate(scope);
+    let query_bindings = RelationQueryBindings::new(scope, &[], limit);
+    let scope_cte = &query_bindings.cte_prefix;
+    let limit_parameter = query_bindings.limit_parameter;
+    let scope_predicate = query_bindings.scope_predicate;
     let query = format!(
         "{scope_cte}\n\
          relation_eligible AS (\n\
@@ -360,7 +397,7 @@ fn relation_count(
          )\n\
          SELECT COUNT(*) FROM relation_eligible"
     );
-    let values = relation_seed_values(scope, &[], limit);
+    let values = query_bindings.values;
     connection
         .query_row(&query, params_from_iter(values), |row| row.get(0))
         .map_err(|error| search_error("counting relation commits", error))
@@ -372,12 +409,11 @@ fn relation_seed_matches(
     limit: i64,
     scope: Option<&SearchFilter>,
 ) -> Result<HashMap<i64, HashSet<String>>, AppError> {
-    let scope_cte = relation_scope_cte_prefix(scope);
-    let scope_parameter_count = relation_scope_parameter_count(scope);
-    let limit_parameter = scope_parameter_count + 1;
-    let first_seed_parameter = scope_parameter_count + 2;
-    let values_clause = seed_values_clause(seed_keys, first_seed_parameter);
-    let scope_predicate = relation_scope_predicate(scope);
+    let query_bindings = RelationQueryBindings::new(scope, seed_keys, limit);
+    let scope_cte = &query_bindings.cte_prefix;
+    let limit_parameter = query_bindings.limit_parameter;
+    let values_clause = seed_values_clause(seed_keys, query_bindings.first_seed_parameter);
+    let scope_predicate = query_bindings.scope_predicate;
     let query = format!(
         "{scope_cte}\n\
          relation_eligible AS (\n\
@@ -398,7 +434,7 @@ fn relation_seed_matches(
            OR (seed_keys.is_basename = 0 AND cp.path_key = seed_keys.seed_key)\n\
          ORDER BY cp.commit_id, seed_keys.seed_key"
     );
-    let values = relation_seed_values(scope, seed_keys, limit);
+    let values = query_bindings.values;
     let mut statement = connection
         .prepare(&query)
         .map_err(|error| search_error("preparing relation seed lookup", error))?;
@@ -422,12 +458,11 @@ fn relation_has_mass_change(
     limit: i64,
     scope: Option<&SearchFilter>,
 ) -> Result<bool, AppError> {
-    let scope_cte = relation_scope_cte_prefix(scope);
-    let scope_parameter_count = relation_scope_parameter_count(scope);
-    let limit_parameter = scope_parameter_count + 1;
-    let first_seed_parameter = scope_parameter_count + 2;
-    let values_clause = seed_values_clause(seed_keys, first_seed_parameter);
-    let scope_predicate = relation_scope_predicate(scope);
+    let query_bindings = RelationQueryBindings::new(scope, seed_keys, limit);
+    let scope_cte = &query_bindings.cte_prefix;
+    let limit_parameter = query_bindings.limit_parameter;
+    let values_clause = seed_values_clause(seed_keys, query_bindings.first_seed_parameter);
+    let scope_predicate = query_bindings.scope_predicate;
     let query = format!(
         "{scope_cte}\n\
          seed_keys(seed_key, is_basename) AS (VALUES {values_clause})\n\
@@ -450,11 +485,9 @@ fn relation_has_mass_change(
          )"
     );
     let found: i64 = connection
-        .query_row(
-            &query,
-            params_from_iter(relation_seed_values(scope, seed_keys, limit)),
-            |row| row.get(0),
-        )
+        .query_row(&query, params_from_iter(query_bindings.values), |row| {
+            row.get(0)
+        })
         .map_err(|error| search_error("checking mass relation changes", error))?;
     Ok(found != 0)
 }
@@ -469,32 +502,6 @@ fn seed_values_clause(seed_keys: &[String], first_parameter: usize) -> String {
         })
         .collect::<Vec<_>>()
         .join(", ")
-}
-
-fn relation_seed_values(
-    scope: Option<&SearchFilter>,
-    seed_keys: &[String],
-    limit: i64,
-) -> Vec<Value> {
-    let mut values = Vec::new();
-    if let Some(scope) = scope {
-        values.push(Value::Text(scope.to_oid.clone()));
-        values.push(
-            scope
-                .from_oid
-                .clone()
-                .map(Value::Text)
-                .unwrap_or(Value::Null),
-        );
-        values.push(scope.since.map(Value::Integer).unwrap_or(Value::Null));
-        values.push(scope.until.map(Value::Integer).unwrap_or(Value::Null));
-    }
-    values.push(Value::Integer(limit));
-    for seed in seed_keys {
-        values.push(Value::Text(seed.clone()));
-        values.push(Value::Integer((!seed.contains('/')) as i64));
-    }
-    values
 }
 
 fn numbered_placeholders(first: usize, count: usize) -> String {
