@@ -573,6 +573,47 @@ fn timeline_patch_is_opt_in_scoped_and_preserves_pagination() {
     assert_eq!(page["entries"][0]["commit_id"], changed);
     assert_eq!(page["entries"][0]["patch"], patch.clone());
 
+    let first_page = json(&repo.run([
+        "timeline",
+        "src/target.rs",
+        "--limit",
+        "1",
+        "--offset",
+        "0",
+        "--patch",
+        "--json",
+    ]));
+    assert_eq!(first_page["start"], 1);
+    assert_eq!(first_page["has_more"], true);
+    let paged_ids = [
+        first_page["entries"][0]["commit_id"].clone(),
+        page["entries"][0]["commit_id"].clone(),
+    ];
+    let complete_ids = patched["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["commit_id"].clone())
+        .collect::<Vec<_>>();
+    assert_eq!(paged_ids.as_slice(), complete_ids.as_slice());
+
+    let empty_page = json(&repo.run([
+        "timeline",
+        "src/target.rs",
+        "--limit",
+        "1",
+        "--offset",
+        "10",
+        "--patch",
+        "--json",
+    ]));
+    assert_eq!(empty_page["schema_version"], 2);
+    assert_eq!(empty_page["total"], 2);
+    assert_eq!(empty_page["start"], 0);
+    assert_eq!(empty_page["end"], 0);
+    assert_eq!(empty_page["has_more"], false);
+    assert_eq!(empty_page["entries"].as_array().unwrap().len(), 0);
+
     let text_output = repo.run(["timeline", "src/target.rs", "--patch"]);
     assert_eq!(text_output.status.code(), Some(0));
     let text_output = String::from_utf8(text_output.stdout).expect("safe timeline output");
@@ -612,6 +653,33 @@ fn timeline_patch_reports_binary_text_as_unavailable() {
     }
     let text = repo.run(["timeline", "src/data.bin", "--patch"]);
     assert!(String::from_utf8_lossy(&text.stdout).contains("Text hunk unavailable."));
+}
+
+#[test]
+fn timeline_patch_binary_is_unavailable_with_text_sibling() {
+    let repo = TestRepo::new();
+    fs::create_dir_all(repo.dir.path().join("src")).expect("create source directory");
+    fs::write(
+        repo.dir.path().join("src/sibling.rs"),
+        b"let sibling = true;\n",
+    )
+    .expect("write sibling text file");
+    commit(
+        &repo,
+        "src/data.bin",
+        b"\0binary data\n",
+        "Add binary and text files",
+        "2020-01-01T00:00:00+0000",
+    );
+    repo.index();
+
+    let report = json(&repo.run(["timeline", "src/data.bin", "--patch", "--json"]));
+    assert_eq!(report["total"], 1);
+    assert_eq!(report["entries"][0]["patch"]["status"], "unavailable");
+    assert_eq!(
+        report["entries"][0]["patch"]["hunks"],
+        serde_json::json!([])
+    );
 }
 
 #[test]
