@@ -13,10 +13,12 @@ mod trace_fix;
 mod why;
 
 pub(crate) use code_search::run as code_search;
+pub(crate) use code_search::run_scoped as code_search_scoped;
 pub(crate) use examples::run as examples;
 pub(crate) use failures::run as failures;
 pub(crate) use relations::{related, tests};
 pub(crate) use search::run as search;
+pub(crate) use search::run_scoped as search_scoped;
 
 pub(crate) use regression::run as regression;
 pub(crate) use trace_fix::run as trace_fix;

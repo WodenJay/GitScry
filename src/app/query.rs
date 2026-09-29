@@ -1,3 +1,4 @@
+use super::search_scope::{self, SearchScopeOptions};
 use super::{AppError, Outcome, QueryReport};
 use crate::{
     analysis, cache,
@@ -55,15 +56,51 @@ pub(super) fn run_with_patch(
     Ok(query_outcome(&session, report))
 }
 
-/// Run a literal changed-code query without tokenizing its text as a topic.
-pub(super) fn run_code(
+pub(super) fn run_search(
+    words: Vec<String>,
+    limit: usize,
+    patch: bool,
+    scope_options: SearchScopeOptions,
+) -> Result<Outcome, AppError> {
+    let intent = analysis::Intent::parse(&words, &[])?;
+    let session = cache::open_query()?;
+    let scope = search_scope::resolve(&session, scope_options)?;
+    let mut report = match &scope {
+        Some(scope) => analysis::search_scoped(&session, &intent, limit, &scope.filter)?,
+        None => analysis::search(&session, &intent, limit)?,
+    };
+    if patch {
+        analysis::attach_patch_excerpts(&session, &intent, &mut report, false, &[])?;
+    }
+    if let Some(scope) = scope {
+        report.scope = Some(scope.report);
+    }
+    Ok(query_outcome(&session, report))
+}
+
+pub(super) fn run_code_search(
     query: String,
     path: Option<String>,
     direction: Option<analysis::CodeDirection>,
     limit: usize,
+    scope_options: SearchScopeOptions,
 ) -> Result<Outcome, AppError> {
     let session = cache::open_query()?;
-    let report = analysis::code_search(&session, &query, path.as_deref(), direction, limit)?;
+    let scope = search_scope::resolve(&session, scope_options)?;
+    let mut report = match &scope {
+        Some(scope) => analysis::code_search_scoped(
+            &session,
+            &query,
+            path.as_deref(),
+            direction,
+            limit,
+            &scope.filter,
+        )?,
+        None => analysis::code_search(&session, &query, path.as_deref(), direction, limit)?,
+    };
+    if let Some(scope) = scope {
+        report.scope = Some(scope.report);
+    }
     Ok(query_outcome(&session, report))
 }
 

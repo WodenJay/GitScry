@@ -52,6 +52,13 @@ impl Repository {
         target::pin_timeline(&self.git, revision, path)
     }
 
+    pub(crate) fn resolve_commit(&self, revision: &str) -> Result<String, AppError> {
+        if revision.contains('\0') {
+            return Err(AppError::input("revision must not contain a NUL byte"));
+        }
+        target::resolve_revision(&self.git, revision)
+    }
+
     pub(crate) fn pin_regression_target(
         &self,
         bad_revision: &str,

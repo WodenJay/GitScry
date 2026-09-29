@@ -17,6 +17,17 @@ impl TestRepo {
     }
 
     fn commit_at(&self, path: &str, contents: &[u8], message: &str, date: &str) {
+        self.commit_with_dates(path, contents, message, date, date);
+    }
+
+    fn commit_with_dates(
+        &self,
+        path: &str,
+        contents: &[u8],
+        message: &str,
+        author_date: &str,
+        committer_date: &str,
+    ) {
         if let Some(parent) = Path::new(path).parent() {
             fs::create_dir_all(self.dir.path().join(parent)).expect("create parent directory");
         }
@@ -24,8 +35,8 @@ impl TestRepo {
         git(self.dir.path(), ["add", path]);
         let output = git_command(self.dir.path())
             .args(["commit", "-m", message])
-            .env("GIT_AUTHOR_DATE", date)
-            .env("GIT_COMMITTER_DATE", date)
+            .env("GIT_AUTHOR_DATE", author_date)
+            .env("GIT_COMMITTER_DATE", committer_date)
             .output()
             .expect("run git");
         assert!(
@@ -34,6 +45,456 @@ impl TestRepo {
             String::from_utf8_lossy(&output.stderr)
         );
     }
+}
+
+#[test]
+fn search_help_documents_historical_scope() {
+    let repo = TestRepo::new();
+    let output = repo.run(["search", "--help"]);
+    assert_eq!(output.status.code(), Some(0));
+    let help = String::from_utf8_lossy(&output.stdout);
+    for expected in [
+        "--from-rev",
+        "--to-rev",
+        "--since",
+        "--until",
+        "committer time",
+        "UTC calendar day",
+        "offset",
+        "cache tip",
+    ] {
+        assert!(help.contains(expected), "missing {expected:?} in:\n{help}");
+    }
+}
+
+#[test]
+fn search_revision_scope_is_lower_exclusive_and_shared_by_code_mode() {
+    let repo = TestRepo::new();
+    repo.commit_at(
+        "scope.txt",
+        b"fn scope_marker_old() {}\n",
+        "ScopeMarker lower",
+        "2001-01-01T00:00:00Z",
+    );
+    let lower = repo.head();
+    repo.commit_at(
+        "scope.txt",
+        b"fn scope_marker_new() {}\n",
+        "ScopeMarker upper",
+        "2000-01-02T00:00:00Z",
+    );
+    let upper = repo.head();
+    repo.index();
+
+    let args = [
+        "search",
+        "ScopeMarker",
+        "--from-rev",
+        lower.as_str(),
+        "--to-rev",
+        upper.as_str(),
+        "--limit",
+        "1",
+    ];
+    let text = repo.run(args);
+    assert_eq!(
+        text.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&text.stderr)
+    );
+    let text = String::from_utf8_lossy(&text.stdout);
+    assert!(text.contains("ScopeMarker upper"), "{text}");
+    assert!(!text.contains("ScopeMarker lower"), "{text}");
+
+    let code = repo.run([
+        "search",
+        "--code",
+        "scope_marker",
+        "--from-rev",
+        lower.as_str(),
+        "--to-rev",
+        upper.as_str(),
+        "--limit",
+        "1",
+    ]);
+    assert_eq!(
+        code.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&code.stderr)
+    );
+    let code = String::from_utf8_lossy(&code.stdout);
+    let rows = code
+        .lines()
+        .filter(|line| line.starts_with("- "))
+        .collect::<Vec<_>>();
+    assert_eq!(rows.len(), 1, "{code}");
+    assert!(rows.iter().all(|row| row.contains(&upper)), "{code}");
+    assert!(code.contains("Showing 1 of 2 matching lines"), "{code}");
+    assert!(
+        code.contains(&format!("excluding {lower} and its ancestors")),
+        "{code}"
+    );
+    let json = repo.run([
+        "search",
+        "ScopeMarker",
+        "--from-rev",
+        lower.as_str(),
+        "--to-rev",
+        upper.as_str(),
+        "--json",
+    ]);
+    assert_eq!(
+        json.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&json.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(value["scope"]["from_rev"], lower);
+    assert_eq!(value["scope"]["to_rev"], upper);
+    assert_eq!(value["scope"]["cache_tip"], upper);
+    let unscoped = repo.run(["search", "ScopeMarker", "--json"]);
+    let unscoped: serde_json::Value = serde_json::from_slice(&unscoped.stdout).unwrap();
+    assert!(unscoped.get("scope").is_none());
+}
+
+#[test]
+fn search_revision_scope_includes_merged_side_history_only() {
+    let repo = TestRepo::new();
+    repo.commit_at(
+        "root.txt",
+        b"fn graph_scope_root() {}\n",
+        "GraphScope root",
+        "2000-01-01T00:00:00Z",
+    );
+    git(repo.dir.path(), ["branch", "side"]);
+    repo.commit_at(
+        "main.txt",
+        b"fn graph_scope_main() {}\n",
+        "GraphScope main",
+        "2000-01-02T00:00:00Z",
+    );
+    let lower = repo.head();
+    git(repo.dir.path(), ["switch", "side"]);
+    repo.commit_at(
+        "side.txt",
+        b"fn graph_scope_side() {}\n",
+        "GraphScope side",
+        "2000-01-03T00:00:00Z",
+    );
+    let side = repo.head();
+    git(repo.dir.path(), ["switch", "main"]);
+    git(
+        repo.dir.path(),
+        [
+            "merge",
+            "--no-ff",
+            "side",
+            "-m",
+            "Merge scoped side history",
+        ],
+    );
+    let upper = repo.head();
+    repo.index();
+
+    let output = repo.run([
+        "search",
+        "GraphScope",
+        "--from-rev",
+        lower.as_str(),
+        "--to-rev",
+        upper.as_str(),
+        "--json",
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let materials = value["materials"].as_array().unwrap();
+    assert_eq!(materials.len(), 1, "{value}");
+    assert!(
+        materials[0]["subject"]
+            .as_str()
+            .unwrap()
+            .contains("GraphScope side")
+    );
+    assert_eq!(value["scope"]["from_rev"], lower);
+    assert_eq!(value["scope"]["to_rev"], upper);
+    assert_eq!(value["scope"]["cache_tip"], upper);
+
+    let unrelated_range = repo.run([
+        "search",
+        "GraphScope",
+        "--from-rev",
+        side.as_str(),
+        "--to-rev",
+        lower.as_str(),
+    ]);
+    assert_eq!(unrelated_range.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&unrelated_range.stderr)
+            .contains("--from-rev must be an ancestor of --to-rev")
+    );
+}
+
+#[test]
+fn search_scope_uses_committer_time_and_utc_calendar_days() {
+    let repo = TestRepo::new();
+    repo.commit_with_dates(
+        "clock.txt",
+        b"fn author_date_only() {}\n",
+        "ClockMarker author-only",
+        "2024-02-01T00:00:00Z",
+        "2024-01-31T23:59:59Z",
+    );
+    repo.commit_with_dates(
+        "clock.txt",
+        b"fn committer_date_only() {}\n",
+        "ClockMarker committer-time",
+        "2020-01-01T00:00:00Z",
+        "2024-02-01T00:00:00Z",
+    );
+    repo.index();
+
+    let instant = repo.run([
+        "search",
+        "ClockMarker",
+        "--since",
+        "2024-02-01t01:00:00+01:00",
+        "--until",
+        "2024-02-01T00:00:00z",
+        "--json",
+    ]);
+    assert_eq!(
+        instant.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&instant.stderr)
+    );
+    let instant: serde_json::Value = serde_json::from_slice(&instant.stdout).unwrap();
+    let materials = instant["materials"].as_array().unwrap();
+    assert_eq!(materials.len(), 1, "{instant}");
+    assert_eq!(materials[0]["subject"], "ClockMarker committer-time");
+    assert_eq!(instant["scope"]["since"], "2024-02-01T00:00:00Z");
+    assert_eq!(instant["scope"]["until"], "2024-02-01T00:00:00Z");
+    assert_eq!(instant["scope"]["to_rev"], repo.head());
+
+    repo.commit_with_dates(
+        "calendar.txt",
+        b"fn calendar_start() {}\n",
+        "CalendarMarker start",
+        "2020-01-01T00:00:00Z",
+        "2024-02-29T00:00:00Z",
+    );
+    repo.commit_with_dates(
+        "calendar.txt",
+        b"fn calendar_offset() {}\n",
+        "CalendarMarker offset",
+        "2020-01-01T00:00:00Z",
+        "2024-03-01T00:30:00+02:00",
+    );
+    repo.commit_with_dates(
+        "calendar.txt",
+        b"fn calendar_end() {}\n",
+        "CalendarMarker end",
+        "2020-01-01T00:00:00Z",
+        "2024-02-29T23:59:59Z",
+    );
+    repo.commit_with_dates(
+        "calendar.txt",
+        b"fn calendar_next_day() {}\n",
+        "CalendarMarker next-day",
+        "2020-01-01T00:00:00Z",
+        "2024-03-01T00:00:00Z",
+    );
+    repo.index();
+
+    let calendar = repo.run([
+        "search",
+        "CalendarMarker",
+        "--since",
+        "2024-02-29",
+        "--until",
+        "2024-02-29",
+        "--json",
+    ]);
+    assert_eq!(
+        calendar.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&calendar.stderr)
+    );
+    let calendar: serde_json::Value = serde_json::from_slice(&calendar.stdout).unwrap();
+    let materials = calendar["materials"].as_array().unwrap();
+    assert_eq!(materials.len(), 3, "{calendar}");
+    for expected in [
+        "CalendarMarker start",
+        "CalendarMarker offset",
+        "CalendarMarker end",
+    ] {
+        assert!(
+            materials
+                .iter()
+                .any(|material| material["subject"] == expected),
+            "{calendar}"
+        );
+    }
+    assert!(
+        !materials
+            .iter()
+            .any(|material| material["subject"] == "CalendarMarker next-day")
+    );
+    assert_eq!(calendar["scope"]["since"], "2024-02-29");
+    assert_eq!(calendar["scope"]["until"], "2024-02-29");
+}
+
+#[test]
+fn search_scope_rejects_bad_bounds_and_renders_empty_results() {
+    let repo = TestRepo::new();
+    repo.commit_at(
+        "validation.txt",
+        b"fn validation_scope_marker() {}\n",
+        "ValidationMarker older",
+        "2000-01-01T00:00:00Z",
+    );
+    let older = repo.head();
+    repo.commit_at(
+        "validation.txt",
+        b"fn validation_scope_marker_new() {}\n",
+        "ValidationMarker newer",
+        "2000-01-02T00:00:00Z",
+    );
+    let newer = repo.head();
+    repo.index();
+
+    let invalid_date = repo.run(["search", "ValidationMarker", "--since", "2024-02-30"]);
+    assert_eq!(invalid_date.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&invalid_date.stderr).contains("invalid --since value"));
+
+    let timezone_free = repo.run([
+        "search",
+        "ValidationMarker",
+        "--until",
+        "2024-02-01T00:00:00",
+    ]);
+    assert_eq!(timezone_free.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&timezone_free.stderr).contains("RFC 3339 timestamp"));
+
+    let reversed_time = repo.run([
+        "search",
+        "ValidationMarker",
+        "--since",
+        "2024-02-02",
+        "--until",
+        "2024-02-01",
+    ]);
+    assert_eq!(reversed_time.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&reversed_time.stderr)
+            .contains("--since must not be later than --until")
+    );
+
+    let invalid_revision = repo.run([
+        "search",
+        "ValidationMarker",
+        "--to-rev",
+        "not-a-real-revision",
+    ]);
+    assert_eq!(invalid_revision.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&invalid_revision.stderr).contains("invalid revision"));
+
+    let reversed_revisions = repo.run([
+        "search",
+        "ValidationMarker",
+        "--from-rev",
+        newer.as_str(),
+        "--to-rev",
+        older.as_str(),
+    ]);
+    assert_eq!(reversed_revisions.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&reversed_revisions.stderr)
+            .contains("--from-rev must be an ancestor of --to-rev")
+    );
+
+    let empty = repo.run(["search", "ValidationMarker", "--since", "9999-12-31"]);
+    assert_eq!(
+        empty.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&empty.stderr)
+    );
+    let empty_text = String::from_utf8_lossy(&empty.stdout);
+    assert!(empty_text.starts_with("Scope:"), "{empty_text}");
+    assert!(
+        empty_text.contains("No relevant history found."),
+        "{empty_text}"
+    );
+
+    let empty_json = repo.run([
+        "search",
+        "ValidationMarker",
+        "--since",
+        "9999-12-31",
+        "--json",
+    ]);
+    assert_eq!(
+        empty_json.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&empty_json.stderr)
+    );
+    let empty_json: serde_json::Value = serde_json::from_slice(&empty_json.stdout).unwrap();
+    assert_eq!(empty_json["materials"], serde_json::json!([]));
+    assert_eq!(empty_json["scope"]["since"], "9999-12-31");
+    assert_eq!(empty_json["scope"]["to_rev"], newer);
+    assert_eq!(empty_json["scope"]["cache_tip"], newer);
+}
+
+#[test]
+fn search_scope_filters_candidates_before_relevance_limit() {
+    let repo = TestRepo::new();
+    for day in 1..=24 {
+        let contents = format!("ordinary revision {day}\n");
+        let date = format!("2030-01-{day:02}T00:00:00Z");
+        repo.commit_at("pool.txt", contents.as_bytes(), "PoolNeedle prior", &date);
+    }
+    let lower = repo.head();
+    repo.commit_at(
+        "pool.txt",
+        b"ordinary selected revision\n",
+        "PoolNeedle selected",
+        "2000-01-01T00:00:00Z",
+    );
+    let upper = repo.head();
+    repo.index();
+
+    let output = repo.run([
+        "search",
+        "PoolNeedle",
+        "--from-rev",
+        lower.as_str(),
+        "--to-rev",
+        upper.as_str(),
+        "--limit",
+        "1",
+        "--json",
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["matched_count"], 1);
+    assert_eq!(value["materials"].as_array().unwrap().len(), 1);
+    assert_eq!(value["materials"][0]["subject"], "PoolNeedle selected");
 }
 
 #[test]

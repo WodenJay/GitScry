@@ -13,7 +13,10 @@ mod retrieval;
 use std::{collections::HashSet, path::Path};
 
 use crate::git::{TraceFixTarget, WhyTarget};
-use crate::{app::AppError, cache::QuerySession};
+use crate::{
+    app::AppError,
+    cache::{QuerySession, SearchFilter},
+};
 
 pub(crate) use patch::{PatchExcerpt, PatchHunk, PatchStatus, attach_patch_excerpts};
 pub(in crate::analysis) use retrieval::anchors_overlap;
@@ -29,7 +32,17 @@ pub(crate) struct Report {
     pub(crate) patch_mode: bool,
     pub(crate) warnings: Vec<String>,
     pub(crate) notices: Vec<String>,
+    pub(crate) scope: Option<SearchScopeInfo>,
 }
+#[derive(Clone, Debug)]
+pub(crate) struct SearchScopeInfo {
+    pub(crate) from_rev: Option<String>,
+    pub(crate) to_rev: String,
+    pub(crate) since: Option<String>,
+    pub(crate) until: Option<String>,
+    pub(crate) cache_tip: String,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReportKind {
     Search,
@@ -195,6 +208,16 @@ pub(crate) fn search(
     capabilities::search(session, intent, limit)
 }
 
+pub(crate) fn search_scoped(
+    session: &QuerySession,
+    intent: &Intent,
+    limit: usize,
+    scope: &SearchFilter,
+) -> Result<Report, AppError> {
+    validate_limit(limit)?;
+    capabilities::search_scoped(session, intent, limit, scope)
+}
+
 pub(crate) fn code_search(
     session: &QuerySession,
     query: &str,
@@ -204,6 +227,18 @@ pub(crate) fn code_search(
 ) -> Result<Report, AppError> {
     validate_limit(limit)?;
     capabilities::code_search(session, query, path, direction, limit)
+}
+
+pub(crate) fn code_search_scoped(
+    session: &QuerySession,
+    query: &str,
+    path: Option<&str>,
+    direction: Option<CodeDirection>,
+    limit: usize,
+    scope: &SearchFilter,
+) -> Result<Report, AppError> {
+    validate_limit(limit)?;
+    capabilities::code_search_scoped(session, query, path, direction, limit, scope)
 }
 
 pub(crate) fn examples(
@@ -298,6 +333,7 @@ pub(crate) fn report(
         truncated: matched_count > limit,
         warnings: Vec::new(),
         notices: Vec::new(),
+        scope: None,
         patch_mode: false,
     }
 }
@@ -311,6 +347,7 @@ pub(crate) fn empty_report(kind: ReportKind) -> Report {
         truncated: false,
         warnings: Vec::new(),
         notices: Vec::new(),
+        scope: None,
         patch_mode: false,
     }
 }

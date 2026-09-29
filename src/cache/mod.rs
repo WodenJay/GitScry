@@ -11,7 +11,7 @@ use crate::{
 pub(crate) use generation::prepare;
 pub(crate) use history::{CodeHunk, HistoryCommit, HistoryHunk, PatchHistory, PatchHistoryHunk};
 use payload::{HunkReader, HunkWriter, encode};
-pub(crate) use query::RelationHistory;
+pub(crate) use query::{RelationHistory, SearchFilter};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params, params_from_iter};
 use std::collections::{HashMap, HashSet};
 use std::{
@@ -96,6 +96,17 @@ impl QuerySession {
             )));
         }
         Ok(())
+    }
+    pub(crate) fn contains_revision(&self, revision: &str) -> Result<bool, AppError> {
+        let present: i64 = self
+            .connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM commits WHERE oid = ?1)",
+                [revision],
+                |row| row.get(0),
+            )
+            .map_err(|error| query_error(format!("checking requested revision: {error}")))?;
+        Ok(present != 0)
     }
 }
 

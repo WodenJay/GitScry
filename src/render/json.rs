@@ -3,7 +3,7 @@ use serde::Serialize;
 
 use crate::analysis::{
     Citation, CodeMatch, Confidence, Detail, Failure, Material, PatchExcerpt, PatchHunk, Relation,
-    Report, ReportKind, Step,
+    Report, ReportKind, SearchScopeInfo, Step,
 };
 
 const SCHEMA_VERSION: u8 = 1;
@@ -23,6 +23,7 @@ pub(crate) fn format_json_report(
             .then(|| report.code_matches.iter().map(json_code_match).collect()),
         warnings,
         notices: &report.notices,
+        scope: report.scope.as_ref().map(json_scope),
     })
 }
 
@@ -37,6 +38,27 @@ struct JsonReport<'a> {
     code_matches: Option<Vec<JsonCodeMatch<'a>>>,
     warnings: Vec<&'a String>,
     notices: &'a [String],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scope: Option<JsonSearchScope<'a>>,
+}
+
+#[derive(Serialize)]
+struct JsonSearchScope<'a> {
+    from_rev: Option<&'a str>,
+    to_rev: &'a str,
+    since: Option<&'a str>,
+    until: Option<&'a str>,
+    cache_tip: &'a str,
+}
+
+fn json_scope(scope: &SearchScopeInfo) -> JsonSearchScope<'_> {
+    JsonSearchScope {
+        from_rev: scope.from_rev.as_deref(),
+        to_rev: &scope.to_rev,
+        since: scope.since.as_deref(),
+        until: scope.until.as_deref(),
+        cache_tip: &scope.cache_tip,
+    }
 }
 
 #[derive(Serialize)]

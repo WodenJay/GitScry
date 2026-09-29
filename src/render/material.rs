@@ -1,5 +1,6 @@
 use crate::analysis::{
-    Detail, Failure, Material, PatchExcerpt, PatchStatus, Relation, Report, ReportKind, Step,
+    Detail, Failure, Material, PatchExcerpt, PatchStatus, Relation, Report, ReportKind,
+    SearchScopeInfo, Step,
 };
 
 /// Printed when history does not state why an approach failed.
@@ -29,11 +30,34 @@ fn empty_message(kind: ReportKind) -> &'static str {
     }
 }
 
-fn format_code_report(report: &Report) -> String {
-    if report.code_matches.is_empty() {
-        return empty_message(report.kind).to_owned();
+fn scope_summary(scope: &SearchScopeInfo) -> String {
+    let mut criteria = vec![format!("commits reachable from {}", scope.to_rev)];
+    if let Some(from_rev) = &scope.from_rev {
+        criteria.push(format!("excluding {from_rev} and its ancestors"));
     }
-    let mut lines = vec![header(report)];
+    if let Some(since) = &scope.since {
+        criteria.push(format!("committer time since {since}"));
+    }
+    if let Some(until) = &scope.until {
+        criteria.push(format!("committer time through {until}"));
+    }
+    format!(
+        "Scope: {}; cache tip {}",
+        criteria.join("; "),
+        scope.cache_tip,
+    )
+}
+
+fn format_code_report(report: &Report) -> String {
+    let mut lines = Vec::new();
+    if let Some(scope) = &report.scope {
+        lines.push(scope_summary(scope));
+    }
+    if report.code_matches.is_empty() {
+        lines.push(empty_message(report.kind).to_owned());
+        return lines.join("\n");
+    }
+    lines.push(header(report));
     for matched in &report.code_matches {
         lines.push(format!(
             "- {} {}:{} {}: {}",
@@ -58,7 +82,7 @@ pub(crate) fn format_report(report: &Report) -> String {
     if report.kind == ReportKind::CodeSearch {
         return format_code_report(report);
     }
-    let lines = if report.materials.is_empty() {
+    let mut lines = if report.materials.is_empty() {
         vec![empty_message(report.kind).to_owned()]
     } else {
         let mut lines = vec![header(report)];
@@ -84,6 +108,9 @@ pub(crate) fn format_report(report: &Report) -> String {
         }
         lines
     };
+    if let Some(scope) = &report.scope {
+        lines.insert(0, scope_summary(scope));
+    }
     lines.join("\n")
 }
 

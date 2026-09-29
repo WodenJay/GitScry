@@ -12,7 +12,10 @@ mod reverts;
 mod text;
 
 use super::Step;
-use crate::{app::AppError, cache::QuerySession};
+use crate::{
+    app::AppError,
+    cache::{QuerySession, SearchFilter},
+};
 
 pub(crate) use crate::cache::message_parts;
 pub(in crate::analysis) use crate::cache::{HistoryCommit, HistoryHunk, RelationHistory};
@@ -64,35 +67,58 @@ pub(in crate::analysis) fn pool(
     intent: &Intent,
     limit: usize,
 ) -> Result<Option<Pool>, AppError> {
+    pool_with_scope(session, intent, limit, None)
+}
+
+pub(in crate::analysis) fn pool_scoped(
+    session: &QuerySession,
+    intent: &Intent,
+    limit: usize,
+    scope: &SearchFilter,
+) -> Result<Option<Pool>, AppError> {
+    pool_with_scope(session, intent, limit, Some(scope))
+}
+
+fn pool_with_scope(
+    session: &QuerySession,
+    intent: &Intent,
+    limit: usize,
+    scope: Option<&SearchFilter>,
+) -> Result<Option<Pool>, AppError> {
     let terms = intent.terms();
     if terms.is_empty() {
         return Ok(None);
     }
     let query = match_query(terms);
-    let matched_count = session.match_count(&query)?;
+    let matched_count = match scope {
+        Some(scope) => session.match_count_scoped(&query, scope)?,
+        None => session.match_count(&query)?,
+    };
     if matched_count == 0 {
         return Ok(None);
     }
 
-    let candidates = session
-        .candidates(&query, candidate_limit(limit))?
-        .into_iter()
-        .map(|candidate| Scored {
-            signals: lexical::signals(
-                intent,
-                &candidate.subject,
-                &candidate.body,
-                &candidate.paths,
-                candidate.bm25,
-            ),
-            position: candidate.position,
-            oid: candidate.oid,
-            commit_time: candidate.commit_time,
-            subject: candidate.subject,
-            path_keys: candidate.path_keys,
-            paths: candidate.paths,
-        })
-        .collect();
+    let candidates = match scope {
+        Some(scope) => session.candidates_scoped(&query, candidate_limit(limit), scope)?,
+        None => session.candidates(&query, candidate_limit(limit))?,
+    }
+    .into_iter()
+    .map(|candidate| Scored {
+        signals: lexical::signals(
+            intent,
+            &candidate.subject,
+            &candidate.body,
+            &candidate.paths,
+            candidate.bm25,
+        ),
+        position: candidate.position,
+        oid: candidate.oid,
+        commit_time: candidate.commit_time,
+        subject: candidate.subject,
+        path_keys: candidate.path_keys,
+        paths: candidate.paths,
+    })
+    .collect();
     Ok(Some(Pool {
         matched_count,
         candidates,

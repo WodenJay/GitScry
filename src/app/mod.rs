@@ -2,6 +2,7 @@ mod error;
 mod index;
 mod query;
 
+mod search_scope;
 mod update;
 use crate::{
     analysis,
@@ -75,21 +76,30 @@ pub(crate) fn execute(
             path,
             limit,
             patch,
+            from_rev,
+            to_rev,
+            since,
+            until,
             ..
-        } => match (query, code) {
-            (Some(query), None) if patch => {
-                query::run_with_patch(query, Vec::new(), limit, false, analysis::search)
+        } => {
+            let scope = search_scope::SearchScopeOptions {
+                from_rev,
+                to_rev,
+                since,
+                until,
+            };
+            match (query, code) {
+                (Some(query), None) => query::run_search(query, limit, patch, scope),
+                (None, Some(code)) => {
+                    let direction = change.map(|change| match change {
+                        CodeChange::Added => analysis::CodeDirection::Added,
+                        CodeChange::Removed => analysis::CodeDirection::Removed,
+                    });
+                    query::run_code_search(code, path, direction, limit, scope)
+                }
+                _ => unreachable!("clap enforces exactly one search mode"),
             }
-            (Some(query), None) => query::run(query, Vec::new(), limit, analysis::search),
-            (None, Some(code)) => {
-                let direction = change.map(|change| match change {
-                    CodeChange::Added => analysis::CodeDirection::Added,
-                    CodeChange::Removed => analysis::CodeDirection::Removed,
-                });
-                query::run_code(code, path, direction, limit)
-            }
-            _ => unreachable!("clap enforces exactly one search mode"),
-        },
+        }
         Command::Examples {
             query,
             paths,

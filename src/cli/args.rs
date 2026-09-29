@@ -36,7 +36,25 @@ pub(crate) enum Command {
     #[command(
         group(ArgGroup::new("search-mode").required(true).args(["query", "code"])),
         about = "Search history or literal changed-code lines",
-        long_about = "Search the published default-branch history for relevant commits or literal changed-code lines.\n\nUse `gitscry search QUERY...` to search commit subjects, bodies, and touched paths. Use `--code TEXT` to find a case-sensitive literal substring in added or removed lines from cached diffs. Code queries are non-empty, single-line text; punctuation and spaces are matched literally. Unchanged context lines are not searched.\n\nIn code mode, `--change added|removed` selects one direction and `--path PATH` matches an exact historical path: additions use the new path and removals use the old path. Rename history is not followed. No file-type filter is applied.\n\nSearch scope: the local cache built from the repository's default branch. Run `gitscry index` to refresh it; incomplete or shallow history is reported as a warning. `--limit` limits matching commits in ordinary mode and matching lines in code mode. `--json` returns structured output.\n\nRequired input: choose one mode—one or more QUERY words, or `--code TEXT`.\n\nExamples:\n\n  gitscry search retry backoff\n\n  gitscry search --code 'unwrap()?' --change added --path src/lib.rs --limit 5",
+        long_about = r#"Search the published cache's default branch history for relevant commits or literal changed-code lines.
+
+Use `gitscry search QUERY...` to search commit subjects, bodies, and touched paths. Use `--code TEXT` to find a case-sensitive literal substring in added or removed lines from cached diffs. Code queries are non-empty, single-line text; punctuation and spaces are matched literally. Unchanged context lines are not searched.
+
+In code mode, `--change added|removed` selects one direction and `--path PATH` matches an exact historical path: additions use the new path and removals use the old path. Rename history is not followed. No file-type filter is applied.
+
+Scope applies to both search modes and is limited to the published cache. `--from-rev REV` excludes that commit and its ancestors; `--to-rev REV` includes that commit and its ancestors. The lower revision must be an ancestor of the upper revision. Revisions must exist in the published cache. If `--to-rev` is omitted, the effective upper revision is the cache tip.
+
+`--since` and `--until` filter committer time. Use `YYYY-MM-DD` for an inclusive UTC calendar day, or an RFC 3339 timestamp with `Z` or an explicit UTC offset for an inclusive instant. Timezone-free timestamps are rejected. Bounds combine with revision scope, and filtering happens before ranking and `--limit`. Scoped results show the normalized bounds, resolved revisions, and effective cache tip in human and JSON output.
+
+Run `gitscry index` to refresh the cache; incomplete or shallow history is reported as a warning. `--limit` limits matching commits in ordinary mode and matching lines in code mode. `--json` returns structured output.
+
+Required input: choose one mode—one or more QUERY words, or `--code TEXT`.
+
+Examples:
+
+  gitscry search retry backoff --from-rev <base> --to-rev release
+
+  gitscry search --code 'unwrap()?' --since 2025-01-01 --until 2025-01-31 --limit 5"#
     )]
     Search {
         /// Query words matched against commit subjects, bodies, and touched paths.
@@ -51,6 +69,18 @@ pub(crate) enum Command {
         /// Exact historical path; additions use the new path, removals the old path.
         #[arg(long = "path", value_name = "PATH", requires = "code")]
         path: Option<String>,
+        /// Exclude this cached commit and its ancestors from search.
+        #[arg(long = "from-rev", value_name = "REV")]
+        from_rev: Option<String>,
+        /// Include this cached commit and its ancestors; defaults to the published cache tip.
+        #[arg(long = "to-rev", value_name = "REV")]
+        to_rev: Option<String>,
+        /// Include commits at or after this UTC date or RFC 3339 timestamp with an offset.
+        #[arg(long, value_name = "DATE_OR_TIMESTAMP")]
+        since: Option<String>,
+        /// Include commits through this UTC date or RFC 3339 timestamp with an offset.
+        #[arg(long, value_name = "DATE_OR_TIMESTAMP")]
+        until: Option<String>,
         /// Maximum number of matching commits or changed lines to return.
         #[arg(long, default_value = "10", value_parser = parse_limit)]
         limit: usize,
