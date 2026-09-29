@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use super::{Intent, Report, anchors_overlap};
+use super::{Detail, Intent, Material, Report, anchors_overlap};
 use crate::{
     app::AppError,
     cache::{PatchHistory, PatchHistoryHunk, QuerySession},
@@ -55,11 +55,48 @@ pub(crate) fn attach_patch_excerpts(
     path_only: bool,
     path_filter: &[String],
 ) -> Result<(), AppError> {
-    report.patch_mode = true;
     let path_anchors = path_filter
         .iter()
         .map(|path| super::normalize_path(path.as_bytes()))
         .collect::<Vec<_>>();
+    attach_patch_excerpts_with(session, report, |_, cached| {
+        let path_match = cached_path_matches(cached, intent, &path_anchors);
+        let text_matches = cached
+            .text
+            .as_deref()
+            .is_some_and(|text| hunk_matches_terms(text, intent));
+        if path_only {
+            path_match && text_matches
+        } else {
+            path_match || text_matches
+        }
+    })
+}
+
+pub(crate) fn attach_trace_fix_patch_excerpts(
+    session: &QuerySession,
+    report: &mut Report,
+) -> Result<(), AppError> {
+    attach_patch_excerpts_with(session, report, |material, cached| {
+        let Some(Detail::TraceFix(trace)) = material.detail.as_ref() else {
+            return false;
+        };
+        trace.patch_anchors.iter().any(|anchor| {
+            cached
+                .new_path
+                .as_ref()
+                .is_some_and(|new_path| anchor.paths.iter().any(|path| path == new_path))
+                && hunk_contains_line(cached, anchor.line)
+        })
+    })
+}
+
+fn attach_patch_excerpts_with(
+    session: &QuerySession,
+    report: &mut Report,
+    mut is_relevant: impl FnMut(&Material, &PatchHistoryHunk) -> bool,
+) -> Result<(), AppError> {
+    report.patch_mode = true;
     for material in &mut report.materials {
         let Some(citation) = material.citations.first() else {
             material.patch = Some(PatchExcerpt {
@@ -80,17 +117,7 @@ pub(crate) fn attach_patch_excerpts(
         let mut excerpt_paths = HashSet::new();
 
         for cached in history.hunks {
-            let path_match = cached_path_matches(&cached, intent, &path_anchors);
-            let text_matches = cached
-                .text
-                .as_deref()
-                .is_some_and(|text| hunk_matches_terms(text, intent));
-            let relevant = if path_only {
-                path_match && text_matches
-            } else {
-                path_match || text_matches
-            };
-            if !relevant {
+            if !is_relevant(material, &cached) {
                 continue;
             }
             if hunks.len() == MAX_EXCERPTS {
@@ -170,6 +197,19 @@ fn cached_path_matches(cached: &PatchHistoryHunk, intent: &Intent, path_filter: 
         path_filter
     };
     anchors_overlap(&paths, anchors) > 0
+}
+
+fn hunk_contains_line(hunk: &PatchHistoryHunk, line: usize) -> bool {
+    let Ok(line) = i64::try_from(line) else {
+        return false;
+    };
+    if hunk.new_lines <= 0 {
+        return false;
+    }
+    let Some(end) = hunk.new_start.checked_add(hunk.new_lines) else {
+        return false;
+    };
+    line >= hunk.new_start && line < end
 }
 
 fn hunk_matches_terms(text: &[u8], intent: &Intent) -> bool {

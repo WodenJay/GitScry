@@ -170,12 +170,16 @@ pub(super) fn run_trace_fix(
     revision: String,
     paths: Vec<String>,
     limit: usize,
+    patch: bool,
 ) -> Result<Outcome, AppError> {
     let repository = Repository::discover()?;
     let target = repository.pin_trace_fix(&revision, &paths)?;
     let session = cache::open_query()?;
     session.require_revision(&target.revision)?;
     let reachable = session.ancestors(&target.revision)?;
-    let report = analysis::trace_fix(&session, &target, &reachable, limit)?;
+    let mut report = analysis::trace_fix(&session, &target, &reachable, limit)?;
+    if patch {
+        analysis::attach_trace_fix_patch_excerpts(&session, &mut report)?;
+    }
     Ok(query_outcome(&session, report))
 }

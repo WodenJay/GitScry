@@ -135,6 +135,149 @@ fn trace_fix_reports_the_introducing_change_and_fix_as_one_chain() {
 }
 
 #[test]
+fn trace_fix_patch_quotes_only_the_attributed_introducing_hunk() {
+    let repo = TestRepo::new();
+    let stable_tail = b"stable_01\nstable_02\nstable_03\nstable_04\nstable_05\nstable_06\nstable_07\nstable_08\nstable_09\nstable_10\nstable_11\nstable_12\n";
+    let mut initial_app = b"safe\nhealthy\n".to_vec();
+    initial_app.extend_from_slice(stable_tail);
+    initial_app.extend_from_slice(b"initial_tail\n");
+    let mut introducing_app = b"safe\nhealthy\nbuggy_impl\n".to_vec();
+    introducing_app.extend_from_slice(stable_tail);
+    introducing_app.extend_from_slice(b"app_hunk_noise\n");
+    let mut failure_app =
+        b"prefix_a\nprefix_b\nprefix_c\nprefix_d\nprefix_e\nprefix_f\nsafe\nhealthy\nbuggy_impl\nfailure_observed\n".to_vec();
+    failure_app.extend_from_slice(stable_tail);
+    failure_app.extend_from_slice(b"app_hunk_noise\n");
+    let mut fixed_app =
+        b"prefix_a\nprefix_b\nprefix_c\nprefix_d\nprefix_e\nprefix_f\nsafe\nhealthy\nfixed_impl\nfailure_observed\n".to_vec();
+    fixed_app.extend_from_slice(stable_tail);
+    fixed_app.extend_from_slice(b"app_hunk_noise\n");
+    repo.commit_files(
+        &[("app.txt", &initial_app), ("unrelated.txt", b"before\n")],
+        "Initial app",
+    );
+    repo.commit_files(
+        &[
+            ("app.txt", &introducing_app),
+            ("unrelated.txt", b"same_commit_noise\n"),
+        ],
+        "Introduce broken behavior",
+    );
+    let introducing = repo.head();
+    repo.commit("app.txt", &failure_app, "Observe failure #19", None);
+    let failure = repo.head();
+    repo.commit(
+        "app.txt",
+        &fixed_app,
+        "Fix #19",
+        Some("Correct the failed implementation."),
+    );
+    let fix = repo.head();
+    repo.index();
+
+    let ordinary_text = repo.run(["trace-fix", &fix, "--path", "app.txt"]);
+    assert_eq!(ordinary_text.status.code(), Some(0));
+    assert!(!String::from_utf8_lossy(&ordinary_text.stdout).contains("patch excerpt:"));
+
+    let ordinary_json = repo.run(["trace-fix", &fix, "--path", "app.txt", "--json"]);
+    assert_eq!(ordinary_json.status.code(), Some(0));
+    let ordinary_json: serde_json::Value = serde_json::from_slice(&ordinary_json.stdout).unwrap();
+    assert_eq!(ordinary_json["schema_version"], 1);
+    assert!(ordinary_json["materials"][0].get("patch").is_none());
+
+    let text_patch = repo.run(["trace-fix", &fix, "--path", "app.txt", "--patch"]);
+    assert_eq!(
+        text_patch.status.code(),
+        Some(0),
+        "trace-fix --patch: {}",
+        String::from_utf8_lossy(&text_patch.stderr)
+    );
+    let text_patch = String::from_utf8_lossy(&text_patch.stdout);
+    assert!(
+        text_patch.contains("patch excerpt: available"),
+        "{text_patch}"
+    );
+    assert!(text_patch.contains("hunk: app.txt"), "{text_patch}");
+    assert!(text_patch.contains("buggy_impl"), "{text_patch}");
+    assert!(!text_patch.contains("app_hunk_noise"), "{text_patch}");
+    assert!(!text_patch.contains("same_commit_noise"), "{text_patch}");
+    assert!(!text_patch.contains("failure_observed"), "{text_patch}");
+    assert!(!text_patch.contains("fixed_impl"), "{text_patch}");
+
+    let json_patch = repo.run(["trace-fix", &fix, "--path", "app.txt", "--patch", "--json"]);
+    assert_eq!(
+        json_patch.status.code(),
+        Some(0),
+        "trace-fix --patch --json: {}",
+        String::from_utf8_lossy(&json_patch.stderr)
+    );
+    let json_patch: serde_json::Value = serde_json::from_slice(&json_patch.stdout).unwrap();
+    assert_eq!(json_patch["schema_version"], 2);
+    let material = &json_patch["materials"][0];
+    let citations = material["citations"].as_array().unwrap();
+    assert_eq!(citations[0]["oid"], introducing);
+    assert!(citations.iter().any(|citation| citation["oid"] == failure));
+    assert!(citations.iter().any(|citation| citation["oid"] == fix));
+    let patch = &material["patch"];
+    assert_eq!(patch["commit_oid"], introducing);
+    assert_eq!(patch["status"], "available");
+    let hunks = patch["hunks"].as_array().unwrap();
+    assert_eq!(hunks.len(), 1);
+    assert!(
+        hunks
+            .iter()
+            .all(|hunk| { hunk["old_path"] == "app.txt" || hunk["new_path"] == "app.txt" })
+    );
+    let patch_text = hunks
+        .iter()
+        .filter_map(|hunk| hunk["text"].as_str())
+        .collect::<String>();
+    assert!(patch_text.contains("buggy_impl"));
+    assert!(!patch_text.contains("app_hunk_noise"));
+    assert!(!patch_text.contains("same_commit_noise"));
+    assert!(!patch_text.contains("failure_observed"));
+    assert!(!patch_text.contains("fixed_impl"));
+}
+
+#[test]
+fn trace_fix_patch_uses_hunk_metadata_when_cached_text_is_missing() {
+    let repo = TestRepo::new();
+    repo.commit("app.txt", b"safe\n", "Initial app", None);
+    let mut oversized_line = vec![b'x'; 100_000];
+    oversized_line.push(b'\n');
+    repo.commit(
+        "app.txt",
+        &oversized_line,
+        "Introduce oversized behavior",
+        None,
+    );
+    repo.commit("app.txt", b"fixed\n", "Fix oversized behavior", None);
+    repo.index();
+
+    let output = repo.run([
+        "trace-fix",
+        "HEAD",
+        "--path",
+        "app.txt",
+        "--patch",
+        "--json",
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "trace-fix --patch --json: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["schema_version"], 2);
+    let patch = &report["materials"][0]["patch"];
+    assert_eq!(patch["status"], "available");
+    assert_eq!(patch["hunks"].as_array().unwrap().len(), 1);
+    assert!(patch["hunks"][0]["text"].is_null());
+    assert_eq!(patch["hunks"][0]["truncated"], true);
+}
+
+#[test]
 fn trace_fix_keeps_failure_context_on_the_blamed_path() {
     let repo = TestRepo::new();
     repo.commit_files(

@@ -37,6 +37,7 @@ pub(crate) struct RegressionTarget {
 pub(crate) struct Blame {
     pub(crate) oid: String,
     pub(crate) subject: String,
+    pub(crate) original_line: usize,
     pub(crate) boundary: bool,
 }
 
@@ -822,7 +823,7 @@ fn parse_blame(output: &[u8]) -> Result<Option<Blame>, AppError> {
             "error: parsing Git blame: invalid object ID",
         ));
     }
-    fields[1]
+    let original_line = fields[1]
         .parse::<usize>()
         .map_err(|_| AppError::operational("error: parsing Git blame: invalid line number"))?;
     let subject = output
@@ -832,6 +833,7 @@ fn parse_blame(output: &[u8]) -> Result<Option<Blame>, AppError> {
         .unwrap_or_default();
     Ok(Some(Blame {
         oid: oid.to_owned(),
+        original_line,
         subject,
         boundary,
     }))

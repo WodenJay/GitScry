@@ -15,7 +15,9 @@ use std::{collections::HashSet, path::Path};
 use crate::git::{TraceFixTarget, WhyTarget};
 use crate::{app::AppError, cache::QuerySession};
 
-pub(crate) use patch::{PatchExcerpt, PatchHunk, PatchStatus, attach_patch_excerpts};
+pub(crate) use patch::{
+    PatchExcerpt, PatchHunk, PatchStatus, attach_patch_excerpts, attach_trace_fix_patch_excerpts,
+};
 pub(in crate::analysis) use retrieval::anchors_overlap;
 pub(crate) use retrieval::{Intent, message_parts, normalize_path, searchable_text};
 
@@ -99,11 +101,17 @@ pub(crate) struct WhyDetail {
     pub(crate) line: usize,
 }
 
+pub(crate) struct TraceFixPatchAnchor {
+    pub(crate) line: usize,
+    pub(crate) paths: Vec<Vec<u8>>,
+}
+
 pub(crate) struct TraceFixDetail {
     pub(crate) role: &'static str,
     pub(crate) fix_revision: String,
     pub(crate) parent_revision: Option<String>,
     pub(crate) line: Option<usize>,
+    pub(crate) patch_anchors: Vec<TraceFixPatchAnchor>,
 }
 
 /// One move a historical change made. Paths stay raw bytes for lossless rendering.
