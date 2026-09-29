@@ -99,7 +99,7 @@ fn pool_with_scope(
     }
 
     let candidates = match scope {
-        Some(scope) => session.candidates_scoped(&query, candidate_limit(limit), scope)?,
+        Some(scope) => session.candidates_scoped(&query, scope)?,
         None => session.candidates(&query, candidate_limit(limit))?,
     }
     .into_iter()

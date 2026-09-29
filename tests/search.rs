@@ -498,6 +498,62 @@ fn search_scope_filters_candidates_before_relevance_limit() {
 }
 
 #[test]
+fn scoped_search_ranks_only_within_the_eligible_corpus() {
+    let repo = TestRepo::new();
+    repo.commit_at(
+        "ranking.txt",
+        b"base contents\n",
+        "Corpus base",
+        "2000-01-01T00:00:00Z",
+    );
+    let lower = repo.head();
+    repo.commit_at(
+        "ranking.txt",
+        b"alpha contents\n",
+        "Alpha candidate",
+        "2000-01-03T00:00:00Z",
+    );
+    repo.commit_at(
+        "ranking.txt",
+        b"beta contents\n",
+        "Beta candidate",
+        "2000-01-02T00:00:00Z",
+    );
+    let upper = repo.head();
+    for day in 1..=12 {
+        let contents = format!("decoy {day}\n");
+        let date = format!("2000-02-{day:02}T00:00:00Z");
+        repo.commit_at(
+            "ranking.txt",
+            contents.as_bytes(),
+            "Alpha out of scope",
+            &date,
+        );
+    }
+    repo.index();
+
+    let output = repo.run([
+        "search",
+        "alpha beta",
+        "--from-rev",
+        lower.as_str(),
+        "--to-rev",
+        upper.as_str(),
+        "--limit",
+        "1",
+        "--json",
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["materials"][0]["subject"], "Alpha candidate");
+}
+
+#[test]
 fn search_reads_published_cache_and_reuses_it() {
     let repo = TestRepo::new();
     repo.commit(

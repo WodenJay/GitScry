@@ -108,10 +108,9 @@ impl QuerySession {
     pub(crate) fn candidates_scoped(
         &self,
         match_query: &str,
-        limit: i64,
         scope: &SearchFilter,
     ) -> Result<Vec<SearchCandidate>, AppError> {
-        candidates_scoped(&self.connection, match_query, limit, scope)
+        candidates_scoped(&self.connection, match_query, scope)
     }
 
     pub(crate) fn projected_path_keys(&self, oid: &str) -> Result<Vec<String>, AppError> {
@@ -483,19 +482,19 @@ fn match_count_scoped(
 fn candidates_scoped(
     connection: &Connection,
     match_query: &str,
-    limit: i64,
     scope: &SearchFilter,
 ) -> Result<Vec<SearchCandidate>, AppError> {
+    // FTS5 BM25 uses corpus-wide statistics, including out-of-scope commits. Search reranks
+    // every scoped match with candidate-local signals before applying the result limit.
     let query = format!(
         "{SEARCH_SCOPE_CTE}
          SELECT c.commit_id, c.oid, c.commit_time, c.message, c.message_length,
-                bm25(search_fts, 10.0, 3.0, 2.0), c.position
+                0.0, c.position
          FROM search_fts
          JOIN commits AS c ON c.commit_id = search_fts.rowid
          WHERE search_fts MATCH ?5
            AND c.commit_id IN (SELECT commit_id FROM eligible)
-         ORDER BY bm25(search_fts, 10.0, 3.0, 2.0), c.commit_time DESC, c.oid ASC
-         LIMIT ?6"
+         ORDER BY c.commit_time DESC, c.oid ASC"
     );
     let mut statement = connection
         .prepare(&query)
@@ -508,7 +507,6 @@ fn candidates_scoped(
                 scope.since,
                 scope.until,
                 match_query,
-                limit,
             ],
             |row| {
                 let message = decode_message_row(row, 3, 4)?;
