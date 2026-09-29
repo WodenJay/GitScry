@@ -247,7 +247,7 @@ pub(super) fn run_trace_fix(
         let scoped_revisions = session.scoped_revisions(&scope.filter)?;
         reachable.retain(|revision| scoped_revisions.contains(revision));
     }
-    let mut report = analysis::trace_fix(&session, &target, &reachable, limit)?;
+    let mut report = analysis::trace_fix(&session, &target, &reachable, limit, scope.is_some())?;
     if patch {
         analysis::attach_trace_fix_patch_excerpts(&session, &mut report)?;
     }

@@ -637,6 +637,19 @@ fn trace_fix_scope_filters_material_without_retargeting_the_fix() {
     assert_eq!(empty_report["materials"], serde_json::json!([]));
     assert_eq!(empty_report["scope"]["to_rev"], fix);
     assert_eq!(empty_report["scope"]["cache_tip"], cache_tip);
+    assert!(
+        empty_report["notices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|notice| {
+                notice.as_str()
+                    != Some(
+                        "warning: no introducing commit is available in the default-branch cache.",
+                    )
+            }),
+        "a scoped empty result must not claim the cache has no introducing commit: {empty_report}"
+    );
 
     let invalid = repo.run([
         "trace-fix",
