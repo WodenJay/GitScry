@@ -157,31 +157,33 @@ fn render_material(lines: &mut Vec<String>, material: &Material) {
     lines.push(format!("  confidence: {}", material.confidence.as_str()));
     lines.push(format!("  basis: {}", material.basis.join(", ")));
     render_related_commits(lines, material);
-    render_patch(lines, material.patch.as_ref());
+    render_patch(lines, material.patch.as_ref(), "  ");
 }
 
-fn render_patch(lines: &mut Vec<String>, patch: Option<&PatchExcerpt>) {
+pub(super) fn render_patch(lines: &mut Vec<String>, patch: Option<&PatchExcerpt>, indent: &str) {
     let Some(patch) = patch else {
         return;
     };
     let status = match patch.status {
         PatchStatus::Available => "available",
-        PatchStatus::NoRelevantHunks => "No relevant text hunk found.",
+        PatchStatus::NoRelevantHunks | PatchStatus::NoRelevantHunk => {
+            "No relevant text hunk found."
+        }
         PatchStatus::Unavailable => "Text hunk unavailable.",
     };
     lines.push(format!(
-        "  patch excerpt: {status} (commit {})",
+        "{indent}patch excerpt: {status} (commit {})",
         patch.commit_oid
     ));
     for hunk in &patch.hunks {
-        render_patch_hunk(lines, hunk);
+        render_patch_hunk(lines, hunk, indent);
     }
     if patch.truncated {
-        lines.push("  patch excerpt truncated by safety limits.".to_owned());
+        lines.push(format!("{indent}patch excerpt truncated by safety limits."));
     }
 }
 
-fn render_patch_hunk(lines: &mut Vec<String>, hunk: &crate::analysis::PatchHunk) {
+fn render_patch_hunk(lines: &mut Vec<String>, hunk: &crate::analysis::PatchHunk, indent: &str) {
     let old_path = hunk.old_path.as_deref().map(escape::path);
     let new_path = hunk.new_path.as_deref().map(escape::path);
     let path = match (old_path, new_path) {
@@ -192,21 +194,24 @@ fn render_patch_hunk(lines: &mut Vec<String>, hunk: &crate::analysis::PatchHunk)
         (None, None) => "(unknown path)".to_owned(),
     };
     lines.push(format!(
-        "  hunk: {path} (old {}+{}, new {}+{})",
+        "{indent}hunk: {path} (old {}+{}, new {}+{})",
         hunk.old_start, hunk.old_lines, hunk.new_start, hunk.new_lines
     ));
+    let content_indent = format!("{indent}  ");
     if let Some(text) = &hunk.text {
         for line in text
             .split(|byte| *byte == b'\n')
             .filter(|line| !line.is_empty())
         {
-            lines.push(format!("    {}", escape::code_line(line)));
+            lines.push(format!("{content_indent}{}", escape::code_line(line)));
         }
     } else {
-        lines.push("    [hunk text omitted: exceeds the scan limit]".to_owned());
+        lines.push(format!(
+            "{content_indent}[hunk text omitted: exceeds the scan limit]"
+        ));
     }
     if hunk.truncated {
-        lines.push("    [hunk excerpt truncated]".to_owned());
+        lines.push(format!("{content_indent}[hunk excerpt truncated]"));
     }
 }
 

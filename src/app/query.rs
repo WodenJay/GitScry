@@ -177,6 +177,7 @@ pub(super) fn run_timeline(
     limit: usize,
     offset: usize,
     last: bool,
+    patch: bool,
 ) -> Result<Outcome, AppError> {
     let session = cache::open_query()?;
     let revision = match at {
@@ -188,8 +189,11 @@ pub(super) fn run_timeline(
     session.require_revision(&target.revision)?;
     let reachable = session.ancestors(&target.revision)?;
     let history = session.timeline_history(&target.path, &reachable)?;
-    let report =
+    let mut report =
         timeline::Report::from_history(target.revision, target.path, history, limit, offset, last);
+    if patch {
+        analysis::attach_timeline_patch_excerpts(&session, &mut report)?;
+    }
     let progress = session.progress().to_vec();
     let warnings = session.warnings().to_vec();
     let report = QueryReport::Timeline(report);

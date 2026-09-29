@@ -74,7 +74,7 @@ struct JsonMaterial<'a> {
 }
 
 #[derive(Serialize)]
-struct JsonPatch<'a> {
+pub(super) struct JsonPatch<'a> {
     commit_oid: &'a str,
     status: &'static str,
     hunks: Vec<JsonPatchHunk<'a>>,
@@ -112,7 +112,7 @@ struct JsonCitation<'a> {
 
 #[derive(Serialize)]
 #[serde(untagged)]
-enum JsonPath<'a> {
+pub(super) enum JsonPath<'a> {
     Utf8(&'a str),
     Base64 { base64: String },
 }
@@ -189,7 +189,7 @@ fn json_material(material: &Material) -> JsonMaterial<'_> {
     }
 }
 
-fn json_patch(patch: &PatchExcerpt) -> JsonPatch<'_> {
+pub(super) fn json_patch(patch: &PatchExcerpt) -> JsonPatch<'_> {
     JsonPatch {
         commit_oid: &patch.commit_oid,
         status: patch.status.as_str(),
@@ -230,7 +230,7 @@ fn json_citation(citation: &Citation) -> JsonCitation<'_> {
     }
 }
 
-fn json_path(path: &[u8]) -> JsonPath<'_> {
+pub(super) fn json_path(path: &[u8]) -> JsonPath<'_> {
     match std::str::from_utf8(path) {
         Ok(path) => JsonPath::Utf8(path),
         Err(_) => JsonPath::Base64 {

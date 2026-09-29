@@ -19,7 +19,8 @@ use crate::{
 };
 
 pub(crate) use patch::{
-    PatchExcerpt, PatchHunk, PatchStatus, attach_patch_excerpts, attach_trace_fix_patch_excerpts,
+    PatchExcerpt, PatchHunk, PatchStatus, attach_patch_excerpts, attach_timeline_patch_excerpts,
+    attach_trace_fix_patch_excerpts,
 };
 pub(in crate::analysis) use retrieval::anchors_overlap;
 pub(crate) use retrieval::{Intent, message_parts, normalize_path, searchable_text};

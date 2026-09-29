@@ -20,10 +20,11 @@ pub(crate) struct PatchExcerpt {
     pub(crate) truncated: bool,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum PatchStatus {
     Available,
     NoRelevantHunks,
+    NoRelevantHunk,
     Unavailable,
 }
 
@@ -32,6 +33,7 @@ impl PatchStatus {
         match self {
             Self::Available => "available",
             Self::NoRelevantHunks => "no_relevant_hunks",
+            Self::NoRelevantHunk => "no_relevant_hunk",
             Self::Unavailable => "unavailable",
         }
     }
@@ -141,29 +143,9 @@ fn attach_patch_excerpts_with(
                 break;
             }
 
-            let (text, hunk_truncated) = match cached.text {
-                Some(mut text) => {
-                    let allowed = MAX_EXCERPT_BYTES.min(remaining_bytes);
-                    let clipped = text.len() > allowed;
-                    text.truncate(allowed);
-                    (Some(text), clipped)
-                }
-                None => (None, true),
-            };
-            if let Some(text) = &text {
-                remaining_bytes -= text.len();
-            }
-            truncated |= hunk_truncated;
-            hunks.push(PatchHunk {
-                old_path: cached.old_path,
-                new_path: cached.new_path,
-                old_start: cached.old_start,
-                old_lines: cached.old_lines,
-                new_start: cached.new_start,
-                new_lines: cached.new_lines,
-                text,
-                truncated: hunk_truncated,
-            });
+            let excerpt = bounded_patch_hunk(cached, &mut remaining_bytes);
+            truncated |= excerpt.truncated;
+            hunks.push(excerpt);
         }
 
         let status = if !has_cached_hunks
@@ -183,6 +165,97 @@ fn attach_patch_excerpts_with(
         });
     }
     Ok(())
+}
+
+pub(crate) fn attach_timeline_patch_excerpts(
+    session: &QuerySession,
+    report: &mut crate::timeline::Report,
+) -> Result<(), AppError> {
+    report.patch_mode = true;
+    for entry in &mut report.entries {
+        // Keep availability scoped to this change so sibling hunks cannot make
+        // binary or metadata-only entries appear to have an attributable patch.
+        let history = session.patch_history_for_change(
+            &entry.commit_id,
+            entry.change_ordinal,
+            MAX_SCANNED_HUNKS,
+            MAX_CACHED_HUNK_BYTES,
+        )?;
+        let has_change_hunks = !history.hunks.is_empty();
+        let mut truncated = history.truncated;
+        let mut remaining_bytes = MAX_RESULT_EXCERPT_BYTES;
+        let mut hunks = Vec::new();
+
+        for cached in history.hunks {
+            let is_entry_path = [&cached.old_path, &cached.new_path]
+                .into_iter()
+                .flatten()
+                .any(|path| path.as_slice() == entry.path.as_slice());
+            if !is_entry_path {
+                continue;
+            }
+            if hunks.len() == MAX_EXCERPTS || remaining_bytes == 0 {
+                truncated = true;
+                break;
+            }
+
+            let excerpt = bounded_patch_hunk(cached, &mut remaining_bytes);
+            truncated |= excerpt.truncated;
+            hunks.push(excerpt);
+        }
+
+        let status = timeline_patch_status(
+            has_change_hunks,
+            !hunks.is_empty(),
+            history.truncated || history.missing_objects,
+        );
+        entry.patch = Some(PatchExcerpt {
+            commit_oid: entry.commit_id.clone(),
+            status,
+            hunks,
+            truncated,
+        });
+    }
+    Ok(())
+}
+
+fn bounded_patch_hunk(cached: PatchHistoryHunk, remaining_bytes: &mut usize) -> PatchHunk {
+    let (text, truncated) = match cached.text {
+        Some(mut text) => {
+            let allowed = MAX_EXCERPT_BYTES.min(*remaining_bytes);
+            let clipped = text.len() > allowed;
+            text.truncate(allowed);
+            (Some(text), clipped)
+        }
+        None => (None, true),
+    };
+    if let Some(text) = &text {
+        *remaining_bytes -= text.len();
+    }
+    PatchHunk {
+        old_path: cached.old_path,
+        new_path: cached.new_path,
+        old_start: cached.old_start,
+        old_lines: cached.old_lines,
+        new_start: cached.new_start,
+        new_lines: cached.new_lines,
+        text,
+        truncated,
+    }
+}
+
+fn timeline_patch_status(
+    has_change_hunks: bool,
+    has_attributable_hunks: bool,
+    history_incomplete: bool,
+) -> PatchStatus {
+    if !has_change_hunks || (!has_attributable_hunks && history_incomplete) {
+        PatchStatus::Unavailable
+    } else if has_attributable_hunks {
+        PatchStatus::Available
+    } else {
+        PatchStatus::NoRelevantHunk
+    }
 }
 
 fn cached_path_matches(cached: &PatchHistoryHunk, intent: &Intent, path_filter: &[String]) -> bool {
@@ -216,4 +289,29 @@ fn hunk_matches_terms(text: &[u8], intent: &Intent) -> bool {
     let text = String::from_utf8_lossy(text);
     let terms = super::retrieval::tokenize(&text);
     intent.terms().iter().any(|term| terms.contains(term))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PatchStatus, timeline_patch_status};
+
+    #[test]
+    fn timeline_patch_status_separates_availability_from_attribution() {
+        assert_eq!(
+            timeline_patch_status(false, false, false),
+            PatchStatus::Unavailable
+        );
+        assert_eq!(
+            timeline_patch_status(true, false, false),
+            PatchStatus::NoRelevantHunk
+        );
+        assert_eq!(
+            timeline_patch_status(true, false, true),
+            PatchStatus::Unavailable
+        );
+        assert_eq!(
+            timeline_patch_status(true, true, true),
+            PatchStatus::Available
+        );
+    }
 }
