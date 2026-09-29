@@ -34,14 +34,24 @@ pub(crate) enum Command {
     Index,
 
     #[command(
-        about = "Search the default branch history for relevant material",
-        long_about = "Search the default branch history for relevant material.\n\nUse `gitscry search` when you want general historical material about a topic and no specialized command fits: it returns commits whose subjects, bodies, and touched paths answer the query words.\n\nRequired input: one or more QUERY words describing the topic.\n\nExamples:\n\n  gitscry search retry backoff\n\n  gitscry search connection pool --limit 5"
+        group(ArgGroup::new("search-mode").required(true).args(["query", "code"])),
+        about = "Search history or literal changed-code lines",
+        long_about = "Search the published default-branch history for relevant commits or literal changed-code lines.\n\nUse `gitscry search QUERY...` to search commit subjects, bodies, and touched paths. Use `--code TEXT` to find a case-sensitive literal substring in added or removed lines from cached diffs. Code queries are non-empty, single-line text; punctuation and spaces are matched literally. Unchanged context lines are not searched.\n\nIn code mode, `--change added|removed` selects one direction and `--path PATH` matches an exact historical path: additions use the new path and removals use the old path. Rename history is not followed. No file-type filter is applied.\n\nSearch scope: the local cache built from the repository's default branch. Run `gitscry index` to refresh it; incomplete or shallow history is reported as a warning. `--limit` limits matching commits in ordinary mode and matching lines in code mode. `--json` returns structured output.\n\nRequired input: choose one mode—one or more QUERY words, or `--code TEXT`.\n\nExamples:\n\n  gitscry search retry backoff\n\n  gitscry search --code 'unwrap()?' --change added --path src/lib.rs --limit 5",
     )]
     Search {
         /// Query words matched against commit subjects, bodies, and touched paths.
-        #[arg(required = true, num_args = 1..)]
-        query: Vec<String>,
-        /// Maximum number of matches to return.
+        #[arg(num_args = 1..)]
+        query: Option<Vec<String>>,
+        /// Case-sensitive literal substring matched on changed lines.
+        #[arg(long, value_name = "TEXT", value_parser = parse_code_query)]
+        code: Option<String>,
+        /// Restrict code matches to added or removed lines.
+        #[arg(long, value_enum, requires = "code")]
+        change: Option<CodeChange>,
+        /// Exact historical path; additions use the new path, removals the old path.
+        #[arg(long = "path", value_name = "PATH", requires = "code")]
+        path: Option<String>,
+        /// Maximum number of matching commits or changed lines to return.
         #[arg(long, default_value = "10", value_parser = parse_limit)]
         limit: usize,
         /// Output a stable structured JSON report instead of human-readable text.
@@ -195,6 +205,12 @@ pub(crate) enum Command {
     },
 }
 
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub(crate) enum CodeChange {
+    Added,
+    Removed,
+}
+
 impl Command {
     pub(crate) fn uses_json(&self) -> bool {
         match self {
@@ -227,6 +243,17 @@ fn parse_limit(value: &str) -> Result<usize, String> {
     (limit > 0)
         .then_some(limit)
         .ok_or_else(|| "limit must be greater than zero".to_owned())
+}
+
+fn parse_code_query(value: &str) -> Result<String, String> {
+    if value.is_empty()
+        || value
+            .chars()
+            .any(|character| matches!(character, '\n' | '\r'))
+    {
+        return Err("code query must be a non-empty single line".to_owned());
+    }
+    Ok(value.to_owned())
 }
 
 #[cfg(test)]

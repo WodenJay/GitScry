@@ -3,6 +3,7 @@
 //! One reason to change: what a capability returns. Reading and scoring live
 //! in [`super::retrieval`]; wording lives in `render`.
 
+mod code_search;
 mod examples;
 mod failures;
 mod regression;
@@ -11,6 +12,7 @@ mod search;
 mod trace_fix;
 mod why;
 
+pub(crate) use code_search::run as code_search;
 pub(crate) use examples::run as examples;
 pub(crate) use failures::run as failures;
 pub(crate) use relations::{related, tests};

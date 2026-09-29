@@ -20,6 +20,7 @@ pub(crate) use retrieval::{Intent, message_parts, normalize_path, searchable_tex
 pub(crate) struct Report {
     pub(crate) kind: ReportKind,
     pub(crate) materials: Vec<Material>,
+    pub(crate) code_matches: Vec<CodeMatch>,
     pub(crate) matched_count: usize,
     pub(crate) truncated: bool,
     pub(crate) warnings: Vec<String>,
@@ -28,6 +29,7 @@ pub(crate) struct Report {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReportKind {
     Search,
+    CodeSearch,
     Examples,
     Failures,
     Related,
@@ -35,6 +37,30 @@ pub(crate) enum ReportKind {
     Why,
     Regression,
     TraceFix,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum CodeDirection {
+    Added,
+    Removed,
+}
+
+impl CodeDirection {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Added => "added",
+            Self::Removed => "removed",
+        }
+    }
+}
+
+/// An exact changed-line match, with the historical path from that line's side.
+pub(crate) struct CodeMatch {
+    pub(crate) commit_id: String,
+    pub(crate) path: Vec<u8>,
+    pub(crate) direction: CodeDirection,
+    pub(crate) line_number: usize,
+    pub(crate) line: Vec<u8>,
 }
 
 /// One result: the analogous or abandoned change, why it was selected, and its citations.
@@ -164,6 +190,17 @@ pub(crate) fn search(
     capabilities::search(session, intent, limit)
 }
 
+pub(crate) fn code_search(
+    session: &QuerySession,
+    query: &str,
+    path: Option<&str>,
+    direction: Option<CodeDirection>,
+    limit: usize,
+) -> Result<Report, AppError> {
+    validate_limit(limit)?;
+    capabilities::code_search(session, query, path, direction, limit)
+}
+
 pub(crate) fn examples(
     session: &QuerySession,
     intent: &Intent,
@@ -251,6 +288,7 @@ pub(crate) fn report(
     Report {
         kind,
         materials,
+        code_matches: Vec::new(),
         matched_count,
         truncated: matched_count > limit,
         warnings: Vec::new(),
@@ -262,6 +300,7 @@ pub(crate) fn empty_report(kind: ReportKind) -> Report {
     Report {
         kind,
         materials: Vec::new(),
+        code_matches: Vec::new(),
         matched_count: 0,
         truncated: false,
         warnings: Vec::new(),
