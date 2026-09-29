@@ -76,6 +76,11 @@ impl QuerySession {
         &self.warnings
     }
 
+    pub(crate) fn completed_tip(&self) -> Result<String, AppError> {
+        query_metadata(&self.connection, "completed_tip")?
+            .ok_or_else(|| query_error("published cache has no completed tip"))
+    }
+
     pub(crate) fn require_revision(&self, revision: &str) -> Result<(), AppError> {
         let present: i64 = self
             .connection

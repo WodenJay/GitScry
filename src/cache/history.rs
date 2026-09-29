@@ -16,6 +16,7 @@ pub(crate) struct HistoryCommit {
     pub(crate) changes: Vec<PathChange>,
     pub(crate) anchored_ordinals: Vec<i64>,
     pub(crate) parent_count: usize,
+    pub(crate) shallow_boundary: bool,
 }
 
 pub(crate) struct PathChange {
@@ -54,7 +55,15 @@ impl QuerySession {
         path: &[u8],
         reachable: &HashSet<String>,
     ) -> Result<Vec<HistoryCommit>, AppError> {
-        path_history(&self.connection, path, reachable)
+        path_history(&self.connection, path, reachable, true)
+    }
+
+    pub(crate) fn timeline_history(
+        &self,
+        path: &[u8],
+        reachable: &HashSet<String>,
+    ) -> Result<Vec<HistoryCommit>, AppError> {
+        path_history(&self.connection, path, reachable, false)
     }
 
     pub(crate) fn ancestors(&self, oid: &str) -> Result<HashSet<String>, AppError> {
@@ -85,6 +94,7 @@ fn path_history(
     connection: &Connection,
     path: &[u8],
     reachable: &HashSet<String>,
+    follow_copies: bool,
 ) -> Result<Vec<HistoryCommit>, AppError> {
     let mut pending = vec![path.to_vec()];
     let mut visited_paths = HashSet::new();
@@ -99,7 +109,8 @@ fn path_history(
                 "SELECT c.position, c.oid, c.commit_time, c.message, c.message_length,
                         ch.ordinal, ch.status, ch.old_path, ch.new_path,
                         ch.old_blob, ch.new_blob,
-                        (SELECT COUNT(*) FROM commit_parents p WHERE p.commit_id = c.commit_id)
+                        (SELECT COUNT(*) FROM commit_parents p WHERE p.commit_id = c.commit_id),
+                        EXISTS(SELECT 1 FROM shallow_boundaries b WHERE b.oid = c.oid)
                  FROM commits AS c
                  JOIN changes AS ch ON ch.commit_id = c.commit_id
                  WHERE c.commit_id IN (
@@ -128,19 +139,29 @@ fn path_history(
                         new_blob: row.get(10)?,
                     },
                     row.get::<_, i64>(11)?,
+                    row.get::<_, bool>(12)?,
                 ))
             })
             .map_err(|error| search_error("reading anchored history", error))?;
 
         for row in rows {
-            let (position, oid, commit_time, subject, body, change, parent_count) =
+            let (position, oid, commit_time, subject, body, change, parent_count, shallow_boundary) =
                 row.map_err(|error| search_error("reading anchored history", error))?;
             if !reachable.contains(&oid) {
                 continue;
             }
+            let is_rename = change.status.starts_with('R');
+            let is_copy = change.status.starts_with('C');
+            let is_source_copy = !follow_copies
+                && is_copy
+                && change.old_path.as_deref() == Some(path.as_slice())
+                && change.new_path.as_deref() != Some(path.as_slice());
+            if is_source_copy {
+                continue;
+            }
             let anchored = change.old_path.as_deref() == Some(path.as_slice())
                 || change.new_path.as_deref() == Some(path.as_slice());
-            if change.status.starts_with('R') || change.status.starts_with('C') {
+            if is_rename || (follow_copies && is_copy) {
                 if change.new_path.as_deref() == Some(path.as_slice()) {
                     if let Some(old_path) = &change.old_path {
                         pending.push(old_path.clone());
@@ -161,6 +182,7 @@ fn path_history(
                 changes: Vec::new(),
                 anchored_ordinals: Vec::new(),
                 parent_count: usize::try_from(parent_count).unwrap_or(usize::MAX),
+                shallow_boundary,
             });
             if anchored && !entry.anchored_ordinals.contains(&change.ordinal) {
                 entry.anchored_ordinals.push(change.ordinal);

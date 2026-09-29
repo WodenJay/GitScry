@@ -7,14 +7,31 @@ mod escape;
 mod json;
 mod material;
 
+mod timeline;
 use crate::{
     app::{self, AppError, IndexStage, Outcome, Progress, UpdateStage},
     cli::Command,
 };
 use std::io::{self, IsTerminal, Write};
 
-pub(crate) use json::format_json_report;
-pub(crate) use material::format_report;
+pub(crate) fn format_report(report: &app::QueryReport) -> String {
+    match report {
+        app::QueryReport::Analysis(report) => material::format_report(report),
+        app::QueryReport::Timeline(report) => timeline::format_report(report),
+    }
+}
+
+pub(crate) fn format_json_report(
+    report: &app::QueryReport,
+    additional_warnings: &[String],
+) -> Result<String, serde_json::Error> {
+    match report {
+        app::QueryReport::Analysis(report) => json::format_json_report(report, additional_warnings),
+        app::QueryReport::Timeline(report) => {
+            timeline::format_json_report(report, additional_warnings)
+        }
+    }
+}
 
 pub(crate) fn run(command: Command) -> i32 {
     let json_output = command.uses_json();
@@ -163,7 +180,7 @@ fn write_outcome(outcome: Outcome, json_output: bool) -> io::Result<()> {
             writeln!(stderr, "{warning}")?;
         }
         if let Some(report) = &outcome.report {
-            for warning in &report.warnings {
+            for warning in report.warnings() {
                 writeln!(stderr, "{warning}")?;
             }
         }

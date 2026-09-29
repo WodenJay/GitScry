@@ -16,7 +16,7 @@ pub(super) struct Cli {
 const ROOT_LONG_HELP: &str = "\
 Your Git history is a treasure trove. GitScry uncovers the implementation examples, failed approaches, code relationships, and regression context hidden inside.
 
-Pick one command by intent, then run `gitscry <command> --help` for inputs, options, and examples.\n\nQuery commands support `--json` for structured output.";
+Pick one command by intent, then run `gitscry <command> --help` for inputs, options, and examples. Use `gitscry timeline PATH` to inspect a file's complete evolution in the published cache.\n\nQuery commands support `--json` for structured output.";
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
@@ -203,6 +203,29 @@ pub(crate) enum Command {
         #[arg(long)]
         json: bool,
     },
+    #[command(
+        about = "Show a file's complete evolution in the published cache",
+        long_about = "Show a file's complete, chronological evolution within the published GitScry cache. This is a factual history, not a ranking of important changes. The default target is the cache's completed tip, not the working tree or an unindexed HEAD. The selected path must be a file at the target revision. All reachable cached commits are included, including merged-branch commits; entries are ordered by Git topological position from earliest to latest. Detected renames are followed; copies and older file incarnations after deletion/recreation are not. Merge entries compare against the first parent. Use the commit ID and historical path to inspect the underlying change.\n\nRequired input: PATH, a repository-relative file path.\n\nOptions: `--at REV` selects a revision in the published cache; `--limit N` sets the page size (default 10); `--offset N` selects a zero-based page offset; `--last` jumps to the final page and conflicts with `--offset`; `--json` returns structured entries and page metadata.\n\nExamples:\n\n  gitscry timeline src/lib.rs\n\n  gitscry timeline src/lib.rs --at HEAD~3 --limit 5 --last --json"
+    )]
+    Timeline {
+        /// Repository-relative file path at the selected revision.
+        path: String,
+        /// Cached revision containing the file; defaults to the cache's completed tip.
+        #[arg(long, value_name = "REV")]
+        at: Option<String>,
+        /// Maximum number of timeline entries to return.
+        #[arg(long, default_value = "10", value_parser = parse_limit)]
+        limit: usize,
+        /// Zero-based offset into the complete timeline.
+        #[arg(long, conflicts_with = "last", value_parser = parse_offset)]
+        offset: Option<usize>,
+        /// Jump to the final page; conflicts with --offset.
+        #[arg(long, conflicts_with = "offset")]
+        last: bool,
+        /// Output a stable structured JSON report instead of human-readable text.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -221,7 +244,8 @@ impl Command {
             | Self::Tests { json, .. }
             | Self::Regression { json, .. }
             | Self::Why { json, .. }
-            | Self::TraceFix { json, .. } => *json,
+            | Self::TraceFix { json, .. }
+            | Self::Timeline { json, .. } => *json,
             Self::Update | Self::Index => false,
         }
     }
@@ -234,6 +258,12 @@ fn parse_line(value: &str) -> Result<usize, String> {
     (line > 0)
         .then_some(line)
         .ok_or_else(|| "line must be greater than zero".to_owned())
+}
+
+fn parse_offset(value: &str) -> Result<usize, String> {
+    value
+        .parse::<usize>()
+        .map_err(|_| "offset must be a non-negative integer".to_owned())
 }
 
 fn parse_limit(value: &str) -> Result<usize, String> {

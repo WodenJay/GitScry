@@ -110,7 +110,7 @@ fn ordinary_commands_have_a_byte_exact_cli_contract() {
         String::from_utf8_lossy(&indexed.stderr)
     );
 
-    let commands: [(&str, &[&str], &str); 8] = [
+    let commands: [(&str, &[&str], &str); 9] = [
         ("search", &["search", "provider"], "search"),
         (
             "examples",
@@ -139,6 +139,7 @@ fn ordinary_commands_have_a_byte_exact_cli_contract() {
             &["trace-fix", "HEAD", "--path", "src/lib.rs"],
             "trace-fix",
         ),
+        ("timeline", &["timeline", "src/lib.rs"], "timeline"),
     ];
 
     let mut observed = String::new();
@@ -176,42 +177,68 @@ fn ordinary_commands_have_a_byte_exact_cli_contract() {
             });
         assert_eq!(value["schema_version"], 1, "{name}");
         assert_eq!(value["kind"], expected_kind, "{name}");
-        assert!(value["matched_count"].as_u64().is_some(), "{name}");
-        assert!(value["truncated"].is_boolean(), "{name}");
-        assert!(value["materials"].is_array(), "{name}");
         assert!(value["warnings"].is_array(), "{name}");
         assert!(value["notices"].is_array(), "{name}");
-        let materials = value["materials"].as_array().unwrap();
-        assert!(
-            !materials.is_empty(),
-            "{name} should have matching materials"
-        );
-        for material in materials {
-            assert!(material["subject"].is_string(), "{name}");
-            assert!(material["paths"].is_array(), "{name}");
-            assert!(material["confidence"].is_string(), "{name}");
-            assert!(material["basis"].is_array(), "{name}");
-            let citations = material["citations"].as_array().unwrap();
-            for citation in citations {
-                assert_eq!(citation["oid"].as_str().unwrap().len(), 40, "{name}");
-                assert!(citation["abbreviation"].is_string(), "{name}");
-                assert!(citation["subject"].is_string(), "{name}");
-            }
-        }
-        let expected_detail = match name {
-            "examples" => Some("steps"),
-            "failures" => Some("failure"),
-            "related" | "tests" => Some("relation"),
-            "why" => Some("why"),
-            "trace-fix" => Some("trace_fix"),
-            _ => None,
-        };
-        if let Some(expected_detail) = expected_detail {
-            assert_eq!(
-                materials[0]["detail"]["type"].as_str(),
-                Some(expected_detail),
-                "{name}"
+        if name == "timeline" {
+            assert!(
+                value["target_revision"]
+                    .as_str()
+                    .is_some_and(|oid| oid.len() == 40)
             );
+            assert!(value["path"].is_string());
+            assert!(value["total"].as_u64().is_some());
+            assert!(value["offset"].as_u64().is_some());
+            assert!(value["limit"].as_u64().is_some());
+            assert!(value["start"].as_u64().is_some());
+            assert!(value["end"].as_u64().is_some());
+            assert!(value["has_more"].is_boolean());
+            let entries = value["entries"].as_array().unwrap();
+            assert!(!entries.is_empty(), "timeline should contain entries");
+            assert!(
+                entries[0]["commit_id"]
+                    .as_str()
+                    .is_some_and(|oid| oid.len() == 40)
+            );
+            assert!(entries[0]["timestamp"].is_string());
+            assert!(entries[0]["subject"].is_string());
+            assert!(entries[0]["path"].is_string());
+            assert!(entries[0]["change_type"].is_string());
+        } else {
+            assert!(value["matched_count"].as_u64().is_some(), "{name}");
+            assert!(value["truncated"].is_boolean(), "{name}");
+            assert!(value["materials"].is_array(), "{name}");
+            let materials = value["materials"].as_array().unwrap();
+            assert!(
+                !materials.is_empty(),
+                "{name} should have matching materials"
+            );
+            for material in materials {
+                assert!(material["subject"].is_string(), "{name}");
+                assert!(material["paths"].is_array(), "{name}");
+                assert!(material["confidence"].is_string(), "{name}");
+                assert!(material["basis"].is_array(), "{name}");
+                let citations = material["citations"].as_array().unwrap();
+                for citation in citations {
+                    assert_eq!(citation["oid"].as_str().unwrap().len(), 40, "{name}");
+                    assert!(citation["abbreviation"].is_string(), "{name}");
+                    assert!(citation["subject"].is_string(), "{name}");
+                }
+            }
+            let expected_detail = match name {
+                "examples" => Some("steps"),
+                "failures" => Some("failure"),
+                "related" | "tests" => Some("relation"),
+                "why" => Some("why"),
+                "trace-fix" => Some("trace_fix"),
+                _ => None,
+            };
+            if let Some(expected_detail) = expected_detail {
+                assert_eq!(
+                    materials[0]["detail"]["type"].as_str(),
+                    Some(expected_detail),
+                    "{name}"
+                );
+            }
         }
         let stderr = String::from_utf8_lossy(&output.stderr);
         for diagnostic in value["warnings"]
@@ -261,6 +288,11 @@ fn json_flag_is_available_only_for_query_commands() {
     let root = repo.run(["--help"]);
     assert_eq!(root.status.code(), Some(0));
     assert!(String::from_utf8_lossy(&root.stdout).contains("--json"));
+    let root_help = String::from_utf8_lossy(&root.stdout);
+    assert!(
+        root_help.contains("timeline"),
+        "root help should list timeline"
+    );
 
     for name in [
         "search",
@@ -271,6 +303,7 @@ fn json_flag_is_available_only_for_query_commands() {
         "why",
         "regression",
         "trace-fix",
+        "timeline",
     ] {
         let help = repo.run([name, "--help"]);
         assert_eq!(help.status.code(), Some(0), "{name}");
@@ -279,6 +312,16 @@ fn json_flag_is_available_only_for_query_commands() {
             "{name} help must document --json"
         );
     }
+    let timeline_help = repo.run(["timeline", "--help"]);
+    assert_eq!(timeline_help.status.code(), Some(0));
+    let timeline_help = String::from_utf8_lossy(&timeline_help.stdout)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(timeline_help.contains("--at <REV>"));
+    assert!(timeline_help.contains("--limit <LIMIT>"));
+    assert!(timeline_help.contains("--offset <OFFSET>"));
+    assert!(timeline_help.contains("--last"));
     let search_help = repo.run(["search", "--help"]);
     assert_eq!(search_help.status.code(), Some(0));
     let search_help = String::from_utf8_lossy(&search_help.stdout)

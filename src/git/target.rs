@@ -19,6 +19,11 @@ pub(crate) struct WhyTarget {
     pub(crate) anchor_valid: bool,
 }
 
+pub(crate) struct TimelineTarget {
+    pub(crate) revision: String,
+    pub(crate) path: Vec<u8>,
+}
+
 pub(crate) struct RegressionTarget {
     pub(crate) bad_revision: String,
     pub(crate) good_revision: Option<String>,
@@ -48,6 +53,28 @@ pub(crate) struct DeletedLine {
     pub(crate) path: Vec<u8>,
     pub(crate) line: usize,
     pub(crate) blame: Option<Blame>,
+}
+
+pub(super) fn pin_timeline(
+    git: &Git,
+    requested_revision: &str,
+    path: &str,
+) -> Result<TimelineTarget, AppError> {
+    validate_path(path)?;
+    if requested_revision.contains('\0') {
+        return Err(AppError::input("revision must not contain a NUL byte"));
+    }
+    let revision = resolve_revision(git, requested_revision)?;
+    let entry = read_tree_entry(git, &revision, path)?;
+    if entry.kind != "blob" {
+        return Err(AppError::input(format!(
+            "path is not a file at timeline revision: {path}"
+        )));
+    }
+    Ok(TimelineTarget {
+        revision,
+        path: path.as_bytes().to_vec(),
+    })
 }
 
 pub(super) fn pin_trace_fix(

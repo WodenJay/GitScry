@@ -8,6 +8,7 @@ use crate::app::{AppError, IndexStage};
 
 pub(crate) use history::{Change, Commit, HistoryTarget, Hunk, PatchStream, Snapshot};
 use process::Git;
+pub(crate) use target::TimelineTarget;
 pub(crate) use target::{DeletedLine, RegressionTarget, TraceFixTarget, WhyAnchor, WhyTarget};
 
 pub(crate) struct Repository {
@@ -41,6 +42,14 @@ impl Repository {
         anchor: WhyAnchor,
     ) -> Result<WhyTarget, AppError> {
         target::pin(&self.git, Some(revision), path, anchor)
+    }
+
+    pub(crate) fn pin_timeline_target(
+        &self,
+        revision: &str,
+        path: &str,
+    ) -> Result<TimelineTarget, AppError> {
+        target::pin_timeline(&self.git, revision, path)
     }
 
     pub(crate) fn pin_regression_target(

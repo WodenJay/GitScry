@@ -1,16 +1,17 @@
-use super::{AppError, Outcome};
+use super::{AppError, Outcome, QueryReport};
 use crate::{
     analysis, cache,
     git::{Repository, WhyAnchor},
-    render,
+    render, timeline,
 };
 use std::path::Path;
 
 fn query_outcome(session: &cache::QuerySession, report: analysis::Report) -> Outcome {
     let progress = session.progress().to_vec();
     let warnings = session.warnings().to_vec();
+    let report = QueryReport::Analysis(report);
     let message = render::format_report(&report);
-    let notices = report.notices.clone();
+    let notices = report.notices().to_vec();
     Outcome {
         progress,
         warnings,
@@ -113,6 +114,38 @@ pub(super) fn run_why(
     let reachable = session.ancestors(&target.revision)?;
     let report = analysis::why(&session, &target, &reachable, limit)?;
     Ok(query_outcome(&session, report))
+}
+
+pub(super) fn run_timeline(
+    path: String,
+    at: Option<String>,
+    limit: usize,
+    offset: usize,
+    last: bool,
+) -> Result<Outcome, AppError> {
+    let session = cache::open_query()?;
+    let revision = match at {
+        Some(revision) => revision,
+        None => session.completed_tip()?,
+    };
+    let repository = Repository::discover()?;
+    let target = repository.pin_timeline_target(&revision, &path)?;
+    session.require_revision(&target.revision)?;
+    let reachable = session.ancestors(&target.revision)?;
+    let history = session.timeline_history(&target.path, &reachable)?;
+    let report =
+        timeline::Report::from_history(target.revision, target.path, history, limit, offset, last);
+    let progress = session.progress().to_vec();
+    let warnings = session.warnings().to_vec();
+    let report = QueryReport::Timeline(report);
+    let message = render::format_report(&report);
+    Ok(Outcome {
+        progress,
+        warnings,
+        message,
+        notices: Vec::new(),
+        report: Some(report),
+    })
 }
 
 pub(super) fn run_trace_fix(
