@@ -190,6 +190,7 @@ pub(crate) fn run(
         truncated: matched_count > limit,
         warnings: Vec::new(),
         notices: Vec::new(),
+        patch_mode: false,
     })
 }
 

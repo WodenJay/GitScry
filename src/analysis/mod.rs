@@ -6,6 +6,7 @@
 //! retrieval mechanics stay private, and all user-visible wording belongs to `render`.
 
 mod capabilities;
+mod patch;
 mod provenance;
 mod retrieval;
 
@@ -14,6 +15,8 @@ use std::{collections::HashSet, path::Path};
 use crate::git::{TraceFixTarget, WhyTarget};
 use crate::{app::AppError, cache::QuerySession};
 
+pub(crate) use patch::{PatchExcerpt, PatchHunk, PatchStatus, attach_patch_excerpts};
+pub(in crate::analysis) use retrieval::anchors_overlap;
 pub(crate) use retrieval::{Intent, message_parts, normalize_path, searchable_text};
 
 /// The complete `material` one capability returns.
@@ -23,6 +26,7 @@ pub(crate) struct Report {
     pub(crate) code_matches: Vec<CodeMatch>,
     pub(crate) matched_count: usize,
     pub(crate) truncated: bool,
+    pub(crate) patch_mode: bool,
     pub(crate) warnings: Vec<String>,
     pub(crate) notices: Vec<String>,
 }
@@ -72,6 +76,7 @@ pub(crate) struct Material {
     /// The subject commit first, then every commit that supports this material.
     pub(crate) citations: Vec<Citation>,
     pub(crate) detail: Option<Detail>,
+    pub(crate) patch: Option<PatchExcerpt>,
 }
 
 /// Capability-specific material beyond the shared citation/basis shape.
@@ -293,6 +298,7 @@ pub(crate) fn report(
         truncated: matched_count > limit,
         warnings: Vec::new(),
         notices: Vec::new(),
+        patch_mode: false,
     }
 }
 
@@ -305,5 +311,6 @@ pub(crate) fn empty_report(kind: ReportKind) -> Report {
         truncated: false,
         warnings: Vec::new(),
         notices: Vec::new(),
+        patch_mode: false,
     }
 }

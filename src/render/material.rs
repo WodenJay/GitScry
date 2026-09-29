@@ -1,4 +1,6 @@
-use crate::analysis::{Detail, Failure, Material, Relation, Report, ReportKind, Step};
+use crate::analysis::{
+    Detail, Failure, Material, PatchExcerpt, PatchStatus, Relation, Report, ReportKind, Step,
+};
 
 /// Printed when history does not state why an approach failed.
 const REASON_UNKNOWN: &str = "Reason unknown";
@@ -128,6 +130,57 @@ fn render_material(lines: &mut Vec<String>, material: &Material) {
     lines.push(format!("  confidence: {}", material.confidence.as_str()));
     lines.push(format!("  basis: {}", material.basis.join(", ")));
     render_related_commits(lines, material);
+    render_patch(lines, material.patch.as_ref());
+}
+
+fn render_patch(lines: &mut Vec<String>, patch: Option<&PatchExcerpt>) {
+    let Some(patch) = patch else {
+        return;
+    };
+    let status = match patch.status {
+        PatchStatus::Available => "available",
+        PatchStatus::NoRelevantHunks => "no relevant cached hunks",
+        PatchStatus::Unavailable => "cached patch material unavailable",
+    };
+    lines.push(format!(
+        "  patch excerpt: {status} (commit {})",
+        patch.commit_oid
+    ));
+    for hunk in &patch.hunks {
+        render_patch_hunk(lines, hunk);
+    }
+    if patch.truncated {
+        lines.push("  patch excerpt truncated by display limits.".to_owned());
+    }
+}
+
+fn render_patch_hunk(lines: &mut Vec<String>, hunk: &crate::analysis::PatchHunk) {
+    let old_path = hunk.old_path.as_deref().map(escape::path);
+    let new_path = hunk.new_path.as_deref().map(escape::path);
+    let path = match (old_path, new_path) {
+        (Some(old), Some(new)) if old != new => format!("{old} -> {new}"),
+        (Some(_), Some(new)) => new,
+        (Some(old), None) => old,
+        (None, Some(new)) => new,
+        (None, None) => "(unknown path)".to_owned(),
+    };
+    lines.push(format!(
+        "  hunk: {path} (old {}+{}, new {}+{})",
+        hunk.old_start, hunk.old_lines, hunk.new_start, hunk.new_lines
+    ));
+    if let Some(text) = &hunk.text {
+        for line in text
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+        {
+            lines.push(format!("    {}", escape::code_line(line)));
+        }
+    } else {
+        lines.push("    [hunk text omitted: exceeds the scan limit]".to_owned());
+    }
+    if hunk.truncated {
+        lines.push("    [hunk excerpt truncated]".to_owned());
+    }
 }
 
 fn render_relation(lines: &mut Vec<String>, material: &Material, relation: &Relation) {

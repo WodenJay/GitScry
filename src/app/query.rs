@@ -36,6 +36,24 @@ pub(super) fn run(
     Ok(query_outcome(&session, report))
 }
 
+pub(super) fn run_with_patch(
+    words: Vec<String>,
+    paths: Vec<String>,
+    limit: usize,
+    path_only: bool,
+    capability: impl FnOnce(
+        &cache::QuerySession,
+        &analysis::Intent,
+        usize,
+    ) -> Result<analysis::Report, AppError>,
+) -> Result<Outcome, AppError> {
+    let intent = analysis::Intent::parse(&words, &paths)?;
+    let session = cache::open_query()?;
+    let mut report = capability(&session, &intent, limit)?;
+    analysis::attach_patch_excerpts(&session, &intent, &mut report, path_only)?;
+    Ok(query_outcome(&session, report))
+}
+
 /// Run a literal changed-code query without tokenizing its text as a topic.
 pub(super) fn run_code(
     query: String,

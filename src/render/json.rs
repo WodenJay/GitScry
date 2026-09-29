@@ -2,7 +2,8 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::Serialize;
 
 use crate::analysis::{
-    Citation, CodeMatch, Confidence, Detail, Failure, Material, Relation, Report, ReportKind, Step,
+    Citation, CodeMatch, Confidence, Detail, Failure, Material, PatchExcerpt, PatchHunk, Relation,
+    Report, ReportKind, Step,
 };
 
 const SCHEMA_VERSION: u8 = 1;
@@ -13,7 +14,7 @@ pub(crate) fn format_json_report(
 ) -> Result<String, serde_json::Error> {
     let warnings = additional_warnings.iter().chain(&report.warnings).collect();
     serde_json::to_string(&JsonReport {
-        schema_version: SCHEMA_VERSION,
+        schema_version: if report.patch_mode { 2 } else { SCHEMA_VERSION },
         kind: report_kind(report.kind),
         matched_count: report.matched_count,
         truncated: report.truncated,
@@ -46,6 +47,28 @@ struct JsonMaterial<'a> {
     basis: &'a [String],
     citations: Vec<JsonCitation<'a>>,
     detail: Option<JsonDetail<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    patch: Option<JsonPatch<'a>>,
+}
+
+#[derive(Serialize)]
+struct JsonPatch<'a> {
+    commit_oid: &'a str,
+    status: &'static str,
+    hunks: Vec<JsonPatchHunk<'a>>,
+    truncated: bool,
+}
+
+#[derive(Serialize)]
+struct JsonPatchHunk<'a> {
+    old_path: Option<JsonPath<'a>>,
+    new_path: Option<JsonPath<'a>>,
+    old_start: i64,
+    old_lines: i64,
+    new_start: i64,
+    new_lines: i64,
+    text: Option<JsonPath<'a>>,
+    truncated: bool,
 }
 
 #[derive(Serialize)]
@@ -140,6 +163,29 @@ fn json_material(material: &Material) -> JsonMaterial<'_> {
         basis: &material.basis,
         citations: material.citations.iter().map(json_citation).collect(),
         detail: material.detail.as_ref().map(json_detail),
+        patch: material.patch.as_ref().map(json_patch),
+    }
+}
+
+fn json_patch(patch: &PatchExcerpt) -> JsonPatch<'_> {
+    JsonPatch {
+        commit_oid: &patch.commit_oid,
+        status: patch.status.as_str(),
+        hunks: patch.hunks.iter().map(json_patch_hunk).collect(),
+        truncated: patch.truncated,
+    }
+}
+
+fn json_patch_hunk(hunk: &PatchHunk) -> JsonPatchHunk<'_> {
+    JsonPatchHunk {
+        old_path: hunk.old_path.as_deref().map(json_path),
+        new_path: hunk.new_path.as_deref().map(json_path),
+        old_start: hunk.old_start,
+        old_lines: hunk.old_lines,
+        new_start: hunk.new_start,
+        new_lines: hunk.new_lines,
+        text: hunk.text.as_deref().map(json_path),
+        truncated: hunk.truncated,
     }
 }
 

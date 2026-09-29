@@ -9,7 +9,7 @@ use crate::{
     git::{Change, Commit, Hunk, PatchStream, Snapshot},
 };
 pub(crate) use generation::prepare;
-pub(crate) use history::{CodeHunk, HistoryCommit, HistoryHunk};
+pub(crate) use history::{CodeHunk, HistoryCommit, HistoryHunk, PatchHistory, PatchHistoryHunk};
 use payload::{HunkReader, HunkWriter, encode};
 pub(crate) use query::RelationHistory;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params, params_from_iter};

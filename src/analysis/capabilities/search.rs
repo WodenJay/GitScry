@@ -39,6 +39,7 @@ pub(crate) fn run(
                 basis,
                 citations: vec![Citation::new(candidate.oid, candidate.subject)],
                 detail: None,
+                patch: None,
             }
         })
         .collect::<Vec<_>>();
