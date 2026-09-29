@@ -208,6 +208,9 @@ pub(crate) enum Command {
         /// Output a stable structured JSON report instead of human-readable text.
         #[arg(long)]
         json: bool,
+        /// Include bounded cached hunks attributed to the introducing change.
+        #[arg(long)]
+        patch: bool,
     },
     #[command(
         about = "Show a file's complete evolution in the published cache",

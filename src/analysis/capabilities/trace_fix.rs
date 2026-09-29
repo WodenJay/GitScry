@@ -8,7 +8,9 @@ use crate::{
 
 use super::super::provenance;
 use super::super::retrieval;
-use super::super::{Citation, Confidence, Detail, Material, Report, ReportKind, TraceFixDetail};
+use super::super::{
+    Citation, Confidence, Detail, Material, Report, ReportKind, TraceFixDetail, TraceFixPatchAnchor,
+};
 
 type PathHistories = HashMap<Vec<u8>, HashMap<String, retrieval::HistoryCommit>>;
 struct Evidence {
@@ -23,6 +25,7 @@ struct Evidence {
     movement: Option<(String, String)>,
     paths: Vec<Vec<u8>>,
     lines: Vec<usize>,
+    patch_anchors: Vec<TraceFixPatchAnchor>,
 }
 
 pub(crate) fn run(
@@ -137,6 +140,7 @@ pub(crate) fn run(
                         fix_revision: target.revision.clone(),
                         parent_revision: target.parent.clone(),
                         line: first_line,
+                        patch_anchors: evidence.patch_anchors,
                     })),
                     patch: None,
                 },
@@ -239,7 +243,8 @@ fn collect_evidence(
             .filter(|candidate| pre_fix.is_empty() || pre_fix.contains(&candidate.oid))
             .max_by_key(|candidate| candidate.position)
             .map(|candidate| (candidate.oid.clone(), candidate.subject.clone()));
-        let mut paths = anchored_paths(history);
+        let introducing_paths = anchored_paths(history);
+        let mut paths = introducing_paths.clone();
         if let Some((movement_oid, _)) = &movement
             && let Some(movement_history) = path_histories.get(movement_oid)
         {
@@ -261,6 +266,7 @@ fn collect_evidence(
             failure: failure.clone(),
             movement: movement.clone(),
             paths,
+            patch_anchors: Vec::new(),
             lines: Vec::new(),
         });
         if let Some(reference) = shared_reference {
@@ -270,6 +276,10 @@ fn collect_evidence(
             evidence.paths.push(deleted.path.clone());
         }
         evidence.lines.push(deleted.line);
+        evidence.patch_anchors.push(TraceFixPatchAnchor {
+            line: blame.original_line,
+            paths: introducing_paths,
+        });
         evidence.boundary |= shallow && blame.boundary;
     }
     by_oid.into_values().collect()

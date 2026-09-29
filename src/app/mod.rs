@@ -144,8 +144,9 @@ pub(crate) fn execute(
             fix_revision,
             paths,
             limit,
+            patch,
             ..
-        } => query::run_trace_fix(fix_revision, paths, limit),
+        } => query::run_trace_fix(fix_revision, paths, limit, patch),
         Command::Timeline {
             path,
             at,
