@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use super::{Intent, Report, anchors_overlap};
 use crate::{
     app::AppError,
@@ -5,7 +7,8 @@ use crate::{
 };
 
 const MAX_SCANNED_HUNKS: usize = 64;
-const MAX_EXCERPTS: usize = 8;
+const MAX_EXCERPTS: usize = 16;
+const MAX_EXCERPT_FILES: usize = 8;
 const MAX_CACHED_HUNK_BYTES: usize = 64 * 1024;
 const MAX_EXCERPT_BYTES: usize = 8 * 1024;
 const MAX_RESULT_EXCERPT_BYTES: usize = 32 * 1024;
@@ -50,8 +53,13 @@ pub(crate) fn attach_patch_excerpts(
     intent: &Intent,
     report: &mut Report,
     path_only: bool,
+    path_filter: &[String],
 ) -> Result<(), AppError> {
     report.patch_mode = true;
+    let path_anchors = path_filter
+        .iter()
+        .map(|path| super::normalize_path(path.as_bytes()))
+        .collect::<Vec<_>>();
     for material in &mut report.materials {
         let Some(citation) = material.citations.first() else {
             material.patch = Some(PatchExcerpt {
@@ -66,26 +74,41 @@ pub(crate) fn attach_patch_excerpts(
         let history: PatchHistory =
             session.patch_history(&citation.oid, MAX_SCANNED_HUNKS, MAX_CACHED_HUNK_BYTES)?;
         let has_cached_hunks = !history.hunks.is_empty();
-        let mut truncated = history.truncated || history.missing_objects;
+        let mut truncated = history.truncated;
         let mut hunks = Vec::new();
         let mut remaining_bytes = MAX_RESULT_EXCERPT_BYTES;
+        let mut excerpt_paths = HashSet::new();
 
         for cached in history.hunks {
-            let path_match = cached_path_matches(&cached, intent);
-            if (path_only && !path_match)
-                || (!path_only
-                    && !path_match
-                    && !cached
-                        .text
-                        .as_deref()
-                        .is_some_and(|text| hunk_matches_terms(text, intent)))
-            {
+            let path_match = cached_path_matches(&cached, intent, &path_anchors);
+            let text_matches = cached
+                .text
+                .as_deref()
+                .is_some_and(|text| hunk_matches_terms(text, intent));
+            let relevant = if path_only {
+                path_match && text_matches
+            } else {
+                path_match || text_matches
+            };
+            if !relevant {
                 continue;
             }
             if hunks.len() == MAX_EXCERPTS {
                 truncated = true;
                 break;
             }
+            let cached_paths = [&cached.old_path, &cached.new_path]
+                .into_iter()
+                .flatten()
+                .cloned()
+                .collect::<HashSet<_>>();
+            if excerpt_paths.len() + cached_paths.difference(&excerpt_paths).count()
+                > MAX_EXCERPT_FILES
+            {
+                truncated = true;
+                break;
+            }
+            excerpt_paths.extend(cached_paths);
             if remaining_bytes == 0 {
                 truncated = true;
                 break;
@@ -116,7 +139,9 @@ pub(crate) fn attach_patch_excerpts(
             });
         }
 
-        let status = if !has_cached_hunks {
+        let status = if !has_cached_hunks
+            || (hunks.is_empty() && (history.truncated || history.missing_objects))
+        {
             PatchStatus::Unavailable
         } else if hunks.is_empty() {
             PatchStatus::NoRelevantHunks
@@ -133,13 +158,18 @@ pub(crate) fn attach_patch_excerpts(
     Ok(())
 }
 
-fn cached_path_matches(cached: &PatchHistoryHunk, intent: &Intent) -> bool {
+fn cached_path_matches(cached: &PatchHistoryHunk, intent: &Intent, path_filter: &[String]) -> bool {
     let paths = [&cached.old_path, &cached.new_path]
         .into_iter()
         .flatten()
         .cloned()
         .collect::<Vec<_>>();
-    anchors_overlap(&paths, intent.anchors()) > 0
+    let anchors = if path_filter.is_empty() {
+        intent.anchors()
+    } else {
+        path_filter
+    };
+    anchors_overlap(&paths, anchors) > 0
 }
 
 fn hunk_matches_terms(text: &[u8], intent: &Intent) -> bool {

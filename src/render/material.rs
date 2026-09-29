@@ -139,8 +139,8 @@ fn render_patch(lines: &mut Vec<String>, patch: Option<&PatchExcerpt>) {
     };
     let status = match patch.status {
         PatchStatus::Available => "available",
-        PatchStatus::NoRelevantHunks => "no relevant cached hunks",
-        PatchStatus::Unavailable => "cached patch material unavailable",
+        PatchStatus::NoRelevantHunks => "No relevant text hunk found.",
+        PatchStatus::Unavailable => "Text hunk unavailable.",
     };
     lines.push(format!(
         "  patch excerpt: {status} (commit {})",
@@ -150,7 +150,7 @@ fn render_patch(lines: &mut Vec<String>, patch: Option<&PatchExcerpt>) {
         render_patch_hunk(lines, hunk);
     }
     if patch.truncated {
-        lines.push("  patch excerpt truncated by display limits.".to_owned());
+        lines.push("  patch excerpt truncated by safety limits.".to_owned());
     }
 }
 

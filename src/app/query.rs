@@ -50,7 +50,7 @@ pub(super) fn run_with_patch(
     let intent = analysis::Intent::parse(&words, &paths)?;
     let session = cache::open_query()?;
     let mut report = capability(&session, &intent, limit)?;
-    analysis::attach_patch_excerpts(&session, &intent, &mut report, path_only)?;
+    analysis::attach_patch_excerpts(&session, &intent, &mut report, path_only, &paths)?;
     Ok(query_outcome(&session, report))
 }
 
