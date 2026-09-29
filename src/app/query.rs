@@ -5,7 +5,7 @@ use crate::{
     git::{Repository, WhyAnchor},
     render, timeline,
 };
-use std::path::Path;
+use std::{collections::HashSet, path::Path};
 
 fn query_outcome(session: &cache::QuerySession, report: analysis::Report) -> Outcome {
     let progress = session.progress().to_vec();
@@ -21,6 +21,19 @@ fn query_outcome(session: &cache::QuerySession, report: analysis::Report) -> Out
         report: Some(report),
     }
 }
+
+fn intersect_scope(
+    session: &cache::QuerySession,
+    scope: Option<&search_scope::ResolvedSearchScope>,
+    reachable: &mut HashSet<String>,
+) -> Result<(), AppError> {
+    if let Some(scope) = scope {
+        let scoped_revisions = session.scoped_revisions(&scope.filter)?;
+        reachable.retain(|revision| scoped_revisions.contains(revision));
+    }
+    Ok(())
+}
+
 /// One query command: build the intent, open the published cache, run the capability, render it.
 pub(super) fn run(
     words: Vec<String>,
@@ -129,20 +142,28 @@ pub(super) fn run_paths(
     Ok(query_outcome(&session, report))
 }
 
+pub(super) struct RegressionWindow {
+    pub(super) good: Option<String>,
+    pub(super) bad: String,
+}
+
 pub(super) fn run_regression(
     words: Vec<String>,
     path: String,
     symbol: Option<String>,
-    good: Option<String>,
-    bad: String,
+    window: RegressionWindow,
     limit: usize,
     patch: bool,
     scope_options: SearchScopeOptions,
 ) -> Result<Outcome, AppError> {
     let intent = analysis::Intent::symptom(&words, &path)?;
     let repository = Repository::discover()?;
-    let target =
-        repository.pin_regression_target(&bad, good.as_deref(), &path, symbol.as_deref())?;
+    let target = repository.pin_regression_target(
+        &window.bad,
+        window.good.as_deref(),
+        &path,
+        symbol.as_deref(),
+    )?;
     let session = cache::open_query()?;
     session.require_revision(&target.bad_revision)?;
     if let Some(good_revision) = &target.good_revision {
@@ -156,10 +177,7 @@ pub(super) fn run_regression(
     } else {
         bad_reachable
     };
-    if let Some(scope) = &scope {
-        let scoped_revisions = session.scoped_revisions(&scope.filter)?;
-        reachable.retain(|revision| scoped_revisions.contains(revision));
-    }
+    intersect_scope(&session, scope.as_ref(), &mut reachable)?;
     let mut report = analysis::regression(&session, &intent, &target, &reachable, limit)?;
     if patch {
         analysis::attach_regression_patch_excerpts(
@@ -243,10 +261,7 @@ pub(super) fn run_trace_fix(
     session.require_revision(&target.revision)?;
     let scope = search_scope::resolve(&session, scope_options, Some(&target.revision))?;
     let mut reachable = session.ancestors(&target.revision)?;
-    if let Some(scope) = &scope {
-        let scoped_revisions = session.scoped_revisions(&scope.filter)?;
-        reachable.retain(|revision| scoped_revisions.contains(revision));
-    }
+    intersect_scope(&session, scope.as_ref(), &mut reachable)?;
     let mut report = analysis::trace_fix(&session, &target, &reachable, limit, scope.is_some())?;
     if patch {
         analysis::attach_trace_fix_patch_excerpts(&session, &mut report)?;

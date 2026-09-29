@@ -10,7 +10,7 @@ use args::Cli;
 pub(crate) use args::{CodeChange, Command};
 
 pub(crate) enum Parsed {
-    Command(Command),
+    Command(Box<Command>),
     Display(String),
 }
 
@@ -20,7 +20,7 @@ where
     T: Into<OsString> + Clone,
 {
     match Cli::try_parse_from(arguments) {
-        Ok(cli) => Ok(Parsed::Command(cli.command)),
+        Ok(cli) => Ok(Parsed::Command(Box::new(cli.command))),
         Err(error)
             if matches!(
                 error.kind(),

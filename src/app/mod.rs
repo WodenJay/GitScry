@@ -146,7 +146,15 @@ pub(crate) fn execute(
                 since,
                 until,
             };
-            query::run_regression(symptom, path, symbol, good, bad, limit, patch, scope)
+            query::run_regression(
+                symptom,
+                path,
+                symbol,
+                query::RegressionWindow { good, bad },
+                limit,
+                patch,
+                scope,
+            )
         }
         Command::Why {
             path,
