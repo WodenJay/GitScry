@@ -103,29 +103,35 @@ pub(super) fn run_code_search(
     }
     Ok(query_outcome(&session, report))
 }
-
 /// One path query: build the intent, open the published cache, run the capability, render it.
 pub(super) fn run_paths(
     paths: Vec<String>,
     limit: usize,
     include_all_citations: bool,
+    scope_options: SearchScopeOptions,
     capability: impl FnOnce(
         &cache::QuerySession,
         &analysis::Intent,
         &Path,
         usize,
         bool,
+        Option<&cache::SearchFilter>,
     ) -> Result<analysis::Report, AppError>,
 ) -> Result<Outcome, AppError> {
     let intent = analysis::Intent::paths(&paths)?;
     let session = cache::open_query()?;
-    let report = capability(
+    let scope = search_scope::resolve(&session, scope_options)?;
+    let mut report = capability(
         &session,
         &intent,
         session.root(),
         limit,
         include_all_citations,
+        scope.as_ref().map(|scope| &scope.filter),
     )?;
+    if let Some(scope) = scope {
+        report.scope = Some(scope.report);
+    }
     Ok(query_outcome(&session, report))
 }
 

@@ -7,7 +7,7 @@ use clap::{Parser, error::ErrorKind};
 use crate::app::AppError;
 
 use args::Cli;
-pub(crate) use args::{CodeChange, Command};
+pub(crate) use args::{CodeChange, Command, HistoricalScopeArgs};
 
 pub(crate) enum Parsed {
     Command(Command),

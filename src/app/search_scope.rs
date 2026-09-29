@@ -13,6 +13,17 @@ pub(super) struct SearchScopeOptions {
     pub(super) until: Option<String>,
 }
 
+impl From<crate::cli::HistoricalScopeArgs> for SearchScopeOptions {
+    fn from(scope: crate::cli::HistoricalScopeArgs) -> Self {
+        Self {
+            from_rev: scope.from_rev,
+            to_rev: scope.to_rev,
+            since: scope.since,
+            until: scope.until,
+        }
+    }
+}
+
 impl SearchScopeOptions {
     pub(super) fn is_empty(&self) -> bool {
         self.from_rev.is_none()

@@ -3,7 +3,10 @@ use std::{
     path::Path,
 };
 
-use crate::{app::AppError, cache::QuerySession};
+use crate::{
+    app::AppError,
+    cache::{QuerySession, SearchFilter},
+};
 
 use super::super::retrieval;
 use super::super::{Citation, Confidence, Detail, Intent, Material, Relation, Report, ReportKind};
@@ -36,6 +39,7 @@ pub(crate) fn related(
     worktree_root: &Path,
     limit: usize,
     include_all_citations: bool,
+    scope: Option<&SearchFilter>,
 ) -> Result<Report, AppError> {
     run(
         session,
@@ -44,6 +48,7 @@ pub(crate) fn related(
         limit,
         false,
         include_all_citations,
+        scope,
     )
 }
 
@@ -53,6 +58,7 @@ pub(crate) fn tests(
     worktree_root: &Path,
     limit: usize,
     include_all_citations: bool,
+    scope: Option<&SearchFilter>,
 ) -> Result<Report, AppError> {
     run(
         session,
@@ -61,6 +67,7 @@ pub(crate) fn tests(
         limit,
         true,
         include_all_citations,
+        scope,
     )
 }
 
@@ -71,6 +78,7 @@ fn run(
     limit: usize,
     tests_only: bool,
     include_all_citations: bool,
+    scope: Option<&SearchFilter>,
 ) -> Result<Report, AppError> {
     let seed_keys = intent.anchors().iter().cloned().collect::<HashSet<_>>();
     let seed_list = seed_keys.iter().cloned().collect::<Vec<_>>();
@@ -79,7 +87,7 @@ fn run(
         seed_touch_commits,
         eligible_commits,
         mass_changes_filtered,
-    } = session.relation_history(&seed_list, MASS_CHANGE_PATH_LIMIT)?;
+    } = session.relation_history(&seed_list, MASS_CHANGE_PATH_LIMIT, scope)?;
     let mut omitted_test_path = false;
     let mut ranked = Vec::new();
 

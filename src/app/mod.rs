@@ -121,12 +121,18 @@ pub(crate) fn execute(
             limit,
             ..
         } => query::run(query, paths, limit, analysis::failures),
-        Command::Related { paths, limit, .. } => {
-            query::run_paths(paths, limit, json_output, analysis::related)
-        }
-        Command::Tests { paths, limit, .. } => {
-            query::run_paths(paths, limit, json_output, analysis::tests)
-        }
+        Command::Related {
+            paths,
+            limit,
+            scope,
+            ..
+        } => query::run_paths(paths, limit, json_output, scope.into(), analysis::related),
+        Command::Tests {
+            paths,
+            limit,
+            scope,
+            ..
+        } => query::run_paths(paths, limit, json_output, scope.into(), analysis::tests),
         Command::Regression {
             symptom,
             path,
