@@ -41,6 +41,7 @@ pub(crate) struct Report {
 pub(crate) struct SearchScopeInfo {
     pub(crate) from_rev: Option<String>,
     pub(crate) to_rev: String,
+    pub(crate) target_rev: Option<String>,
     pub(crate) since: Option<String>,
     pub(crate) until: Option<String>,
     pub(crate) cache_tip: String,
@@ -263,10 +264,11 @@ pub(crate) fn why(
     session: &QuerySession,
     target: &WhyTarget,
     reachable: &HashSet<String>,
+    eligible_revisions: Option<&HashSet<String>>,
     limit: usize,
 ) -> Result<Report, AppError> {
     validate_limit(limit)?;
-    capabilities::why(session, target, reachable, limit)
+    capabilities::why(session, target, reachable, eligible_revisions, limit)
 }
 
 pub(crate) fn attach_why_patch_excerpts(

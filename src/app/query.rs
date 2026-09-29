@@ -172,16 +172,29 @@ pub(super) fn run_why(
     anchor: WhyAnchor,
     limit: usize,
     patch: bool,
+    scope_options: SearchScopeOptions,
 ) -> Result<Outcome, AppError> {
     let repository = Repository::discover()?;
     let target = repository.pin_why_target(&revision, &path, anchor)?;
     let session = cache::open_query()?;
     session.require_revision(&target.revision)?;
+    let scope = search_scope::resolve_for_target(&session, scope_options, &target.revision)?;
     let reachable = session.ancestors(&target.revision)?;
-    let mut report = analysis::why(&session, &target, &reachable, limit)?;
+    let eligible_revisions = scope
+        .as_ref()
+        .map(|scope| session.scoped_revisions(&scope.filter, &target.revision))
+        .transpose()?;
+    let mut report = analysis::why(
+        &session,
+        &target,
+        &reachable,
+        eligible_revisions.as_ref(),
+        limit,
+    )?;
     if patch {
         analysis::attach_why_patch_excerpts(&session, &target, &reachable, &mut report)?;
     }
+    report.scope = scope.map(|scope| scope.report);
     Ok(query_outcome(&session, report))
 }
 
@@ -192,6 +205,7 @@ pub(super) fn run_timeline(
     offset: usize,
     last: bool,
     patch: bool,
+    scope_options: SearchScopeOptions,
 ) -> Result<Outcome, AppError> {
     let session = cache::open_query()?;
     let revision = match at {
@@ -201,10 +215,23 @@ pub(super) fn run_timeline(
     let repository = Repository::discover()?;
     let target = repository.pin_timeline_target(&revision, &path)?;
     session.require_revision(&target.revision)?;
+    let scope = search_scope::resolve_for_target(&session, scope_options, &target.revision)?;
     let reachable = session.ancestors(&target.revision)?;
+    let eligible_revisions = scope
+        .as_ref()
+        .map(|scope| session.scoped_revisions(&scope.filter, &target.revision))
+        .transpose()?;
     let history = session.timeline_history(&target.path, &reachable)?;
-    let mut report =
-        timeline::Report::from_history(target.revision, target.path, history, limit, offset, last);
+    let mut report = timeline::Report::from_history(
+        target.revision,
+        target.path,
+        history,
+        eligible_revisions.as_ref(),
+        limit,
+        offset,
+        last,
+    );
+    report.scope = scope.map(|scope| scope.report);
     if patch {
         analysis::attach_timeline_patch_excerpts(&session, &mut report)?;
     }

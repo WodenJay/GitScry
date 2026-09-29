@@ -4,6 +4,7 @@ mod query;
 
 mod search_scope;
 mod update;
+use self::search_scope::SearchScopeOptions;
 use crate::{
     analysis,
     cli::{CodeChange, Command},
@@ -141,6 +142,10 @@ pub(crate) fn execute(
             line,
             symbol,
             at,
+            from_rev,
+            to_rev,
+            since,
+            until,
             limit,
             patch,
             ..
@@ -150,7 +155,13 @@ pub(crate) fn execute(
                 (None, Some(name)) => crate::git::WhyAnchor::Symbol { name, number: 0 },
                 _ => unreachable!("clap enforces exactly one why anchor"),
             };
-            query::run_why(at, path, anchor, limit, patch)
+            let scope = SearchScopeOptions {
+                from_rev,
+                to_rev,
+                since,
+                until,
+            };
+            query::run_why(at, path, anchor, limit, patch, scope)
         }
         Command::TraceFix {
             fix_revision,
@@ -162,11 +173,23 @@ pub(crate) fn execute(
         Command::Timeline {
             path,
             at,
+            from_rev,
+            to_rev,
+            since,
+            until,
             limit,
             offset,
             last,
             patch,
             ..
-        } => query::run_timeline(path, at, limit, offset.unwrap_or(0), last, patch),
+        } => {
+            let scope = SearchScopeOptions {
+                from_rev,
+                to_rev,
+                since,
+                until,
+            };
+            query::run_timeline(path, at, limit, offset.unwrap_or(0), last, patch, scope)
+        }
     }
 }

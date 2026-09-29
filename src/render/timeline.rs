@@ -1,14 +1,19 @@
 use serde::Serialize;
 
-use super::json::{self, JsonPatch, JsonPath};
+use super::{
+    json::{self, JsonPatch, JsonPath, JsonSearchScope},
+    material,
+};
 use crate::timeline::{Entry, Report};
-
 pub(super) fn format_report(report: &Report) -> String {
     let mut lines = vec![format!(
         "File evolution timeline for {} at {}",
         super::escape::path(&report.path),
         report.target_revision
     )];
+    if let Some(scope) = &report.scope {
+        lines.push(material::scope_summary(scope));
+    }
     if report.total == 0 {
         lines.push(
             "No changes are recorded for this file incarnation in the published cache.".to_owned(),
@@ -74,6 +79,7 @@ pub(super) fn format_json_report(
         entries,
         warnings: additional_warnings.iter().collect(),
         notices: Vec::new(),
+        scope: report.scope.as_ref().map(json::json_scope),
     };
     serde_json::to_string(&output)
 }
@@ -92,6 +98,8 @@ struct JsonReport<'a> {
     has_more: bool,
     entries: Vec<JsonEntry<'a>>,
     warnings: Vec<&'a String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scope: Option<JsonSearchScope<'a>>,
     notices: Vec<String>,
 }
 

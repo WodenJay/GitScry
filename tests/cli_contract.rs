@@ -322,6 +322,21 @@ fn json_flag_is_available_only_for_query_commands() {
     assert!(timeline_help.contains("--limit <LIMIT>"));
     assert!(timeline_help.contains("--offset <OFFSET>"));
     assert!(timeline_help.contains("--last"));
+    for flag in ["--from-rev", "--to-rev", "--since", "--until"] {
+        assert!(
+            timeline_help.contains(flag),
+            "timeline help should document {flag}"
+        );
+    }
+    let why_help = repo.run(["why", "--help"]);
+    assert_eq!(why_help.status.code(), Some(0));
+    let why_help = String::from_utf8_lossy(&why_help.stdout)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    for flag in ["--from-rev", "--to-rev", "--since", "--until"] {
+        assert!(why_help.contains(flag), "why help should document {flag}");
+    }
     let search_help = repo.run(["search", "--help"]);
     assert_eq!(search_help.status.code(), Some(0));
     let search_help = String::from_utf8_lossy(&search_help.stdout)

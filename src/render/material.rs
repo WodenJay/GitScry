@@ -30,8 +30,11 @@ fn empty_message(kind: ReportKind) -> &'static str {
     }
 }
 
-fn scope_summary(scope: &SearchScopeInfo) -> String {
+pub(super) fn scope_summary(scope: &SearchScopeInfo) -> String {
     let mut criteria = vec![format!("commits reachable from {}", scope.to_rev)];
+    if let Some(target_rev) = &scope.target_rev {
+        criteria.push(format!("intersected with target revision {target_rev}"));
+    }
     if let Some(from_rev) = &scope.from_rev {
         criteria.push(format!("excluding {from_rev} and its ancestors"));
     }

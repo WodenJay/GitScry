@@ -1,10 +1,15 @@
-use crate::{analysis::PatchExcerpt, cache::HistoryCommit};
+use crate::{
+    analysis::{PatchExcerpt, SearchScopeInfo},
+    cache::HistoryCommit,
+};
+use std::collections::HashSet;
 
 pub(crate) struct Report {
     pub(crate) target_revision: String,
     pub(crate) path: Vec<u8>,
     pub(crate) patch_mode: bool,
     pub(crate) total: usize,
+    pub(crate) scope: Option<SearchScopeInfo>,
     pub(crate) offset: usize,
     pub(crate) limit: usize,
     pub(crate) start: usize,
@@ -30,6 +35,7 @@ impl Report {
         target_revision: String,
         path: Vec<u8>,
         history: Vec<HistoryCommit>,
+        eligible_revisions: Option<&HashSet<String>>,
         limit: usize,
         requested_offset: usize,
         last: bool,
@@ -51,6 +57,9 @@ impl Report {
         let mut entries = history
             .iter()
             .filter(|commit| latest_origin.is_none_or(|origin| commit.position >= origin))
+            .filter(|commit| {
+                eligible_revisions.is_none_or(|eligible| eligible.contains(&commit.oid))
+            })
             .filter_map(|commit| {
                 let change = commit
                     .changes
@@ -113,6 +122,7 @@ impl Report {
             path,
             patch_mode: false,
             total,
+            scope: None,
             offset,
             limit,
             start,

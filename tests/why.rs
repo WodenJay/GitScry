@@ -468,6 +468,124 @@ fn why_warns_when_blame_ignores_a_revision() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("blame ignored revisions"));
 }
 
+#[test]
+fn why_scope_intersects_target_and_filters_materials() {
+    let repo = TestRepo::new();
+    repo.commit(
+        "target.txt",
+        b"target\n",
+        "Initial target history",
+        Some("Because the target line establishes the behavior."),
+    );
+    let initial = repo.head();
+    repo.commit("target.txt", b"later\n", "Later target history", None);
+    let later = repo.head();
+    repo.index();
+
+    let scoped = json(
+        &repo,
+        &[
+            "why",
+            "target.txt",
+            "--line",
+            "1",
+            "--at",
+            initial.as_str(),
+            "--to-rev",
+            later.as_str(),
+            "--json",
+        ],
+    );
+    assert_eq!(scoped["scope"]["to_rev"], later);
+    assert_eq!(scoped["scope"]["target_rev"], initial);
+    assert_eq!(scoped["scope"]["cache_tip"], later);
+    assert_eq!(scoped["materials"].as_array().unwrap().len(), 1);
+    assert_eq!(scoped["materials"][0]["subject"], "Initial target history");
+
+    let excluded = json(
+        &repo,
+        &[
+            "why",
+            "target.txt",
+            "--line",
+            "1",
+            "--at",
+            initial.as_str(),
+            "--from-rev",
+            initial.as_str(),
+            "--to-rev",
+            later.as_str(),
+            "--json",
+        ],
+    );
+    assert_eq!(excluded["matched_count"], 0);
+    assert_eq!(excluded["materials"], serde_json::json!([]));
+
+    let dated = json(
+        &repo,
+        &[
+            "why",
+            "target.txt",
+            "--line",
+            "1",
+            "--at",
+            initial.as_str(),
+            "--since",
+            "9999-01-01",
+            "--json",
+        ],
+    );
+    assert_eq!(dated["scope"]["since"], "9999-01-01");
+    assert_eq!(dated["matched_count"], 0);
+
+    let text = repo.run([
+        "why",
+        "target.txt",
+        "--line",
+        "1",
+        "--at",
+        initial.as_str(),
+        "--to-rev",
+        later.as_str(),
+    ]);
+    assert_eq!(text.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&text.stdout).contains("intersected with target revision"));
+}
+
+#[test]
+fn why_scope_hides_out_of_scope_blame_citations() {
+    let repo = TestRepo::new();
+    repo.commit("target.txt", b"initial\n", "Initial line", None);
+    let initial = repo.head();
+    repo.commit("target.txt", b"target\n", "Excluded target blame", None);
+    let target = repo.head();
+    repo.index();
+
+    let report = json(
+        &repo,
+        &[
+            "why",
+            "target.txt",
+            "--line",
+            "1",
+            "--at",
+            target.as_str(),
+            "--to-rev",
+            initial.as_str(),
+            "--json",
+        ],
+    );
+    assert_eq!(report["materials"].as_array().unwrap().len(), 1);
+    assert_eq!(report["materials"][0]["subject"], "Initial line");
+    assert!(
+        !report["materials"][0]["citations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|citation| citation["oid"] == target)
+    );
+}
+
 fn json(repo: &TestRepo, args: &[&str]) -> serde_json::Value {
     let output = repo.run(args);
     assert_eq!(

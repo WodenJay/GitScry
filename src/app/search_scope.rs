@@ -55,6 +55,22 @@ pub(super) fn resolve(
     session: &QuerySession,
     options: SearchScopeOptions,
 ) -> Result<Option<ResolvedSearchScope>, AppError> {
+    resolve_with_target(session, options, None)
+}
+
+pub(super) fn resolve_for_target(
+    session: &QuerySession,
+    options: SearchScopeOptions,
+    target_revision: &str,
+) -> Result<Option<ResolvedSearchScope>, AppError> {
+    resolve_with_target(session, options, Some(target_revision))
+}
+
+fn resolve_with_target(
+    session: &QuerySession,
+    options: SearchScopeOptions,
+    target_revision: Option<&str>,
+) -> Result<Option<ResolvedSearchScope>, AppError> {
     if options.is_empty() {
         return Ok(None);
     }
@@ -88,7 +104,9 @@ pub(super) fn resolve(
             require_cached_revision(session, requested, &revision)?;
             revision
         }
-        None => cache_tip.clone(),
+        None => target_revision
+            .map(str::to_owned)
+            .unwrap_or_else(|| cache_tip.clone()),
     };
     let from_rev = options
         .from_rev
@@ -101,11 +119,19 @@ pub(super) fn resolve(
         .transpose()?;
 
     if let Some(from_rev) = &from_rev {
-        let reachable = session.ancestors(&to_rev)?;
-        if !reachable.contains(from_rev) {
+        let scope_reachable = session.ancestors(&to_rev)?;
+        if !scope_reachable.contains(from_rev) {
             return Err(AppError::input(
-                "--from-rev must be an ancestor of --to-rev (or the published cache tip)",
+                "--from-rev must be an ancestor of --to-rev (or the effective upper revision)",
             ));
+        }
+        if let Some(target_revision) = target_revision {
+            let target_reachable = session.ancestors(target_revision)?;
+            if !target_reachable.contains(from_rev) {
+                return Err(AppError::input(
+                    "--from-rev must be an ancestor of both the scope upper revision and target revision",
+                ));
+            }
         }
     }
 
@@ -118,6 +144,7 @@ pub(super) fn resolve(
     let report = SearchScopeInfo {
         from_rev,
         to_rev,
+        target_rev: target_revision.map(str::to_owned),
         since: since.map(|bound| bound.normalized),
         until: until.map(|bound| bound.normalized),
         cache_tip,

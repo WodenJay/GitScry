@@ -38,6 +38,7 @@ pub(crate) fn run(
     session: &QuerySession,
     target: &WhyTarget,
     reachable: &HashSet<String>,
+    eligible_revisions: Option<&HashSet<String>>,
     limit: usize,
 ) -> Result<Report, AppError> {
     if !target.anchor_valid {
@@ -58,7 +59,11 @@ pub(crate) fn run(
         let hunks = session.history_hunks(&commit.oid)?;
         let direct_hunk = retrieval::trace_line(commit, &hunks, &mut historical_line).is_some();
         let blame_match = blame_oid == Some(commit.oid.as_str());
-        seen_blame |= blame_match;
+        let eligible = eligible_revisions.is_none_or(|revisions| revisions.contains(&commit.oid));
+        seen_blame |= blame_match && eligible;
+        if !eligible {
+            continue;
+        }
         let explanation = explanation_strength(&commit.subject, &commit.body);
         let cochanged = cochanged_paths(commit, &target.path);
         let mut basis = Vec::new();
@@ -103,6 +108,7 @@ pub(crate) fn run(
         let mut citations = vec![Citation::new(commit.oid.clone(), commit.subject.clone())];
         if let Some(blame) = &target.blame
             && blame.oid != commit.oid
+            && eligible_revisions.is_none_or(|revisions| revisions.contains(&blame.oid))
         {
             citations.push(
                 Citation::new(blame.oid.clone(), blame.subject.clone()).noting("target line blame"),
@@ -124,6 +130,7 @@ pub(crate) fn run(
 
     if let Some(blame) = &target.blame
         && !seen_blame
+        && eligible_revisions.is_none_or(|revisions| revisions.contains(&blame.oid))
     {
         let mut basis = vec!["target-specific blame fact outside the default cache".to_owned()];
         if blame.boundary {

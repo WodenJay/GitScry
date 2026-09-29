@@ -110,6 +110,62 @@ impl QuerySession {
         path_history(&self.connection, path, reachable, false)
     }
 
+    pub(crate) fn scoped_revisions(
+        &self,
+        scope: &SearchFilter,
+        target_oid: &str,
+    ) -> Result<HashSet<String>, AppError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                r#"WITH RECURSIVE scope_reachable(commit_id) AS (
+                    SELECT commit_id FROM commits WHERE oid = ?1
+                    UNION
+                    SELECT parent.parent_id
+                    FROM commit_parents AS parent
+                    JOIN scope_reachable ON scope_reachable.commit_id = parent.commit_id
+                    WHERE parent.parent_id IS NOT NULL
+                ), target_reachable(commit_id) AS (
+                    SELECT commit_id FROM commits WHERE oid = ?2
+                    UNION
+                    SELECT parent.parent_id
+                    FROM commit_parents AS parent
+                    JOIN target_reachable ON target_reachable.commit_id = parent.commit_id
+                    WHERE parent.parent_id IS NOT NULL
+                ), excluded(commit_id) AS (
+                    SELECT commit_id FROM commits WHERE oid = ?3
+                    UNION
+                    SELECT parent.parent_id
+                    FROM commit_parents AS parent
+                    JOIN excluded ON excluded.commit_id = parent.commit_id
+                    WHERE parent.parent_id IS NOT NULL
+                )
+                SELECT commits.oid
+                FROM commits
+                WHERE commits.commit_id IN (SELECT commit_id FROM scope_reachable)
+                  AND commits.commit_id IN (SELECT commit_id FROM target_reachable)
+                  AND (?3 IS NULL OR commits.commit_id NOT IN (SELECT commit_id FROM excluded))
+                  AND (?4 IS NULL OR commits.commit_time >= ?4)
+                  AND (?5 IS NULL OR commits.commit_time <= ?5)
+                ORDER BY commits.position DESC"#,
+            )
+            .map_err(|error| search_error("preparing scoped history revisions", error))?;
+        let rows = statement
+            .query_map(
+                params![
+                    scope.to_oid.as_str(),
+                    target_oid,
+                    scope.from_oid.as_deref(),
+                    scope.since,
+                    scope.until,
+                ],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(|error| search_error("querying scoped history revisions", error))?;
+        rows.collect::<Result<HashSet<_>, _>>()
+            .map_err(|error| search_error("reading scoped history revisions", error))
+    }
+
     pub(crate) fn ancestors(&self, oid: &str) -> Result<HashSet<String>, AppError> {
         ancestors(&self.connection, oid)
     }

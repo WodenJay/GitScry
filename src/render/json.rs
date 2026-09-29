@@ -43,18 +43,21 @@ struct JsonReport<'a> {
 }
 
 #[derive(Serialize)]
-struct JsonSearchScope<'a> {
+pub(super) struct JsonSearchScope<'a> {
     from_rev: Option<&'a str>,
     to_rev: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_rev: Option<&'a str>,
     since: Option<&'a str>,
     until: Option<&'a str>,
     cache_tip: &'a str,
 }
 
-fn json_scope(scope: &SearchScopeInfo) -> JsonSearchScope<'_> {
+pub(super) fn json_scope(scope: &SearchScopeInfo) -> JsonSearchScope<'_> {
     JsonSearchScope {
         from_rev: scope.from_rev.as_deref(),
         to_rev: &scope.to_rev,
+        target_rev: scope.target_rev.as_deref(),
         since: scope.since.as_deref(),
         until: scope.until.as_deref(),
         cache_tip: &scope.cache_tip,

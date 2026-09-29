@@ -203,7 +203,7 @@ Examples:
     ))]
     #[command(
         about = "Explain the local history behind one line or symbol",
-        long_about = "Explain the local history behind one line or symbol.\n\nUse `gitscry why` when a line or symbol raises a question and you want the history behind it: the commits whose material explains why the line or symbol looks the way it does at the target revision.\n\nRequired inputs: a repository-relative PATH and exactly one anchor, `--line` (a one-based line number) or `--symbol` (a symbol name). `--at` pins the local revision containing the target and defaults to HEAD.\n\nExamples:\n\n  gitscry why src/lib.rs --line 12\n\n  gitscry why src/lib.rs --symbol provider --at HEAD~1"
+        long_about = "Explain the local history behind one line or symbol.\n\nUse `gitscry why` when a line or symbol raises a question and you want the commits whose material explains why it looks the way it does at the target revision.\n\nRequired inputs: a repository-relative PATH and exactly one anchor, `--line` (a one-based line number) or `--symbol` (a symbol name). `--at` pins the local revision containing the target and defaults to HEAD.\n\nHistorical scope: `--from-rev REV` excludes REV and its ancestors; `--to-rev REV` includes REV and its ancestors, intersected with the target revision selected by `--at`. Without `--to-rev`, the target revision is the upper bound. `--since` and `--until` filter by committer time and accept UTC dates or RFC 3339 timestamps with offsets. Scope flags combine, and revisions must be in the published cache.\n\nExamples:\n\n  gitscry why src/lib.rs --line 12\n\n  gitscry why src/lib.rs --symbol provider --at HEAD~1 --from-rev HEAD~5 --to-rev HEAD~1\n\n  gitscry why src/lib.rs --line 12 --since 2025-01-01 --until 2025-01-31"
     )]
     Why {
         /// Repository-relative path at the target revision.
@@ -217,6 +217,18 @@ Examples:
         /// Local revision containing the target; defaults to HEAD.
         #[arg(long, default_value = "HEAD")]
         at: String,
+        /// Exclude this cached revision and its ancestors from eligible history.
+        #[arg(long = "from-rev", value_name = "REV")]
+        from_rev: Option<String>,
+        /// Include this cached revision and its ancestors, intersected with the target.
+        #[arg(long = "to-rev", value_name = "REV")]
+        to_rev: Option<String>,
+        /// Include commits at or after this UTC date or RFC 3339 timestamp.
+        #[arg(long, value_name = "DATE_OR_TIMESTAMP")]
+        since: Option<String>,
+        /// Include commits through this UTC date or RFC 3339 timestamp.
+        #[arg(long, value_name = "DATE_OR_TIMESTAMP")]
+        until: Option<String>,
         /// Maximum number of matches to return.
         #[arg(long, default_value = "10", value_parser = parse_limit)]
         limit: usize,
@@ -250,7 +262,7 @@ Examples:
     },
     #[command(
         about = "Show a file's complete evolution in the published cache",
-        long_about = "Show a file's complete, chronological evolution within the published GitScry cache. This is a factual history, not a ranking of important changes. The default target is the cache's completed tip, not the working tree or an unindexed HEAD. The selected path must be a file at the target revision. All reachable cached commits are included, including merged-branch commits; entries are ordered by Git topological position from earliest to latest. Detected renames are followed; copies and older file incarnations after deletion/recreation are not. Merge entries compare against the first parent. Use the commit ID and historical path to inspect the underlying change. `--patch` adds bounded cached text hunks for each listed change; unavailable text is reported rather than guessed, and excerpts are not full diffs. `--json` returns structured entries and page metadata (schema v2 with `--patch`).\n\nRequired input: PATH, a repository-relative file path.\n\nOptions: `--at REV` selects a revision in the published cache; `--limit N` sets the page size (default 10); `--offset N` selects a zero-based page offset; `--last` jumps to the final page and conflicts with `--offset`; `--patch` adds per-entry text excerpts; `--json` returns structured output.\n\nExamples:\n\n  gitscry timeline src/lib.rs\n\n  gitscry timeline src/lib.rs --patch --limit 5 --offset 5 --json"
+        long_about = "Show a file's complete, chronological evolution within the published GitScry cache. This is a factual history, not a ranking of important changes. The default target is the cache's completed tip, not the working tree or an unindexed HEAD. The selected path must be a file at the target revision. All reachable cached commits are included, including merged-branch commits; entries are ordered by Git topological position from earliest to latest. Detected renames are followed; copies and older file incarnations after deletion/recreation are not. Merge entries compare against the first parent. Use the commit ID and historical path to inspect the underlying change. `--patch` adds bounded cached text hunks for each listed change; unavailable text is reported rather than guessed, and excerpts are not full diffs. `--json` returns structured entries and page metadata (schema v2 with `--patch`).\n\nHistorical scope: `--from-rev REV` excludes REV and its ancestors; `--to-rev REV` includes REV and its ancestors, intersected with the target revision selected by `--at` (or the cache tip). `--since` and `--until` filter by committer time and accept UTC dates or RFC 3339 timestamps with offsets. Scope filters apply before pagination; rename traversal and the target file incarnation remain unchanged. Scope revisions must be in the published cache.\n\nRequired input: PATH, a repository-relative file path.\n\nOptions: `--at REV` selects a revision in the published cache; `--from-rev REV`, `--to-rev REV`, `--since DATE_OR_TIMESTAMP`, and `--until DATE_OR_TIMESTAMP` restrict history; `--limit N` sets the page size (default 10); `--offset N` selects a zero-based page offset; `--last` jumps to the final page and conflicts with `--offset`; `--patch` adds per-entry text excerpts; `--json` returns structured output.\n\nExamples:\n\n  gitscry timeline src/lib.rs\n\n  gitscry timeline src/lib.rs --to-rev HEAD~5 --since 2025-01-01 --limit 5 --json"
     )]
     Timeline {
         /// Repository-relative file path at the selected revision.
@@ -258,6 +270,18 @@ Examples:
         /// Cached revision containing the file; defaults to the cache's completed tip.
         #[arg(long, value_name = "REV")]
         at: Option<String>,
+        /// Exclude this cached revision and its ancestors from eligible history.
+        #[arg(long = "from-rev", value_name = "REV")]
+        from_rev: Option<String>,
+        /// Include this cached revision and its ancestors, intersected with the target.
+        #[arg(long = "to-rev", value_name = "REV")]
+        to_rev: Option<String>,
+        /// Include commits at or after this UTC date or RFC 3339 timestamp.
+        #[arg(long, value_name = "DATE_OR_TIMESTAMP")]
+        since: Option<String>,
+        /// Include commits through this UTC date or RFC 3339 timestamp.
+        #[arg(long, value_name = "DATE_OR_TIMESTAMP")]
+        until: Option<String>,
         /// Maximum number of timeline entries to return.
         #[arg(long, default_value = "10", value_parser = parse_limit)]
         limit: usize,

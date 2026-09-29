@@ -722,3 +722,118 @@ fn timeline_patch_bounds_hunks_and_bytes_per_entry() {
     assert_eq!(first_hunk["truncated"], true);
     assert_eq!(patch["truncated"], true);
 }
+
+#[test]
+fn timeline_scope_intersects_target_and_preserves_renames() {
+    let repo = TestRepo::new();
+    let base = commit(
+        &repo,
+        "src/old.rs",
+        b"base\n",
+        "Add source file",
+        "2020-01-01T00:00:00+0000",
+    );
+    let shared = commit(
+        &repo,
+        "src/old.rs",
+        b"shared\n",
+        "Change source file",
+        "2020-01-02T00:00:00+0000",
+    );
+    git(repo.dir.path(), ["switch", "-c", "feature"]);
+    commit(
+        &repo,
+        "feature.txt",
+        b"feature\n",
+        "Add feature",
+        "2020-01-03T00:00:00+0000",
+    );
+    let feature = repo.head();
+    git(repo.dir.path(), ["switch", "main"]);
+    rename(
+        &repo,
+        "src/old.rs",
+        "src/new.rs",
+        "Rename source file",
+        "2020-01-04T00:00:00+0000",
+    );
+    let target = commit(
+        &repo,
+        "src/new.rs",
+        b"target\n",
+        "Change target source",
+        "2020-01-05T00:00:00+0000",
+    );
+    let merge = git_command(repo.dir.path())
+        .args(["merge", "--no-ff", "--no-edit", "feature"])
+        .env("GIT_AUTHOR_DATE", "2020-01-06T00:00:00+0000")
+        .env("GIT_COMMITTER_DATE", "2020-01-06T00:00:00+0000")
+        .output()
+        .expect("merge feature branch");
+    assert!(merge.status.success());
+    repo.index();
+
+    let report = json(&repo.run([
+        "timeline",
+        "src/new.rs",
+        "--at",
+        target.as_str(),
+        "--to-rev",
+        feature.as_str(),
+        "--limit",
+        "1",
+        "--offset",
+        "1",
+        "--json",
+    ]));
+    assert_eq!(report["target_revision"], target);
+    assert_eq!(report["scope"]["to_rev"], feature);
+    assert_eq!(report["scope"]["target_rev"], target);
+    assert_eq!(report["total"], 2);
+    assert_eq!(report["start"], 2);
+    assert_eq!(report["entries"][0]["commit_id"], shared);
+    assert_eq!(report["entries"][0]["path"], "src/old.rs");
+
+    let after_base = json(&repo.run([
+        "timeline",
+        "src/new.rs",
+        "--at",
+        target.as_str(),
+        "--to-rev",
+        feature.as_str(),
+        "--from-rev",
+        base.as_str(),
+        "--json",
+    ]));
+    assert_eq!(after_base["total"], 1);
+    assert_eq!(after_base["entries"][0]["commit_id"], shared);
+
+    let date_scoped = json(&repo.run([
+        "timeline",
+        "src/new.rs",
+        "--at",
+        target.as_str(),
+        "--to-rev",
+        feature.as_str(),
+        "--since",
+        "2020-01-02",
+        "--until",
+        "2020-01-02",
+        "--json",
+    ]));
+    assert_eq!(date_scoped["total"], 1);
+    assert_eq!(date_scoped["entries"][0]["commit_id"], shared);
+    assert_eq!(date_scoped["scope"]["since"], "2020-01-02");
+    assert_eq!(date_scoped["scope"]["until"], "2020-01-02");
+
+    let text = repo.run([
+        "timeline",
+        "src/new.rs",
+        "--at",
+        target.as_str(),
+        "--to-rev",
+        feature.as_str(),
+    ]);
+    assert_eq!(text.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&text.stdout).contains("intersected with target revision"));
+}
