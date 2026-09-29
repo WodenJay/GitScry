@@ -327,9 +327,17 @@ pub(crate) fn related(
     worktree_root: &Path,
     limit: usize,
     include_all_citations: bool,
+    scope: Option<&SearchFilter>,
 ) -> Result<Report, AppError> {
     validate_limit(limit)?;
-    capabilities::related(session, intent, worktree_root, limit, include_all_citations)
+    capabilities::related(
+        session,
+        intent,
+        worktree_root,
+        limit,
+        include_all_citations,
+        scope,
+    )
 }
 
 pub(crate) fn tests(
@@ -338,9 +346,17 @@ pub(crate) fn tests(
     worktree_root: &Path,
     limit: usize,
     include_all_citations: bool,
+    scope: Option<&SearchFilter>,
 ) -> Result<Report, AppError> {
     validate_limit(limit)?;
-    capabilities::tests(session, intent, worktree_root, limit, include_all_citations)
+    capabilities::tests(
+        session,
+        intent,
+        worktree_root,
+        limit,
+        include_all_citations,
+        scope,
+    )
 }
 
 fn validate_limit(limit: usize) -> Result<(), AppError> {

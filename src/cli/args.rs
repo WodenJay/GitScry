@@ -1,4 +1,4 @@
-use clap::{ArgGroup, Parser, Subcommand};
+use clap::{ArgGroup, Args, Parser, Subcommand};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -17,6 +17,22 @@ const ROOT_LONG_HELP: &str = "\
 Your Git history is a treasure trove. GitScry uncovers the implementation examples, failed approaches, code relationships, and regression context hidden inside.
 
 Pick one command by intent, then run `gitscry <command> --help` for inputs, options, and examples. Use `gitscry timeline PATH` to inspect a file's complete evolution in the published cache.\n\nQuery commands support `--json` for structured output.";
+
+#[derive(Debug, Default, Args)]
+pub(crate) struct HistoricalScopeArgs {
+    /// Exclude this cached commit and its ancestors from history.
+    #[arg(long = "from-rev", value_name = "REV")]
+    pub(crate) from_rev: Option<String>,
+    /// Include this cached commit and its ancestors; defaults to the published cache tip.
+    #[arg(long = "to-rev", value_name = "REV")]
+    pub(crate) to_rev: Option<String>,
+    /// Include commits at or after this UTC date or RFC 3339 timestamp with an offset.
+    #[arg(long, value_name = "DATE_OR_TIMESTAMP")]
+    pub(crate) since: Option<String>,
+    /// Include commits through this UTC date or RFC 3339 timestamp with an offset.
+    #[arg(long, value_name = "DATE_OR_TIMESTAMP")]
+    pub(crate) until: Option<String>,
+}
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
@@ -135,12 +151,14 @@ Examples:
 
     #[command(
         about = "Find historical paths changed alongside one or more seed paths",
-        long_about = "Find historical paths changed alongside one or more seed paths.\n\nUse `gitscry related` when you are changing one or more paths and want to know which other paths historically changed together with them, such as mirrored files or coupled modules.\n\nRequired input: one or more repository-relative seed PATHS.\n\nExamples:\n\n  gitscry related src/lib.rs\n\n  gitscry related src/cli.rs src/render.rs"
+        long_about = "Find historical paths changed alongside one or more seed paths.\n\nUse `gitscry related` when you are changing one or more paths and want to know which other paths historically changed together with them, such as mirrored files or coupled modules.\n\nRequired input: one or more repository-relative seed PATHS.\n\nScope applies only to cached history. `--from-rev REV` excludes that commit and its ancestors; `--to-rev REV` includes that commit and its ancestors and defaults to the published cache tip. Revisions must exist in the published cache, and the lower revision must be an ancestor of the upper revision. `--since` and `--until` filter committer time: `YYYY-MM-DD` means an inclusive UTC calendar day, while RFC 3339 timestamps with `Z` or an explicit offset mean inclusive instants. Timezone-free timestamps are rejected. All bounds intersect. Scope filters co-change counts, scoring denominators, and supporting commits before ranking and `--limit`; scoped output reports resolved bounds and the effective cache tip. Without scope flags, all cached history is used.\n\nExamples:\n\n  gitscry related src/lib.rs --from-rev <base> --to-rev release\n\n  gitscry related src/cli.rs --since 2025-01-01 --until 2025-01-31"
     )]
     Related {
         /// Repository-relative seed paths matched against history.
         #[arg(required = true, num_args = 1..)]
         paths: Vec<String>,
+        #[command(flatten)]
+        scope: HistoricalScopeArgs,
         /// Maximum number of matches to return.
         #[arg(long, default_value = "10", value_parser = parse_limit)]
         limit: usize,
@@ -151,12 +169,14 @@ Examples:
 
     #[command(
         about = "Find current test paths historically changed alongside one or more seed paths",
-        long_about = "Find current test paths historically changed alongside one or more seed paths.\n\nUse `gitscry tests` when you changed code and want the test files that historically changed with it: it returns existing test paths ranked by co-change history.\n\nRequired input: one or more repository-relative seed PATHS.\n\nExamples:\n\n  gitscry tests src/lib.rs"
+        long_about = "Find current test paths historically changed alongside one or more seed paths.\n\nUse `gitscry tests` when you changed code and want the test files that historically changed with it: it returns existing test paths ranked by co-change history.\n\nRequired input: one or more repository-relative seed PATHS.\n\nTest candidates remain current test paths in the working tree; scope narrows historical support, not the current test-path target set. `--from-rev REV` excludes that commit and its ancestors; `--to-rev REV` includes that commit and its ancestors and defaults to the published cache tip. Revisions must exist in the published cache, and the lower revision must be an ancestor of the upper revision. `--since` and `--until` filter committer time: `YYYY-MM-DD` means an inclusive UTC calendar day, while RFC 3339 timestamps with `Z` or an explicit offset mean inclusive instants. Timezone-free timestamps are rejected. All bounds intersect. Historical support and scoring are filtered before ranking and `--limit`; scoped output reports resolved bounds and the effective cache tip. Without scope flags, all cached history is used.\n\nExamples:\n\n  gitscry tests src/lib.rs --from-rev <base> --to-rev release\n\n  gitscry tests src/cli.rs --since 2025-01-01 --until 2025-01-31"
     )]
     Tests {
         /// Repository-relative seed paths matched against history.
         #[arg(required = true, num_args = 1..)]
         paths: Vec<String>,
+        #[command(flatten)]
+        scope: HistoricalScopeArgs,
         /// Maximum number of matches to return.
         #[arg(long, default_value = "10", value_parser = parse_limit)]
         limit: usize,

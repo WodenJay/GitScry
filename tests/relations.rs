@@ -2,7 +2,7 @@ mod support;
 
 use std::{fs, path::Path, process::Output};
 
-use support::{TestRepo, git};
+use support::{TestRepo, git, git_command};
 
 impl TestRepo {
     fn commit_files(&self, files: &[(&str, &[u8])], message: &str) {
@@ -15,6 +15,34 @@ impl TestRepo {
         }
         git(self.dir.path(), ["add", "--all"]);
         git(self.dir.path(), ["commit", "-m", message]);
+    }
+
+    fn commit_files_at(
+        &self,
+        files: &[(&str, &[u8])],
+        message: &str,
+        author_date: &str,
+        committer_date: &str,
+    ) {
+        for (path, contents) in files {
+            let path = Path::new(path);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(self.dir.path().join(parent)).expect("create parent directory");
+            }
+            fs::write(self.dir.path().join(path), contents).expect("write tracked file");
+        }
+        git(self.dir.path(), ["add", "--all"]);
+        let output = git_command(self.dir.path())
+            .args(["commit", "-m", message])
+            .env("GIT_AUTHOR_DATE", author_date)
+            .env("GIT_COMMITTER_DATE", committer_date)
+            .output()
+            .expect("run git");
+        assert!(
+            output.status.success(),
+            "git failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     fn remove(&self, path: &str, message: &str) {
@@ -286,4 +314,264 @@ fn related_matches_seed_basenames_through_the_projection() {
         "{text}"
     );
     assert!(text.contains("co-change count: 1"), "{text}");
+}
+
+#[test]
+fn related_and_tests_filter_and_rank_only_scoped_cochanges() {
+    let repo = TestRepo::new();
+    repo.commit_files(&[("src/seed.rs", b"seed base\n")], "create seed");
+
+    for index in 0..3 {
+        let seed = format!("seed outside {index}\n");
+        let source = format!("outside {index}\n");
+        let test = format!("outside test {index}\n");
+        repo.commit_files_at(
+            &[
+                ("src/seed.rs", seed.as_bytes()),
+                ("src/outside.rs", source.as_bytes()),
+                ("tests/test_outside.py", test.as_bytes()),
+            ],
+            "outside relation",
+            "2001-01-02T12:00:00Z",
+            "2001-01-02T12:00:00Z",
+        );
+    }
+    repo.commit_files(&[("src/seed.rs", b"seed lower\n")], "lower boundary");
+    let lower = repo.head();
+
+    repo.commit_files_at(
+        &[
+            ("src/seed.rs", b"seed scoped one\n"),
+            ("src/scoped.rs", b"scoped one\n"),
+            ("tests/test_current.py", b"current one\n"),
+        ],
+        "in-range relation one",
+        "1999-01-01T00:00:00Z",
+        "2001-01-02T00:00:00Z",
+    );
+    repo.commit_files_at(
+        &[
+            ("src/seed.rs", b"seed outside-time\n"),
+            ("src/time_only.rs", b"outside time\n"),
+            ("tests/test_time_only.py", b"outside time test\n"),
+        ],
+        "committer outside time range",
+        "2001-01-02T12:00:00Z",
+        "2001-01-04T00:00:00Z",
+    );
+    repo.commit_files_at(
+        &[
+            ("src/seed.rs", b"seed scoped two\n"),
+            ("src/scoped.rs", b"scoped two\n"),
+            ("tests/test_current.py", b"current two\n"),
+        ],
+        "in-range relation two",
+        "2001-01-04T00:00:00Z",
+        "2001-01-04T00:30:00+01:00",
+    );
+    repo.commit_files_at(
+        &[
+            ("src/seed.rs", b"seed removed candidate\n"),
+            ("tests/test_removed.py", b"removed test\n"),
+        ],
+        "in-range removed test",
+        "2001-01-03T00:00:00Z",
+        "2001-01-03T00:00:00Z",
+    );
+    let upper = repo.head();
+
+    for index in 0..3 {
+        let seed = format!("seed future {index}\n");
+        let source = format!("future {index}\n");
+        let test = format!("future test {index}\n");
+        repo.commit_files_at(
+            &[
+                ("src/seed.rs", seed.as_bytes()),
+                ("src/future.rs", source.as_bytes()),
+                ("tests/test_future.py", test.as_bytes()),
+            ],
+            "future relation",
+            "2001-01-03T12:00:00Z",
+            "2001-01-03T12:00:00Z",
+        );
+    }
+    repo.remove("tests/test_removed.py", "remove scoped test");
+    repo.index();
+    let cache_tip = repo.head();
+
+    let related = repo.run([
+        "related",
+        "src/seed.rs",
+        "--from-rev",
+        lower.as_str(),
+        "--to-rev",
+        upper.as_str(),
+        "--since",
+        "2001-01-02",
+        "--until",
+        "2001-01-03",
+        "--limit",
+        "1",
+        "--json",
+    ]);
+    assert_eq!(related.status.code(), Some(0), "{}", stderr(&related));
+    let related: serde_json::Value = serde_json::from_slice(&related.stdout).unwrap();
+    assert_eq!(related["matched_count"], 3);
+    assert_eq!(related["truncated"], true);
+    assert_eq!(related["materials"].as_array().unwrap().len(), 1);
+    let candidate = &related["materials"][0];
+    assert_eq!(candidate["paths"][0], "src/scoped.rs");
+    assert_eq!(candidate["detail"]["co_change_count"], 2);
+    assert_eq!(candidate["detail"]["supporting_count"], 2);
+    let cited_subjects = candidate["citations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|citation| citation["subject"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(cited_subjects.contains(&"in-range relation one"));
+    assert!(cited_subjects.contains(&"in-range relation two"));
+    assert!(!cited_subjects.contains(&"outside relation"));
+    let scope = &related["scope"];
+    assert_eq!(scope["from_rev"], lower);
+    assert_eq!(scope["to_rev"], upper);
+    assert_eq!(scope["since"], "2001-01-02");
+    assert_eq!(scope["until"], "2001-01-03");
+    assert_eq!(scope["cache_tip"], cache_tip);
+
+    let tests = repo.run([
+        "tests",
+        "src/seed.rs",
+        "--from-rev",
+        lower.as_str(),
+        "--to-rev",
+        upper.as_str(),
+        "--since",
+        "2001-01-02",
+        "--until",
+        "2001-01-03",
+        "--limit",
+        "1",
+        "--json",
+    ]);
+    assert_eq!(tests.status.code(), Some(0), "{}", stderr(&tests));
+    let tests: serde_json::Value = serde_json::from_slice(&tests.stdout).unwrap();
+    assert_eq!(tests["matched_count"], 1);
+    assert_eq!(tests["materials"].as_array().unwrap().len(), 1);
+    assert_eq!(tests["materials"][0]["paths"][0], "tests/test_current.py");
+    assert_eq!(tests["materials"][0]["detail"]["co_change_count"], 2);
+    assert_eq!(tests["scope"]["cache_tip"], cache_tip);
+    let tests_output = serde_json::to_string(&tests).unwrap();
+    for excluded in [
+        "tests/test_outside.py",
+        "tests/test_time_only.py",
+        "tests/test_future.py",
+        "tests/test_removed.py",
+    ] {
+        assert!(!tests_output.contains(excluded), "{tests_output}");
+    }
+
+    for command in ["related", "tests"] {
+        for (flag, value) in [
+            ("--from-rev", lower.as_str()),
+            ("--to-rev", upper.as_str()),
+            ("--since", "2001-01-02"),
+            ("--until", "2001-01-03"),
+        ] {
+            let output = repo.run([command, "src/seed.rs", flag, value]);
+            assert_eq!(
+                output.status.code(),
+                Some(0),
+                "{command} {flag}: {}",
+                stderr(&output)
+            );
+        }
+    }
+    let implicit_tip = repo.run([
+        "related",
+        "src/seed.rs",
+        "--from-rev",
+        lower.as_str(),
+        "--json",
+    ]);
+    let implicit_tip: serde_json::Value = serde_json::from_slice(&implicit_tip.stdout).unwrap();
+    assert_eq!(implicit_tip["scope"]["to_rev"], cache_tip);
+    assert_eq!(implicit_tip["scope"]["cache_tip"], cache_tip);
+
+    let unscoped = repo.run(["related", "src/seed.rs", "--json"]);
+    let unscoped: serde_json::Value = serde_json::from_slice(&unscoped.stdout).unwrap();
+    assert!(unscoped.get("scope").is_none());
+}
+
+#[test]
+fn scoped_relation_queries_report_empty_scope_and_reject_reversed_time() {
+    let repo = TestRepo::new();
+    repo.commit_files(&[("src/only.rs", b"only\n")], "only");
+    repo.index();
+    let tip = repo.head();
+
+    for (command, empty_message) in [
+        ("related", "No historical relations found."),
+        ("tests", "No historically related tests found."),
+    ] {
+        let json = repo.run([command, "src/only.rs", "--from-rev", tip.as_str(), "--json"]);
+        assert_eq!(json.status.code(), Some(0), "{}", stderr(&json));
+        let value: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+        assert_eq!(value["matched_count"], 0);
+        assert_eq!(value["materials"].as_array().unwrap().len(), 0);
+        assert_eq!(value["scope"]["from_rev"], tip);
+        assert_eq!(value["scope"]["to_rev"], tip);
+        assert_eq!(value["scope"]["cache_tip"], tip);
+
+        let human = repo.run([command, "src/only.rs", "--from-rev", tip.as_str()]);
+        assert_eq!(human.status.code(), Some(0), "{}", stderr(&human));
+        let output = stdout(&human);
+        assert!(
+            output.starts_with(&format!("Scope: commits reachable from {tip};")),
+            "{output}"
+        );
+        assert!(output.contains(empty_message), "{output}");
+
+        let invalid = repo.run([
+            command,
+            "src/only.rs",
+            "--since",
+            "2001-01-03",
+            "--until",
+            "2001-01-02",
+        ]);
+        assert_eq!(invalid.status.code(), Some(2), "{}", stderr(&invalid));
+        assert!(
+            stderr(&invalid).contains("--since must not be later than --until"),
+            "{}",
+            stderr(&invalid)
+        );
+    }
+}
+
+#[test]
+fn related_and_tests_help_document_scope_rules() {
+    let repo = TestRepo::new();
+    for command in ["related", "tests"] {
+        let output = repo.run([command, "--help"]);
+        assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+        let help = stdout(&output);
+        for expected in [
+            "--from-rev",
+            "--to-rev",
+            "--since",
+            "--until",
+            "committer time",
+            "UTC calendar day",
+            "RFC 3339",
+            "published cache tip",
+            "before ranking and `--limit`",
+        ] {
+            assert!(help.contains(expected), "missing {expected:?} in:\n{help}");
+        }
+        if command == "tests" {
+            assert!(help.contains("current test paths"), "{help}");
+            assert!(help.contains("scope narrows historical support"), "{help}");
+        }
+    }
 }
