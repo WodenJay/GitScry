@@ -167,7 +167,7 @@ Examples:
 
     #[command(
         about = "Locate historical commits that may have introduced a regression",
-        long_about = "Locate historical commits that may have introduced a regression.\n\nUse `gitscry regression` when a regression is observable and you want suspects: commits in the requested revision range whose material supports them as candidates that may have introduced the regression. Suspects are historical candidates; they do not replace an executable `git bisect`.\n\nRequired inputs: one or more SYMPTOM words and `--path`, the repository-relative path affected by the regression. `--symbol` narrows the suspect history to a symbol in that path. `--good` pins the last known good revision so suspects are limited to the good..bad range; `--bad` pins the last known bad revision and defaults to HEAD.\n\nExamples:\n\n  gitscry regression provider normalization --path src/lib.rs\n\n  gitscry regression slow startup --path src/main.rs --good v0.1.0 --symbol main"
+        long_about = "Locate historical commits that may have introduced a regression.\n\nUse `gitscry regression` when a regression is observable and you want suspects: commits in the requested revision range whose material supports them as candidates that may have introduced the regression. Suspects are historical candidates; they do not replace an executable `git bisect`.\n\nRequired inputs: one or more SYMPTOM words and `--path`, the repository-relative path affected by the regression. `--symbol` narrows the suspect history to a symbol in that path. `--good` pins the last known good revision so suspects are limited to the good..bad range; `--bad` pins the last known bad revision and defaults to HEAD.\n\nHistory scope narrows that pinned suspect window: `--from-rev` excludes that revision and its ancestors; `--to-rev` is inclusive and defaults to `--bad`. `--since` and `--until` intersect with the suspect window using committer time. Date-only bounds cover inclusive UTC calendar days; timestamps require RFC 3339 with `Z` or an explicit UTC offset.\n\nExamples:\n\n  gitscry regression provider normalization --path src/lib.rs\n\n  gitscry regression slow startup --path src/main.rs --good v0.1.0 --symbol main\n\n  gitscry regression timeout --path src/app.py --good v0.2 --bad v0.3 --since 2024-01-01"
     )]
     Regression {
         /// Words describing the observable regression symptom.
@@ -185,6 +185,18 @@ Examples:
         /// Last known bad revision; defaults to HEAD.
         #[arg(long, default_value = "HEAD")]
         bad: String,
+        /// Exclude this revision and all its ancestors from the scoped history.
+        #[arg(long, value_name = "REV")]
+        from_rev: Option<String>,
+        /// Inclusive upper revision bound; defaults to --bad.
+        #[arg(long, value_name = "REV")]
+        to_rev: Option<String>,
+        /// Inclusive committer-time lower bound: UTC date or RFC 3339 timestamp with Z/offset.
+        #[arg(long, value_name = "DATE_OR_TIMESTAMP")]
+        since: Option<String>,
+        /// Inclusive committer-time upper bound: UTC date or RFC 3339 timestamp with Z/offset.
+        #[arg(long, value_name = "DATE_OR_TIMESTAMP")]
+        until: Option<String>,
         /// Maximum number of matches to return.
         #[arg(long, default_value = "10", value_parser = parse_limit)]
         limit: usize,
@@ -230,7 +242,7 @@ Examples:
 
     #[command(
         about = "Trace a fix back to the introducing change and observed failure",
-        long_about = "Trace a fix back to the introducing change and observed failure.\n\nUse `gitscry trace-fix` when a fix commit is known and you want what it fixed: the introducing change identified from the fix's parent diff and the observed failure recorded in the fix commit message.\n\nRequired input: FIX_REVISION, a local revision containing the fix commit. `--path` narrows the material to a repository-relative path changed by the fix and may be repeated.\n\nExamples:\n\n  gitscry trace-fix HEAD\n\n  gitscry trace-fix HEAD~1 --path src/lib.rs"
+        long_about = "Trace a fix back to the introducing change and observed failure.\n\nUse `gitscry trace-fix` when a fix commit is known and you want what it fixed: the introducing change identified from the fix's parent diff and the observed failure recorded in the fix commit message.\n\nRequired input: FIX_REVISION is the fix target, a local revision containing the fix commit. `--path` narrows the material to a repository-relative path changed by the fix and may be repeated.\n\nHistory scope narrows introducing-change candidates without retargeting FIX_REVISION: `--from-rev` excludes that revision and its ancestors; `--to-rev` is inclusive and defaults to FIX_REVISION. `--since` and `--until` intersect with that commit range using committer time. Date-only bounds cover inclusive UTC calendar days; timestamps require RFC 3339 with `Z` or an explicit UTC offset.\n\nExamples:\n\n  gitscry trace-fix HEAD\n\n  gitscry trace-fix HEAD~1 --path src/lib.rs\n\n  gitscry trace-fix HEAD --from-rev HEAD~5 --since 2024-01-01"
     )]
     TraceFix {
         /// Local revision containing the fix commit.
@@ -238,6 +250,18 @@ Examples:
         /// Repository-relative path changed by the fix; repeatable.
         #[arg(long = "path", value_name = "PATH")]
         paths: Vec<String>,
+        /// Exclude this revision and all its ancestors from the scoped history.
+        #[arg(long, value_name = "REV")]
+        from_rev: Option<String>,
+        /// Inclusive upper revision bound; defaults to FIX_REVISION.
+        #[arg(long, value_name = "REV")]
+        to_rev: Option<String>,
+        /// Inclusive committer-time lower bound: UTC date or RFC 3339 timestamp with Z/offset.
+        #[arg(long, value_name = "DATE_OR_TIMESTAMP")]
+        since: Option<String>,
+        /// Inclusive committer-time upper bound: UTC date or RFC 3339 timestamp with Z/offset.
+        #[arg(long, value_name = "DATE_OR_TIMESTAMP")]
+        until: Option<String>,
         /// Maximum number of matches to return.
         #[arg(long, default_value = "10", value_parser = parse_limit)]
         limit: usize,

@@ -238,7 +238,7 @@ fn search_revision_scope_includes_merged_side_history_only() {
     assert_eq!(unrelated_range.status.code(), Some(2));
     assert!(
         String::from_utf8_lossy(&unrelated_range.stderr)
-            .contains("--from-rev must be an ancestor of --to-rev")
+            .contains("--from-rev must be an ancestor of the effective --to-rev")
     );
 }
 
@@ -419,7 +419,7 @@ fn search_scope_rejects_bad_bounds_and_renders_empty_results() {
     assert_eq!(reversed_revisions.status.code(), Some(2));
     assert!(
         String::from_utf8_lossy(&reversed_revisions.stderr)
-            .contains("--from-rev must be an ancestor of --to-rev")
+            .contains("--from-rev must be an ancestor of the effective --to-rev")
     );
 
     let empty = repo.run(["search", "ValidationMarker", "--since", "9999-12-31"]);

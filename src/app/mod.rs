@@ -134,8 +134,20 @@ pub(crate) fn execute(
             bad,
             limit,
             patch,
+            from_rev,
+            to_rev,
+            since,
+            until,
             ..
-        } => query::run_regression(symptom, path, symbol, good, bad, limit, patch),
+        } => {
+            let scope = search_scope::SearchScopeOptions {
+                from_rev,
+                to_rev,
+                since,
+                until,
+            };
+            query::run_regression(symptom, path, symbol, good, bad, limit, patch, scope)
+        }
         Command::Why {
             path,
             line,
@@ -157,8 +169,20 @@ pub(crate) fn execute(
             paths,
             limit,
             patch,
+            from_rev,
+            to_rev,
+            since,
+            until,
             ..
-        } => query::run_trace_fix(fix_revision, paths, limit, patch),
+        } => {
+            let scope = search_scope::SearchScopeOptions {
+                from_rev,
+                to_rev,
+                since,
+                until,
+            };
+            query::run_trace_fix(fix_revision, paths, limit, patch, scope)
+        }
         Command::Timeline {
             path,
             at,

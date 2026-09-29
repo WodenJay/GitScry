@@ -64,7 +64,7 @@ pub(super) fn run_search(
 ) -> Result<Outcome, AppError> {
     let intent = analysis::Intent::parse(&words, &[])?;
     let session = cache::open_query()?;
-    let scope = search_scope::resolve(&session, scope_options)?;
+    let scope = search_scope::resolve(&session, scope_options, None)?;
     let mut report = match &scope {
         Some(scope) => analysis::search_scoped(&session, &intent, limit, &scope.filter)?,
         None => analysis::search(&session, &intent, limit)?,
@@ -86,7 +86,7 @@ pub(super) fn run_code_search(
     scope_options: SearchScopeOptions,
 ) -> Result<Outcome, AppError> {
     let session = cache::open_query()?;
-    let scope = search_scope::resolve(&session, scope_options)?;
+    let scope = search_scope::resolve(&session, scope_options, None)?;
     let mut report = match &scope {
         Some(scope) => analysis::code_search_scoped(
             &session,
@@ -137,6 +137,7 @@ pub(super) fn run_regression(
     bad: String,
     limit: usize,
     patch: bool,
+    scope_options: SearchScopeOptions,
 ) -> Result<Outcome, AppError> {
     let intent = analysis::Intent::symptom(&words, &path)?;
     let repository = Repository::discover()?;
@@ -147,13 +148,18 @@ pub(super) fn run_regression(
     if let Some(good_revision) = &target.good_revision {
         session.require_revision(good_revision)?;
     }
+    let scope = search_scope::resolve(&session, scope_options, Some(&target.bad_revision))?;
     let bad_reachable = session.ancestors(&target.bad_revision)?;
-    let reachable = if let Some(good_revision) = &target.good_revision {
+    let mut reachable = if let Some(good_revision) = &target.good_revision {
         let good_reachable = session.ancestors(good_revision)?;
         bad_reachable.difference(&good_reachable).cloned().collect()
     } else {
         bad_reachable
     };
+    if let Some(scope) = &scope {
+        let scoped_revisions = session.scoped_revisions(&scope.filter)?;
+        reachable.retain(|revision| scoped_revisions.contains(revision));
+    }
     let mut report = analysis::regression(&session, &intent, &target, &reachable, limit)?;
     if patch {
         analysis::attach_regression_patch_excerpts(
@@ -163,6 +169,9 @@ pub(super) fn run_regression(
             &reachable,
             &mut report,
         )?;
+    }
+    if let Some(scope) = scope {
+        report.scope = Some(scope.report);
     }
     Ok(query_outcome(&session, report))
 }
@@ -226,15 +235,24 @@ pub(super) fn run_trace_fix(
     paths: Vec<String>,
     limit: usize,
     patch: bool,
+    scope_options: SearchScopeOptions,
 ) -> Result<Outcome, AppError> {
     let repository = Repository::discover()?;
     let target = repository.pin_trace_fix(&revision, &paths)?;
     let session = cache::open_query()?;
     session.require_revision(&target.revision)?;
-    let reachable = session.ancestors(&target.revision)?;
+    let scope = search_scope::resolve(&session, scope_options, Some(&target.revision))?;
+    let mut reachable = session.ancestors(&target.revision)?;
+    if let Some(scope) = &scope {
+        let scoped_revisions = session.scoped_revisions(&scope.filter)?;
+        reachable.retain(|revision| scoped_revisions.contains(revision));
+    }
     let mut report = analysis::trace_fix(&session, &target, &reachable, limit)?;
     if patch {
         analysis::attach_trace_fix_patch_excerpts(&session, &mut report)?;
+    }
+    if let Some(scope) = scope {
+        report.scope = Some(scope.report);
     }
     Ok(query_outcome(&session, report))
 }

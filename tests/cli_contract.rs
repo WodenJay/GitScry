@@ -350,9 +350,15 @@ fn json_flag_is_available_only_for_query_commands() {
         ] {
             assert!(help.contains(flag), "{name} help missing {flag}");
         }
-        assert!(help.contains("committer time"), "{name} help must explain time scope");
+        assert!(
+            help.contains("committer time"),
+            "{name} help must explain time scope"
+        );
         assert!(help.contains("UTC"), "{name} help must explain UTC bounds");
-        assert!(help.contains("Examples:"), "{name} help must include examples");
+        assert!(
+            help.contains("Examples:"),
+            "{name} help must include examples"
+        );
     }
     let regression_help = repo.run(["regression", "--help"]);
     let regression_help = String::from_utf8_lossy(&regression_help.stdout);
@@ -363,7 +369,6 @@ fn json_flag_is_available_only_for_query_commands() {
     let trace_help = String::from_utf8_lossy(&trace_help.stdout);
     assert!(trace_help.contains("FIX_REVISION"));
     assert!(trace_help.contains("fix target"));
-
 
     for name in ["index", "update"] {
         let help = repo.run([name, "--help"]);

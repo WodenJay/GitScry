@@ -54,6 +54,7 @@ impl TimeBound {
 pub(super) fn resolve(
     session: &QuerySession,
     options: SearchScopeOptions,
+    default_to_rev: Option<&str>,
 ) -> Result<Option<ResolvedSearchScope>, AppError> {
     if options.is_empty() {
         return Ok(None);
@@ -88,7 +89,7 @@ pub(super) fn resolve(
             require_cached_revision(session, requested, &revision)?;
             revision
         }
-        None => cache_tip.clone(),
+        None => default_to_rev.unwrap_or(&cache_tip).to_owned(),
     };
     let from_rev = options
         .from_rev
@@ -104,7 +105,7 @@ pub(super) fn resolve(
         let reachable = session.ancestors(&to_rev)?;
         if !reachable.contains(from_rev) {
             return Err(AppError::input(
-                "--from-rev must be an ancestor of --to-rev (or the published cache tip)",
+                "--from-rev must be an ancestor of the effective --to-rev",
             ));
         }
     }

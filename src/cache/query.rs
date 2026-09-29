@@ -113,6 +113,36 @@ impl QuerySession {
         candidates_scoped(&self.connection, match_query, scope)
     }
 
+    pub(crate) fn scoped_revisions(
+        &self,
+        scope: &SearchFilter,
+    ) -> Result<HashSet<String>, AppError> {
+        let query = format!(
+            "{SEARCH_SCOPE_CTE}
+             SELECT commits.oid
+             FROM eligible
+             JOIN commits USING (commit_id)
+             ORDER BY commits.position"
+        );
+        let mut statement = self
+            .connection
+            .prepare(&query)
+            .map_err(|error| search_error("preparing scoped revisions", error))?;
+        let rows = statement
+            .query_map(
+                params![
+                    scope.to_oid.as_str(),
+                    scope.from_oid.as_deref(),
+                    scope.since,
+                    scope.until
+                ],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(|error| search_error("querying scoped revisions", error))?;
+        rows.collect::<Result<HashSet<_>, _>>()
+            .map_err(|error| search_error("reading scoped revisions", error))
+    }
+
     pub(crate) fn projected_path_keys(&self, oid: &str) -> Result<Vec<String>, AppError> {
         projected_path_keys(&self.connection, oid)
     }

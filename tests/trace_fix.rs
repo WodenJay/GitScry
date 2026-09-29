@@ -649,8 +649,10 @@ fn trace_fix_scope_filters_material_without_retargeting_the_fix() {
         introducing.as_str(),
     ]);
     assert_eq!(invalid.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&invalid.stderr)
-        .contains("--from-rev must be an ancestor of --to-rev"));
+    assert!(
+        String::from_utf8_lossy(&invalid.stderr)
+            .contains("--from-rev must be an ancestor of the effective --to-rev")
+    );
 
     let human = repo.run([
         "trace-fix",
