@@ -3,7 +3,10 @@ mod index;
 mod query;
 
 mod update;
-use crate::{analysis, cli::Command};
+use crate::{
+    analysis,
+    cli::{CodeChange, Command},
+};
 
 pub(crate) use error::AppError;
 
@@ -45,9 +48,24 @@ pub(crate) fn execute(
     match command {
         Command::Index => index::run(&mut |stage| report(Progress::Index(stage))),
         Command::Update => update::run(&mut |stage| report(Progress::Update(stage))),
-        Command::Search { query, limit, .. } => {
-            query::run(query, Vec::new(), limit, analysis::search)
-        }
+        Command::Search {
+            query,
+            code,
+            change,
+            path,
+            limit,
+            ..
+        } => match (query, code) {
+            (Some(query), None) => query::run(query, Vec::new(), limit, analysis::search),
+            (None, Some(code)) => {
+                let direction = change.map(|change| match change {
+                    CodeChange::Added => analysis::CodeDirection::Added,
+                    CodeChange::Removed => analysis::CodeDirection::Removed,
+                });
+                query::run_code(code, path, direction, limit)
+            }
+            _ => unreachable!("clap enforces exactly one search mode"),
+        },
         Command::Examples {
             query,
             paths,

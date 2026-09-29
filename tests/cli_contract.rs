@@ -279,6 +279,19 @@ fn json_flag_is_available_only_for_query_commands() {
             "{name} help must document --json"
         );
     }
+    let search_help = repo.run(["search", "--help"]);
+    assert_eq!(search_help.status.code(), Some(0));
+    let search_help = String::from_utf8_lossy(&search_help.stdout)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(search_help.contains("literal changed-code lines"));
+    assert!(search_help.contains("--code <TEXT>"));
+    assert!(search_help.contains("--change <CHANGE>"));
+    assert!(search_help.contains("--path <PATH>"));
+    assert!(search_help.contains("case-sensitive literal substring"));
+    assert!(search_help.contains("default branch"));
+    assert!(search_help.contains("Examples:"));
 
     for name in ["index", "update"] {
         let help = repo.run([name, "--help"]);

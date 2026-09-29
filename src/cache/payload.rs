@@ -466,6 +466,11 @@ impl<'a> HunkReader<'a> {
         Ok(output)
     }
 
+    pub(crate) fn clear_decoded_blocks(&mut self) {
+        self.line_cache.clear();
+        self.token_cache.clear();
+    }
+
     fn token_block(&mut self, block_id: i64, material: &str) -> Result<&[u8], AppError> {
         if !self.token_cache.contains_key(&block_id) {
             let (compressed, length): (Vec<u8>, i64) = self

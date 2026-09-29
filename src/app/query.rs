@@ -36,6 +36,18 @@ pub(super) fn run(
     Ok(query_outcome(&session, report))
 }
 
+/// Run a literal changed-code query without tokenizing its text as a topic.
+pub(super) fn run_code(
+    query: String,
+    path: Option<String>,
+    direction: Option<analysis::CodeDirection>,
+    limit: usize,
+) -> Result<Outcome, AppError> {
+    let session = cache::open_query()?;
+    let report = analysis::code_search(&session, &query, path.as_deref(), direction, limit)?;
+    Ok(query_outcome(&session, report))
+}
+
 /// One path query: build the intent, open the published cache, run the capability, render it.
 pub(super) fn run_paths(
     paths: Vec<String>,

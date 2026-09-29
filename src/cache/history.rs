@@ -4,7 +4,7 @@ use rusqlite::{Connection, params};
 
 use crate::app::AppError;
 
-use super::{QuerySession, cache_error, message_parts, read_hunks};
+use super::{HunkReader, QuerySession, cache_error, message_parts, read_hunks};
 
 pub(crate) struct HistoryCommit {
     pub(crate) position: i64,
@@ -36,6 +36,18 @@ pub(crate) struct HistoryHunk {
     pub(crate) text: Vec<u8>,
 }
 
+pub(crate) struct CodeHunk {
+    pub(crate) oid: String,
+    pub(crate) commit_time: i64,
+    pub(crate) change_ordinal: i64,
+    pub(crate) old_path: Option<Vec<u8>>,
+    pub(crate) new_path: Option<Vec<u8>>,
+    pub(crate) hunk_ordinal: i64,
+    pub(crate) old_start: i64,
+    pub(crate) new_start: i64,
+    pub(crate) text: Vec<u8>,
+}
+
 impl QuerySession {
     pub(crate) fn path_history(
         &self,
@@ -51,6 +63,13 @@ impl QuerySession {
 
     pub(crate) fn history_hunks(&self, oid: &str) -> Result<Vec<HistoryHunk>, AppError> {
         hunks(&self.connection, oid)
+    }
+
+    pub(crate) fn scan_code_hunks(
+        &self,
+        visit: impl FnMut(CodeHunk) -> Result<(), AppError>,
+    ) -> Result<(), AppError> {
+        scan_code_hunks(&self.connection, visit)
     }
 
     pub(crate) fn has_missing_objects(&self, commits: &[HistoryCommit]) -> Result<bool, AppError> {
@@ -218,6 +237,73 @@ fn hunks(connection: &Connection, oid: &str) -> Result<Vec<HistoryHunk>, AppErro
             })
             .collect()
     })
+}
+
+fn scan_code_hunks(
+    connection: &Connection,
+    mut visit: impl FnMut(CodeHunk) -> Result<(), AppError>,
+) -> Result<(), AppError> {
+    let mut reader = HunkReader::new(connection)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT c.oid, c.commit_time, ch.ordinal, ch.old_path, ch.new_path,
+                    h.ordinal, h.old_start, h.new_start, h.payload_id, p.token_block_id
+             FROM hunks AS h
+             JOIN changes AS ch ON ch.change_id = h.change_id
+             JOIN commits AS c ON c.commit_id = ch.commit_id
+             JOIN hunk_payloads AS p ON p.payload_id = h.payload_id
+             ORDER BY p.token_block_id, p.token_offset",
+        )
+        .map_err(|error| search_error("preparing code-search hunks", error))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, Option<Vec<u8>>>(3)?,
+                row.get::<_, Option<Vec<u8>>>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, i64>(7)?,
+                row.get::<_, i64>(8)?,
+                row.get::<_, i64>(9)?,
+            ))
+        })
+        .map_err(|error| search_error("reading code-search hunks", error))?;
+    let mut active_token_block = None;
+    for row in rows {
+        let (
+            oid,
+            commit_time,
+            change_ordinal,
+            old_path,
+            new_path,
+            hunk_ordinal,
+            old_start,
+            new_start,
+            payload_id,
+            token_block_id,
+        ) = row.map_err(|error| search_error("reading code-search hunks", error))?;
+        if active_token_block != Some(token_block_id) {
+            reader.clear_decoded_blocks();
+            active_token_block = Some(token_block_id);
+        }
+        let material = format!("{oid}/change {change_ordinal}/hunk {hunk_ordinal}");
+        let text = reader.decode_payload(payload_id, &material)?;
+        visit(CodeHunk {
+            oid,
+            commit_time,
+            change_ordinal,
+            old_path,
+            new_path,
+            hunk_ordinal,
+            old_start,
+            new_start,
+            text,
+        })?;
+    }
+    Ok(())
 }
 
 fn has_missing_objects(

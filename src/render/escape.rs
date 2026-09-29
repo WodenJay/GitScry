@@ -1,3 +1,4 @@
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 /// Escape a path the way Git renders one: unquoted when plain, C-quoted when not.
 pub(super) fn path(path: &[u8]) -> String {
     let quoted = path
@@ -24,11 +25,19 @@ pub(super) fn path(path: &[u8]) -> String {
     rendered
 }
 
+/// Keep changed source text on one safe output line; non-UTF-8 bytes are base64 encoded.
+pub(super) fn code_line(line: &[u8]) -> String {
+    match std::str::from_utf8(line) {
+        Ok(line) => subject(line),
+        Err(_) => format!("base64:{}", STANDARD.encode(line)),
+    }
+}
+
 /// Escape a commit subject so the line-oriented output stays one line per field.
 pub(super) fn subject(subject: &str) -> String {
     let mut rendered = String::with_capacity(subject.len());
     for character in subject.chars() {
-        if character.is_control() {
+        if character.is_control() || matches!(character, '\u{2028}' | '\u{2029}') {
             rendered.extend(character.escape_default());
         } else {
             rendered.push(character);

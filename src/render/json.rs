@@ -2,7 +2,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::Serialize;
 
 use crate::analysis::{
-    Citation, Confidence, Detail, Failure, Material, Relation, Report, ReportKind, Step,
+    Citation, CodeMatch, Confidence, Detail, Failure, Material, Relation, Report, ReportKind, Step,
 };
 
 const SCHEMA_VERSION: u8 = 1;
@@ -18,6 +18,8 @@ pub(crate) fn format_json_report(
         matched_count: report.matched_count,
         truncated: report.truncated,
         materials: report.materials.iter().map(json_material).collect(),
+        code_matches: (report.kind == ReportKind::CodeSearch)
+            .then(|| report.code_matches.iter().map(json_code_match).collect()),
         warnings,
         notices: &report.notices,
     })
@@ -30,6 +32,8 @@ struct JsonReport<'a> {
     matched_count: usize,
     truncated: bool,
     materials: Vec<JsonMaterial<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code_matches: Option<Vec<JsonCodeMatch<'a>>>,
     warnings: Vec<&'a String>,
     notices: &'a [String],
 }
@@ -42,6 +46,15 @@ struct JsonMaterial<'a> {
     basis: &'a [String],
     citations: Vec<JsonCitation<'a>>,
     detail: Option<JsonDetail<'a>>,
+}
+
+#[derive(Serialize)]
+struct JsonCodeMatch<'a> {
+    commit_id: &'a str,
+    path: JsonPath<'a>,
+    direction: &'static str,
+    line_number: usize,
+    line: JsonPath<'a>,
 }
 
 #[derive(Serialize)]
@@ -109,6 +122,7 @@ fn report_kind(kind: ReportKind) -> &'static str {
     match kind {
         ReportKind::Search => "search",
         ReportKind::Examples => "examples",
+        ReportKind::CodeSearch => "code-search",
         ReportKind::Failures => "failures",
         ReportKind::Related => "related",
         ReportKind::Tests => "tests",
@@ -126,6 +140,16 @@ fn json_material(material: &Material) -> JsonMaterial<'_> {
         basis: &material.basis,
         citations: material.citations.iter().map(json_citation).collect(),
         detail: material.detail.as_ref().map(json_detail),
+    }
+}
+
+fn json_code_match(matched: &CodeMatch) -> JsonCodeMatch<'_> {
+    JsonCodeMatch {
+        commit_id: &matched.commit_id,
+        path: json_path(&matched.path),
+        direction: matched.direction.as_str(),
+        line_number: matched.line_number,
+        line: json_path(&matched.line),
     }
 }
 

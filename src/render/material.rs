@@ -16,6 +16,7 @@ const RELATION_CITATIONS_PER_RESULT: usize = 5;
 fn empty_message(kind: ReportKind) -> &'static str {
     match kind {
         ReportKind::Search => "No relevant history found.",
+        ReportKind::CodeSearch => "No matching changed lines found.",
         ReportKind::Examples => "No historical examples found.",
         ReportKind::Failures => "No failed approaches found.",
         ReportKind::Related => "No historical relations found.",
@@ -26,7 +27,35 @@ fn empty_message(kind: ReportKind) -> &'static str {
     }
 }
 
+fn format_code_report(report: &Report) -> String {
+    if report.code_matches.is_empty() {
+        return empty_message(report.kind).to_owned();
+    }
+    let mut lines = vec![header(report)];
+    for matched in &report.code_matches {
+        lines.push(format!(
+            "- {} {}:{} {}: {}",
+            matched.commit_id,
+            escape::path(&matched.path),
+            matched.line_number,
+            matched.direction.as_str(),
+            escape::code_line(&matched.line),
+        ));
+    }
+    if report.truncated {
+        lines.push(format!(
+            "Showing {} of {} matching lines; results truncated.",
+            report.code_matches.len(),
+            report.matched_count,
+        ));
+    }
+    lines.join("\n")
+}
+
 pub(crate) fn format_report(report: &Report) -> String {
+    if report.kind == ReportKind::CodeSearch {
+        return format_code_report(report);
+    }
     let lines = if report.materials.is_empty() {
         vec![empty_message(report.kind).to_owned()]
     } else {
@@ -36,6 +65,7 @@ pub(crate) fn format_report(report: &Report) -> String {
         }
         if report.truncated {
             let noun = match report.kind {
+                ReportKind::CodeSearch => "matching lines",
                 ReportKind::Related | ReportKind::Tests => "matching paths",
                 ReportKind::Why => "matching commits",
                 ReportKind::Search
@@ -58,6 +88,7 @@ pub(crate) fn format_report(report: &Report) -> String {
 fn header(report: &Report) -> String {
     let noun = match report.kind {
         ReportKind::Search => "Relevant history",
+        ReportKind::CodeSearch => "Code search",
         ReportKind::Examples => "Historical examples",
         ReportKind::Failures => "Failed approaches",
         ReportKind::Related => "Related paths",
