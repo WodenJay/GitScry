@@ -1,4 +1,7 @@
-use crate::{app::AppError, cache::QuerySession};
+use crate::{
+    app::AppError,
+    cache::{QuerySession, SearchFilter},
+};
 
 use super::super::provenance::{revert_reason, stated_retry};
 use super::super::retrieval;
@@ -26,17 +29,17 @@ pub(crate) fn run(
     session: &QuerySession,
     intent: &Intent,
     limit: usize,
+    scope: Option<&SearchFilter>,
 ) -> Result<Report, AppError> {
-    let Some(pool) = retrieval::pool(session, intent, limit)? else {
+    let Some(pool) = retrieval::pool(session, intent, limit, scope)? else {
         return Ok(super::super::empty_report(ReportKind::Failures));
     };
-    let reverts = retrieval::reverts(session)?;
-
+    let reverts = retrieval::reverts(session, scope)?;
     // Which commit history records as reverting each candidate. Computing this once keeps
     // the fold and the citation consistent.
     let mut linked = Vec::with_capacity(pool.candidates.len());
     for candidate in &pool.candidates {
-        linked.push(retrieval::link(session, &reverts, candidate)?);
+        linked.push(retrieval::link(session, &reverts, scope, candidate)?);
     }
 
     let mut ranked = Vec::new();
@@ -90,7 +93,7 @@ pub(crate) fn run(
             reason = revert_reason(&revert.subject, &revert.body);
             retry = stated_retry(&revert.body);
             if let Some((oid, subject, body)) =
-                retrieval::corrective_follow_up(session, &revert.oid, &candidate.path_keys)?
+                retrieval::corrective_follow_up(session, scope, &revert.oid, &candidate.path_keys)?
             {
                 score += FOLLOW_UP_WEIGHT;
                 basis.push("corrective follow-up".to_owned());

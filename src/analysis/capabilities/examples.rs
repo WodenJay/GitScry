@@ -1,4 +1,7 @@
-use crate::{app::AppError, cache::QuerySession};
+use crate::{
+    app::AppError,
+    cache::{QuerySession, SearchFilter},
+};
 
 use super::super::retrieval;
 use super::super::{Citation, Confidence, Detail, Intent, Material, Report, ReportKind};
@@ -17,12 +20,12 @@ pub(crate) fn run(
     session: &QuerySession,
     intent: &Intent,
     limit: usize,
+    scope: Option<&SearchFilter>,
 ) -> Result<Report, AppError> {
-    let Some(pool) = retrieval::pool(session, intent, limit)? else {
+    let Some(pool) = retrieval::pool(session, intent, limit, scope)? else {
         return Ok(super::super::empty_report(ReportKind::Examples));
     };
-    let reverts = retrieval::reverts(session)?;
-
+    let reverts = retrieval::reverts(session, scope)?;
     let mut ranked = Vec::new();
     for (index, candidate) in pool.candidates.iter().enumerate() {
         let anchored = candidate.signals.matched_anchors();
@@ -31,7 +34,7 @@ pub(crate) fn run(
         score += if coherent { COHERENT_WEIGHT } else { 0.0 };
         // Work that was later undone, and the revert itself, are not precedents to follow.
         if reverts.is_revert(&candidate.oid)
-            || retrieval::link(session, &reverts, candidate)?.is_some()
+            || retrieval::link(session, &reverts, scope, candidate)?.is_some()
         {
             score -= REVERT_DEMOTION;
         }
@@ -64,7 +67,7 @@ pub(crate) fn run(
         if reverts.is_revert(&candidate.oid) {
             basis.push("demoted: a revert, not a precedent".to_owned());
             confidence = Confidence::Low;
-        } else if let Some(revert) = retrieval::link(session, &reverts, candidate)? {
+        } else if let Some(revert) = retrieval::link(session, &reverts, scope, candidate)? {
             citations.push(
                 Citation::new(revert.oid.clone(), revert.subject.clone()).noting("later reverted"),
             );

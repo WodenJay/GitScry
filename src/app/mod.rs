@@ -76,18 +76,10 @@ pub(crate) fn execute(
             path,
             limit,
             patch,
-            from_rev,
-            to_rev,
-            since,
-            until,
+            scope,
             ..
         } => {
-            let scope = search_scope::SearchScopeOptions {
-                from_rev,
-                to_rev,
-                since,
-                until,
-            };
+            let scope = scope.into();
             match (query, code) {
                 (Some(query), None) => query::run_search(query, limit, patch, scope),
                 (None, Some(code)) => {
@@ -105,21 +97,16 @@ pub(crate) fn execute(
             paths,
             limit,
             patch,
+            scope,
             ..
-        } => {
-            if patch {
-                let path_only = !paths.is_empty();
-                query::run_with_patch(query, paths, limit, path_only, analysis::examples)
-            } else {
-                query::run(query, paths, limit, analysis::examples)
-            }
-        }
+        } => query::run_with_scope(query, paths, limit, patch, scope.into(), analysis::examples),
         Command::Failures {
             query,
             paths,
             limit,
+            scope,
             ..
-        } => query::run(query, paths, limit, analysis::failures),
+        } => query::run_with_scope(query, paths, limit, false, scope.into(), analysis::failures),
         Command::Related { paths, limit, .. } => {
             query::run_paths(paths, limit, json_output, analysis::related)
         }

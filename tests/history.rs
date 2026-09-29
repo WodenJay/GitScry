@@ -880,3 +880,186 @@ fn examples_and_failures_reject_paths_outside_the_repository() {
         }
     }
 }
+
+#[test]
+fn examples_and_failures_filter_candidates_before_limit_with_combined_scope() {
+    let repo = TestRepo::new();
+    let lower = repo.commit_at(
+        "src/providers/boundary.rs",
+        b"boundary example\n",
+        "Retire telemetry provider at the lower boundary",
+        "2020-01-01T00:00:00+0000",
+    );
+    let example = repo.commit_at(
+        "src/providers/scoped.rs",
+        b"release example\n",
+        "Retire telemetry provider within the release",
+        "2020-01-02T00:00:00+0000",
+    );
+    let failure = repo.commit_at(
+        "src/db/noisy_cache.rs",
+        b"filter enabled\n",
+        "Exclude noisy cache tags from lookup",
+        "2020-01-02T12:00:00+0000",
+    );
+    repo.commit_at(
+        "src/db/noisy_cache.rs",
+        b"filter disabled\n",
+        &format!(
+            "revert: exclude noisy cache tags from lookup\n\nThis reverts commit {failure}.\n"
+        ),
+        "2020-01-03T00:00:00+0000",
+    );
+    let mut upper = repo.head();
+
+    // More matching commits than the unscoped candidate pool can inspect, all outside the
+    // time window. They must not crowd in-scope material out before ranking and --limit.
+    for index in 0..21 {
+        let day = 10 + index;
+        repo.commit_at(
+            &format!("src/providers/outside-{index}.rs"),
+            format!("outside example {index}\n").as_bytes(),
+            &format!("Retire telemetry provider outside the release {index}"),
+            &format!("2020-01-{day:02}T00:00:00+0000"),
+        );
+        let abandoned = repo.commit_at(
+            "src/db/noisy_cache.rs",
+            format!("filter enabled {index}\n").as_bytes(),
+            &format!("Exclude noisy cache tags from lookup attempt {index}"),
+            &format!("2020-01-{day:02}T01:00:00+0000"),
+        );
+        repo.commit_at(
+            "src/db/noisy_cache.rs",
+            b"filter disabled\n",
+            &format!(
+                "revert: exclude noisy cache tags from lookup\n\nThis reverts commit {abandoned}.\n"
+            ),
+            &format!("2020-01-{day:02}T02:00:00+0000"),
+        );
+        upper = repo.head();
+    }
+    repo.index();
+
+    let examples = repo.run([
+        "examples",
+        "retire",
+        "telemetry",
+        "--from-rev",
+        lower.as_str(),
+        "--to-rev",
+        upper.as_str(),
+        "--since",
+        "2020-01-02",
+        "--until",
+        "2020-01-03",
+        "--limit",
+        "1",
+        "--json",
+    ]);
+    assert_eq!(examples.status.code(), Some(0), "{}", stderr(&examples));
+    let examples: serde_json::Value = serde_json::from_slice(&examples.stdout).unwrap();
+    assert_eq!(examples["materials"].as_array().unwrap().len(), 1);
+    assert_eq!(examples["materials"][0]["citations"][0]["oid"], example);
+    assert_eq!(
+        examples["materials"][0]["paths"][0],
+        "src/providers/scoped.rs"
+    );
+    assert_eq!(examples["scope"]["from_rev"], lower);
+    assert_eq!(examples["scope"]["to_rev"], upper);
+    assert_eq!(examples["scope"]["since"], "2020-01-02");
+    assert_eq!(examples["scope"]["until"], "2020-01-03");
+
+    let failures = repo.run([
+        "failures",
+        "exclude",
+        "noisy",
+        "cache",
+        "--from-rev",
+        lower.as_str(),
+        "--to-rev",
+        upper.as_str(),
+        "--since",
+        "2020-01-02",
+        "--until",
+        "2020-01-03",
+        "--limit",
+        "1",
+        "--json",
+    ]);
+    assert_eq!(failures.status.code(), Some(0), "{}", stderr(&failures));
+    let failures: serde_json::Value = serde_json::from_slice(&failures.stdout).unwrap();
+    assert_eq!(failures["materials"].as_array().unwrap().len(), 1);
+    assert_eq!(failures["materials"][0]["citations"][0]["oid"], failure);
+    assert_eq!(
+        failures["materials"][0]["paths"][0],
+        "src/db/noisy_cache.rs"
+    );
+    assert_eq!(failures["scope"]["from_rev"], lower);
+    assert_eq!(failures["scope"]["to_rev"], upper);
+    assert_eq!(failures["scope"]["since"], "2020-01-02");
+    assert_eq!(failures["scope"]["until"], "2020-01-03");
+}
+
+#[test]
+fn examples_and_failures_share_scope_validation_and_empty_output() {
+    let repo = provider_retirements();
+    repo.index();
+    let tip = repo.head();
+    let lower = git_stdout(repo.dir.path(), ["rev-parse", "HEAD^"]);
+
+    for (command, empty_message) in [
+        ("examples", "No historical examples found."),
+        ("failures", "No failed approaches found."),
+    ] {
+        let help = repo.run([command, "--help"]);
+        assert_eq!(help.status.code(), Some(0), "{}", stderr(&help));
+        let help = stdout(&help);
+        for option in ["--from-rev", "--to-rev", "--since", "--until", "RFC 3339"] {
+            assert!(
+                help.contains(option),
+                "{command} help missing {option}: {help}"
+            );
+        }
+
+        let invalid_date = repo.run([command, "provider", "--since", "2024-02-30"]);
+        assert_eq!(invalid_date.status.code(), Some(2));
+        assert!(
+            stderr(&invalid_date).contains("invalid --since value"),
+            "{}",
+            stderr(&invalid_date)
+        );
+
+        let reversed_revisions = repo.run([
+            command,
+            "provider",
+            "--from-rev",
+            tip.as_str(),
+            "--to-rev",
+            lower.as_str(),
+        ]);
+        assert_eq!(reversed_revisions.status.code(), Some(2));
+        assert!(
+            stderr(&reversed_revisions).contains("--from-rev must be an ancestor of --to-rev"),
+            "{}",
+            stderr(&reversed_revisions)
+        );
+
+        let empty = repo.run([command, "provider", "--since", "9999-12-31"]);
+        assert_eq!(empty.status.code(), Some(0), "{}", stderr(&empty));
+        let text = stdout(&empty);
+        assert!(text.starts_with("Scope:"), "{text}");
+        assert!(text.contains(empty_message), "{text}");
+
+        let empty_json = repo.run([command, "provider", "--since", "9999-12-31", "--json"]);
+        assert_eq!(empty_json.status.code(), Some(0), "{}", stderr(&empty_json));
+        let empty_json: serde_json::Value = serde_json::from_slice(&empty_json.stdout).unwrap();
+        assert_eq!(empty_json["materials"], serde_json::json!([]));
+        assert_eq!(empty_json["scope"]["since"], "9999-12-31");
+        assert_eq!(empty_json["scope"]["cache_tip"], tip);
+
+        let unscoped = repo.run([command, "provider", "--json"]);
+        assert_eq!(unscoped.status.code(), Some(0), "{}", stderr(&unscoped));
+        let unscoped: serde_json::Value = serde_json::from_slice(&unscoped.stdout).unwrap();
+        assert!(unscoped.get("scope").is_none(), "{unscoped}");
+    }
+}

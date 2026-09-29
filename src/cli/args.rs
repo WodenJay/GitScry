@@ -1,4 +1,4 @@
-use clap::{ArgGroup, Parser, Subcommand};
+use clap::{ArgGroup, Args, Parser, Subcommand};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -18,6 +18,21 @@ Your Git history is a treasure trove. GitScry uncovers the implementation exampl
 
 Pick one command by intent, then run `gitscry <command> --help` for inputs, options, and examples. Use `gitscry timeline PATH` to inspect a file's complete evolution in the published cache.\n\nQuery commands support `--json` for structured output.";
 
+#[derive(Debug, Args, Default)]
+pub(crate) struct HistoricalScopeArgs {
+    /// Exclude this cached commit and its ancestors from the query scope.
+    #[arg(long = "from-rev", value_name = "REV")]
+    pub(crate) from_rev: Option<String>,
+    /// Include this cached commit and its ancestors; defaults to the published cache tip.
+    #[arg(long = "to-rev", value_name = "REV")]
+    pub(crate) to_rev: Option<String>,
+    /// Include commits at or after this UTC date or RFC 3339 timestamp with an offset.
+    #[arg(long, value_name = "DATE_OR_TIMESTAMP")]
+    pub(crate) since: Option<String>,
+    /// Include commits through this UTC date or RFC 3339 timestamp with an offset.
+    #[arg(long, value_name = "DATE_OR_TIMESTAMP")]
+    pub(crate) until: Option<String>,
+}
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
     #[command(
@@ -69,18 +84,8 @@ Examples:
         /// Exact historical path; additions use the new path, removals the old path.
         #[arg(long = "path", value_name = "PATH", requires = "code")]
         path: Option<String>,
-        /// Exclude this cached commit and its ancestors from search.
-        #[arg(long = "from-rev", value_name = "REV")]
-        from_rev: Option<String>,
-        /// Include this cached commit and its ancestors; defaults to the published cache tip.
-        #[arg(long = "to-rev", value_name = "REV")]
-        to_rev: Option<String>,
-        /// Include commits at or after this UTC date or RFC 3339 timestamp with an offset.
-        #[arg(long, value_name = "DATE_OR_TIMESTAMP")]
-        since: Option<String>,
-        /// Include commits through this UTC date or RFC 3339 timestamp with an offset.
-        #[arg(long, value_name = "DATE_OR_TIMESTAMP")]
-        until: Option<String>,
+        #[command(flatten)]
+        scope: HistoricalScopeArgs,
         /// Maximum number of matching commits or changed lines to return.
         #[arg(long, default_value = "10", value_parser = parse_limit)]
         limit: usize,
@@ -94,7 +99,19 @@ Examples:
 
     #[command(
         about = "Find historical examples of a similar change or migration",
-        long_about = "Find historical examples of a similar change or migration.\n\nUse `gitscry examples` before making a planned change when you want reusable precedents: commits that implemented something similar, with their change steps and touched paths.\n\nRequired input: one or more QUERY words describing the change. `--path` narrows the material to a repository-relative path the change touched and may be repeated.\n\nExamples:\n\n  gitscry examples retry backoff\n\n  gitscry examples retire provider --path src/lib.rs"
+        long_about = r#"Find historical examples of a similar change or migration.
+
+Use `gitscry examples` before making a planned change when you want reusable precedents: commits that implemented something similar, with their change steps and touched paths.
+
+Required input: one or more QUERY words describing the change. `--path` narrows the material to a repository-relative path the change touched and may be repeated.
+
+Historical scope: `--from-rev REV` excludes that commit and its ancestors. `--to-rev REV` includes that commit and its ancestors, and defaults to the published cache tip. The lower revision must be an ancestor of the upper revision; revisions must exist in the published cache. `--since` and `--until` are inclusive bounds: use `YYYY-MM-DD` for a UTC calendar day or an RFC 3339 timestamp with `Z` or an explicit UTC offset for an instant. Timezone-free timestamps are rejected. Revision and time bounds combine. Scope filters commits before ranking and `--limit`; scoped output shows the resolved revisions, normalized time bounds, and effective cache tip in human and JSON output.
+
+Examples:
+
+  gitscry examples retry backoff --from-rev v1.2.0 --to-rev v1.3.0
+
+  gitscry examples retire provider --since 2025-01-01 --until 2025-01-31 --path src/lib.rs"#
     )]
     Examples {
         /// Query words matched against commit subjects, bodies, and touched paths.
@@ -112,11 +129,25 @@ Examples:
         /// Include bounded cached text hunks from paths matching this query.
         #[arg(long)]
         patch: bool,
+        #[command(flatten)]
+        scope: HistoricalScopeArgs,
     },
 
     #[command(
         about = "Find abandoned or reverted approaches, their recorded reason, and safe retry conditions",
-        long_about = "Find abandoned or reverted approaches, their recorded reason, and safe retry conditions.\n\nUse `gitscry failures` when you are considering an approach and want to know whether it was tried and abandoned: it returns reverted or superseded commits together with the recorded reason and retry conditions from their commit bodies.\n\nRequired input: one or more QUERY words describing the approach. `--path` narrows the material to a repository-relative path the change touched and may be repeated.\n\nExamples:\n\n  gitscry failures provider normalization\n\n  gitscry failures hand rolled parser --path src/parse.rs"
+        long_about = r#"Find abandoned or reverted approaches, their recorded reason, and safe retry conditions.
+
+Use `gitscry failures` when you are considering an approach and want to know whether it was tried and abandoned: it returns reverted or superseded commits together with the recorded reason and retry conditions from their commit bodies.
+
+Required input: one or more QUERY words describing the approach. `--path` narrows the material to a repository-relative path the change touched and may be repeated.
+
+Historical scope: `--from-rev REV` excludes that commit and its ancestors. `--to-rev REV` includes that commit and its ancestors, and defaults to the published cache tip. The lower revision must be an ancestor of the upper revision; revisions must exist in the published cache. `--since` and `--until` are inclusive bounds: use `YYYY-MM-DD` for a UTC calendar day or an RFC 3339 timestamp with `Z` or an explicit UTC offset for an instant. Timezone-free timestamps are rejected. Revision and time bounds combine. Scope filters commits before ranking and `--limit`; scoped output shows the resolved revisions, normalized time bounds, and effective cache tip in human and JSON output.
+
+Examples:
+
+  gitscry failures provider normalization --from-rev v1.2.0 --to-rev v1.3.0
+
+  gitscry failures parser migration --since 2025-01-01T09:00:00-05:00"#
     )]
     Failures {
         /// Query words matched against commit subjects, bodies, and touched paths.
@@ -131,6 +162,8 @@ Examples:
         /// Output a stable structured JSON report instead of human-readable text.
         #[arg(long)]
         json: bool,
+        #[command(flatten)]
+        scope: HistoricalScopeArgs,
     },
 
     #[command(

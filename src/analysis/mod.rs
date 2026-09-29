@@ -254,9 +254,10 @@ pub(crate) fn examples(
     session: &QuerySession,
     intent: &Intent,
     limit: usize,
+    scope: Option<&SearchFilter>,
 ) -> Result<Report, AppError> {
     validate_limit(limit)?;
-    capabilities::examples(session, intent, limit)
+    capabilities::examples(session, intent, limit, scope)
 }
 
 pub(crate) fn why(
@@ -316,9 +317,10 @@ pub(crate) fn failures(
     session: &QuerySession,
     intent: &Intent,
     limit: usize,
+    scope: Option<&SearchFilter>,
 ) -> Result<Report, AppError> {
     validate_limit(limit)?;
-    capabilities::failures(session, intent, limit)
+    capabilities::failures(session, intent, limit, scope)
 }
 
 pub(crate) fn related(
