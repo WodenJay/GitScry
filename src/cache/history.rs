@@ -37,6 +37,22 @@ pub(crate) struct HistoryHunk {
     pub(crate) text: Vec<u8>,
 }
 
+pub(crate) struct PatchHistory {
+    pub(crate) missing_objects: bool,
+    pub(crate) hunks: Vec<PatchHistoryHunk>,
+    pub(crate) truncated: bool,
+}
+
+pub(crate) struct PatchHistoryHunk {
+    pub(crate) old_path: Option<Vec<u8>>,
+    pub(crate) new_path: Option<Vec<u8>>,
+    pub(crate) old_start: i64,
+    pub(crate) old_lines: i64,
+    pub(crate) new_start: i64,
+    pub(crate) new_lines: i64,
+    pub(crate) text: Option<Vec<u8>>,
+}
+
 pub(crate) struct CodeHunk {
     pub(crate) oid: String,
     pub(crate) commit_time: i64,
@@ -72,6 +88,15 @@ impl QuerySession {
 
     pub(crate) fn history_hunks(&self, oid: &str) -> Result<Vec<HistoryHunk>, AppError> {
         hunks(&self.connection, oid)
+    }
+
+    pub(crate) fn patch_history(
+        &self,
+        oid: &str,
+        max_hunks: usize,
+        max_hunk_bytes: usize,
+    ) -> Result<PatchHistory, AppError> {
+        patch_history(&self.connection, oid, max_hunks, max_hunk_bytes)
     }
 
     pub(crate) fn scan_code_hunks(
@@ -258,6 +283,96 @@ fn hunks(connection: &Connection, oid: &str) -> Result<Vec<HistoryHunk>, AppErro
                 text: hunk.text,
             })
             .collect()
+    })
+}
+
+fn patch_history(
+    connection: &Connection,
+    oid: &str,
+    max_hunks: usize,
+    max_hunk_bytes: usize,
+) -> Result<PatchHistory, AppError> {
+    let missing_objects: bool = connection
+        .query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM changes AS ch
+                 JOIN commits AS c ON c.commit_id = ch.commit_id
+                 WHERE c.oid = ?1 AND (
+                     EXISTS (SELECT 1 FROM missing_objects AS m WHERE m.oid = ch.old_blob)
+                     OR EXISTS (SELECT 1 FROM missing_objects AS m WHERE m.oid = ch.new_blob)
+                 )
+             )",
+            params![oid],
+            |row| row.get(0),
+        )
+        .map_err(|error| search_error("checking cached patch completeness", error))?;
+
+    let limit = i64::try_from(max_hunks.saturating_add(1)).unwrap_or(i64::MAX);
+    let mut statement = connection
+        .prepare(
+            "SELECT ch.ordinal, ch.old_path, ch.new_path, h.ordinal,
+                    h.old_start, h.old_lines, h.new_start, h.new_lines, h.payload_id
+             FROM commits AS c
+             JOIN changes AS ch ON ch.commit_id = c.commit_id
+             JOIN hunks AS h ON h.change_id = ch.change_id
+             WHERE c.oid = ?1
+             ORDER BY ch.ordinal, h.ordinal
+             LIMIT ?2",
+        )
+        .map_err(|error| search_error("preparing cached patch hunks", error))?;
+    let rows = statement
+        .query_map(params![oid, limit], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, Option<Vec<u8>>>(1)?,
+                row.get::<_, Option<Vec<u8>>>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, i64>(7)?,
+                row.get::<_, i64>(8)?,
+            ))
+        })
+        .map_err(|error| search_error("reading cached patch hunks", error))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| search_error("reading cached patch hunks", error))?;
+    drop(statement);
+
+    let mut reader = HunkReader::new(connection)?;
+    let mut hunks = Vec::new();
+    let mut truncated = rows.len() > max_hunks;
+    for (
+        change_ordinal,
+        old_path,
+        new_path,
+        hunk_ordinal,
+        old_start,
+        old_lines,
+        new_start,
+        new_lines,
+        payload_id,
+    ) in rows.into_iter().take(max_hunks)
+    {
+        let material = format!("{oid}/change {change_ordinal}/hunk {hunk_ordinal}");
+        let text = reader.decode_payload_limited(payload_id, &material, max_hunk_bytes)?;
+        truncated |= text.is_none();
+        reader.clear_decoded_blocks();
+        hunks.push(PatchHistoryHunk {
+            old_path,
+            new_path,
+            old_start,
+            old_lines,
+            new_start,
+            new_lines,
+            text,
+        });
+    }
+
+    Ok(PatchHistory {
+        missing_objects,
+        hunks,
+        truncated,
     })
 }
 

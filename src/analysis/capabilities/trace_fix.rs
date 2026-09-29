@@ -138,6 +138,7 @@ pub(crate) fn run(
                         parent_revision: target.parent.clone(),
                         line: first_line,
                     })),
+                    patch: None,
                 },
             }
         })

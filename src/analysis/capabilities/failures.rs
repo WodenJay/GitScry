@@ -141,6 +141,7 @@ pub(crate) fn run(
                     reason: entry.reason,
                     retry: entry.retry,
                 })),
+                patch: None,
             }
         })
         .collect::<Vec<_>>();

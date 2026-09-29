@@ -171,6 +171,7 @@ fn run(
                 proportion,
                 supporting_count: support_count,
             })),
+            patch: None,
         };
         ranked.push(RankedCandidate {
             score,

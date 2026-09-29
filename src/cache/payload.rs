@@ -407,6 +407,31 @@ impl<'a> HunkReader<'a> {
         })
     }
 
+    pub(crate) fn decode_payload_limited(
+        &mut self,
+        payload_id: i64,
+        material: &str,
+        max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, AppError> {
+        let length: i64 = self
+            .connection
+            .query_row(
+                "SELECT text_length FROM hunk_payloads WHERE payload_id = ?1",
+                [payload_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| match error {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    corruption(material, "missing hunk payload index")
+                }
+                error => storage_error("reading hunk payload index", error),
+            })?;
+        if checked_length(length, material)? > max_bytes {
+            return Ok(None);
+        }
+        self.decode_payload(payload_id, material).map(Some)
+    }
+
     pub(crate) fn decode_payload(
         &mut self,
         payload_id: i64,

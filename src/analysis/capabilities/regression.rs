@@ -108,6 +108,7 @@ pub(crate) fn run(
                 basis,
                 citations: vec![Citation::new(commit.oid, commit.subject)],
                 detail: None,
+                patch: None,
             },
         });
     }

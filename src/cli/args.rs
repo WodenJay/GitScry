@@ -57,6 +57,9 @@ pub(crate) enum Command {
         /// Output a stable structured JSON report instead of human-readable text.
         #[arg(long)]
         json: bool,
+        /// Include bounded relevant cached text hunks; unavailable history is reported.
+        #[arg(long, requires = "query", conflicts_with = "code")]
+        patch: bool,
     },
 
     #[command(
@@ -76,6 +79,9 @@ pub(crate) enum Command {
         /// Output a stable structured JSON report instead of human-readable text.
         #[arg(long)]
         json: bool,
+        /// Include bounded cached text hunks from paths matching this query.
+        #[arg(long)]
+        patch: bool,
     },
 
     #[command(

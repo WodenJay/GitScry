@@ -167,6 +167,7 @@ pub(crate) fn run(
                     revision: target.revision.clone(),
                     line: target_line,
                 })),
+                patch: None,
             }
         })
         .collect::<Vec<_>>();

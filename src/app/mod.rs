@@ -74,8 +74,12 @@ pub(crate) fn execute(
             change,
             path,
             limit,
+            patch,
             ..
         } => match (query, code) {
+            (Some(query), None) if patch => {
+                query::run_with_patch(query, Vec::new(), limit, false, analysis::search)
+            }
             (Some(query), None) => query::run(query, Vec::new(), limit, analysis::search),
             (None, Some(code)) => {
                 let direction = change.map(|change| match change {
@@ -90,8 +94,16 @@ pub(crate) fn execute(
             query,
             paths,
             limit,
+            patch,
             ..
-        } => query::run(query, paths, limit, analysis::examples),
+        } => {
+            if patch {
+                let path_only = !paths.is_empty();
+                query::run_with_patch(query, paths, limit, path_only, analysis::examples)
+            } else {
+                query::run(query, paths, limit, analysis::examples)
+            }
+        }
         Command::Failures {
             query,
             paths,

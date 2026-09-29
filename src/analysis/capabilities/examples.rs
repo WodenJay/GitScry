@@ -80,6 +80,7 @@ pub(crate) fn run(
             basis,
             citations,
             detail: (!steps.is_empty()).then_some(Detail::Steps(steps)),
+            patch: None,
         });
     }
     retrieval::assign_citations(&mut materials);
