@@ -1,6 +1,6 @@
-use base64::Engine as _;
 use serde::Serialize;
 
+use super::json::{self, JsonPatch, JsonPath};
 use crate::timeline::{Entry, Report};
 
 pub(super) fn format_report(report: &Report) -> String {
@@ -45,6 +45,7 @@ pub(super) fn format_report(report: &Report) -> String {
                 "    Inspect commit/diff with `git show {}`.",
                 entry.commit_id
             ));
+            super::material::render_patch(&mut lines, entry.patch.as_ref(), "    ");
         }
     }
     lines.join("\n")
@@ -60,10 +61,10 @@ pub(super) fn format_json_report(
         .map(JsonEntry::from)
         .collect::<Vec<_>>();
     let output = JsonReport {
-        schema_version: 1,
+        schema_version: if report.patch_mode { 2 } else { 1 },
         kind: "timeline",
         target_revision: &report.target_revision,
-        path: JsonPath::from_bytes(&report.path),
+        path: json::json_path(&report.path),
         total: report.total,
         offset: report.offset,
         limit: report.limit,
@@ -104,6 +105,8 @@ struct JsonEntry<'a> {
     parent_count: usize,
     shallow_boundary: bool,
     diff_comparison: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    patch: Option<JsonPatch<'a>>,
 }
 
 impl<'a> From<&'a Entry> for JsonEntry<'a> {
@@ -112,29 +115,12 @@ impl<'a> From<&'a Entry> for JsonEntry<'a> {
             commit_id: &entry.commit_id,
             timestamp: &entry.timestamp,
             subject: &entry.subject,
-            path: JsonPath::from_bytes(&entry.path),
+            path: json::json_path(&entry.path),
             change_type: entry.change_type,
             parent_count: entry.parent_count,
             shallow_boundary: entry.shallow_boundary,
             diff_comparison: (entry.parent_count > 1).then_some("first_parent"),
-        }
-    }
-}
-
-#[derive(Serialize)]
-#[serde(untagged)]
-enum JsonPath<'a> {
-    Utf8(&'a str),
-    Base64 { base64: String },
-}
-
-impl<'a> JsonPath<'a> {
-    fn from_bytes(path: &'a [u8]) -> Self {
-        match std::str::from_utf8(path) {
-            Ok(path) => Self::Utf8(path),
-            Err(_) => Self::Base64 {
-                base64: base64::engine::general_purpose::STANDARD.encode(path),
-            },
+            patch: entry.patch.as_ref().map(json::json_patch),
         }
     }
 }

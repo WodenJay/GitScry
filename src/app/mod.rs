@@ -152,7 +152,8 @@ pub(crate) fn execute(
             limit,
             offset,
             last,
+            patch,
             ..
-        } => query::run_timeline(path, at, limit, offset.unwrap_or(0), last),
+        } => query::run_timeline(path, at, limit, offset.unwrap_or(0), last, patch),
     }
 }

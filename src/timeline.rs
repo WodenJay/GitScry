@@ -1,8 +1,9 @@
-use crate::cache::HistoryCommit;
+use crate::{analysis::PatchExcerpt, cache::HistoryCommit};
 
 pub(crate) struct Report {
     pub(crate) target_revision: String,
     pub(crate) path: Vec<u8>,
+    pub(crate) patch_mode: bool,
     pub(crate) total: usize,
     pub(crate) offset: usize,
     pub(crate) limit: usize,
@@ -14,12 +15,14 @@ pub(crate) struct Report {
 
 pub(crate) struct Entry {
     pub(crate) commit_id: String,
+    pub(crate) change_ordinal: i64,
     pub(crate) timestamp: String,
     pub(crate) subject: String,
     pub(crate) path: Vec<u8>,
     pub(crate) change_type: &'static str,
     pub(crate) parent_count: usize,
     pub(crate) shallow_boundary: bool,
+    pub(crate) patch: Option<PatchExcerpt>,
 }
 
 impl Report {
@@ -62,6 +65,7 @@ impl Report {
                     commit.position,
                     Entry {
                         commit_id: commit.oid.clone(),
+                        change_ordinal: change.ordinal,
                         timestamp: format_timestamp(commit.commit_time),
                         subject: commit.subject.clone(),
                         path: historical_path,
@@ -74,6 +78,7 @@ impl Report {
                         },
                         parent_count: commit.parent_count,
                         shallow_boundary: commit.shallow_boundary,
+                        patch: None,
                     },
                 ))
             })
@@ -106,6 +111,7 @@ impl Report {
         Self {
             target_revision,
             path,
+            patch_mode: false,
             total,
             offset,
             limit,

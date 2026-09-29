@@ -15,6 +15,7 @@ use std::{collections::HashSet, path::Path};
 use crate::git::{TraceFixTarget, WhyTarget};
 use crate::{app::AppError, cache::QuerySession};
 
+pub(crate) use patch::attach_timeline_patch_excerpts;
 pub(crate) use patch::{PatchExcerpt, PatchHunk, PatchStatus, attach_patch_excerpts};
 pub(in crate::analysis) use retrieval::anchors_overlap;
 pub(crate) use retrieval::{Intent, message_parts, normalize_path, searchable_text};

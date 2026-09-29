@@ -211,7 +211,7 @@ pub(crate) enum Command {
     },
     #[command(
         about = "Show a file's complete evolution in the published cache",
-        long_about = "Show a file's complete, chronological evolution within the published GitScry cache. This is a factual history, not a ranking of important changes. The default target is the cache's completed tip, not the working tree or an unindexed HEAD. The selected path must be a file at the target revision. All reachable cached commits are included, including merged-branch commits; entries are ordered by Git topological position from earliest to latest. Detected renames are followed; copies and older file incarnations after deletion/recreation are not. Merge entries compare against the first parent. Use the commit ID and historical path to inspect the underlying change.\n\nRequired input: PATH, a repository-relative file path.\n\nOptions: `--at REV` selects a revision in the published cache; `--limit N` sets the page size (default 10); `--offset N` selects a zero-based page offset; `--last` jumps to the final page and conflicts with `--offset`; `--json` returns structured entries and page metadata.\n\nExamples:\n\n  gitscry timeline src/lib.rs\n\n  gitscry timeline src/lib.rs --at HEAD~3 --limit 5 --last --json"
+        long_about = "Show a file's complete, chronological evolution within the published GitScry cache. This is a factual history, not a ranking of important changes. The default target is the cache's completed tip, not the working tree or an unindexed HEAD. The selected path must be a file at the target revision. All reachable cached commits are included, including merged-branch commits; entries are ordered by Git topological position from earliest to latest. Detected renames are followed; copies and older file incarnations after deletion/recreation are not. Merge entries compare against the first parent. Use the commit ID and historical path to inspect the underlying change. `--patch` adds bounded cached text hunks for each listed change; unavailable text is reported rather than guessed, and excerpts are not full diffs. `--json` returns structured entries and page metadata (schema v2 with `--patch`).\n\nRequired input: PATH, a repository-relative file path.\n\nOptions: `--at REV` selects a revision in the published cache; `--limit N` sets the page size (default 10); `--offset N` selects a zero-based page offset; `--last` jumps to the final page and conflicts with `--offset`; `--patch` adds per-entry text excerpts; `--json` returns structured output.\n\nExamples:\n\n  gitscry timeline src/lib.rs\n\n  gitscry timeline src/lib.rs --patch --limit 5 --offset 5 --json"
     )]
     Timeline {
         /// Repository-relative file path at the selected revision.
@@ -231,6 +231,9 @@ pub(crate) enum Command {
         /// Output a stable structured JSON report instead of human-readable text.
         #[arg(long)]
         json: bool,
+        /// Include bounded cached text hunks for each timeline entry.
+        #[arg(long)]
+        patch: bool,
     },
 }
 

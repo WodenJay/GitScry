@@ -130,6 +130,22 @@ fn timeline_json_pages_topologically_and_follows_renames() {
     assert_eq!(last_page["entries"][0]["path"], "src/new.rs");
     assert_eq!(last_page["entries"][1]["commit_id"], changed);
 
+    let patched = json(&repo.run(["timeline", "src/new.rs", "--patch", "--json"]));
+    assert_eq!(patched["schema_version"], 2);
+    assert_eq!(patched["total"], 4);
+    assert_eq!(
+        patched["entries"][0]["patch"]["hunks"][0]["new_path"],
+        "src/old.rs"
+    );
+    assert_eq!(
+        patched["entries"][1]["patch"]["hunks"][0]["old_path"],
+        "src/old.rs"
+    );
+    assert_eq!(patched["entries"][2]["patch"]["status"], "unavailable");
+    assert_eq!(
+        patched["entries"][3]["patch"]["hunks"][0]["new_path"],
+        "src/new.rs"
+    );
     let old_path_at_rename = json(&repo.run([
         "timeline",
         "src/old.rs",
@@ -165,7 +181,14 @@ fn timeline_json_pages_topologically_and_follows_renames() {
     let help = repo.run(["timeline", "--help"]);
     assert_eq!(help.status.code(), Some(0));
     let help = String::from_utf8_lossy(&help.stdout);
-    for option in ["--at REV", "--limit N", "--offset N", "--last", "--json"] {
+    for option in [
+        "--at REV",
+        "--limit N",
+        "--offset N",
+        "--last",
+        "--patch",
+        "--json",
+    ] {
         assert!(help.contains(option), "timeline help is missing {option}");
     }
     let root_help = repo.run(["--help"]);
@@ -248,6 +271,24 @@ fn recreated_path_starts_a_new_file_incarnation() {
     assert_ne!(report["entries"][0]["commit_id"], original);
     assert_ne!(report["entries"][0]["commit_id"], original_change);
     assert_ne!(report["entries"][0]["commit_id"], deleted);
+    let patched = json(&repo.run(["timeline", "src/file.rs", "--patch", "--json"]));
+    assert_eq!(patched["schema_version"], 2);
+    assert_eq!(patched["total"], 2);
+    assert_eq!(patched["entries"][0]["commit_id"], recreated);
+    assert_eq!(patched["entries"][1]["commit_id"], final_change);
+    for entry in patched["entries"].as_array().unwrap() {
+        let patch = &entry["patch"];
+        assert_eq!(patch["commit_oid"], entry["commit_id"]);
+        assert_eq!(patch["status"], "available");
+        let text = patch["hunks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|hunk| hunk["text"].as_str().unwrap())
+            .collect::<String>();
+        assert!(text.contains("new incarnation"));
+        assert!(!text.contains("original"));
+    }
 }
 
 #[test]
@@ -295,8 +336,13 @@ fn timeline_includes_merged_branch_commits_and_marks_merge_comparison() {
     assert_eq!(report["entries"][1]["commit_id"], feature);
     assert_eq!(report["entries"][2]["commit_id"], merge);
     assert_eq!(report["entries"][2]["parent_count"], 2);
+    let patched = json(&repo.run(["timeline", "src/file.rs", "--patch", "--json"]));
+    assert_eq!(patched["schema_version"], 2);
+    assert_eq!(patched["entries"][2]["commit_id"], merge);
+    assert_eq!(patched["entries"][2]["diff_comparison"], "first_parent");
+    assert_eq!(patched["entries"][2]["patch"]["status"], "available");
     assert_eq!(report["entries"][2]["diff_comparison"], "first_parent");
-    let text = repo.run(["timeline", "src/file.rs"]);
+    let text = repo.run(["timeline", "src/file.rs", "--patch"]);
     assert!(String::from_utf8_lossy(&text.stdout).contains("compared with the first parent"));
 }
 
@@ -441,4 +487,170 @@ fn shallow_boundary_warns_and_does_not_claim_introduction() {
     assert_eq!(report["total"], 1, "{report}");
     assert_eq!(report["entries"][0]["commit_id"], head);
     assert_eq!(report["entries"][0]["change_type"], "modified");
+}
+
+#[test]
+fn timeline_patch_is_opt_in_scoped_and_preserves_pagination() {
+    let repo = TestRepo::new();
+    let before = (0..40)
+        .map(|index| format!("let value_{index} = {index};\n"))
+        .collect::<String>();
+    let added = commit(
+        &repo,
+        "src/target.rs",
+        before.as_bytes(),
+        "Add target source",
+        "2020-01-01T00:00:00+0000",
+    );
+    fs::write(
+        repo.dir.path().join("src/other.rs"),
+        b"let sibling = false;\n",
+    )
+    .expect("write sibling file");
+    let after = before
+        .replacen("let value_0 = 0;", "let selected_first = true;", 1)
+        .replacen("let value_39 = 39;", "let selected_last = true;", 1);
+    let changed = commit(
+        &repo,
+        "src/target.rs",
+        after.as_bytes(),
+        "Update target and another file",
+        "2020-01-02T00:00:00+0000",
+    );
+    repo.index();
+
+    let plain = json(&repo.run(["timeline", "src/target.rs", "--json"]));
+    assert_eq!(plain["schema_version"], 1);
+    assert_eq!(plain["total"], 2);
+    assert!(plain["entries"][1].get("patch").is_none());
+
+    let patched = json(&repo.run(["timeline", "src/target.rs", "--patch", "--json"]));
+    assert_eq!(patched["schema_version"], 2);
+    assert_eq!(patched["total"], plain["total"]);
+    assert_eq!(patched["offset"], plain["offset"]);
+    assert_eq!(patched["start"], plain["start"]);
+    assert_eq!(patched["end"], plain["end"]);
+    assert_eq!(patched["has_more"], plain["has_more"]);
+    assert_eq!(patched["entries"][0]["commit_id"], added);
+    assert_eq!(patched["entries"][1]["commit_id"], changed);
+
+    assert_eq!(patched["entries"][0]["patch"]["status"], "available");
+    assert_eq!(patched["entries"][0]["patch"]["commit_oid"], added);
+    let added_text = patched["entries"][0]["patch"]["hunks"][0]["text"]
+        .as_str()
+        .unwrap();
+    assert!(added_text.contains("value_0"));
+    assert!(!added_text.contains("other.rs"));
+    let patch = &patched["entries"][1]["patch"];
+    assert_eq!(patch["status"], "available");
+    assert_eq!(patch["commit_oid"], changed);
+    let hunks = patch["hunks"].as_array().unwrap();
+    assert_eq!(hunks.len(), 2);
+    assert!(hunks.iter().all(|hunk| {
+        hunk["new_path"] == "src/target.rs" && hunk["old_path"] == "src/target.rs"
+    }));
+    let text = hunks
+        .iter()
+        .map(|hunk| hunk["text"].as_str().unwrap())
+        .collect::<String>();
+    assert!(text.contains("selected_first"));
+    assert!(text.contains("selected_last"));
+    assert!(!text.contains("sibling"));
+
+    let page = json(&repo.run([
+        "timeline",
+        "src/target.rs",
+        "--limit",
+        "1",
+        "--offset",
+        "1",
+        "--patch",
+        "--json",
+    ]));
+    assert_eq!(page["total"], 2);
+    assert_eq!(page["start"], 2);
+    assert_eq!(page["entries"].as_array().unwrap().len(), 1);
+    assert_eq!(page["entries"][0]["commit_id"], changed);
+    assert_eq!(page["entries"][0]["patch"], patch.clone());
+
+    let text_output = repo.run(["timeline", "src/target.rs", "--patch"]);
+    assert_eq!(text_output.status.code(), Some(0));
+    let text_output = String::from_utf8(text_output.stdout).expect("safe timeline output");
+    assert!(text_output.contains("patch excerpt: available"));
+    assert!(text_output.contains("selected_first"));
+    assert!(!text_output.contains("sibling"));
+
+    let help = repo.run(["timeline", "--help"]);
+    assert!(String::from_utf8_lossy(&help.stdout).contains("--patch"));
+}
+
+#[test]
+fn timeline_patch_reports_binary_text_as_unavailable() {
+    let repo = TestRepo::new();
+    commit(
+        &repo,
+        "src/data.bin",
+        b"\0first binary value\n",
+        "Add binary file",
+        "2020-01-01T00:00:00+0000",
+    );
+    commit(
+        &repo,
+        "src/data.bin",
+        b"\0second binary value\n",
+        "Update binary file",
+        "2020-01-02T00:00:00+0000",
+    );
+    repo.index();
+
+    let report = json(&repo.run(["timeline", "src/data.bin", "--patch", "--json"]));
+    assert_eq!(report["schema_version"], 2);
+    assert_eq!(report["total"], 2);
+    for entry in report["entries"].as_array().unwrap() {
+        assert_eq!(entry["patch"]["status"], "unavailable");
+        assert_eq!(entry["patch"]["hunks"], serde_json::json!([]));
+    }
+    let text = repo.run(["timeline", "src/data.bin", "--patch"]);
+    assert!(String::from_utf8_lossy(&text.stdout).contains("Text hunk unavailable."));
+}
+
+#[test]
+fn timeline_patch_bounds_hunks_and_bytes_per_entry() {
+    let repo = TestRepo::new();
+    let mut before_lines = vec!["a".repeat(12 * 1024)];
+    before_lines.extend((0..240).map(|index| format!("let value_{index} = false;")));
+    let before = format!("{}\n", before_lines.join("\n"));
+    let added = commit(
+        &repo,
+        "src/bounded.rs",
+        before.as_bytes(),
+        "Add bounded source",
+        "2020-01-01T00:00:00+0000",
+    );
+
+    let mut after_lines = before_lines;
+    after_lines[0] = "b".repeat(12 * 1024);
+    for index in (8..after_lines.len()).step_by(12) {
+        after_lines[index] = format!("let value_{index} = true;");
+    }
+    let after = format!("{}\n", after_lines.join("\n"));
+    let changed = commit(
+        &repo,
+        "src/bounded.rs",
+        after.as_bytes(),
+        "Change bounded source",
+        "2020-01-02T00:00:00+0000",
+    );
+    repo.index();
+
+    let report = json(&repo.run(["timeline", "src/bounded.rs", "--patch", "--json"]));
+    assert_eq!(report["entries"][0]["commit_id"], added);
+    assert_eq!(report["entries"][1]["commit_id"], changed);
+    let patch = &report["entries"][1]["patch"];
+    let hunks = patch["hunks"].as_array().unwrap();
+    assert_eq!(hunks.len(), 16);
+    let first_hunk = &hunks[0];
+    assert!(first_hunk["text"].as_str().unwrap().len() <= 8 * 1024);
+    assert_eq!(first_hunk["truncated"], true);
+    assert_eq!(patch["truncated"], true);
 }

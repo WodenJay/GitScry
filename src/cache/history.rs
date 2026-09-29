@@ -96,7 +96,23 @@ impl QuerySession {
         max_hunks: usize,
         max_hunk_bytes: usize,
     ) -> Result<PatchHistory, AppError> {
-        patch_history(&self.connection, oid, max_hunks, max_hunk_bytes)
+        patch_history(&self.connection, oid, None, max_hunks, max_hunk_bytes)
+    }
+
+    pub(crate) fn patch_history_for_change(
+        &self,
+        oid: &str,
+        change_ordinal: i64,
+        max_hunks: usize,
+        max_hunk_bytes: usize,
+    ) -> Result<PatchHistory, AppError> {
+        patch_history(
+            &self.connection,
+            oid,
+            Some(change_ordinal),
+            max_hunks,
+            max_hunk_bytes,
+        )
     }
 
     pub(crate) fn scan_code_hunks(
@@ -289,6 +305,7 @@ fn hunks(connection: &Connection, oid: &str) -> Result<Vec<HistoryHunk>, AppErro
 fn patch_history(
     connection: &Connection,
     oid: &str,
+    change_ordinal: Option<i64>,
     max_hunks: usize,
     max_hunk_bytes: usize,
 ) -> Result<PatchHistory, AppError> {
@@ -297,12 +314,12 @@ fn patch_history(
             "SELECT EXISTS(
                  SELECT 1 FROM changes AS ch
                  JOIN commits AS c ON c.commit_id = ch.commit_id
-                 WHERE c.oid = ?1 AND (
+                 WHERE c.oid = ?1 AND (?2 IS NULL OR ch.ordinal = ?2) AND (
                      EXISTS (SELECT 1 FROM missing_objects AS m WHERE m.oid = ch.old_blob)
                      OR EXISTS (SELECT 1 FROM missing_objects AS m WHERE m.oid = ch.new_blob)
                  )
              )",
-            params![oid],
+            params![oid, change_ordinal],
             |row| row.get(0),
         )
         .map_err(|error| search_error("checking cached patch completeness", error))?;
@@ -315,13 +332,13 @@ fn patch_history(
              FROM commits AS c
              JOIN changes AS ch ON ch.commit_id = c.commit_id
              JOIN hunks AS h ON h.change_id = ch.change_id
-             WHERE c.oid = ?1
+             WHERE c.oid = ?1 AND (?2 IS NULL OR ch.ordinal = ?2)
              ORDER BY ch.ordinal, h.ordinal
-             LIMIT ?2",
+             LIMIT ?3",
         )
         .map_err(|error| search_error("preparing cached patch hunks", error))?;
     let rows = statement
-        .query_map(params![oid, limit], |row| {
+        .query_map(params![oid, change_ordinal, limit], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, Option<Vec<u8>>>(1)?,

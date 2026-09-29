@@ -24,6 +24,7 @@ pub(crate) struct PatchExcerpt {
 pub(crate) enum PatchStatus {
     Available,
     NoRelevantHunks,
+    NoRelevantHunk,
     Unavailable,
 }
 
@@ -32,6 +33,7 @@ impl PatchStatus {
         match self {
             Self::Available => "available",
             Self::NoRelevantHunks => "no_relevant_hunks",
+            Self::NoRelevantHunk => "no_relevant_hunk",
             Self::Unavailable => "unavailable",
         }
     }
@@ -150,6 +152,80 @@ pub(crate) fn attach_patch_excerpts(
         };
         material.patch = Some(PatchExcerpt {
             commit_oid: citation.oid.clone(),
+            status,
+            hunks,
+            truncated,
+        });
+    }
+    Ok(())
+}
+
+pub(crate) fn attach_timeline_patch_excerpts(
+    session: &QuerySession,
+    report: &mut crate::timeline::Report,
+) -> Result<(), AppError> {
+    report.patch_mode = true;
+    for entry in &mut report.entries {
+        let history = session.patch_history_for_change(
+            &entry.commit_id,
+            entry.change_ordinal,
+            MAX_SCANNED_HUNKS,
+            MAX_CACHED_HUNK_BYTES,
+        )?;
+        let has_cached_hunks = !history.hunks.is_empty();
+        let mut truncated = history.truncated;
+        let mut remaining_bytes = MAX_RESULT_EXCERPT_BYTES;
+        let mut hunks = Vec::new();
+
+        for cached in history.hunks {
+            let is_entry_path = [&cached.old_path, &cached.new_path]
+                .into_iter()
+                .flatten()
+                .any(|path| path.as_slice() == entry.path.as_slice());
+            if !is_entry_path {
+                continue;
+            }
+            if hunks.len() == MAX_EXCERPTS || remaining_bytes == 0 {
+                truncated = true;
+                break;
+            }
+
+            let (text, hunk_truncated) = match cached.text {
+                Some(mut text) => {
+                    let allowed = MAX_EXCERPT_BYTES.min(remaining_bytes);
+                    let clipped = text.len() > allowed;
+                    text.truncate(allowed);
+                    (Some(text), clipped)
+                }
+                None => (None, true),
+            };
+            if let Some(text) = &text {
+                remaining_bytes -= text.len();
+            }
+            truncated |= hunk_truncated;
+            hunks.push(PatchHunk {
+                old_path: cached.old_path,
+                new_path: cached.new_path,
+                old_start: cached.old_start,
+                old_lines: cached.old_lines,
+                new_start: cached.new_start,
+                new_lines: cached.new_lines,
+                text,
+                truncated: hunk_truncated,
+            });
+        }
+
+        let status = if !has_cached_hunks
+            || (hunks.is_empty() && (history.truncated || history.missing_objects))
+        {
+            PatchStatus::Unavailable
+        } else if hunks.is_empty() {
+            PatchStatus::NoRelevantHunk
+        } else {
+            PatchStatus::Available
+        };
+        entry.patch = Some(PatchExcerpt {
+            commit_oid: entry.commit_id.clone(),
             status,
             hunks,
             truncated,
