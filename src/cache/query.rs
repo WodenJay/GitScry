@@ -5,6 +5,38 @@ use crate::app::AppError;
 
 use super::{QuerySession, cache_error, decode_message_row, message_parts};
 
+#[derive(Clone, Debug)]
+pub(crate) struct SearchFilter {
+    pub(crate) from_oid: Option<String>,
+    pub(crate) to_oid: String,
+    pub(crate) since: Option<i64>,
+    pub(crate) until: Option<i64>,
+}
+
+pub(crate) const SEARCH_SCOPE_CTE: &str = r#"
+WITH RECURSIVE reachable(commit_id) AS (
+    SELECT commit_id FROM commits WHERE oid = ?1
+    UNION
+    SELECT parent.parent_id
+    FROM commit_parents AS parent
+    JOIN reachable ON reachable.commit_id = parent.commit_id
+    WHERE parent.parent_id IS NOT NULL
+), excluded(commit_id) AS (
+    SELECT commit_id FROM commits WHERE oid = ?2
+    UNION
+    SELECT parent.parent_id
+    FROM commit_parents AS parent
+    JOIN excluded ON excluded.commit_id = parent.commit_id
+    WHERE parent.parent_id IS NOT NULL
+), eligible(commit_id) AS (
+    SELECT commits.commit_id
+    FROM commits
+    WHERE commits.commit_id IN (SELECT commit_id FROM reachable)
+      AND (?2 IS NULL OR commits.commit_id NOT IN (SELECT commit_id FROM excluded))
+      AND (?3 IS NULL OR commits.commit_time >= ?3)
+      AND (?4 IS NULL OR commits.commit_time <= ?4)
+ )
+"#;
 /// A lexical candidate: one cache row with the paths it changed.
 pub(crate) struct SearchCandidate {
     pub(crate) commit_id: i64,
@@ -63,6 +95,22 @@ impl QuerySession {
         limit: i64,
     ) -> Result<Vec<SearchCandidate>, AppError> {
         candidates(&self.connection, match_query, limit)
+    }
+
+    pub(crate) fn match_count_scoped(
+        &self,
+        match_query: &str,
+        scope: &SearchFilter,
+    ) -> Result<usize, AppError> {
+        match_count_scoped(&self.connection, match_query, scope)
+    }
+
+    pub(crate) fn candidates_scoped(
+        &self,
+        match_query: &str,
+        scope: &SearchFilter,
+    ) -> Result<Vec<SearchCandidate>, AppError> {
+        candidates_scoped(&self.connection, match_query, scope)
     }
 
     pub(crate) fn projected_path_keys(&self, oid: &str) -> Result<Vec<String>, AppError> {
@@ -395,6 +443,93 @@ fn match_count(connection: &Connection, match_query: &str) -> Result<usize, AppE
         .map_err(|error| search_error("counting search matches", error))?;
     usize::try_from(count)
         .map_err(|_| search_error("counting search matches", "count exceeded platform limits"))
+}
+
+fn match_count_scoped(
+    connection: &Connection,
+    match_query: &str,
+    scope: &SearchFilter,
+) -> Result<usize, AppError> {
+    let query = format!(
+        "{SEARCH_SCOPE_CTE}
+         SELECT COUNT(*)
+         FROM search_fts
+         JOIN commits AS c ON c.commit_id = search_fts.rowid
+         WHERE search_fts MATCH ?5
+           AND c.commit_id IN (SELECT commit_id FROM eligible)"
+    );
+    let count = connection
+        .query_row(
+            &query,
+            params![
+                scope.to_oid.as_str(),
+                scope.from_oid.as_deref(),
+                scope.since,
+                scope.until,
+                match_query,
+            ],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|error| search_error("counting scoped search matches", error))?;
+    usize::try_from(count).map_err(|_| {
+        search_error(
+            "counting scoped search matches",
+            "count exceeded platform limits",
+        )
+    })
+}
+
+fn candidates_scoped(
+    connection: &Connection,
+    match_query: &str,
+    scope: &SearchFilter,
+) -> Result<Vec<SearchCandidate>, AppError> {
+    // FTS5 BM25 uses corpus-wide statistics, including out-of-scope commits. Search reranks
+    // every scoped match with candidate-local signals before applying the result limit.
+    let query = format!(
+        "{SEARCH_SCOPE_CTE}
+         SELECT c.commit_id, c.oid, c.commit_time, c.message, c.message_length,
+                0.0, c.position
+         FROM search_fts
+         JOIN commits AS c ON c.commit_id = search_fts.rowid
+         WHERE search_fts MATCH ?5
+           AND c.commit_id IN (SELECT commit_id FROM eligible)
+         ORDER BY c.commit_time DESC, c.oid ASC"
+    );
+    let mut statement = connection
+        .prepare(&query)
+        .map_err(|error| search_error("preparing scoped search", error))?;
+    let rows = statement
+        .query_map(
+            params![
+                scope.to_oid.as_str(),
+                scope.from_oid.as_deref(),
+                scope.since,
+                scope.until,
+                match_query,
+            ],
+            |row| {
+                let message = decode_message_row(row, 3, 4)?;
+                let (subject, body) = message_parts(&message);
+                Ok(SearchCandidate {
+                    commit_id: row.get(0)?,
+                    oid: row.get(1)?,
+                    commit_time: row.get(2)?,
+                    subject,
+                    body,
+                    paths: Vec::new(),
+                    path_keys: Vec::new(),
+                    bm25: row.get(5)?,
+                    position: row.get(6)?,
+                })
+            },
+        )
+        .map_err(|error| search_error("running scoped search", error))?;
+    let mut candidates = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| search_error("reading scoped search results", error))?;
+    load_candidate_paths(connection, &mut candidates)?;
+    Ok(candidates)
 }
 
 /// The strongest lexical candidates, each carrying the paths it changed.

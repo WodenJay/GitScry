@@ -512,7 +512,7 @@ fn validate_path(path: &str) -> Result<(), AppError> {
     Ok(())
 }
 
-fn resolve_revision(git: &Git, requested: &str) -> Result<String, AppError> {
+pub(super) fn resolve_revision(git: &Git, requested: &str) -> Result<String, AppError> {
     let spec = format!("{requested}^{{commit}}");
     let result = git.text([
         "rev-parse",

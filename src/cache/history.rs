@@ -4,6 +4,7 @@ use rusqlite::{Connection, params};
 
 use crate::app::AppError;
 
+use super::query::{SEARCH_SCOPE_CTE, SearchFilter};
 use super::{HunkReader, QuerySession, cache_error, message_parts, read_hunks};
 
 pub(crate) struct HistoryCommit {
@@ -104,6 +105,14 @@ impl QuerySession {
         visit: impl FnMut(CodeHunk) -> Result<(), AppError>,
     ) -> Result<(), AppError> {
         scan_code_hunks(&self.connection, visit)
+    }
+
+    pub(crate) fn scan_code_hunks_scoped(
+        &self,
+        scope: &SearchFilter,
+        visit: impl FnMut(CodeHunk) -> Result<(), AppError>,
+    ) -> Result<(), AppError> {
+        scan_code_hunks_scoped(&self.connection, scope, visit)
     }
 
     pub(crate) fn has_missing_objects(&self, commits: &[HistoryCommit]) -> Result<bool, AppError> {
@@ -378,11 +387,66 @@ fn patch_history(
 
 fn scan_code_hunks(
     connection: &Connection,
+    visit: impl FnMut(CodeHunk) -> Result<(), AppError>,
+) -> Result<(), AppError> {
+    scan_code_hunks_inner(connection, None, visit)
+}
+
+fn scan_code_hunks_scoped(
+    connection: &Connection,
+    scope: &SearchFilter,
+    visit: impl FnMut(CodeHunk) -> Result<(), AppError>,
+) -> Result<(), AppError> {
+    scan_code_hunks_inner(connection, Some(scope), visit)
+}
+
+type StoredCodeHunk = (
+    String,
+    i64,
+    i64,
+    Option<Vec<u8>>,
+    Option<Vec<u8>>,
+    i64,
+    i64,
+    i64,
+    i64,
+    i64,
+);
+
+fn code_hunk_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredCodeHunk> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+        row.get(5)?,
+        row.get(6)?,
+        row.get(7)?,
+        row.get(8)?,
+        row.get(9)?,
+    ))
+}
+
+fn scan_code_hunks_inner(
+    connection: &Connection,
+    scope: Option<&SearchFilter>,
     mut visit: impl FnMut(CodeHunk) -> Result<(), AppError>,
 ) -> Result<(), AppError> {
     let mut reader = HunkReader::new(connection)?;
-    let mut statement = connection
-        .prepare(
+    let query = match scope {
+        Some(_) => format!(
+            "{SEARCH_SCOPE_CTE}
+             SELECT c.oid, c.commit_time, ch.ordinal, ch.old_path, ch.new_path,
+                    h.ordinal, h.old_start, h.new_start, h.payload_id, p.token_block_id
+             FROM hunks AS h
+             JOIN changes AS ch ON ch.change_id = h.change_id
+             JOIN commits AS c ON c.commit_id = ch.commit_id
+             JOIN hunk_payloads AS p ON p.payload_id = h.payload_id
+             WHERE c.commit_id IN (SELECT commit_id FROM eligible)
+             ORDER BY p.token_block_id, p.token_offset"
+        ),
+        None => String::from(
             "SELECT c.oid, c.commit_time, ch.ordinal, ch.old_path, ch.new_path,
                     h.ordinal, h.old_start, h.new_start, h.payload_id, p.token_block_id
              FROM hunks AS h
@@ -390,24 +454,24 @@ fn scan_code_hunks(
              JOIN commits AS c ON c.commit_id = ch.commit_id
              JOIN hunk_payloads AS p ON p.payload_id = h.payload_id
              ORDER BY p.token_block_id, p.token_offset",
-        )
+        ),
+    };
+    let mut statement = connection
+        .prepare(&query)
         .map_err(|error| search_error("preparing code-search hunks", error))?;
-    let rows = statement
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, i64>(2)?,
-                row.get::<_, Option<Vec<u8>>>(3)?,
-                row.get::<_, Option<Vec<u8>>>(4)?,
-                row.get::<_, i64>(5)?,
-                row.get::<_, i64>(6)?,
-                row.get::<_, i64>(7)?,
-                row.get::<_, i64>(8)?,
-                row.get::<_, i64>(9)?,
-            ))
-        })
-        .map_err(|error| search_error("reading code-search hunks", error))?;
+    let rows = match scope {
+        Some(scope) => statement.query_map(
+            params![
+                scope.to_oid.as_str(),
+                scope.from_oid.as_deref(),
+                scope.since,
+                scope.until,
+            ],
+            code_hunk_row,
+        ),
+        None => statement.query_map([], code_hunk_row),
+    }
+    .map_err(|error| search_error("reading code-search hunks", error))?;
     let mut active_token_block = None;
     for row in rows {
         let (

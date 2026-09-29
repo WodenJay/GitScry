@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use crate::{
     analysis::{CodeDirection, CodeMatch, Report, ReportKind},
     app::AppError,
-    cache::{CodeHunk, QuerySession},
+    cache::{CodeHunk, QuerySession, SearchFilter},
 };
 
 struct OrderedMatch {
@@ -158,6 +158,28 @@ pub(crate) fn run(
     direction: Option<CodeDirection>,
     limit: usize,
 ) -> Result<Report, AppError> {
+    run_with_scope(session, query, path, direction, limit, None)
+}
+
+pub(crate) fn run_scoped(
+    session: &QuerySession,
+    query: &str,
+    path: Option<&str>,
+    direction: Option<CodeDirection>,
+    limit: usize,
+    scope: &SearchFilter,
+) -> Result<Report, AppError> {
+    run_with_scope(session, query, path, direction, limit, Some(scope))
+}
+
+fn run_with_scope(
+    session: &QuerySession,
+    query: &str,
+    path: Option<&str>,
+    direction: Option<CodeDirection>,
+    limit: usize,
+    scope: Option<&SearchFilter>,
+) -> Result<Report, AppError> {
     if query.is_empty()
         || query
             .chars()
@@ -176,7 +198,10 @@ pub(crate) fn run(
         matches: BTreeSet::new(),
         matched_count: 0,
     };
-    session.scan_code_hunks(|hunk| search.scan_hunk(hunk))?;
+    match scope {
+        Some(scope) => session.scan_code_hunks_scoped(scope, |hunk| search.scan_hunk(hunk))?,
+        None => session.scan_code_hunks(|hunk| search.scan_hunk(hunk))?,
+    }
     let CodeSearch {
         matches,
         matched_count,
@@ -191,6 +216,7 @@ pub(crate) fn run(
         warnings: Vec::new(),
         notices: Vec::new(),
         patch_mode: false,
+        scope: None,
     })
 }
 

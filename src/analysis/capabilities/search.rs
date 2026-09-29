@@ -1,4 +1,7 @@
-use crate::{app::AppError, cache::QuerySession};
+use crate::{
+    app::AppError,
+    cache::{QuerySession, SearchFilter},
+};
 
 use super::super::retrieval;
 use super::super::{Citation, Intent, Material, Report, ReportKind};
@@ -9,7 +12,29 @@ pub(crate) fn run(
     intent: &Intent,
     limit: usize,
 ) -> Result<Report, AppError> {
-    let Some(pool) = retrieval::pool(session, intent, limit)? else {
+    run_with_scope(session, intent, limit, None)
+}
+
+pub(crate) fn run_scoped(
+    session: &QuerySession,
+    intent: &Intent,
+    limit: usize,
+    scope: &SearchFilter,
+) -> Result<Report, AppError> {
+    run_with_scope(session, intent, limit, Some(scope))
+}
+
+fn run_with_scope(
+    session: &QuerySession,
+    intent: &Intent,
+    limit: usize,
+    scope: Option<&SearchFilter>,
+) -> Result<Report, AppError> {
+    let pool = match scope {
+        Some(scope) => retrieval::pool_scoped(session, intent, limit, scope)?,
+        None => retrieval::pool(session, intent, limit)?,
+    };
+    let Some(pool) = pool else {
         return Ok(super::super::empty_report(ReportKind::Search));
     };
 
