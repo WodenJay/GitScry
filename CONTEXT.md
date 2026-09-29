@@ -15,3 +15,6 @@ _Avoid_: evidence, answer, recommendation
 **suspect**:
 A commit that may have introduced a regression, supported by material from its path, symbol, diff, or history.
 _Avoid_: culprit, root cause
+
+**file evolution timeline**:
+A chronological account of commits affecting a file within cache-reachable history, including detected earlier paths. It does not claim that every entry is significant or that uncached history is covered.
