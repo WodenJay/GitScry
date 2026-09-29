@@ -123,14 +123,16 @@ pub(crate) fn execute(
             good,
             bad,
             limit,
+            patch,
             ..
-        } => query::run_regression(symptom, path, symbol, good, bad, limit),
+        } => query::run_regression(symptom, path, symbol, good, bad, limit, patch),
         Command::Why {
             path,
             line,
             symbol,
             at,
             limit,
+            patch,
             ..
         } => {
             let anchor = match (line, symbol) {
@@ -138,7 +140,7 @@ pub(crate) fn execute(
                 (None, Some(name)) => crate::git::WhyAnchor::Symbol { name, number: 0 },
                 _ => unreachable!("clap enforces exactly one why anchor"),
             };
-            query::run_why(at, path, anchor, limit)
+            query::run_why(at, path, anchor, limit, patch)
         }
         Command::TraceFix {
             fix_revision,

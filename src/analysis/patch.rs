@@ -1,9 +1,9 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use super::{Intent, Report, anchors_overlap};
 use crate::{
     app::AppError,
-    cache::{PatchHistory, PatchHistoryHunk, QuerySession},
+    cache::{HunkId, PatchHistory, PatchHistoryHunk, QuerySession},
 };
 
 const MAX_SCANNED_HUNKS: usize = 64;
@@ -48,6 +48,8 @@ pub(crate) struct PatchHunk {
     pub(crate) truncated: bool,
 }
 
+pub(crate) type HunkPriorities = HashMap<String, HashMap<HunkId, usize>>;
+
 pub(crate) fn attach_patch_excerpts(
     session: &QuerySession,
     intent: &Intent,
@@ -55,11 +57,43 @@ pub(crate) fn attach_patch_excerpts(
     path_only: bool,
     path_filter: &[String],
 ) -> Result<(), AppError> {
-    report.patch_mode = true;
     let path_anchors = path_filter
         .iter()
         .map(|path| super::normalize_path(path.as_bytes()))
         .collect::<Vec<_>>();
+    attach_patch_excerpts_using(session, report, |_, cached| {
+        let path_match = cached_path_matches(cached, intent, &path_anchors);
+        let text_matches = cached
+            .text
+            .as_deref()
+            .is_some_and(|text| hunk_matches_terms(text, intent));
+        let relevant = if path_only {
+            path_match && text_matches
+        } else {
+            path_match || text_matches
+        };
+        relevant.then_some(0)
+    })
+}
+
+pub(crate) fn attach_selected_patch_excerpts(
+    session: &QuerySession,
+    report: &mut Report,
+    priorities: &HunkPriorities,
+) -> Result<(), AppError> {
+    attach_patch_excerpts_using(session, report, |oid, cached| {
+        priorities
+            .get(oid)
+            .and_then(|hunks| hunks.get(&cached.id()).copied())
+    })
+}
+
+fn attach_patch_excerpts_using(
+    session: &QuerySession,
+    report: &mut Report,
+    mut priority_for: impl FnMut(&str, &PatchHistoryHunk) -> Option<usize>,
+) -> Result<(), AppError> {
+    report.patch_mode = true;
     for material in &mut report.materials {
         let Some(citation) = material.citations.first() else {
             material.patch = Some(PatchExcerpt {
@@ -78,21 +112,16 @@ pub(crate) fn attach_patch_excerpts(
         let mut hunks = Vec::new();
         let mut remaining_bytes = MAX_RESULT_EXCERPT_BYTES;
         let mut excerpt_paths = HashSet::new();
+        let mut selected = history
+            .hunks
+            .into_iter()
+            .filter_map(|cached| {
+                priority_for(&citation.oid, &cached).map(|priority| (priority, cached))
+            })
+            .collect::<Vec<_>>();
+        selected.sort_by_key(|(priority, _)| *priority);
 
-        for cached in history.hunks {
-            let path_match = cached_path_matches(&cached, intent, &path_anchors);
-            let text_matches = cached
-                .text
-                .as_deref()
-                .is_some_and(|text| hunk_matches_terms(text, intent));
-            let relevant = if path_only {
-                path_match && text_matches
-            } else {
-                path_match || text_matches
-            };
-            if !relevant {
-                continue;
-            }
+        for (_, cached) in selected {
             if hunks.len() == MAX_EXCERPTS {
                 truncated = true;
                 break;

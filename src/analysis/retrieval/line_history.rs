@@ -1,5 +1,6 @@
 //! Interpret cached diff hunks while walking a line backward through path history.
 
+use crate::cache::HunkId;
 use std::collections::HashSet;
 
 use super::{HistoryCommit, HistoryHunk};
@@ -9,7 +10,7 @@ pub(in crate::analysis) fn trace_line(
     commit: &HistoryCommit,
     hunks: &[HistoryHunk],
     line: &mut i64,
-) -> bool {
+) -> Option<HunkId> {
     let relevant = commit
         .anchored_ordinals
         .iter()
@@ -22,6 +23,7 @@ pub(in crate::analysis) fn trace_line(
     ordered.sort_by_key(|hunk| std::cmp::Reverse(hunk.new_start));
     for hunk in ordered {
         let new_end = hunk.new_start + hunk.new_lines - 1;
+        let hunk_id = hunk.id();
         if *line > new_end {
             *line += hunk.old_lines - hunk.new_lines;
             continue;
@@ -61,9 +63,9 @@ pub(in crate::analysis) fn trace_line(
                 _ => {}
             }
         }
-        return direct;
+        return direct.then_some(hunk_id);
     }
-    false
+    None
 }
 
 /// Check whether changed diff lines touch a symbol's current line range.

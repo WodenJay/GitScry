@@ -2,6 +2,7 @@ use std::collections::HashSet;
 
 use crate::{app::AppError, cache::QuerySession, git::RegressionTarget};
 
+use super::super::patch::HunkPriorities;
 use super::super::retrieval;
 use super::super::{Citation, Confidence, Intent, Material, Report, ReportKind};
 
@@ -140,6 +141,56 @@ pub(crate) fn run(
     Ok(report)
 }
 
+pub(crate) fn patch_hunk_priorities(
+    session: &QuerySession,
+    intent: &Intent,
+    target: &RegressionTarget,
+    reachable: &HashSet<String>,
+) -> Result<HunkPriorities, AppError> {
+    let history = session.path_history(&target.path, reachable)?;
+    let mut priorities = HunkPriorities::new();
+    let mut symbol_range = target
+        .symbol_line
+        .zip(target.symbol_end)
+        .map(|(start, end)| (start as i64, end as i64));
+
+    for commit in history {
+        let hunks = session.history_hunks(&commit.oid)?;
+        let anchored = commit
+            .anchored_ordinals
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>();
+        for hunk in &hunks {
+            if !anchored.contains(&hunk.change_ordinal) {
+                continue;
+            }
+            let hunk_text = String::from_utf8_lossy(&hunk.text);
+            let symptom_match = count_term_hits(intent.terms(), &hunk_text) > 0;
+            let symbol_match = symbol_range.as_ref().is_some_and(|(start, end)| {
+                retrieval::hunk_overlaps_symbol(hunk, (*start).min(*end), (*start).max(*end))
+            });
+            if symptom_match || symbol_match {
+                let priority = match (symptom_match, symbol_match) {
+                    (true, true) => 0,
+                    (false, true) => 1,
+                    (true, false) => 2,
+                    (false, false) => unreachable!(),
+                };
+                priorities
+                    .entry(commit.oid.clone())
+                    .or_default()
+                    .insert(hunk.id(), priority);
+            }
+        }
+        if let Some((start, end)) = &mut symbol_range {
+            retrieval::trace_line(&commit, &hunks, start);
+            retrieval::trace_line(&commit, &hunks, end);
+        }
+    }
+    Ok(priorities)
+}
+
 fn symptom_hits(
     intent: &Intent,
     commit: &retrieval::HistoryCommit,
@@ -193,8 +244,8 @@ fn symbol_matches(
             commit.anchored_ordinals.contains(&hunk.change_ordinal)
                 && retrieval::hunk_overlaps_symbol(hunk, line.min(end_line), line.max(end_line))
         });
-        let line_changed = retrieval::trace_line(commit, &hunks, &mut line);
-        let end_changed = retrieval::trace_line(commit, &hunks, &mut end_line);
+        let line_changed = retrieval::trace_line(commit, &hunks, &mut line).is_some();
+        let end_changed = retrieval::trace_line(commit, &hunks, &mut end_line).is_some();
         if overlaps_symbol || line_changed || end_changed {
             matches.insert(commit.oid.clone());
         }

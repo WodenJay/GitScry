@@ -18,8 +18,10 @@ pub(crate) use failures::run as failures;
 pub(crate) use relations::{related, tests};
 pub(crate) use search::run as search;
 
+pub(crate) use regression::patch_hunk_priorities as regression_patch_hunk_priorities;
 pub(crate) use regression::run as regression;
 pub(crate) use trace_fix::run as trace_fix;
+pub(crate) use why::patch_hunk_priorities as why_patch_hunk_priorities;
 pub(crate) use why::run as why;
 /// The confidence a result carries when nothing beyond the lexical match supports it.
 pub(super) fn lexical_confidence(signals: &super::retrieval::Signals) -> super::Confidence {

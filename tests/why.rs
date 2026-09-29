@@ -467,3 +467,321 @@ fn why_warns_when_blame_ignores_a_revision() {
     assert_eq!(output.status.code(), Some(0));
     assert!(String::from_utf8_lossy(&output.stderr).contains("blame ignored revisions"));
 }
+
+fn json(repo: &TestRepo, args: &[&str]) -> serde_json::Value {
+    let output = repo.run(args);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "gitscry failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("parse JSON report")
+}
+
+#[test]
+fn why_patch_excerpts_follow_line_and_symbol_anchors() {
+    let repo = TestRepo::new();
+    let initial = concat!(
+        "fn run() {\n",
+        "    let target_value = \"old\";\n",
+        "    let stable_value = 0;\n",
+        "}\n\n",
+        "fn helper() {\n",
+        "    let filler_0 = 0;\n",
+        "    let filler_1 = 1;\n",
+        "    let filler_2 = 2;\n",
+        "    let filler_3 = 3;\n",
+        "    let filler_4 = 4;\n",
+        "    let filler_5 = 5;\n",
+        "    let filler_6 = 6;\n",
+        "    let filler_7 = 7;\n",
+        "    let helper_value = 1;\n",
+        "    let tail_0 = 0;\n",
+        "    let tail_1 = 1;\n",
+        "}\n",
+    );
+    repo.commit("src/engine.rs", initial.as_bytes(), "Create engine", None);
+    let changed = initial
+        .replace("target_value = \"old\"", "target_value = \"new\"")
+        .replace("helper_value = 1", "helper_value = 2");
+    repo.commit(
+        "src/engine.rs",
+        changed.as_bytes(),
+        "Change target and helper",
+        None,
+    );
+    fs::write(repo.dir.path().join("README.md"), "unrelated docs\n").expect("write unrelated docs");
+    git(repo.dir.path(), ["add", "README.md"]);
+    let amended = git_command(repo.dir.path())
+        .args(["commit", "--amend", "--no-edit"])
+        .output()
+        .expect("amend target commit with docs");
+    assert!(amended.status.success());
+    let latest = changed.replace("helper_value = 2", "helper_value = 3");
+    repo.commit(
+        "src/engine.rs",
+        latest.as_bytes(),
+        "Touch unrelated helper",
+        None,
+    );
+    repo.index();
+
+    let plain = json(
+        &repo,
+        &[
+            "why",
+            "src/engine.rs",
+            "--line",
+            "2",
+            "--limit",
+            "10",
+            "--json",
+        ],
+    );
+    let patched = json(
+        &repo,
+        &[
+            "why",
+            "src/engine.rs",
+            "--line",
+            "2",
+            "--limit",
+            "10",
+            "--patch",
+            "--json",
+        ],
+    );
+    assert_eq!(plain["schema_version"], 1);
+    assert_eq!(patched["schema_version"], 2);
+    assert_eq!(patched["matched_count"], plain["matched_count"]);
+    assert_eq!(
+        plain["materials"].as_array().unwrap().len(),
+        patched["materials"].as_array().unwrap().len()
+    );
+    assert!(
+        plain["materials"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|material| material.get("patch").is_none())
+    );
+
+    let target = patched["materials"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|material| material["subject"] == "Change target and helper")
+        .expect("target-changing material");
+    let patch = &target["patch"];
+    assert_eq!(patch["status"], "available");
+    assert_eq!(patch["commit_oid"], target["citations"][0]["oid"]);
+    let hunks = patch["hunks"].as_array().unwrap();
+    assert_eq!(hunks.len(), 1);
+    assert_eq!(hunks[0]["new_path"], "src/engine.rs");
+    let hunk_text = hunks[0]["text"].as_str().unwrap();
+    assert!(hunk_text.contains("target_value = \"new\""));
+    assert!(!hunk_text.contains("helper_value"));
+    assert!(!hunk_text.contains("README.md"));
+
+    let unrelated = patched["materials"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|material| material["subject"] == "Touch unrelated helper")
+        .expect("unrelated helper material");
+    assert_eq!(unrelated["patch"]["status"], "no_relevant_hunks");
+    assert_eq!(unrelated["patch"]["hunks"], serde_json::json!([]));
+
+    let symbol = json(
+        &repo,
+        &[
+            "why",
+            "src/engine.rs",
+            "--symbol",
+            "run",
+            "--limit",
+            "10",
+            "--patch",
+            "--json",
+        ],
+    );
+    let symbol_target = symbol["materials"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|material| material["subject"] == "Change target and helper")
+        .expect("symbol-changing material");
+    let symbol_hunks = symbol_target["patch"]["hunks"].as_array().unwrap();
+    assert_eq!(symbol_hunks.len(), 1);
+    assert!(
+        symbol_hunks[0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("target_value = \"new\"")
+    );
+    assert!(
+        !symbol_hunks[0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("helper_value")
+    );
+
+    let text = repo.run(["why", "src/engine.rs", "--line", "2", "--patch"]);
+    assert_eq!(text.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&text.stdout).contains("patch excerpt: available"));
+    let plain_text = repo.run(["why", "src/engine.rs", "--line", "2"]);
+    assert!(!String::from_utf8_lossy(&plain_text.stdout).contains("patch excerpt:"));
+}
+
+#[test]
+fn why_symbol_patch_keeps_body_hunks_after_signature_edit() {
+    let repo = TestRepo::new();
+    let initial = "fn calculate() {\n    let result = 1;\n}\n";
+    repo.commit(
+        "src/calculate.rs",
+        initial.as_bytes(),
+        "Create calculation",
+        None,
+    );
+    let body_changed = initial.replace("result = 1", "result = 2");
+    repo.commit(
+        "src/calculate.rs",
+        body_changed.as_bytes(),
+        "Update calculation result",
+        None,
+    );
+    let signature_changed = body_changed.replace("fn calculate()", "fn calculate(input: i32)");
+    repo.commit(
+        "src/calculate.rs",
+        signature_changed.as_bytes(),
+        "Add calculation input",
+        None,
+    );
+    repo.index();
+
+    let patched = json(
+        &repo,
+        &[
+            "why",
+            "src/calculate.rs",
+            "--symbol",
+            "calculate",
+            "--patch",
+            "--json",
+        ],
+    );
+    let body_material = patched["materials"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|material| material["subject"] == "Update calculation result")
+        .expect("body-changing material");
+    assert_eq!(body_material["patch"]["status"], "available");
+    let hunks = body_material["patch"]["hunks"].as_array().unwrap();
+    assert_eq!(hunks.len(), 1);
+    assert!(hunks[0]["text"].as_str().unwrap().contains("result = 2"));
+}
+
+#[test]
+fn why_symbol_patch_ignores_braces_inside_literals_and_comments() {
+    let repo = TestRepo::new();
+    let initial = concat!(
+        "fn parse<'a>(input: &'a str) {\n",
+        "    let text = \"}\";\n",
+        "    let raw_text = r#\"}\"#;\n",
+        "    // }\n",
+        "    let delimiter = '}';\n",
+        "    let result = 1;\n",
+        "}\n",
+    );
+    repo.commit("src/parser.rs", initial.as_bytes(), "Create parser", None);
+    let changed = initial.replace("result = 1", "result = 2");
+    repo.commit(
+        "src/parser.rs",
+        changed.as_bytes(),
+        "Update parser result",
+        None,
+    );
+    repo.index();
+
+    let patched = json(
+        &repo,
+        &[
+            "why",
+            "src/parser.rs",
+            "--symbol",
+            "parse",
+            "--patch",
+            "--json",
+        ],
+    );
+    let material = patched["materials"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|material| material["subject"] == "Update parser result")
+        .expect("body-changing material");
+    assert_eq!(material["patch"]["status"], "available");
+    assert!(
+        material["patch"]["hunks"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("result = 2")
+    );
+}
+
+#[test]
+fn why_symbol_patch_ignores_braces_inside_javascript_strings() {
+    let repo = TestRepo::new();
+    let initial = concat!(
+        "function parse(input) {\n",
+        "    const quoted = 'closer } stays string';\n",
+        "    const object = { value: 'closer } stays string' };\n",
+        "\n",
+        "\n",
+        "\n",
+        "\n",
+        "\n",
+        "\n",
+        "\n",
+        "\n",
+        "    const template = `template } stays string`;\n",
+        "    const result = 1;\n",
+        "}\n",
+    );
+    repo.commit("src/parser.js", initial.as_bytes(), "Create parser", None);
+    let changed = initial.replace("result = 1", "result = 2");
+    repo.commit(
+        "src/parser.js",
+        changed.as_bytes(),
+        "Update parser result",
+        None,
+    );
+    repo.index();
+
+    let patched = json(
+        &repo,
+        &[
+            "why",
+            "src/parser.js",
+            "--symbol",
+            "parse",
+            "--patch",
+            "--json",
+        ],
+    );
+    let material = patched["materials"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|material| material["subject"] == "Update parser result")
+        .expect("body-changing material");
+    assert_eq!(material["patch"]["status"], "available");
+    assert!(
+        material["patch"]["hunks"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("result = 2")
+    );
+}

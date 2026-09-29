@@ -99,6 +99,7 @@ pub(super) fn run_regression(
     good: Option<String>,
     bad: String,
     limit: usize,
+    patch: bool,
 ) -> Result<Outcome, AppError> {
     let intent = analysis::Intent::symptom(&words, &path)?;
     let repository = Repository::discover()?;
@@ -116,7 +117,16 @@ pub(super) fn run_regression(
     } else {
         bad_reachable
     };
-    let report = analysis::regression(&session, &intent, &target, &reachable, limit)?;
+    let mut report = analysis::regression(&session, &intent, &target, &reachable, limit)?;
+    if patch {
+        analysis::attach_regression_patch_excerpts(
+            &session,
+            &intent,
+            &target,
+            &reachable,
+            &mut report,
+        )?;
+    }
     Ok(query_outcome(&session, report))
 }
 pub(super) fn run_why(
@@ -124,13 +134,17 @@ pub(super) fn run_why(
     path: String,
     anchor: WhyAnchor,
     limit: usize,
+    patch: bool,
 ) -> Result<Outcome, AppError> {
     let repository = Repository::discover()?;
     let target = repository.pin_why_target(&revision, &path, anchor)?;
     let session = cache::open_query()?;
     session.require_revision(&target.revision)?;
     let reachable = session.ancestors(&target.revision)?;
-    let report = analysis::why(&session, &target, &reachable, limit)?;
+    let mut report = analysis::why(&session, &target, &reachable, limit)?;
+    if patch {
+        analysis::attach_why_patch_excerpts(&session, &target, &reachable, &mut report)?;
+    }
     Ok(query_outcome(&session, report))
 }
 
