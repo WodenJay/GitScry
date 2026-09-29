@@ -27,6 +27,19 @@ impl TestRepo {
     }
 }
 
+fn set_head_date(repo: &TestRepo, date: &str) {
+    let output = git_command(repo.dir.path())
+        .args(["commit", "--amend", "--no-edit", "--date", date])
+        .env("GIT_COMMITTER_DATE", date)
+        .output()
+        .expect("amend commit date");
+    assert!(
+        output.status.success(),
+        "git commit --amend failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[test]
 fn regression_reports_a_historical_suspect() {
     let repo = TestRepo::new();
@@ -663,4 +676,176 @@ fn regression_patch_reports_no_relevant_hunks() {
         .expect("symptom-matching material");
     assert_eq!(material["patch"]["status"], "no_relevant_hunks");
     assert_eq!(material["patch"]["hunks"], serde_json::json!([]));
+}
+
+#[test]
+fn regression_scope_intersects_the_pinned_good_bad_window() {
+    let repo = TestRepo::new();
+    repo.commit("app.py", b"return 'safe'\n", "Initial stable version", None);
+    let initial = repo.head();
+    repo.commit(
+        "app.py",
+        b"return 'old timeout'\n",
+        "Pre-good timeout change",
+        None,
+    );
+    let good = repo.head();
+    repo.commit(
+        "app.py",
+        b"return 'first timeout'\n",
+        "First timeout suspect",
+        None,
+    );
+    let first_suspect = repo.head();
+    repo.commit(
+        "app.py",
+        b"return 'second timeout'\n",
+        "Second timeout suspect",
+        None,
+    );
+    let bad = repo.head();
+    repo.commit(
+        "app.py",
+        b"return 'after bad timeout'\n",
+        "After-bad timeout change",
+        None,
+    );
+    let after_bad = repo.head();
+    repo.index();
+
+    let output = repo.run([
+        "regression",
+        "timeout",
+        "--path",
+        "app.py",
+        "--good",
+        good.as_str(),
+        "--bad",
+        bad.as_str(),
+        "--from-rev",
+        initial.as_str(),
+        "--to-rev",
+        after_bad.as_str(),
+        "--since",
+        "2000-01-01",
+        "--until",
+        "2099-12-31",
+        "--json",
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let subjects = report["materials"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|material| material["subject"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(subjects.contains(&"First timeout suspect"));
+    assert!(subjects.contains(&"Second timeout suspect"));
+    assert!(!subjects.contains(&"Pre-good timeout change"));
+    assert!(!subjects.contains(&"After-bad timeout change"));
+    assert_eq!(report["scope"]["from_rev"], initial);
+    assert_eq!(report["scope"]["to_rev"], after_bad);
+    assert_eq!(report["scope"]["since"], "2000-01-01");
+    assert_eq!(report["scope"]["until"], "2099-12-31");
+    assert_eq!(report["scope"]["cache_tip"], after_bad);
+
+    let narrowed = json(
+        &repo,
+        &[
+            "regression",
+            "timeout",
+            "--path",
+            "app.py",
+            "--good",
+            good.as_str(),
+            "--bad",
+            bad.as_str(),
+            "--to-rev",
+            first_suspect.as_str(),
+            "--json",
+        ],
+    );
+    let subjects = narrowed["materials"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|material| material["subject"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(subjects.contains(&"First timeout suspect"));
+    assert!(!subjects.contains(&"Second timeout suspect"));
+    assert_eq!(narrowed["scope"]["to_rev"], first_suspect);
+}
+
+#[test]
+fn regression_scope_uses_inclusive_utc_calendar_days() {
+    let repo = TestRepo::new();
+    repo.commit("app.py", b"return 'safe'\n", "Initial stable version", None);
+    set_head_date(&repo, "2024-01-01T00:00:00Z");
+    let good = repo.head();
+    repo.commit(
+        "app.py",
+        b"return 'timeout near midnight'\n",
+        "First timeout suspect",
+        None,
+    );
+    set_head_date(&repo, "2024-02-01T23:59:59Z");
+    repo.commit(
+        "app.py",
+        b"return 'timeout after midnight'\n",
+        "Second timeout suspect",
+        None,
+    );
+    set_head_date(&repo, "2024-02-02T00:00:00Z");
+    let bad = repo.head();
+    repo.index();
+
+    let report = json(
+        &repo,
+        &[
+            "regression",
+            "timeout",
+            "--path",
+            "app.py",
+            "--good",
+            good.as_str(),
+            "--bad",
+            bad.as_str(),
+            "--since",
+            "2024-02-01",
+            "--until",
+            "2024-02-01",
+            "--json",
+        ],
+    );
+    let subjects = report["materials"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|material| material["subject"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(subjects.contains(&"First timeout suspect"));
+    assert!(!subjects.contains(&"Second timeout suspect"));
+    assert_eq!(report["scope"]["since"], "2024-02-01");
+    assert_eq!(report["scope"]["until"], "2024-02-01");
+
+    let invalid = repo.run([
+        "regression",
+        "timeout",
+        "--path",
+        "app.py",
+        "--good",
+        good.as_str(),
+        "--bad",
+        bad.as_str(),
+        "--until",
+        "2024-02-30",
+    ]);
+    assert_eq!(invalid.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&invalid.stderr).contains("invalid --until value"));
 }
