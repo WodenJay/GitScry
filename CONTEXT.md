@@ -18,3 +18,6 @@ _Avoid_: culprit, root cause
 
 **file evolution timeline**:
 A chronological account of commits affecting a file within cache-reachable history, including detected earlier paths. It does not claim that every entry is significant or that uncached history is covered.
+
+**file incarnation**:
+A file's continuous identity from its introduction through detected renames until its removal. A later file created at the same path is a separate incarnation.
