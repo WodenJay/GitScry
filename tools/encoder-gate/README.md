@@ -67,7 +67,31 @@ risk, not something this harness hides with a generated compatibility header.
 
 ## Evidence
 
-Pending remote execution. A local `DOCS_RS=1 cargo check` checks Rust syntax/types
-without a native runtime; it is **not** static linking or inference evidence.
-This isolated crate deliberately prevents an unresolved native dependency from
-breaking ordinary CLI builds or existing automatic CI.
+**FAILED / design decision required.** Manual run
+[36742848765](https://github.com/WodenJay/GitScry/actions/runs/36742848765)
+on task-branch commit `44aa037` took **31m50s** and failed compiling the
+unmodified upstream 1.22.1 source, before Rust linking or model acquisition:
+
+```text
+onnxruntime/core/platform/posix/stacktrace.cc:7:10:
+fatal error: execinfo.h: No such file or directory
+```
+
+`Release`/`NDEBUG` does not eliminate this unconditional include. No source
+patch, compatibility header, alternate backend, glibc artifact, or target removal
+was attempted. This establishes failure of this pinned stock-Alpine route,
+**not impossibility of every supported musl build configuration**. Any next route
+requires a design decision before dependent implementation proceeds.
+
+Evidence artifact: `encoder-gate-musl-36742848765` (14-day retention), containing
+the full build log and CMake configuration. The exact source, environment,
+commands, failure and run URL are recorded here so they outlive that artifact.
+The task-branch bootstrap in `ci.yml` has been removed; existing automatic CI is
+byte-for-byte unchanged from the starting commit.
+
+Local checks: existing full suite **218 passed**, formatting check and
+all-target/all-feature Clippy with one Cargo job and warnings denied passed.
+The isolated probe passed formatting, typechecking and Clippy using `DOCS_RS=1`.
+That mode supplies no native runtime and is **not** link/inference evidence.
+No model/vector fixtures or production encoder were integrated because the
+first portability gate failed. #111 remains open.
