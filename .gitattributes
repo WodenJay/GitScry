@@ -1,1 +1,3 @@
 tests/fixtures/cli-contract.txt text eol=lf
+# Hash-pinned model resource: preserve upstream bytes on every platform.
+src/analysis/retrieval/embedding/fixtures/tokenizer.json -text
