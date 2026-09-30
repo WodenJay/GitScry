@@ -142,10 +142,14 @@ gitscry tests src/lib.rs
 Add this to `AGENTS.md`:
 
 ```text
-Use GitScry when past changes may help you understand, implement, or debug code. Skip it when history is irrelevant; see `gitscry --help`.
+Use GitScry when **past changes in the repository** may help with tasks such as understanding, implementing, or debugging code. Skip it when past changes are irrelevant. Run `gitscry --help` for more information.
 ```
 
-GitScry is designed to give coding agents access to implementation context that is usually left buried in repository history.
+This is enough! GitScry intentionally uses a single lightweight instruction instead of an MCP server, a dedicated skill, or a full command list.
+
+- Not every session needs `gitscry`, so keeping GitScry permanently exposed through MCP would consume context even when it is irrelevant. 
+- A dedicated skill would duplicate information that is already available through `gitscry --help`. 
+- Listing every command in the prompt would have the same problem as a dedicated skill: it increases context usage before the agent even knows whether GitScry is needed.
 
 ## Benchmark
 
