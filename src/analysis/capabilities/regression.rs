@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use crate::{app::AppError, cache::QuerySession, git::RegressionTarget};
 
-use super::super::patch::HunkPriorities;
+use super::super::patch::{self, HunkPriorities};
 use super::super::retrieval;
 use super::super::{Citation, Confidence, Intent, Material, Report, ReportKind};
 
@@ -15,35 +15,66 @@ pub(crate) fn run(
     target: &RegressionTarget,
     reachable: &HashSet<String>,
     limit: usize,
+    with_patch: bool,
 ) -> Result<Report, AppError> {
     let history = session.path_history(&target.path, reachable)?;
     let missing_objects = session.has_missing_objects(&history)?;
-    let symbol_matches = match (target.symbol_line, target.symbol_end) {
-        (Some(symbol_line), Some(symbol_end)) => {
-            Some(symbol_matches(session, &history, symbol_line, symbol_end)?)
-        }
-        _ => None,
-    };
+    let mut symbol_range = target
+        .symbol_line
+        .zip(target.symbol_end)
+        .map(|(start, end)| (start as i64, end as i64));
+    let mut priorities = HunkPriorities::new();
 
     let rename_boundary = history.iter().any(has_path_boundary);
     let history_len = history.len();
     let mut ranked = Vec::new();
     for (history_index, commit) in history.into_iter().enumerate() {
-        if let Some(matches) = &symbol_matches
-            && !matches.contains(&commit.oid)
+        let hunks = session.history_hunks(&commit.oid)?;
+        // Material and excerpts see the same symbol range before tracing to the parent.
+        let mut overlaps_symbol = false;
+        let mut symptom_hunk = false;
+        for hunk in hunks
+            .iter()
+            .filter(|hunk| commit.anchored_ordinals.contains(&hunk.change_ordinal))
         {
+            let symptom_match =
+                count_term_hits(intent.terms(), &String::from_utf8_lossy(&hunk.text)) > 0;
+            let symbol_match = symbol_range.is_some_and(|(start, end)| {
+                retrieval::hunk_overlaps_symbol(hunk, start.min(end), start.max(end))
+            });
+            symptom_hunk |= symptom_match;
+            overlaps_symbol |= symbol_match;
+            if with_patch && (symptom_match || symbol_match) {
+                let priority = match (symptom_match, symbol_match) {
+                    (true, true) => 0,
+                    (false, true) => 1,
+                    (true, false) => 2,
+                    (false, false) => unreachable!(),
+                };
+                priorities
+                    .entry(commit.oid.clone())
+                    .or_default()
+                    .insert(hunk.id(), priority);
+            }
+        }
+        let symbol_match = if let Some((start, end)) = &mut symbol_range {
+            let start_changed = retrieval::trace_line(&commit, &hunks, start).is_some();
+            let end_changed = retrieval::trace_line(&commit, &hunks, end).is_some();
+            overlaps_symbol || start_changed || end_changed
+        } else {
+            false
+        };
+        if symbol_range.is_some() && !symbol_match {
             continue;
         }
-        let hunks = session.history_hunks(&commit.oid)?;
-        let (lexical_hits, hunk_hits) = symptom_hits(intent, &commit, &hunks);
+        let message = format!("{}\n{}", commit.subject, commit.body);
+        let lexical_hits = count_term_hits(intent.terms(), &message);
+        let hunk_hits = usize::from(symptom_hunk);
         let test_paths = commit
             .paths
             .iter()
             .filter(|path| is_test_path(path))
             .count();
-        let symbol_match = symbol_matches
-            .as_ref()
-            .is_some_and(|matches| matches.contains(&commit.oid));
         let temporal = temporal_score(history_index, history_len);
         let rename_boundary = has_path_boundary(&commit);
         if lexical_hits == 0 && hunk_hits == 0 && !symbol_match && test_paths == 0 {
@@ -138,80 +169,10 @@ pub(crate) fn run(
         );
     }
     report.notices.push(BISECT_NOTICE.to_owned());
-    Ok(report)
-}
-
-pub(crate) fn patch_hunk_priorities(
-    session: &QuerySession,
-    intent: &Intent,
-    target: &RegressionTarget,
-    reachable: &HashSet<String>,
-) -> Result<HunkPriorities, AppError> {
-    let history = session.path_history(&target.path, reachable)?;
-    let mut priorities = HunkPriorities::new();
-    let mut symbol_range = target
-        .symbol_line
-        .zip(target.symbol_end)
-        .map(|(start, end)| (start as i64, end as i64));
-
-    for commit in history {
-        let hunks = session.history_hunks(&commit.oid)?;
-        let anchored = commit
-            .anchored_ordinals
-            .iter()
-            .copied()
-            .collect::<HashSet<_>>();
-        for hunk in &hunks {
-            if !anchored.contains(&hunk.change_ordinal) {
-                continue;
-            }
-            let hunk_text = String::from_utf8_lossy(&hunk.text);
-            let symptom_match = count_term_hits(intent.terms(), &hunk_text) > 0;
-            let symbol_match = symbol_range.as_ref().is_some_and(|(start, end)| {
-                retrieval::hunk_overlaps_symbol(hunk, (*start).min(*end), (*start).max(*end))
-            });
-            if symptom_match || symbol_match {
-                let priority = match (symptom_match, symbol_match) {
-                    (true, true) => 0,
-                    (false, true) => 1,
-                    (true, false) => 2,
-                    (false, false) => unreachable!(),
-                };
-                priorities
-                    .entry(commit.oid.clone())
-                    .or_default()
-                    .insert(hunk.id(), priority);
-            }
-        }
-        if let Some((start, end)) = &mut symbol_range {
-            retrieval::trace_line(&commit, &hunks, start);
-            retrieval::trace_line(&commit, &hunks, end);
-        }
+    if with_patch {
+        patch::attach_selected_patch_excerpts(session, &mut report, &priorities)?;
     }
-    Ok(priorities)
-}
-
-fn symptom_hits(
-    intent: &Intent,
-    commit: &retrieval::HistoryCommit,
-    hunks: &[retrieval::HistoryHunk],
-) -> (usize, usize) {
-    let message = format!("{}\n{}", commit.subject, commit.body);
-    let lexical_hits = count_term_hits(intent.terms(), &message);
-    let anchored = commit
-        .anchored_ordinals
-        .iter()
-        .copied()
-        .collect::<HashSet<_>>();
-    let hunk_text = hunks
-        .iter()
-        .filter(|hunk| anchored.contains(&hunk.change_ordinal))
-        .map(|hunk| String::from_utf8_lossy(&hunk.text))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let hunk_hits =
-        usize::from(!hunk_text.is_empty() && count_term_hits(intent.terms(), &hunk_text) > 0);
-    (lexical_hits, hunk_hits)
+    Ok(report)
 }
 
 fn count_term_hits(terms: &[String], text: &str) -> usize {
@@ -229,30 +190,6 @@ fn has_path_boundary(commit: &retrieval::HistoryCommit) -> bool {
         .filter(|change| commit.anchored_ordinals.contains(&change.ordinal))
         .any(|change| change.status.starts_with('R') || change.status.starts_with('C'))
 }
-fn symbol_matches(
-    session: &QuerySession,
-    history: &[retrieval::HistoryCommit],
-    symbol_line: usize,
-    symbol_end: usize,
-) -> Result<HashSet<String>, AppError> {
-    let mut line = symbol_line as i64;
-    let mut end_line = symbol_end as i64;
-    let mut matches = HashSet::new();
-    for commit in history {
-        let hunks = session.history_hunks(&commit.oid)?;
-        let overlaps_symbol = hunks.iter().any(|hunk| {
-            commit.anchored_ordinals.contains(&hunk.change_ordinal)
-                && retrieval::hunk_overlaps_symbol(hunk, line.min(end_line), line.max(end_line))
-        });
-        let line_changed = retrieval::trace_line(commit, &hunks, &mut line).is_some();
-        let end_changed = retrieval::trace_line(commit, &hunks, &mut end_line).is_some();
-        if overlaps_symbol || line_changed || end_changed {
-            matches.insert(commit.oid.clone());
-        }
-    }
-    Ok(matches)
-}
-
 fn temporal_score(index: usize, history_len: usize) -> f64 {
     if history_len == 0 {
         return 0.0;

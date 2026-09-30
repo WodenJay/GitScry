@@ -303,22 +303,14 @@ fn run_regression(
         bad_reachable
     };
     context.intersect(&target.bad_revision, &mut reachable)?;
-    let mut report = capabilities::regression(
+    let report = capabilities::regression(
         &context.session,
         &intent,
         &target,
         &reachable,
         options.limit,
+        options.patch,
     )?;
-    if options.patch {
-        let priorities = capabilities::regression_patch_hunk_priorities(
-            &context.session,
-            &intent,
-            &target,
-            &reachable,
-        )?;
-        patch::attach_selected_patch_excerpts(&context.session, &mut report, &priorities)?;
-    }
     Ok(context.finish(QueryReport::Analysis(report)))
 }
 
@@ -335,18 +327,14 @@ fn run_why(
     let context = Context::for_target(session, options.scope, &target.revision)?;
     let reachable = context.session.ancestors(&target.revision)?;
     let eligible = context.eligible_revisions(&target.revision)?;
-    let mut report = capabilities::why(
+    let report = capabilities::why(
         &context.session,
         &target,
         &reachable,
         eligible.as_ref(),
         options.limit,
+        options.patch,
     )?;
-    if options.patch {
-        let priorities =
-            capabilities::why_patch_hunk_priorities(&context.session, &target, &reachable)?;
-        patch::attach_selected_patch_excerpts(&context.session, &mut report, &priorities)?;
-    }
     Ok(context.finish(QueryReport::Analysis(report)))
 }
 

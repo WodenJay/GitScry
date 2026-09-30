@@ -221,6 +221,32 @@ fn regression_symbol_tracking_survives_overlapping_newest_change() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Introduce alpha bug"));
     assert!(!stdout.contains("Shift file and tweak alpha"));
+    let patched = json(
+        &repo,
+        &[
+            "regression",
+            "alpha bug",
+            "--path",
+            "lib.rs",
+            "--symbol",
+            "alpha",
+            "--good",
+            good.as_str(),
+            "--limit",
+            "1",
+            "--patch",
+            "--json",
+        ],
+    );
+    assert_eq!(patched["materials"][0]["subject"], "Introduce alpha bug");
+    let patch = &patched["materials"][0]["patch"];
+    assert_eq!(patch["status"], "available");
+    assert!(
+        patch["hunks"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("key.trim()")
+    );
 }
 
 #[test]
@@ -260,6 +286,22 @@ fn regression_symbol_tracking_keeps_unrelated_shifted_changes_out() {
     assert_eq!(output.status.code(), Some(0));
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_eq!(stdout, "No supported regression suspects found.\n");
+    let patched = json(
+        &repo,
+        &[
+            "regression",
+            "alpha regression",
+            "--path",
+            "lib.rs",
+            "--symbol",
+            "alpha",
+            "--good",
+            good.as_str(),
+            "--patch",
+            "--json",
+        ],
+    );
+    assert_eq!(patched["materials"], serde_json::json!([]));
 }
 
 #[test]
@@ -589,6 +631,23 @@ fn regression_patch_excerpts_prioritize_symptom_and_symbol_hunks() {
     assert_eq!(plain["schema_version"], 1);
     assert_eq!(patched["schema_version"], 2);
     assert_eq!(patched["matched_count"], plain["matched_count"]);
+    assert_eq!(
+        patched["materials"].as_array().unwrap().len(),
+        plain["materials"].as_array().unwrap().len()
+    );
+    for (plain_material, patched_material) in plain["materials"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip(patched["materials"].as_array().unwrap())
+    {
+        let mut material = patched_material.clone();
+        material.as_object_mut().unwrap().remove("patch");
+        assert_eq!(
+            &material, plain_material,
+            "patch must not change material or ranking"
+        );
+    }
     let material = &patched["materials"][0];
     assert_eq!(material["subject"], "Introduce timeout regression");
     let patch = &material["patch"];

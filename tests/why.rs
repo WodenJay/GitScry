@@ -685,6 +685,19 @@ fn why_patch_excerpts_follow_line_and_symbol_anchors() {
         plain["materials"].as_array().unwrap().len(),
         patched["materials"].as_array().unwrap().len()
     );
+    for (plain_material, patched_material) in plain["materials"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip(patched["materials"].as_array().unwrap())
+    {
+        let mut material = patched_material.clone();
+        material.as_object_mut().unwrap().remove("patch");
+        assert_eq!(
+            &material, plain_material,
+            "patch must not change material or ranking"
+        );
+    }
     assert!(
         plain["materials"]
             .as_array()
@@ -758,6 +771,53 @@ fn why_patch_excerpts_follow_line_and_symbol_anchors() {
     assert!(String::from_utf8_lossy(&text.stdout).contains("patch excerpt: available"));
     let plain_text = repo.run(["why", "src/engine.rs", "--line", "2"]);
     assert!(!String::from_utf8_lossy(&plain_text.stdout).contains("patch excerpt:"));
+}
+
+#[test]
+fn why_scoped_patch_does_not_reassign_line_ownership_to_older_material() {
+    let repo = TestRepo::new();
+    repo.commit("target.txt", b"initial\n", "Create target", None);
+    repo.commit("target.txt", b"older\n", "Older target change", None);
+    let older = repo.head();
+    repo.commit("target.txt", b"newer\n", "Newer target owner", None);
+    repo.index();
+
+    let report = json(
+        &repo,
+        &[
+            "why",
+            "target.txt",
+            "--line",
+            "1",
+            "--to-rev",
+            older.as_str(),
+            "--patch",
+            "--json",
+        ],
+    );
+    assert_eq!(report["matched_count"], 2);
+    let material = report["materials"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|material| material["subject"] == "Older target change")
+        .expect("older material remains eligible for ranking");
+    assert!(
+        material["basis"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|basis| basis == "diff hunk corroborates the target line")
+    );
+    assert_eq!(material["patch"]["status"], "no_relevant_hunks");
+    assert_eq!(material["patch"]["hunks"], serde_json::json!([]));
+    assert!(
+        report["materials"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|material| material["subject"] != "Newer target owner")
+    );
 }
 
 #[test]
