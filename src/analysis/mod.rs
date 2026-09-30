@@ -1,30 +1,21 @@
 //! Turning cache rows into traceable `material` for one capability.
 //!
-//! Three parts, three reasons to change. [`retrieval`] owns *how history is read and
-//! scored*; [`provenance`] owns *how a commit message is read for failure provenance*;
-//! [`capabilities`] owns *what material each command assembles*. Ranking weights and
-//! retrieval mechanics stay private, and all user-visible wording belongs to `render`.
+//! [`query`] owns the published generation, pinned target, scope semantics and
+//! optional excerpts behind one execution interface. [`retrieval`] reads and
+//! scores history; [`provenance`] interprets failure provenance; [`capabilities`]
+//! assembles material. Ranking mechanics stay private; wording belongs to `render`.
 
 mod capabilities;
 mod patch;
 mod provenance;
+pub(crate) mod query;
 mod retrieval;
 
-use std::{collections::HashSet, path::Path};
-
-use crate::git::{TraceFixTarget, WhyTarget};
-use crate::{
-    app::AppError,
-    cache::{QuerySession, SearchFilter},
-};
-
 pub(crate) use capabilities::timeline::{Entry as TimelineEntry, Report as TimelineReport};
-pub(crate) use patch::{
-    PatchExcerpt, PatchHunk, PatchStatus, attach_patch_excerpts, attach_timeline_patch_excerpts,
-    attach_trace_fix_patch_excerpts,
-};
+pub(crate) use patch::{PatchExcerpt, PatchHunk, PatchStatus};
+use retrieval::Intent;
 pub(in crate::analysis) use retrieval::anchors_overlap;
-pub(crate) use retrieval::{Intent, message_parts, normalize_path, searchable_text};
+pub(crate) use retrieval::{message_parts, normalize_path, searchable_text};
 
 /// The complete `material` one capability returns.
 pub(crate) struct Report {
@@ -208,151 +199,6 @@ impl Citation {
         self.note = Some(note);
         self
     }
-}
-
-pub(crate) fn search(
-    session: &QuerySession,
-    intent: &Intent,
-    limit: usize,
-) -> Result<Report, AppError> {
-    validate_limit(limit)?;
-    capabilities::search(session, intent, limit)
-}
-
-pub(crate) fn search_scoped(
-    session: &QuerySession,
-    intent: &Intent,
-    limit: usize,
-    scope: &SearchFilter,
-) -> Result<Report, AppError> {
-    validate_limit(limit)?;
-    capabilities::search_scoped(session, intent, limit, scope)
-}
-
-pub(crate) fn code_search(
-    session: &QuerySession,
-    query: &str,
-    path: Option<&str>,
-    direction: Option<CodeDirection>,
-    limit: usize,
-) -> Result<Report, AppError> {
-    validate_limit(limit)?;
-    capabilities::code_search(session, query, path, direction, limit)
-}
-
-pub(crate) fn code_search_scoped(
-    session: &QuerySession,
-    query: &str,
-    path: Option<&str>,
-    direction: Option<CodeDirection>,
-    limit: usize,
-    scope: &SearchFilter,
-) -> Result<Report, AppError> {
-    validate_limit(limit)?;
-    capabilities::code_search_scoped(session, query, path, direction, limit, scope)
-}
-
-pub(crate) fn examples(
-    session: &QuerySession,
-    intent: &Intent,
-    limit: usize,
-    scope: Option<&SearchFilter>,
-) -> Result<Report, AppError> {
-    validate_limit(limit)?;
-    capabilities::examples(session, intent, limit, scope)
-}
-
-pub(crate) fn why(
-    session: &QuerySession,
-    target: &WhyTarget,
-    reachable: &HashSet<String>,
-    eligible_revisions: Option<&HashSet<String>>,
-    limit: usize,
-) -> Result<Report, AppError> {
-    validate_limit(limit)?;
-    capabilities::why(session, target, reachable, eligible_revisions, limit)
-}
-
-pub(crate) fn attach_why_patch_excerpts(
-    session: &QuerySession,
-    target: &WhyTarget,
-    reachable: &HashSet<String>,
-    report: &mut Report,
-) -> Result<(), AppError> {
-    let priorities = capabilities::why_patch_hunk_priorities(session, target, reachable)?;
-    patch::attach_selected_patch_excerpts(session, report, &priorities)
-}
-
-pub(crate) fn regression(
-    session: &QuerySession,
-    intent: &Intent,
-    target: &crate::git::RegressionTarget,
-    reachable: &HashSet<String>,
-    limit: usize,
-) -> Result<Report, AppError> {
-    validate_limit(limit)?;
-    capabilities::regression(session, intent, target, reachable, limit)
-}
-
-pub(crate) fn attach_regression_patch_excerpts(
-    session: &QuerySession,
-    intent: &Intent,
-    target: &crate::git::RegressionTarget,
-    reachable: &HashSet<String>,
-    report: &mut Report,
-) -> Result<(), AppError> {
-    let priorities =
-        capabilities::regression_patch_hunk_priorities(session, intent, target, reachable)?;
-    patch::attach_selected_patch_excerpts(session, report, &priorities)
-}
-
-pub(crate) fn trace_fix(
-    session: &QuerySession,
-    target: &TraceFixTarget,
-    reachable: &HashSet<String>,
-    limit: usize,
-    scope_applied: bool,
-) -> Result<Report, AppError> {
-    validate_limit(limit)?;
-    capabilities::trace_fix(session, target, reachable, limit, scope_applied)
-}
-
-pub(crate) fn failures(
-    session: &QuerySession,
-    intent: &Intent,
-    limit: usize,
-    scope: Option<&SearchFilter>,
-) -> Result<Report, AppError> {
-    validate_limit(limit)?;
-    capabilities::failures(session, intent, limit, scope)
-}
-
-pub(crate) fn related(
-    session: &QuerySession,
-    intent: &Intent,
-    worktree_root: &Path,
-    limit: usize,
-    scope: Option<&SearchFilter>,
-) -> Result<Report, AppError> {
-    validate_limit(limit)?;
-    capabilities::related(session, intent, worktree_root, limit, scope)
-}
-
-pub(crate) fn tests(
-    session: &QuerySession,
-    intent: &Intent,
-    worktree_root: &Path,
-    limit: usize,
-    scope: Option<&SearchFilter>,
-) -> Result<Report, AppError> {
-    validate_limit(limit)?;
-    capabilities::tests(session, intent, worktree_root, limit, scope)
-}
-
-fn validate_limit(limit: usize) -> Result<(), AppError> {
-    (limit > 0)
-        .then_some(())
-        .ok_or_else(|| AppError::input("limit must be greater than zero"))
 }
 
 /// Report assembly, shared by the capabilities so truncation stays uniform.

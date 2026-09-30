@@ -493,6 +493,7 @@ fn why_scope_intersects_target_and_filters_materials() {
             initial.as_str(),
             "--to-rev",
             later.as_str(),
+            "--patch",
             "--json",
         ],
     );
@@ -501,6 +502,13 @@ fn why_scope_intersects_target_and_filters_materials() {
     assert_eq!(scoped["scope"]["cache_tip"], later);
     assert_eq!(scoped["materials"].as_array().unwrap().len(), 1);
     assert_eq!(scoped["materials"][0]["subject"], "Initial target history");
+    assert_eq!(scoped["materials"][0]["patch"]["status"], "available");
+    assert!(
+        scoped["materials"][0]["patch"]["hunks"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("+target")
+    );
 
     let excluded = json(
         &repo,

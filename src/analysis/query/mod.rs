@@ -1,0 +1,410 @@
+//! Execute a historical query against one published cache generation.
+//!
+//! Target pinning, scope semantics, material assembly and optional excerpts stay
+//! behind this interface. Display formats never participate in query execution.
+
+mod scope;
+
+use std::collections::HashSet;
+
+use super::{CodeDirection, Intent, Report, TimelineReport, capabilities, patch};
+use crate::{
+    app::AppError,
+    cache::{self, QuerySession, SearchFilter},
+    git::{Repository, WhyAnchor},
+};
+
+pub(crate) use scope::SearchScopeOptions;
+
+pub(crate) enum Request {
+    Search(Vec<String>),
+    CodeSearch {
+        query: String,
+        path: Option<String>,
+        direction: Option<CodeDirection>,
+    },
+    Examples {
+        words: Vec<String>,
+        paths: Vec<String>,
+    },
+    Failures {
+        words: Vec<String>,
+        paths: Vec<String>,
+    },
+    Related(Vec<String>),
+    Tests(Vec<String>),
+    Regression {
+        words: Vec<String>,
+        path: String,
+        symbol: Option<String>,
+        good: Option<String>,
+        bad: String,
+    },
+    Why {
+        revision: String,
+        path: String,
+        anchor: WhyAnchor,
+    },
+    TraceFix {
+        revision: String,
+        paths: Vec<String>,
+    },
+    Timeline {
+        path: String,
+        at: Option<String>,
+        offset: usize,
+        last: bool,
+    },
+}
+
+pub(crate) struct Options {
+    pub(crate) limit: usize,
+    pub(crate) patch: bool,
+    pub(crate) scope: SearchScopeOptions,
+}
+
+pub(crate) enum QueryReport {
+    Analysis(Report),
+    Timeline(TimelineReport),
+}
+
+impl QueryReport {
+    pub(crate) fn warnings(&self) -> &[String] {
+        match self {
+            Self::Analysis(report) => &report.warnings,
+            Self::Timeline(_) => &[],
+        }
+    }
+
+    pub(crate) fn notices(&self) -> &[String] {
+        match self {
+            Self::Analysis(report) => &report.notices,
+            Self::Timeline(_) => &[],
+        }
+    }
+}
+
+pub(crate) struct Outcome {
+    pub(crate) progress: Vec<String>,
+    pub(crate) warnings: Vec<String>,
+    pub(crate) report: QueryReport,
+}
+
+/// The cache generation and scope shared by material selection and excerpts.
+struct Context {
+    session: QuerySession,
+    scope: Option<scope::ResolvedSearchScope>,
+}
+
+impl Context {
+    fn open(options: SearchScopeOptions) -> Result<Self, AppError> {
+        let session = cache::open_query()?;
+        let scope = scope::resolve(&session, options)?;
+        Ok(Self { session, scope })
+    }
+
+    fn for_target(
+        session: QuerySession,
+        options: SearchScopeOptions,
+        revision: &str,
+    ) -> Result<Self, AppError> {
+        let scope = scope::resolve_for_target(&session, options, revision)?;
+        Ok(Self { session, scope })
+    }
+
+    fn filter(&self) -> Option<&SearchFilter> {
+        self.scope.as_ref().map(|scope| &scope.filter)
+    }
+
+    /// Eligibility is distinct from traversal: why and timeline must follow
+    /// the complete target history before filtering material or pagination.
+    fn eligible_revisions(&self, revision: &str) -> Result<Option<HashSet<String>>, AppError> {
+        self.filter()
+            .map(|filter| self.session.scoped_revisions(filter, revision))
+            .transpose()
+    }
+
+    fn intersect(&self, revision: &str, reachable: &mut HashSet<String>) -> Result<(), AppError> {
+        if let Some(eligible) = self.eligible_revisions(revision)? {
+            reachable.retain(|revision| eligible.contains(revision));
+        }
+        Ok(())
+    }
+
+    fn finish(self, mut report: QueryReport) -> Outcome {
+        let scope = self.scope.map(|scope| scope.report);
+        match &mut report {
+            QueryReport::Analysis(report) => report.scope = scope,
+            QueryReport::Timeline(report) => report.scope = scope,
+        }
+        Outcome {
+            progress: self.session.progress().to_vec(),
+            warnings: self.session.warnings().to_vec(),
+            report,
+        }
+    }
+}
+
+pub(crate) fn execute(request: Request, options: Options) -> Result<Outcome, AppError> {
+    if options.limit == 0 {
+        return Err(AppError::input("limit must be greater than zero"));
+    }
+    match request {
+        Request::Search(words) => run_search(words, options),
+        Request::CodeSearch {
+            query,
+            path,
+            direction,
+        } => run_code_search(query, path, direction, options),
+        Request::Examples { words, paths } => {
+            run_text(words, paths, options, capabilities::examples)
+        }
+        Request::Failures { words, paths } => {
+            run_text(words, paths, options, capabilities::failures)
+        }
+        Request::Related(paths) => run_paths(paths, options, capabilities::related),
+        Request::Tests(paths) => run_paths(paths, options, capabilities::tests),
+        Request::Regression {
+            words,
+            path,
+            symbol,
+            good,
+            bad,
+        } => run_regression(words, path, symbol, good, bad, options),
+        Request::Why {
+            revision,
+            path,
+            anchor,
+        } => run_why(revision, path, anchor, options),
+        Request::TraceFix { revision, paths } => run_trace_fix(revision, paths, options),
+        Request::Timeline {
+            path,
+            at,
+            offset,
+            last,
+        } => run_timeline(path, at, offset, last, options),
+    }
+}
+
+fn run_text(
+    words: Vec<String>,
+    paths: Vec<String>,
+    options: Options,
+    capability: impl FnOnce(
+        &QuerySession,
+        &Intent,
+        usize,
+        Option<&SearchFilter>,
+    ) -> Result<Report, AppError>,
+) -> Result<Outcome, AppError> {
+    let intent = Intent::parse(&words, &paths)?;
+    let context = Context::open(options.scope)?;
+    let mut report = capability(&context.session, &intent, options.limit, context.filter())?;
+    if options.patch {
+        patch::attach_patch_excerpts(
+            &context.session,
+            &intent,
+            &mut report,
+            !paths.is_empty(),
+            &paths,
+        )?;
+    }
+    Ok(context.finish(QueryReport::Analysis(report)))
+}
+
+fn run_search(words: Vec<String>, options: Options) -> Result<Outcome, AppError> {
+    let intent = Intent::parse(&words, &[])?;
+    let context = Context::open(options.scope)?;
+    let mut report = match context.filter() {
+        Some(filter) => {
+            capabilities::search_scoped(&context.session, &intent, options.limit, filter)?
+        }
+        None => capabilities::search(&context.session, &intent, options.limit)?,
+    };
+    if options.patch {
+        patch::attach_patch_excerpts(&context.session, &intent, &mut report, false, &[])?;
+    }
+    Ok(context.finish(QueryReport::Analysis(report)))
+}
+
+fn run_code_search(
+    query: String,
+    path: Option<String>,
+    direction: Option<CodeDirection>,
+    options: Options,
+) -> Result<Outcome, AppError> {
+    let context = Context::open(options.scope)?;
+    let report = match context.filter() {
+        Some(filter) => capabilities::code_search_scoped(
+            &context.session,
+            &query,
+            path.as_deref(),
+            direction,
+            options.limit,
+            filter,
+        )?,
+        None => capabilities::code_search(
+            &context.session,
+            &query,
+            path.as_deref(),
+            direction,
+            options.limit,
+        )?,
+    };
+    Ok(context.finish(QueryReport::Analysis(report)))
+}
+
+fn run_paths(
+    paths: Vec<String>,
+    options: Options,
+    capability: impl FnOnce(
+        &QuerySession,
+        &Intent,
+        &std::path::Path,
+        usize,
+        Option<&SearchFilter>,
+    ) -> Result<Report, AppError>,
+) -> Result<Outcome, AppError> {
+    let intent = Intent::paths(&paths)?;
+    let context = Context::open(options.scope)?;
+    let report = capability(
+        &context.session,
+        &intent,
+        context.session.root(),
+        options.limit,
+        context.filter(),
+    )?;
+    Ok(context.finish(QueryReport::Analysis(report)))
+}
+
+fn run_regression(
+    words: Vec<String>,
+    path: String,
+    symbol: Option<String>,
+    good: Option<String>,
+    bad: String,
+    options: Options,
+) -> Result<Outcome, AppError> {
+    let intent = Intent::symptom(&words, &path)?;
+    let repository = Repository::discover()?;
+    let target =
+        repository.pin_regression_target(&bad, good.as_deref(), &path, symbol.as_deref())?;
+    let session = cache::open_query()?;
+    session.require_revision(&target.bad_revision)?;
+    if let Some(good_revision) = &target.good_revision {
+        session.require_revision(good_revision)?;
+    }
+    let context = Context::for_target(session, options.scope, &target.bad_revision)?;
+    let bad_reachable = context.session.ancestors(&target.bad_revision)?;
+    let mut reachable = if let Some(good_revision) = &target.good_revision {
+        let good_reachable = context.session.ancestors(good_revision)?;
+        bad_reachable.difference(&good_reachable).cloned().collect()
+    } else {
+        bad_reachable
+    };
+    context.intersect(&target.bad_revision, &mut reachable)?;
+    let mut report = capabilities::regression(
+        &context.session,
+        &intent,
+        &target,
+        &reachable,
+        options.limit,
+    )?;
+    if options.patch {
+        let priorities = capabilities::regression_patch_hunk_priorities(
+            &context.session,
+            &intent,
+            &target,
+            &reachable,
+        )?;
+        patch::attach_selected_patch_excerpts(&context.session, &mut report, &priorities)?;
+    }
+    Ok(context.finish(QueryReport::Analysis(report)))
+}
+
+fn run_why(
+    revision: String,
+    path: String,
+    anchor: WhyAnchor,
+    options: Options,
+) -> Result<Outcome, AppError> {
+    let repository = Repository::discover()?;
+    let target = repository.pin_why_target(&revision, &path, anchor)?;
+    let session = cache::open_query()?;
+    session.require_revision(&target.revision)?;
+    let context = Context::for_target(session, options.scope, &target.revision)?;
+    let reachable = context.session.ancestors(&target.revision)?;
+    let eligible = context.eligible_revisions(&target.revision)?;
+    let mut report = capabilities::why(
+        &context.session,
+        &target,
+        &reachable,
+        eligible.as_ref(),
+        options.limit,
+    )?;
+    if options.patch {
+        let priorities =
+            capabilities::why_patch_hunk_priorities(&context.session, &target, &reachable)?;
+        patch::attach_selected_patch_excerpts(&context.session, &mut report, &priorities)?;
+    }
+    Ok(context.finish(QueryReport::Analysis(report)))
+}
+
+fn run_timeline(
+    path: String,
+    at: Option<String>,
+    offset: usize,
+    last: bool,
+    options: Options,
+) -> Result<Outcome, AppError> {
+    let session = cache::open_query()?;
+    let revision = match at {
+        Some(revision) => revision,
+        None => session.completed_tip()?,
+    };
+    let repository = Repository::discover()?;
+    let target = repository.pin_timeline_target(&revision, &path)?;
+    session.require_revision(&target.revision)?;
+    let context = Context::for_target(session, options.scope, &target.revision)?;
+    let reachable = context.session.ancestors(&target.revision)?;
+    let eligible = context.eligible_revisions(&target.revision)?;
+    let history = context.session.timeline_history(&target.path, &reachable)?;
+    let mut report = TimelineReport::from_history(
+        target.revision,
+        target.path,
+        history,
+        eligible.as_ref(),
+        options.limit,
+        offset,
+        last,
+    );
+    if options.patch {
+        patch::attach_timeline_patch_excerpts(&context.session, &mut report)?;
+    }
+    Ok(context.finish(QueryReport::Timeline(report)))
+}
+
+fn run_trace_fix(
+    revision: String,
+    paths: Vec<String>,
+    options: Options,
+) -> Result<Outcome, AppError> {
+    let repository = Repository::discover()?;
+    let target = repository.pin_trace_fix(&revision, &paths)?;
+    let session = cache::open_query()?;
+    session.require_revision(&target.revision)?;
+    let context = Context::for_target(session, options.scope, &target.revision)?;
+    let mut reachable = context.session.ancestors(&target.revision)?;
+    context.intersect(&target.revision, &mut reachable)?;
+    let mut report = capabilities::trace_fix(
+        &context.session,
+        &target,
+        &reachable,
+        options.limit,
+        context.scope.is_some(),
+    )?;
+    if options.patch {
+        patch::attach_trace_fix_patch_excerpts(&context.session, &mut report)?;
+    }
+    Ok(context.finish(QueryReport::Analysis(report)))
+}

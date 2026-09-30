@@ -9,27 +9,26 @@ mod material;
 
 mod timeline;
 use crate::{
+    analysis::query::QueryReport,
     app::{self, AppError, IndexStage, Outcome, Progress, UpdateStage},
     cli::Command,
 };
 use std::io::{self, IsTerminal, Write};
 
-pub(crate) fn format_report(report: &app::QueryReport) -> String {
+fn format_report(report: &QueryReport) -> String {
     match report {
-        app::QueryReport::Analysis(report) => material::format_report(report),
-        app::QueryReport::Timeline(report) => timeline::format_report(report),
+        QueryReport::Analysis(report) => material::format_report(report),
+        QueryReport::Timeline(report) => timeline::format_report(report),
     }
 }
 
-pub(crate) fn format_json_report(
-    report: &app::QueryReport,
+fn format_json_report(
+    report: &QueryReport,
     additional_warnings: &[String],
 ) -> Result<String, serde_json::Error> {
     match report {
-        app::QueryReport::Analysis(report) => json::format_json_report(report, additional_warnings),
-        app::QueryReport::Timeline(report) => {
-            timeline::format_json_report(report, additional_warnings)
-        }
+        QueryReport::Analysis(report) => json::format_json_report(report, additional_warnings),
+        QueryReport::Timeline(report) => timeline::format_json_report(report, additional_warnings),
     }
 }
 
@@ -187,7 +186,11 @@ fn write_outcome(outcome: Outcome, json_output: bool) -> io::Result<()> {
         for notice in &outcome.notices {
             writeln!(stderr, "{notice}")?;
         }
-        writeln!(io::stdout().lock(), "{}", outcome.message)
+        let message = outcome
+            .report
+            .as_ref()
+            .map_or_else(|| outcome.message.clone(), format_report);
+        writeln!(io::stdout().lock(), "{message}")
     }
 }
 

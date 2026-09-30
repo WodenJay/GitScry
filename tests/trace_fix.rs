@@ -600,6 +600,7 @@ fn trace_fix_scope_filters_material_without_retargeting_the_fix() {
         "2000-01-01",
         "--until",
         "2099-12-31",
+        "--patch",
         "--json",
     ]);
     assert_eq!(
@@ -616,6 +617,13 @@ fn trace_fix_scope_filters_material_without_retargeting_the_fix() {
     assert_eq!(report["scope"]["cache_tip"], cache_tip);
     assert_eq!(report["materials"][0]["subject"], "Introduce timeout bug");
     assert_eq!(report["materials"][0]["detail"]["fix_revision"], fix);
+    assert_eq!(report["materials"][0]["patch"]["status"], "available");
+    assert!(
+        report["materials"][0]["patch"]["hunks"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("+buggy")
+    );
 
     let empty = repo.run([
         "trace-fix",

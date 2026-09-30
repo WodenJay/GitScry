@@ -784,6 +784,7 @@ fn timeline_scope_intersects_target_and_preserves_renames() {
         "1",
         "--offset",
         "1",
+        "--patch",
         "--json",
     ]));
     assert_eq!(report["target_revision"], target);
@@ -793,6 +794,13 @@ fn timeline_scope_intersects_target_and_preserves_renames() {
     assert_eq!(report["start"], 2);
     assert_eq!(report["entries"][0]["commit_id"], shared);
     assert_eq!(report["entries"][0]["path"], "src/old.rs");
+    assert_eq!(report["entries"][0]["patch"]["status"], "available");
+    assert!(
+        report["entries"][0]["patch"]["hunks"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("+shared")
+    );
 
     let after_base = json(&repo.run([
         "timeline",

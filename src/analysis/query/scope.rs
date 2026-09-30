@@ -6,23 +6,13 @@ use crate::{
 };
 
 #[derive(Default)]
-pub(super) struct SearchScopeOptions {
-    pub(super) from_rev: Option<String>,
-    pub(super) to_rev: Option<String>,
-    pub(super) since: Option<String>,
-    pub(super) until: Option<String>,
+pub(crate) struct SearchScopeOptions {
+    pub(crate) from_rev: Option<String>,
+    pub(crate) to_rev: Option<String>,
+    pub(crate) since: Option<String>,
+    pub(crate) until: Option<String>,
 }
 
-impl From<crate::cli::HistoricalScopeArgs> for SearchScopeOptions {
-    fn from(options: crate::cli::HistoricalScopeArgs) -> Self {
-        Self {
-            from_rev: options.from_rev,
-            to_rev: options.to_rev,
-            since: options.since,
-            until: options.until,
-        }
-    }
-}
 impl SearchScopeOptions {
     pub(super) fn is_empty(&self) -> bool {
         self.from_rev.is_none()
