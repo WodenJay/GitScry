@@ -27,6 +27,8 @@ trailing CRs on the title are removed. Invalid UTF-8 is replaced, not rejected.
 Exceptional bodies are prefix-tokenized instead of tokenizing the entire body.
 Short queries allow 254 content tokens + CLS/SEP; longer queries slice the
 original IDs into 220-token windows, overlap 40, without decoding/re-tokenizing.
+At most 32 windows (5800 content tokens) are accepted; larger queries fail before
+inference with shortening guidance, rather than silently truncating the query.
 
 Eight documents at most are encoded/inferred at a time. Length ordering is local
 to each batch, and input identities/order are restored. Padding is right-hand zero

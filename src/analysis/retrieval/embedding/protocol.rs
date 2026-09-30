@@ -68,6 +68,11 @@ fn encode(tokenizer: &Tokenizer, text: &str, special: bool) -> Result<Encoding, 
 
 pub(crate) fn query(tokenizer: &Tokenizer, text: &str) -> Result<Vec<Encoding>, Error> {
     let content = encode(tokenizer, text, false)?;
+    if content.len() > 220 + 31 * 180 {
+        return Err(Error::Tokenization(
+            "query exceeds 32 windows; shorten the query to at most 5800 content tokens".into(),
+        ));
+    }
     if content.len() <= 254 {
         return Ok(vec![encode(tokenizer, text, true)?]);
     }
@@ -102,6 +107,17 @@ pub(crate) fn query(tokenizer: &Tokenizer, text: &str) -> Result<Vec<Encoding>, 
 mod tests {
     use super::*;
     use serde_json::Value;
+
+    #[test]
+    fn query_chunk_limit_rejects_before_inference() {
+        let tokenizer = tokenizer();
+        assert_eq!(query(&tokenizer, &"a ".repeat(5800)).unwrap().len(), 32);
+        let error = query(&tokenizer, &"a ".repeat(5801))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("32"));
+        assert!(error.contains("shorten"));
+    }
 
     fn tokenizer() -> Tokenizer {
         let mut tokenizer =
