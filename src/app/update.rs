@@ -1016,6 +1016,75 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
+    fn self_update_succeeds_and_cleans_up_after_exit() {
+        use std::process::Command;
+        use std::time::{Duration, Instant};
+        use zip::write::SimpleFileOptions;
+
+        const CHILD: &str = "GITSCRY_SELF_UPDATE_TEST_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let executable = std::env::current_exe().unwrap();
+            let target = Target::X86_64PcWindowsMsvc;
+            let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+            writer
+                .start_file("gitscry.exe", SimpleFileOptions::default())
+                .unwrap();
+            writer.write_all(b"new executable").unwrap();
+            let archive = writer.finish().unwrap().into_inner();
+            let mut source = fixture_source("v0.2.0", archive, target.archive_name());
+            let outcome = run_with(
+                &mut source,
+                &Version::parse("0.1.0").unwrap(),
+                &executable,
+                target,
+                &mut |_| {},
+            )
+            .unwrap();
+            assert_eq!(outcome.message, "Updated GitScry 0.1.0 → 0.2.0.");
+            return;
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let executable = directory.path().join("gitscry.exe");
+        fs::copy(std::env::current_exe().unwrap(), &executable).unwrap();
+        let output = Command::new(&executable)
+            .args([
+                "--exact",
+                "app::update::tests::self_update_succeeds_and_cleans_up_after_exit",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert_eq!(fs::read(&executable).unwrap(), b"new executable");
+        assert!(
+            output.status.success(),
+            "self-update failed after installing the new executable:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let update_storage_remains = fs::read_dir(directory.path())
+                .unwrap()
+                .any(|entry| {
+                    entry
+                        .unwrap()
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".gitscry-update-")
+                });
+            if !update_storage_remains {
+                break;
+            }
+            assert!(Instant::now() < deadline, "old executable was not cleaned up");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
     fn updates_verified_zip_on_windows() {
         use std::io::Write;
         use zip::write::SimpleFileOptions;
