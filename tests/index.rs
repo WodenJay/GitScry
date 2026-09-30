@@ -66,6 +66,78 @@ fn first_index_publishes_complete_cache() {
 }
 
 #[test]
+fn failed_incremental_write_keeps_the_published_generation() {
+    let repo = TestRepo::new();
+    repo.commit("hello.txt", b"hello\n", "initial commit");
+    assert!(repo.run(["index"]).status.success());
+    let published_tip = repo.head();
+    repo.commit("hello.txt", b"hello again\n", "extend greeting");
+
+    let cache_path = repo.dir.path().join(".gitscry/cache.sqlite");
+    let cache = Connection::open(&cache_path).unwrap();
+    cache
+        .execute_batch(
+            "CREATE TRIGGER reject_hunk BEFORE INSERT ON hunks
+         BEGIN SELECT RAISE(ABORT, 'injected hunk write failure'); END;",
+        )
+        .unwrap();
+    drop(cache);
+
+    let failed = repo.run(["index"]);
+    assert_eq!(failed.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&failed.stderr).contains("injected hunk write failure"));
+    let cache = Connection::open(&cache_path).unwrap();
+    let (tip, count): (String, i64) = cache
+        .query_row(
+            "SELECT (SELECT value FROM metadata WHERE key = 'completed_tip'),
+                (SELECT COUNT(*) FROM commits)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(tip, published_tip);
+    assert_eq!(count, 1);
+    let completed_count: String = cache
+        .query_row(
+            "SELECT value FROM metadata WHERE key = 'completed_commit_count'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(completed_count, "1");
+    let orphan_documents: i64 = cache
+        .query_row(
+            "SELECT COUNT(*) FROM search_fts WHERE rowid NOT IN (SELECT commit_id FROM commits)",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(orphan_documents, 0);
+    cache.execute_batch("DROP TRIGGER reject_hunk").unwrap();
+    drop(cache);
+
+    let retry = repo.run(["index"]);
+    assert!(
+        retry.status.success(),
+        "{}",
+        String::from_utf8_lossy(&retry.stderr)
+    );
+    let cache = Connection::open(&cache_path).unwrap();
+    let tip: String = cache
+        .query_row(
+            "SELECT value FROM metadata WHERE key = 'completed_tip'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(tip, repo.head());
+    let count: i64 = cache
+        .query_row("SELECT COUNT(*) FROM commits", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(count, 2);
+}
+
+#[test]
 fn gitlink_entries_are_not_reported_as_missing_objects() {
     let repo = TestRepo::new();
     repo.commit("README.md", b"root\n", "root");
