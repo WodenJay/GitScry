@@ -49,6 +49,17 @@ and runs a copied executable outside its build output directory.
 `--skip_tests` alone only skips their execution. Our release inference and ELF
 dependency checks remain mandatory. No ORT source is modified.
 
+`pack-runtime.py` combines the unmodified runtime and dependency object members
+into one indexed `libonnxruntime.a` using GNU ar MRI mode. This uses ort-sys's
+single-library interface rather than depending on its assumptions about split
+archive directories. Only protobuf-lite is packaged; protobuf and protoc are
+excluded. The input archive list is preserved as evidence.
+
+Actions caches this native archive under the exact build/packaging script hashes,
+without broad restore keys. Even on a cache hit the Rust release binary is rebuilt,
+ELF dependencies checked, the model verified, and inference rerun. To force a fresh
+source build, delete the corresponding Actions cache; no caching occurs locally.
+
 On failure, preserve the Actions log/artifact and stop for a design decision.
 Do not patch upstream, use GNU results as musl proof, change runtime/model, or
 remove a release target. The previously tested 1.22.1 source includes
@@ -111,3 +122,15 @@ Rust linking and our inference probe had not yet run, so this is not a gate pass
 The retry uses the documented `onnxruntime_BUILD_UNIT_TESTS=OFF` option, not a
 source patch or a different runtime/model. Evidence artifact:
 `encoder-gate-musl-36748881801` (14-day retention).
+
+Manual run [36755445118](https://github.com/WodenJay/GitScry/actions/runs/36755445118)
+on `c801bed` took **48m42s**. All 1165 native build steps completed, followed by
+successful probe Clippy. Release linking failed in ort-sys:
+`error: could not find native static library \`onnx\`, perhaps an -L flag is missing?`.
+The archive exists at `Release/_deps/onnx-build/libonnx.a`; the binding's first
+matching split-library layout instead searches `ort/_deps/onnx-build/Release`.
+The retry packages unmodified object members for the supported single-library
+interface; no runtime/model version or source changes. Evidence artifact:
+`encoder-gate-musl-36755445118` (14-day retention).
+The temporary manual bootstrap is restored on the task branch for these retries
+and will again be removed before merging.

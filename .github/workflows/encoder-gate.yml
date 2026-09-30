@@ -21,6 +21,12 @@ jobs:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
+      - name: Restore exact native archive recipe
+        id: native-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: tools/encoder-gate/.native/ort-packed
+          key: encoder-musl-alpine3.22-rust1.89-${{ hashFiles('tools/encoder-gate/linux-musl.sh', 'tools/encoder-gate/pack-runtime.py') }}
       - name: Build unmodified upstream and execute pinned graph
         shell: bash
         run: |
@@ -30,6 +36,12 @@ jobs:
             -v "$PWD:/work" -w /work \
             rust:1.89.0-alpine3.22 \
             sh tools/encoder-gate/linux-musl.sh 2>&1 | tee encoder-gate-musl.log
+      - name: Cache completed native archive even if the Rust probe fails
+        if: always() && steps.native-cache.outputs.cache-hit != 'true' && hashFiles('tools/encoder-gate/.native/ort-packed/libonnxruntime.a') != ''
+        uses: actions/cache/save@v5
+        with:
+          path: tools/encoder-gate/.native/ort-packed
+          key: ${{ steps.native-cache.outputs.cache-primary-key }}
       - name: Preserve evidence even when the gate fails
         if: always()
         uses: actions/upload-artifact@v7
@@ -39,5 +51,6 @@ jobs:
           path: |
             encoder-gate-musl.log
             tools/encoder-gate/.native/elf-*.txt
+            tools/encoder-gate/.native/ort-packed/archive-inputs.txt
             tools/encoder-gate/.native/ort/Release/CMakeCache.txt
             tools/encoder-gate/.native/ort/Release/CMakeFiles/CMakeConfigureLog.yaml
