@@ -48,9 +48,68 @@ jobs:
         with:
           name: encoder-gate-musl-${{ github.run_id }}
           retention-days: 14
+          include-hidden-files: true
           path: |
             encoder-gate-musl.log
             tools/encoder-gate/.native/elf-*.txt
             tools/encoder-gate/.native/ort-packed/archive-inputs.txt
             tools/encoder-gate/.native/ort/Release/CMakeCache.txt
             tools/encoder-gate/.native/ort/Release/CMakeFiles/CMakeConfigureLog.yaml
+
+  desktop:
+    name: Static CPU encoder on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-2022, macos-14]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.89.0
+        with:
+          components: rustfmt, clippy
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+        with:
+          arch: x64
+      - name: Restore exact native archive recipe
+        id: native-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: tools/encoder-gate/.native/ort-packed
+          key: encoder-${{ matrix.os }}-ort1.28.0-${{ hashFiles('tools/encoder-gate/desktop-runtime.py') }}
+      - name: Build unmodified pinned CPU runtime
+        shell: bash
+        run: |
+          set -o pipefail
+          python tools/encoder-gate/desktop-runtime.py 2>&1 | tee encoder-gate-desktop-build.log
+      - name: Cache completed native archive
+        if: always() && steps.native-cache.outputs.cache-hit != 'true' && (hashFiles('tools/encoder-gate/.native/ort-packed/libonnxruntime.a', 'tools/encoder-gate/.native/ort-packed/onnxruntime.lib') != '')
+        uses: actions/cache/save@v5
+        with:
+          path: tools/encoder-gate/.native/ort-packed
+          key: ${{ steps.native-cache.outputs.cache-primary-key }}
+      - name: Verify release parity and single-executable dependencies
+        shell: bash
+        run: |
+          set -o pipefail
+          python tools/encoder-gate/desktop-smoke.py 2>&1 | tee encoder-gate-desktop-parity.log
+      - name: Preserve build and parity evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: encoder-gate-${{ matrix.os }}-${{ github.run_id }}
+          retention-days: 14
+          include-hidden-files: true
+          path: |
+            encoder-gate-desktop-*.log
+            tools/encoder-gate/.native/dependencies.txt
+            tools/encoder-gate/.native/macos-minimum.txt
+            tools/encoder-gate/.native/ort-packed/archive-inputs.txt
+            tools/encoder-gate/.native/ort/Release/CMakeCache.txt

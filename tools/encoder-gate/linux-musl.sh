@@ -21,7 +21,11 @@ rustup component add rustfmt clippy
 cargo fmt --all -- --check
 cargo clippy --locked --all-targets --all-features --jobs 1 -- -D warnings
 cargo build --locked --release --jobs 1
-python3 acquire-model.py .native/model.onnx
+module=../../src/analysis/retrieval/embedding/Cargo.toml
+cargo fmt --manifest-path "$module" --all -- --check
+cargo clippy --manifest-path "$module" --locked --all-targets --all-features --jobs 1 -- -D warnings
+cargo test --manifest-path "$module" --locked --all-features --jobs 1
+python3 acquire-model.py .native/resources
 binary=target/release/gitscry-encoder-gate
 # Static musl proof: reject both ELF interpreter and shared-library requirements.
 readelf -l "$binary" > .native/elf-program-headers.txt
@@ -35,4 +39,4 @@ fi
 # Copy to a fresh directory to exercise the executable, not a build-tree loader.
 mkdir -p .native/installed
 cp "$binary" .native/installed/gitscry-encoder-gate
-.native/installed/gitscry-encoder-gate .native/model.onnx
+.native/installed/gitscry-encoder-gate .native/resources
