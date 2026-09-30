@@ -90,12 +90,11 @@ fn run_with<S: ReleaseSource>(
     verify_checksum(&archive, &checksum, archive_name).map_err(update_error)?;
 
     report(UpdateStage::Installing);
-    install_archive(&archive, target, &executable).map_err(update_error)?;
-
+    let warnings = install_archive(&archive, target, &executable).map_err(update_error)?;
     Ok(Outcome {
         progress: Vec::new(),
         message: format!("Updated GitScry {current} → {latest}."),
-        warnings: Vec::new(),
+        warnings,
         notices: Vec::new(),
         report: None,
     })
@@ -315,7 +314,11 @@ fn runtime_target() -> String {
     }
 }
 
-fn install_archive(archive: &[u8], target: Target, executable: &Path) -> Result<(), String> {
+fn install_archive(
+    archive: &[u8],
+    target: Target,
+    executable: &Path,
+) -> Result<Vec<String>, String> {
     let parent = executable
         .parent()
         .ok_or_else(|| "running executable has no parent directory".to_owned())?;
@@ -338,7 +341,11 @@ fn install_archive(archive: &[u8], target: Target, executable: &Path) -> Result<
     {
         return Err("replacement did not leave an executable at the running path".to_owned());
     }
-    Ok(())
+    #[cfg(windows)]
+    let warnings = cleanup_windows_update(temporary);
+    #[cfg(not(windows))]
+    let warnings = Vec::new();
+    Ok(warnings)
 }
 
 struct LimitedVec {
@@ -566,35 +573,64 @@ fn replace_executable(staged: &Path, executable: &Path) -> Result<(), String> {
         ));
     }
 
-    if let Err(error) = fs::remove_file(&backup) {
-        schedule_delete_on_reboot(&backup).map_err(|schedule_error| {
-            format!(
-                "cleaning up the old executable: {error}; scheduling deferred cleanup: {schedule_error}"
-            )
-        })?;
-    }
     Ok(())
 }
 
 #[cfg(windows)]
-fn schedule_delete_on_reboot(path: &Path) -> Result<(), String> {
-    use std::os::windows::ffi::OsStrExt;
+fn cleanup_windows_update(temporary: tempfile::TempDir) -> Vec<String> {
+    let backup = temporary.path().join("previous-executable");
+    if fs::remove_file(&backup).is_ok() {
+        return Vec::new();
+    }
 
-    const MOVEFILE_DELAY_UNTIL_REBOOT: u32 = 0x0000_0004;
-    let path: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-    let scheduled =
-        unsafe { MoveFileExW(path.as_ptr(), std::ptr::null(), MOVEFILE_DELAY_UNTIL_REBOOT) };
-    if scheduled == 0 {
-        Err(std::io::Error::last_os_error().to_string())
-    } else {
-        Ok(())
+    // The old executable is still mapped by this process. Retain its private
+    // directory for the helper rather than letting TempDir try to delete it.
+    let directory = temporary.keep();
+    match spawn_windows_cleanup(&directory) {
+        Ok(()) => Vec::new(),
+        Err(error) => vec![format!(
+            "Update installed, but could not start old executable cleanup: {error}. Remove `{}` after GitScry exits.",
+            directory.display()
+        )],
     }
 }
 
 #[cfg(windows)]
-#[link(name = "kernel32")]
-unsafe extern "system" {
-    fn MoveFileExW(existing_file_name: *const u16, new_file_name: *const u16, flags: u32) -> i32;
+fn spawn_windows_cleanup(directory: &Path) -> io::Result<()> {
+    use std::os::windows::process::CommandExt;
+    use std::process::{Command, Stdio};
+
+    // Retry the image lock rather than waiting on a PID that might be reused.
+    // Delete only the known backup and an empty directory, never a directory tree.
+    const SCRIPT: &str = r#"
+$ErrorActionPreference = 'Stop'
+$directory = $env:GITSCRY_UPDATE_CLEANUP_DIR
+$backup = [IO.Path]::Combine($directory, 'previous-executable')
+for ($attempt = 0; $attempt -lt 600; $attempt++) {
+    try {
+        [IO.File]::Delete($backup)
+        [IO.Directory]::Delete($directory)
+        exit 0
+    } catch {
+        Start-Sleep -Milliseconds 100
+    }
+}
+exit 1
+"#;
+    let system_root = std::env::var_os("SystemRoot")
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "SystemRoot is not set"))?;
+    let powershell =
+        PathBuf::from(system_root).join("System32/WindowsPowerShell/v1.0/powershell.exe");
+    Command::new(powershell)
+        .args(["-NoProfile", "-NonInteractive", "-Command", SCRIPT])
+        // Pass the path as data, so quotes, Unicode and shell syntax stay literal.
+        .env("GITSCRY_UPDATE_CLEANUP_DIR", directory)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+        .spawn()?;
+    Ok(())
 }
 
 struct UpdateLock {
@@ -1066,19 +1102,20 @@ mod tests {
 
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
-            let update_storage_remains = fs::read_dir(directory.path())
-                .unwrap()
-                .any(|entry| {
-                    entry
-                        .unwrap()
-                        .file_name()
-                        .to_string_lossy()
-                        .starts_with(".gitscry-update-")
-                });
+            let update_storage_remains = fs::read_dir(directory.path()).unwrap().any(|entry| {
+                entry
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".gitscry-update-")
+            });
             if !update_storage_remains {
                 break;
             }
-            assert!(Instant::now() < deadline, "old executable was not cleaned up");
+            assert!(
+                Instant::now() < deadline,
+                "old executable was not cleaned up"
+            );
             std::thread::sleep(Duration::from_millis(50));
         }
     }
