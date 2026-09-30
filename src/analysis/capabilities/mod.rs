@@ -9,6 +9,7 @@ mod failures;
 mod regression;
 mod relations;
 mod search;
+pub(super) mod timeline;
 mod trace_fix;
 mod why;
 

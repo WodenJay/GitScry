@@ -35,7 +35,7 @@ pub(crate) enum Progress {
 }
 pub(crate) enum QueryReport {
     Analysis(analysis::Report),
-    Timeline(crate::timeline::Report),
+    Timeline(analysis::TimelineReport),
 }
 
 impl QueryReport {

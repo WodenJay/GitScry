@@ -4,7 +4,7 @@ use super::{
     json::{self, JsonPatch, JsonPath, JsonSearchScope},
     material,
 };
-use crate::timeline::{Entry, Report};
+use crate::analysis::{TimelineEntry as Entry, TimelineReport as Report};
 pub(super) fn format_report(report: &Report) -> String {
     let mut lines = vec![format!(
         "File evolution timeline for {} at {}",

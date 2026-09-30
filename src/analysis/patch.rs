@@ -190,7 +190,7 @@ fn attach_patch_excerpts_using(
 
 pub(crate) fn attach_timeline_patch_excerpts(
     session: &QuerySession,
-    report: &mut crate::timeline::Report,
+    report: &mut super::TimelineReport,
 ) -> Result<(), AppError> {
     report.patch_mode = true;
     for entry in &mut report.entries {

@@ -18,6 +18,7 @@ use crate::{
     cache::{QuerySession, SearchFilter},
 };
 
+pub(crate) use capabilities::timeline::{Entry as TimelineEntry, Report as TimelineReport};
 pub(crate) use patch::{
     PatchExcerpt, PatchHunk, PatchStatus, attach_patch_excerpts, attach_timeline_patch_excerpts,
     attach_trace_fix_patch_excerpts,

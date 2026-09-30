@@ -3,7 +3,7 @@ use super::{AppError, Outcome, QueryReport};
 use crate::{
     analysis, cache,
     git::{Repository, WhyAnchor},
-    render, timeline,
+    render,
 };
 use std::{collections::HashSet, path::Path};
 
@@ -257,7 +257,7 @@ pub(super) fn run_timeline(
         .map(|scope| session.scoped_revisions(&scope.filter, &target.revision))
         .transpose()?;
     let history = session.timeline_history(&target.path, &reachable)?;
-    let mut report = timeline::Report::from_history(
+    let mut report = analysis::TimelineReport::from_history(
         target.revision,
         target.path,
         history,

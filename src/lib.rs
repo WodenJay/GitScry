@@ -4,7 +4,6 @@ mod cache;
 mod cli;
 mod git;
 mod render;
-mod timeline;
 
 pub fn run() -> i32 {
     match cli::parse(std::env::args_os()) {
