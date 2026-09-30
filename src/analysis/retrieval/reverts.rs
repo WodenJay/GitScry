@@ -1,6 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::{app::AppError, cache::QuerySession};
+use crate::{
+    app::AppError,
+    cache::{QuerySession, SearchFilter},
+};
 
 use super::super::provenance::{is_revert_subject, reverted_commit};
 use super::message_parts;
@@ -74,20 +77,30 @@ impl RevertIndex {
 }
 
 /// Index every cached revert in cache order; the earliest resolved revert of a commit wins.
-pub(in crate::analysis) fn index(session: &QuerySession) -> Result<RevertIndex, AppError> {
-    let commits = session.commits()?;
-    let known = commits
+pub(in crate::analysis) fn index(
+    session: &QuerySession,
+    scope: Option<&SearchFilter>,
+) -> Result<RevertIndex, AppError> {
+    let commits = match scope {
+        Some(scope) => session.commits_scoped(scope)?,
+        None => session.commits()?,
+    };
+    let eligible = commits
         .iter()
         .map(|commit| commit.oid.clone())
         .collect::<HashSet<_>>();
+    let all_cached = match scope {
+        Some(_) => session.commit_oids()?,
+        None => eligible.clone(),
+    };
     let mut reverts = Vec::new();
     for commit in commits {
         let (subject, body) = message_parts(&commit.message);
         if !is_revert_subject(&subject) {
             continue;
         }
-        let target =
-            reverted_commit(&format!("{subject}\n{body}")).and_then(|hex| resolve(&known, &hex));
+        let target = reverted_commit(&format!("{subject}\n{body}"))
+            .and_then(|hex| resolve_in_scope(&all_cached, &eligible, &hex));
         reverts.push(Revert {
             path_keys: session.projected_path_keys(&commit.oid)?,
             oid: commit.oid,
@@ -114,4 +127,36 @@ fn resolve(known: &HashSet<String>, hex: &str) -> Option<String> {
     let mut matches = known.iter().filter(|oid| oid.starts_with(hex));
     let resolved = matches.next()?.clone();
     matches.next().is_none().then_some(resolved)
+}
+
+fn resolve_in_scope(
+    all_cached: &HashSet<String>,
+    eligible: &HashSet<String>,
+    hex: &str,
+) -> Option<String> {
+    resolve(all_cached, hex).filter(|target| eligible.contains(target))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_in_scope;
+    use std::collections::HashSet;
+
+    #[test]
+    fn revert_target_prefix_must_be_unique_across_all_cached_commits() {
+        let all_cached = HashSet::from([
+            "1234567aaaa".to_owned(),
+            "1234567bbbb".to_owned(),
+            "abcdef01234".to_owned(),
+            "fedcba01234".to_owned(),
+        ]);
+        let eligible = HashSet::from(["1234567aaaa".to_owned(), "abcdef01234".to_owned()]);
+
+        assert_eq!(resolve_in_scope(&all_cached, &eligible, "1234567"), None);
+        assert_eq!(
+            resolve_in_scope(&all_cached, &eligible, "abcdef0"),
+            Some("abcdef01234".to_owned())
+        );
+        assert_eq!(resolve_in_scope(&all_cached, &eligible, "fedcba0"), None);
+    }
 }

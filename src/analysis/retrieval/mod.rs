@@ -66,23 +66,6 @@ pub(in crate::analysis) fn pool(
     session: &QuerySession,
     intent: &Intent,
     limit: usize,
-) -> Result<Option<Pool>, AppError> {
-    pool_with_scope(session, intent, limit, None)
-}
-
-pub(in crate::analysis) fn pool_scoped(
-    session: &QuerySession,
-    intent: &Intent,
-    limit: usize,
-    scope: &SearchFilter,
-) -> Result<Option<Pool>, AppError> {
-    pool_with_scope(session, intent, limit, Some(scope))
-}
-
-fn pool_with_scope(
-    session: &QuerySession,
-    intent: &Intent,
-    limit: usize,
     scope: Option<&SearchFilter>,
 ) -> Result<Option<Pool>, AppError> {
     let terms = intent.terms();
@@ -148,10 +131,11 @@ pub(in crate::analysis) fn commit_text(
 
 pub(in crate::analysis) fn corrective_follow_up(
     session: &QuerySession,
+    scope: Option<&SearchFilter>,
     revert_oid: &str,
     path_keys: &[String],
 ) -> Result<Option<(String, String, String)>, AppError> {
-    for commit in session.follow_ups(revert_oid, path_keys)? {
+    for commit in session.follow_ups(revert_oid, path_keys, scope)? {
         let (subject, body) = message_parts(&commit.message);
         if super::provenance::is_corrective_subject(&subject) {
             return Ok(Some((commit.oid, subject, body)));
@@ -165,13 +149,19 @@ pub(in crate::analysis) fn corrective_follow_up(
 pub(in crate::analysis) fn link<'a>(
     session: &QuerySession,
     reverts: &'a RevertIndex,
+    scope: Option<&SearchFilter>,
     candidate: &Scored,
 ) -> Result<Option<&'a Revert>, AppError> {
     if let Some(revert) = reverts.of(&candidate.oid) {
         return Ok(Some(revert));
     }
     for revert in reverts.undoings(&candidate.oid, &candidate.path_keys, candidate.position) {
-        if !session.touched_between(candidate.position, revert.position, &candidate.path_keys)? {
+        if !session.touched_between(
+            candidate.position,
+            revert.position,
+            &candidate.path_keys,
+            scope,
+        )? {
             return Ok(Some(revert));
         }
     }

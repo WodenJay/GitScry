@@ -37,6 +37,15 @@ WITH RECURSIVE reachable(commit_id) AS (
       AND (?4 IS NULL OR commits.commit_time <= ?4)
  )
 "#;
+
+fn scope_values(scope: &SearchFilter) -> [Value; 4] {
+    [
+        Value::Text(scope.to_oid.clone()),
+        scope.from_oid.clone().map_or(Value::Null, Value::Text),
+        scope.since.map_or(Value::Null, Value::Integer),
+        scope.until.map_or(Value::Null, Value::Integer),
+    ]
+}
 /// A lexical candidate: one cache row with the paths it changed.
 pub(crate) struct SearchCandidate {
     pub(crate) commit_id: i64,
@@ -130,21 +139,40 @@ impl QuerySession {
         commits(&self.connection)
     }
 
+    pub(crate) fn commits_scoped(
+        &self,
+        scope: &SearchFilter,
+    ) -> Result<Vec<StoredCommit>, AppError> {
+        commits_scoped(&self.connection, scope)
+    }
+
+    pub(crate) fn commit_oids(&self) -> Result<HashSet<String>, AppError> {
+        commit_oids(&self.connection)
+    }
+
     pub(crate) fn touched_between(
         &self,
         from_position: i64,
         to_position: i64,
         path_keys: &[String],
+        scope: Option<&SearchFilter>,
     ) -> Result<bool, AppError> {
-        touch_between(&self.connection, from_position, to_position, path_keys)
+        touch_between(
+            &self.connection,
+            from_position,
+            to_position,
+            path_keys,
+            scope,
+        )
     }
 
     pub(crate) fn follow_ups(
         &self,
         revert_oid: &str,
         path_keys: &[String],
+        scope: Option<&SearchFilter>,
     ) -> Result<Vec<StoredCommit>, AppError> {
-        follow_ups(&self.connection, revert_oid, path_keys)
+        follow_ups(&self.connection, revert_oid, path_keys, scope)
     }
 }
 
@@ -818,6 +846,45 @@ fn commits(connection: &Connection) -> Result<Vec<StoredCommit>, AppError> {
         .map_err(|error| search_error("reading history scan", error))
 }
 
+/// Commits eligible under the same revision and committer-time bounds as scoped search.
+fn commits_scoped(
+    connection: &Connection,
+    scope: &SearchFilter,
+) -> Result<Vec<StoredCommit>, AppError> {
+    let query = format!(
+        "{SEARCH_SCOPE_CTE}
+         SELECT c.position, c.oid, c.message, c.message_length
+         FROM commits AS c
+         JOIN eligible ON eligible.commit_id = c.commit_id
+         ORDER BY c.commit_time, c.oid"
+    );
+    let mut statement = connection
+        .prepare(&query)
+        .map_err(|error| search_error("preparing scoped history scan", error))?;
+    statement
+        .query_map(params_from_iter(scope_values(scope)), |row| {
+            Ok(StoredCommit {
+                position: row.get(0)?,
+                oid: row.get(1)?,
+                message: decode_message_row(row, 2, 3)?,
+            })
+        })
+        .map_err(|error| search_error("reading scoped history scan", error))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| search_error("reading scoped history scan", error))
+}
+
+fn commit_oids(connection: &Connection) -> Result<HashSet<String>, AppError> {
+    let mut statement = connection
+        .prepare("SELECT oid FROM commits")
+        .map_err(|error| search_error("preparing cached object ID scan", error))?;
+    statement
+        .query_map([], |row| row.get(0))
+        .map_err(|error| search_error("reading cached object IDs", error))?
+        .collect::<Result<HashSet<_>, _>>()
+        .map_err(|error| search_error("reading cached object IDs", error))
+}
+
 /// Whether any commit strictly between two positions touched one of `path_keys`.
 ///
 /// A revert only counts as undoing a candidate when that candidate was the last work on
@@ -827,23 +894,45 @@ fn touch_between(
     from_position: i64,
     to_position: i64,
     path_keys: &[String],
+    scope: Option<&SearchFilter>,
 ) -> Result<bool, AppError> {
     if path_keys.is_empty() || from_position >= to_position {
         return Ok(false);
     }
-    for path_chunk in path_keys.chunks(SQL_PARAMETER_LIMIT) {
-        let placeholders = std::iter::repeat_n("?", path_chunk.len())
-            .collect::<Vec<_>>()
-            .join(", ");
-        let query = format!(
-            "SELECT EXISTS(SELECT 1 FROM commits AS c
-             JOIN commit_paths AS cp ON cp.commit_id = c.commit_id
-             WHERE c.position > ?1 AND c.position < ?2
-               AND cp.path_key IN ({placeholders}))"
-        );
-        let values = [Value::Integer(from_position), Value::Integer(to_position)]
-            .into_iter()
-            .chain(path_chunk.iter().cloned().map(Value::Text));
+    let scoped = scope.is_some();
+    let path_chunk_limit = SQL_PARAMETER_LIMIT - if scoped { 6 } else { 2 };
+    for path_chunk in path_keys.chunks(path_chunk_limit) {
+        let path_placeholders = numbered_placeholders(if scoped { 7 } else { 3 }, path_chunk.len());
+        let (query, values) = if let Some(scope) = scope {
+            (
+                format!(
+                    "{SEARCH_SCOPE_CTE}
+                     SELECT EXISTS(SELECT 1 FROM commits AS c
+                     JOIN eligible ON eligible.commit_id = c.commit_id
+                     JOIN commit_paths AS cp ON cp.commit_id = c.commit_id
+                     WHERE c.position > ?5 AND c.position < ?6
+                       AND cp.path_key IN ({path_placeholders}))"
+                ),
+                scope_values(scope)
+                    .into_iter()
+                    .chain([Value::Integer(from_position), Value::Integer(to_position)])
+                    .chain(path_chunk.iter().cloned().map(Value::Text))
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            (
+                format!(
+                    "SELECT EXISTS(SELECT 1 FROM commits AS c
+                     JOIN commit_paths AS cp ON cp.commit_id = c.commit_id
+                     WHERE c.position > ?1 AND c.position < ?2
+                       AND cp.path_key IN ({path_placeholders}))"
+                ),
+                [Value::Integer(from_position), Value::Integer(to_position)]
+                    .into_iter()
+                    .chain(path_chunk.iter().cloned().map(Value::Text))
+                    .collect::<Vec<_>>(),
+            )
+        };
         let touched: i64 = connection
             .query_row(&query, params_from_iter(values), |row| row.get(0))
             .map_err(|error| search_error("checking intervening history", error))?;
@@ -859,28 +948,54 @@ fn follow_ups(
     connection: &Connection,
     revert_oid: &str,
     path_keys: &[String],
+    scope: Option<&SearchFilter>,
 ) -> Result<Vec<StoredCommit>, AppError> {
     if path_keys.is_empty() {
         return Ok(Vec::new());
     }
+    let scoped = scope.is_some();
+    let path_chunk_limit = SQL_PARAMETER_LIMIT - if scoped { 5 } else { 1 };
     let mut candidates = Vec::<(i64, String, Vec<u8>)>::new();
     let mut seen = HashSet::new();
-    for path_chunk in path_keys.chunks(SQL_PARAMETER_LIMIT) {
-        let placeholders = std::iter::repeat_n("?", path_chunk.len())
-            .collect::<Vec<_>>()
-            .join(", ");
-        let query = format!(
-            "SELECT c.position, c.oid, c.message, c.message_length
-             FROM commits AS c
-             JOIN commit_paths AS cp ON cp.commit_id = c.commit_id
-             WHERE c.position > (SELECT position FROM commits WHERE oid = ?1)
-               AND c.oid <> ?1
-               AND cp.path_key IN ({placeholders})
-             GROUP BY c.commit_id
-             ORDER BY c.position ASC"
-        );
-        let values = std::iter::once(Value::Text(revert_oid.to_owned()))
-            .chain(path_chunk.iter().cloned().map(Value::Text));
+    for path_chunk in path_keys.chunks(path_chunk_limit) {
+        let path_placeholders = numbered_placeholders(if scoped { 6 } else { 2 }, path_chunk.len());
+        let (query, values) = if let Some(scope) = scope {
+            (
+                format!(
+                    "{SEARCH_SCOPE_CTE}
+                     SELECT c.position, c.oid, c.message, c.message_length
+                     FROM commits AS c
+                     JOIN eligible ON eligible.commit_id = c.commit_id
+                     JOIN commit_paths AS cp ON cp.commit_id = c.commit_id
+                     WHERE c.position > (SELECT position FROM commits WHERE oid = ?5)
+                       AND c.oid <> ?5
+                       AND cp.path_key IN ({path_placeholders})
+                     GROUP BY c.commit_id
+                     ORDER BY c.position ASC"
+                ),
+                scope_values(scope)
+                    .into_iter()
+                    .chain(std::iter::once(Value::Text(revert_oid.to_owned())))
+                    .chain(path_chunk.iter().cloned().map(Value::Text))
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            (
+                format!(
+                    "SELECT c.position, c.oid, c.message, c.message_length
+                     FROM commits AS c
+                     JOIN commit_paths AS cp ON cp.commit_id = c.commit_id
+                     WHERE c.position > (SELECT position FROM commits WHERE oid = ?1)
+                       AND c.oid <> ?1
+                       AND cp.path_key IN ({path_placeholders})
+                     GROUP BY c.commit_id
+                     ORDER BY c.position ASC"
+                ),
+                std::iter::once(Value::Text(revert_oid.to_owned()))
+                    .chain(path_chunk.iter().cloned().map(Value::Text))
+                    .collect::<Vec<_>>(),
+            )
+        };
         let mut statement = connection
             .prepare(&query)
             .map_err(|error| search_error("preparing corrective follow-up", error))?;

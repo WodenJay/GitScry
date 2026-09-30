@@ -30,10 +30,7 @@ fn run_with_scope(
     limit: usize,
     scope: Option<&SearchFilter>,
 ) -> Result<Report, AppError> {
-    let pool = match scope {
-        Some(scope) => retrieval::pool_scoped(session, intent, limit, scope)?,
-        None => retrieval::pool(session, intent, limit)?,
-    };
+    let pool = retrieval::pool(session, intent, limit, scope)?;
     let Some(pool) = pool else {
         return Ok(super::super::empty_report(ReportKind::Search));
     };

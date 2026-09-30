@@ -21,38 +21,36 @@ fn query_outcome(session: &cache::QuerySession, report: analysis::Report) -> Out
         report: Some(report),
     }
 }
-/// One query command: build the intent, open the published cache, run the capability, render it.
-pub(super) fn run(
-    words: Vec<String>,
-    paths: Vec<String>,
-    limit: usize,
-    capability: impl FnOnce(
-        &cache::QuerySession,
-        &analysis::Intent,
-        usize,
-    ) -> Result<analysis::Report, AppError>,
-) -> Result<Outcome, AppError> {
-    let intent = analysis::Intent::parse(&words, &paths)?;
-    let session = cache::open_query()?;
-    let report = capability(&session, &intent, limit)?;
-    Ok(query_outcome(&session, report))
-}
 
-pub(super) fn run_with_patch(
+/// One scoped history query: resolve scope, run its capability, and preserve the resolved bounds.
+pub(super) fn run_with_scope(
     words: Vec<String>,
     paths: Vec<String>,
     limit: usize,
-    path_only: bool,
+    patch: bool,
+    scope_options: SearchScopeOptions,
     capability: impl FnOnce(
         &cache::QuerySession,
         &analysis::Intent,
         usize,
+        Option<&cache::SearchFilter>,
     ) -> Result<analysis::Report, AppError>,
 ) -> Result<Outcome, AppError> {
     let intent = analysis::Intent::parse(&words, &paths)?;
     let session = cache::open_query()?;
-    let mut report = capability(&session, &intent, limit)?;
-    analysis::attach_patch_excerpts(&session, &intent, &mut report, path_only, &paths)?;
+    let scope = search_scope::resolve(&session, scope_options)?;
+    let mut report = capability(
+        &session,
+        &intent,
+        limit,
+        scope.as_ref().map(|scope| &scope.filter),
+    )?;
+    if patch {
+        analysis::attach_patch_excerpts(&session, &intent, &mut report, !paths.is_empty(), &paths)?;
+    }
+    if let Some(scope) = scope {
+        report.scope = Some(scope.report);
+    }
     Ok(query_outcome(&session, report))
 }
 
