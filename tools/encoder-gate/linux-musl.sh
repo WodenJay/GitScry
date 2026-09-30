@@ -3,6 +3,7 @@
 set -eu
 cd "$(dirname "$0")"
 apk add --no-cache build-base cmake ninja git python3 linux-headers curl
+python3 test_pack_runtime.py
 mkdir -p .native
 cd .native
 if ! test -f ort-packed/libonnxruntime.a; then

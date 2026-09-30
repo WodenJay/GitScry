@@ -16,6 +16,8 @@ python3 onnxruntime/tools/ci_build/build.py \
     onnxruntime_BUILD_UNIT_TESTS=OFF \
     onnxruntime_BUILD_FOR_NATIVE_MACHINE=OFF \
     onnxruntime_USE_AVX=OFF onnxruntime_USE_AVX2=OFF onnxruntime_USE_AVX512=OFF
+# re2 is EXCLUDE_FROM_ALL and split static libraries do not pull it in.
+cmake --build ort/Release --target re2 --parallel 2
 # Never accept a silently patched runtime checkout.
 git -C onnxruntime diff --exit-code
 python3 ../pack-runtime.py ort/Release ort-packed

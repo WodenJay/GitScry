@@ -143,3 +143,13 @@ The completed native archive was cached. The retry explicitly discovers
 `libstdc++.a` with the compiler and adds its directory to Rust's native search
 path. The identical build recipe is now private in `build-runtime.sh`; a one-time
 exact-key cache migration avoids rebuilding it and will be removed afterward.
+
+Manual run [36765627642](https://github.com/WodenJay/GitScry/actions/runs/36765627642)
+on `e95de56` reused the native cache and reached final linking. Undefined references
+identified two packaging omissions: `model_package/libmodel_package.a` was outside
+`_deps`, and upstream's `EXCLUDE_FROM_ALL` re2 target was not built by a split
+static-library build. The retry explicitly builds `re2`, discovers nested archives
+across the build tree, and requires both dependencies before packaging. A model-free
+archive-selection regression failed first, then passed after the packaging fix.
+The one-time cache migration has been removed; the changed native recipe deliberately
+gets a fresh cache key, so the incomplete prior archive cannot hide this correction.

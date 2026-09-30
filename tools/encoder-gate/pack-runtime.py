@@ -25,10 +25,11 @@ def main():
     # duplicate symbols; protoc is a build-time generator, not a runtime library.
     excluded = {"libprotobuf.a", "libprotoc.a"}
     dependencies = sorted(
-        archive for archive in (build / "_deps").rglob("lib*.a")
-        if archive.name not in excluded
+        archive for archive in build.rglob("lib*.a")
+        if archive not in core and archive.name not in excluded
     )
-    if not dependencies:
+    required_dependencies = {"libre2.a", "libmodel_package.a", "libprotobuf-lite.a"}
+    if not required_dependencies.issubset({archive.name for archive in dependencies}):
         raise RuntimeError("Missing ONNX Runtime dependency archives")
     output.mkdir(parents=True, exist_ok=True)
     destination = output / "libonnxruntime.a"
@@ -41,7 +42,7 @@ def main():
     subprocess.run(["ar", "-M"], input="\n".join(instructions), text=True, check=True)
     subprocess.run(["ar", "s", str(destination)], check=True)
     (output / "archive-inputs.txt").write_text(
-        "\n".join(str(path.relative_to(build)) for path in archives) + "\n",
+        "\n".join(path.relative_to(build).as_posix() for path in archives) + "\n",
         encoding="utf-8",
     )
     print(f"Packed {len(archives)} unchanged static archives into {destination}")
