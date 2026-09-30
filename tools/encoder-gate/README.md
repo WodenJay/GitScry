@@ -7,11 +7,13 @@ route passes. No product dependencies, commands, or initialization have changed.
 
 ## Pinned candidate
 
-- Unmodified ONNX Runtime **1.22.1**, commit
-  `89746dc19a0a1ae59ebf4b16df9acab8f99f3925`, CPU-only, split static archives.
-  This upstream patch release avoids 1.22.0's broken Eigen archive digest.
-- Rust `ort` and `ort-sys` **2.0.0-rc.10**, default features disabled; no vendor
-  binary downloads, shared-library loading, or accelerator providers.
+- Unmodified ONNX Runtime **1.28.0**, commit
+  `da9b5e364c465de65c49d91e696cd6485270757f`, CPU-only, split static archives.
+  Includes the upstream Abseil stacktrace fix (#28405); no extra compatibility
+  dependency or source patch. This candidate was approved after 1.22.1 failed.
+- Rust `ort` and `ort-sys` **2.0.0-rc.13**, default features disabled, explicit
+  `std` and `api-27`; no vendor binary downloads, shared-library loading, or
+  accelerator providers. Their Rust 1.88 minimum fits the project's Rust 1.89.
 - Rust 1.89.0, Alpine 3.22 on GitHub's Ubuntu 22.04 runner. The container is used
   **only remotely**; do not run Linux containers, WSL, or a Linux emulator locally.
 - FP32 `Qdrant/all-MiniLM-L6-v2-onnx` revision
@@ -46,9 +48,9 @@ and runs a copied executable outside its build output directory.
 
 On failure, preserve the Actions log/artifact and stop for a design decision.
 Do not patch upstream, use GNU results as musl proof, change runtime/model, or
-remove a release target. In particular, upstream POSIX `stacktrace.cc` includes
-`execinfo.h`, absent on stock recent Alpine; this is an unresolved source-build
-risk, not something this harness hides with a generated compatibility header.
+remove a release target. The previously tested 1.22.1 source includes
+`execinfo.h`, absent on stock recent Alpine. The approved 1.28.0 candidate
+removes that dependency upstream, but must still pass the complete gate.
 
 ## Remaining gates
 
@@ -67,7 +69,7 @@ risk, not something this harness hides with a generated compatibility header.
 
 ## Evidence
 
-**FAILED / design decision required.** Manual run
+### Previous candidate: 1.22.1 — failed
 [36742848765](https://github.com/WodenJay/GitScry/actions/runs/36742848765)
 on task-branch commit `44aa037` took **31m50s** and failed compiling the
 unmodified upstream 1.22.1 source, before Rust linking or model acquisition:

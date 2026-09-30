@@ -3,6 +3,7 @@ name: Manual encoder distribution gate
 # Deliberately no push or pull_request trigger. Source builds are expensive.
 on:
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read

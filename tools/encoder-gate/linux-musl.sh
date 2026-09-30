@@ -5,10 +5,10 @@ cd "$(dirname "$0")"
 apk add --no-cache build-base cmake ninja git python3 linux-headers curl
 mkdir -p .native
 cd .native
-# Upstream 1.22.1 fixes the 1.22.0 Eigen archive pin without source patches.
+# Upstream 1.28.0 includes the Abseil stacktrace fix; no local source patches.
 git init onnxruntime
 git -C onnxruntime remote add origin https://github.com/microsoft/onnxruntime.git
-git -C onnxruntime fetch --depth 1 origin 89746dc19a0a1ae59ebf4b16df9acab8f99f3925
+git -C onnxruntime fetch --depth 1 origin da9b5e364c465de65c49d91e696cd6485270757f
 git -C onnxruntime checkout --detach FETCH_HEAD
 git -C onnxruntime submodule update --init --recursive
 python3 onnxruntime/tools/ci_build/build.py \

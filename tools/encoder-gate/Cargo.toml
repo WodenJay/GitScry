@@ -7,6 +7,6 @@ publish = false
 
 # Kept outside the product build until the static distribution gate passes.
 [dependencies]
-ort = { version = "=2.0.0-rc.10", default-features = false, features = ["std"] }
-ort-sys = { version = "=2.0.0-rc.10", default-features = false, features = ["std"] }
+ort = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "api-27"] }
+ort-sys = { version = "=2.0.0-rc.13", default-features = false, features = ["std", "api-27"] }
 sha2 = "0.10"
