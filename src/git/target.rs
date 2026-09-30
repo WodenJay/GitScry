@@ -2,7 +2,7 @@ use std::{collections::HashSet, path::Path};
 
 use crate::app::AppError;
 
-use super::{history, process::Git};
+use super::{history, process::Git, symbol};
 
 #[derive(Clone)]
 pub(crate) enum WhyAnchor {
@@ -316,13 +316,7 @@ pub(super) fn pin(
                 "error: reading target path at {requested_revision}: {error}"
             ))
         })?;
-    let (anchor, number) = resolve_anchor(&anchor, &content, path)?;
-    let symbol_end = match &anchor {
-        WhyAnchor::Symbol { number, .. } => {
-            Some(symbol_span_end(&content, *number, path.ends_with(".rs")))
-        }
-        WhyAnchor::Line { .. } => None,
-    };
+    let (anchor, number, symbol_end) = resolve_anchor(&anchor, &content, path)?;
     let ignore_file = blame_ignore_file(git)?;
     let (blame, used_ignore_file) =
         read_blame(git, &revision, path, number, ignore_file.as_deref())?;
@@ -388,22 +382,8 @@ pub(super) fn pin_regression(
     let content = git.output(["cat-file", "blob", &format!("{bad_revision}:{path}")], &[])?;
     let (symbol, symbol_line, symbol_end) = match symbol {
         Some(name) => {
-            let (resolved, number) = resolve_anchor(
-                &WhyAnchor::Symbol {
-                    name: name.to_owned(),
-                    number: 0,
-                },
-                &content,
-                path,
-            )?;
-            let WhyAnchor::Symbol { name, .. } = resolved else {
-                unreachable!("symbol anchor resolves to a symbol");
-            };
-            (
-                Some(name),
-                Some(number),
-                Some(symbol_span_end(&content, number, path.ends_with(".rs"))),
-            )
+            let span = symbol::locate(&content, name, path)?;
+            (Some(name.to_owned()), Some(span.start), Some(span.end))
         }
         None => (None, None, None),
     };
@@ -427,231 +407,6 @@ pub(super) fn pin_regression(
     })
 }
 
-fn symbol_span_end(content: &[u8], start: usize, rust_source: bool) -> usize {
-    let lines = content.split(|byte| *byte == b'\n').collect::<Vec<_>>();
-    let start_index = start.saturating_sub(1).min(lines.len().saturating_sub(1));
-    let start_line = lines.get(start_index).copied().unwrap_or_default();
-    let start_indent = leading_indent(start_line);
-    let mut state = BraceState::Code;
-    let (mut braces, has_brace) = brace_delta(start_line, &mut state, rust_source);
-    if has_brace && braces <= 0 {
-        return start;
-    }
-    if braces > 0 {
-        for (index, line) in lines.iter().enumerate().skip(start_index + 1) {
-            let (delta, has_brace) = brace_delta(line, &mut state, rust_source);
-            braces += delta;
-            if has_brace && braces <= 0 {
-                return index + 1;
-            }
-        }
-    }
-    for (index, line) in lines.iter().enumerate().skip(start_index + 1) {
-        if line.is_empty() || leading_indent(line) > start_indent {
-            continue;
-        }
-        if is_symbol_declaration(line) {
-            return index.max(start_index);
-        }
-    }
-    lines.len().max(start)
-}
-
-fn leading_indent(line: &[u8]) -> usize {
-    line.iter()
-        .take_while(|byte| matches!(byte, b' ' | b'\t'))
-        .count()
-}
-
-#[derive(Clone, Copy)]
-enum BraceState {
-    Code,
-    String { quote: u8, escaped: bool },
-    RawString(usize),
-    BlockComment(usize),
-}
-
-fn brace_delta(line: &[u8], state: &mut BraceState, rust_source: bool) -> (i32, bool) {
-    let mut balance = 0;
-    let mut has_brace = false;
-    let mut index = 0;
-    while index < line.len() {
-        match *state {
-            BraceState::Code => {
-                if let Some((quote, hashes)) = raw_string_start(line, index) {
-                    *state = BraceState::RawString(hashes);
-                    index = quote + 1;
-                    continue;
-                }
-                if line[index] == b'/' && line.get(index + 1) == Some(&b'/') {
-                    break;
-                }
-                if line[index] == b'/' && line.get(index + 1) == Some(&b'*') {
-                    *state = BraceState::BlockComment(1);
-                    index += 2;
-                    continue;
-                }
-                match line[index] {
-                    b'"' | b'`' => {
-                        *state = BraceState::String {
-                            quote: line[index],
-                            escaped: false,
-                        }
-                    }
-                    b'\'' => {
-                        if let Some(end) = char_literal_end(line, index) {
-                            index = end;
-                            continue;
-                        } else if !rust_source || !is_rust_lifetime(line, index) {
-                            *state = BraceState::String {
-                                quote: b'\'',
-                                escaped: false,
-                            };
-                        }
-                    }
-                    b'{' => {
-                        balance += 1;
-                        has_brace = true;
-                    }
-                    b'}' => {
-                        balance -= 1;
-                        has_brace = true;
-                    }
-                    _ => {}
-                }
-            }
-            BraceState::String { quote, escaped } => {
-                if escaped {
-                    *state = BraceState::String {
-                        quote,
-                        escaped: false,
-                    };
-                } else if line[index] == b'\\' {
-                    *state = BraceState::String {
-                        quote,
-                        escaped: true,
-                    };
-                } else if line[index] == quote {
-                    *state = BraceState::Code;
-                }
-            }
-            BraceState::RawString(hashes) => {
-                if line[index] == b'"' {
-                    let suffix = &line[index + 1..];
-                    let closing_hashes = suffix.iter().take_while(|byte| **byte == b'#').count();
-                    if closing_hashes == hashes {
-                        *state = BraceState::Code;
-                        index += 1 + hashes;
-                        continue;
-                    }
-                }
-            }
-            BraceState::BlockComment(depth) => {
-                if line[index] == b'/' && line.get(index + 1) == Some(&b'*') {
-                    *state = BraceState::BlockComment(depth + 1);
-                    index += 2;
-                    continue;
-                }
-                if line[index] == b'*' && line.get(index + 1) == Some(&b'/') {
-                    if depth == 1 {
-                        *state = BraceState::Code;
-                    } else {
-                        *state = BraceState::BlockComment(depth - 1);
-                    }
-                    index += 2;
-                    continue;
-                }
-            }
-        }
-        index += 1;
-    }
-    (balance, has_brace)
-}
-
-fn raw_string_start(line: &[u8], index: usize) -> Option<(usize, usize)> {
-    let hashes_start = match line.get(index..index + 2) {
-        Some(b"br") => index + 2,
-        _ if line.get(index) == Some(&b'r') => index + 1,
-        _ => return None,
-    };
-    let mut quote = hashes_start;
-    while line.get(quote) == Some(&b'#') {
-        quote += 1;
-    }
-    (line.get(quote) == Some(&b'"')).then_some((quote, quote - hashes_start))
-}
-
-fn char_literal_end(line: &[u8], start: usize) -> Option<usize> {
-    let content = start + 1;
-    let first = *line.get(content)?;
-    let closing = if first == b'\\' {
-        match *line.get(content + 1)? {
-            b'x' => content + 4,
-            b'u' if line.get(content + 2) == Some(&b'{') => line
-                .iter()
-                .enumerate()
-                .skip(content + 3)
-                .find(|(_, byte)| **byte == b'}')
-                .map(|(index, _)| index + 1)?,
-            b'n' | b'r' | b't' | b'0' | b'\\' | b'\'' | b'"' => content + 2,
-            _ => return None,
-        }
-    } else {
-        let width = match first {
-            0x00..=0x7f => 1,
-            0xc2..=0xdf => 2,
-            0xe0..=0xef => 3,
-            0xf0..=0xf4 => 4,
-            _ => return None,
-        };
-        content + width
-    };
-    (line.get(closing) == Some(&b'\'')).then_some(closing + 1)
-}
-
-fn is_rust_lifetime(line: &[u8], start: usize) -> bool {
-    let mut end = start + 1;
-    let Some(first) = line.get(end) else {
-        return false;
-    };
-    if !first.is_ascii_alphabetic() && *first != b'_' {
-        return false;
-    }
-    end += 1;
-    while let Some(byte) = line.get(end) {
-        if byte.is_ascii_alphanumeric() || *byte == b'_' {
-            end += 1;
-        } else {
-            break;
-        }
-    }
-
-    let previous = line[..start]
-        .iter()
-        .rev()
-        .find(|byte| !byte.is_ascii_whitespace())
-        .copied();
-    matches!(previous, Some(b'&' | b'<' | b',' | b':' | b'+'))
-        || matches!(line.get(end).copied(), Some(b'>' | b',' | b':'))
-}
-
-fn is_symbol_declaration(line: &[u8]) -> bool {
-    let line = String::from_utf8_lossy(line);
-    let trimmed = line.trim_start();
-    [
-        "fn ",
-        "pub fn ",
-        "pub(crate) fn ",
-        "async fn ",
-        "def ",
-        "async def ",
-        "class ",
-        "struct ",
-        "function ",
-    ]
-    .iter()
-    .any(|prefix| trimmed.starts_with(prefix))
-}
 fn normalize_path(path: &[u8]) -> Vec<u8> {
     let mut normalized = Vec::new();
     for component in path.split(|byte| *byte == b'/' || *byte == b'\\') {
@@ -753,7 +508,7 @@ fn resolve_anchor(
     anchor: &WhyAnchor,
     content: &[u8],
     path: &str,
-) -> Result<(WhyAnchor, usize), AppError> {
+) -> Result<(WhyAnchor, usize, Option<usize>), AppError> {
     match anchor {
         WhyAnchor::Line { number } => {
             let line_count = if content.is_empty() {
@@ -771,127 +526,20 @@ fn resolve_anchor(
                     "line {number} is outside {path} at the target revision"
                 )));
             }
-            Ok((anchor.clone(), *number))
+            Ok((anchor.clone(), *number, None))
         }
         WhyAnchor::Symbol { name, .. } => {
-            if name.trim().is_empty() {
-                return Err(AppError::input("symbol must not be empty"));
-            }
-            let lines = content
-                .split(|byte| *byte == b'\n')
-                .enumerate()
-                .filter_map(|(index, line)| {
-                    contains_symbol(line, name.as_bytes()).then_some(index + 1)
-                })
-                .collect::<Vec<_>>();
-            let number = lines
-                .iter()
-                .copied()
-                .find(|line| {
-                    let bytes = content
-                        .split(|byte| *byte == b'\n')
-                        .nth(line.saturating_sub(1))
-                        .unwrap_or_default();
-                    is_declaration(bytes, name.as_bytes())
-                })
-                .or_else(|| lines.first().copied())
-                .ok_or_else(|| {
-                    AppError::input(format!(
-                        "symbol {name} was not found in {path} at the target revision"
-                    ))
-                })?;
+            let span = symbol::locate(content, name, path)?;
             Ok((
                 WhyAnchor::Symbol {
                     name: name.clone(),
-                    number,
+                    number: span.start,
                 },
-                number,
+                span.start,
+                Some(span.end),
             ))
         }
     }
-}
-
-fn contains_symbol(line: &[u8], symbol: &[u8]) -> bool {
-    if symbol.is_empty() {
-        return false;
-    }
-    line.windows(symbol.len())
-        .enumerate()
-        .any(|(index, window)| {
-            window == symbol
-                && (index == 0 || !is_symbol_byte(line[index - 1]))
-                && (index + symbol.len() == line.len()
-                    || !is_symbol_byte(line[index + symbol.len()]))
-        })
-}
-
-fn is_declaration(line: &[u8], symbol: &[u8]) -> bool {
-    let trimmed = line
-        .iter()
-        .copied()
-        .skip_while(u8::is_ascii_whitespace)
-        .collect::<Vec<_>>();
-    if trimmed.starts_with(b"//")
-        || trimmed.starts_with(b"#")
-        || trimmed.starts_with(b"/*")
-        || trimmed.starts_with(b"*")
-        || trimmed.starts_with(b"\"")
-        || trimmed.starts_with(b"'")
-    {
-        return false;
-    }
-    let Some(index) = line
-        .windows(symbol.len())
-        .position(|window| window == symbol)
-    else {
-        return false;
-    };
-    if index > 0 && is_symbol_byte(line[index - 1])
-        || index + symbol.len() < line.len() && is_symbol_byte(line[index + symbol.len()])
-    {
-        return false;
-    }
-    let before = &line[..index];
-    let after = line[index + symbol.len()..]
-        .iter()
-        .copied()
-        .skip_while(u8::is_ascii_whitespace)
-        .collect::<Vec<_>>();
-    let shape = after.starts_with(b"(")
-        || after.starts_with(b"{")
-        || after.starts_with(b":")
-        || after.starts_with(b"=");
-    let tokens = before
-        .split(|byte| !is_symbol_byte(*byte))
-        .filter(|token| !token.is_empty())
-        .collect::<Vec<_>>();
-    let keyword = tokens.last().is_some_and(|token| {
-        matches!(
-            *token,
-            b"fn"
-                | b"func"
-                | b"function"
-                | b"def"
-                | b"class"
-                | b"struct"
-                | b"enum"
-                | b"trait"
-                | b"interface"
-                | b"type"
-                | b"const"
-                | b"let"
-                | b"var"
-                | b"module"
-                | b"namespace"
-                | b"macro"
-                | b"impl"
-        )
-    });
-    keyword && shape
-}
-
-fn is_symbol_byte(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || byte == b'_'
 }
 
 fn blame_ignore_file(git: &Git) -> Result<Option<String>, AppError> {
@@ -1033,28 +681,4 @@ fn read_shallow_boundaries(git: &Git) -> Result<Vec<String>, AppError> {
 
 fn is_oid(value: &[u8]) -> bool {
     matches!(value.len(), 40 | 64) && value.iter().all(u8::is_ascii_hexdigit)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::symbol_span_end;
-
-    #[test]
-    fn symbol_span_end_ignores_javascript_object_string_braces() {
-        let source = concat!(
-            "function parse() {\n",
-            "    const object = { value: 'closer } stays string' };\n",
-            "\n",
-            "\n",
-            "\n",
-            "\n",
-            "\n",
-            "\n",
-            "\n",
-            "\n",
-            "    const result = 1;\n",
-            "}\n",
-        );
-        assert_eq!(symbol_span_end(source.as_bytes(), 1, false), 12);
-    }
 }

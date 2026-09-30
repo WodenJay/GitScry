@@ -1,5 +1,6 @@
 mod history;
 mod process;
+mod symbol;
 mod target;
 
 use std::path::PathBuf;
