@@ -33,6 +33,7 @@ pub(crate) fn run(
     target: &TraceFixTarget,
     reachable: &HashSet<String>,
     limit: usize,
+    scope_applied: bool,
 ) -> Result<Report, AppError> {
     let histories = candidate_history(session, &target.deleted_lines, reachable)?;
     let references = message_references(&target.fix.message);
@@ -161,7 +162,7 @@ pub(crate) fn run(
     report
         .notices
         .push("Remote context unavailable from local history.".to_owned());
-    if !target.deleted_lines.is_empty() && matched_count == 0 {
+    if !scope_applied && !target.deleted_lines.is_empty() && matched_count == 0 {
         report.notices.push(
             "warning: no introducing commit is available in the default-branch cache.".to_owned(),
         );

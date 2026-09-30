@@ -128,8 +128,20 @@ pub(crate) fn execute(
             bad,
             limit,
             patch,
+            scope,
             ..
-        } => query::run_regression(symptom, path, symbol, good, bad, limit, patch),
+        } => {
+            let scope = scope.into();
+            query::run_regression(
+                symptom,
+                path,
+                symbol,
+                query::RegressionWindow { good, bad },
+                limit,
+                patch,
+                scope,
+            )
+        }
         Command::Why {
             path,
             line,
@@ -161,8 +173,12 @@ pub(crate) fn execute(
             paths,
             limit,
             patch,
+            scope,
             ..
-        } => query::run_trace_fix(fix_revision, paths, limit, patch),
+        } => {
+            let scope = scope.into();
+            query::run_trace_fix(fix_revision, paths, limit, patch, scope)
+        }
         Command::Timeline {
             path,
             at,

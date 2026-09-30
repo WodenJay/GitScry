@@ -568,3 +568,115 @@ fn trace_fix_degrades_pure_additions_without_fabricating_lineage() {
     );
     assert!(String::from_utf8_lossy(&output.stderr).contains("no deleted lines"));
 }
+
+#[test]
+fn trace_fix_scope_filters_material_without_retargeting_the_fix() {
+    let repo = TestRepo::new();
+    repo.commit("app.txt", b"safe\n", "Initial app", None);
+    let initial = repo.head();
+    repo.commit("app.txt", b"buggy\n", "Introduce timeout bug", None);
+    let introducing = repo.head();
+    repo.commit(
+        "app.txt",
+        b"fixed\n",
+        "Fix timeout bug",
+        Some("The timeout behavior is fixed."),
+    );
+    let fix = repo.head();
+    repo.commit("later.txt", b"later\n", "Post-fix unrelated change", None);
+    let cache_tip = repo.head();
+    repo.index();
+
+    let output = repo.run([
+        "trace-fix",
+        fix.as_str(),
+        "--path",
+        "app.txt",
+        "--from-rev",
+        initial.as_str(),
+        "--to-rev",
+        introducing.as_str(),
+        "--since",
+        "2000-01-01",
+        "--until",
+        "2099-12-31",
+        "--json",
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["scope"]["from_rev"], initial);
+    assert_eq!(report["scope"]["to_rev"], introducing);
+    assert_eq!(report["scope"]["since"], "2000-01-01");
+    assert_eq!(report["scope"]["until"], "2099-12-31");
+    assert_eq!(report["scope"]["cache_tip"], cache_tip);
+    assert_eq!(report["materials"][0]["subject"], "Introduce timeout bug");
+    assert_eq!(report["materials"][0]["detail"]["fix_revision"], fix);
+
+    let empty = repo.run([
+        "trace-fix",
+        fix.as_str(),
+        "--path",
+        "app.txt",
+        "--from-rev",
+        introducing.as_str(),
+        "--json",
+    ]);
+    assert_eq!(
+        empty.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&empty.stderr)
+    );
+    let empty_report: serde_json::Value = serde_json::from_slice(&empty.stdout).unwrap();
+    assert_eq!(empty_report["matched_count"], 0);
+    assert_eq!(empty_report["materials"], serde_json::json!([]));
+    assert_eq!(empty_report["scope"]["to_rev"], fix);
+    assert_eq!(empty_report["scope"]["cache_tip"], cache_tip);
+    assert!(
+        empty_report["notices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|notice| {
+                notice.as_str()
+                    != Some(
+                        "warning: no introducing commit is available in the default-branch cache.",
+                    )
+            }),
+        "a scoped empty result must not claim the cache has no introducing commit: {empty_report}"
+    );
+
+    let invalid = repo.run([
+        "trace-fix",
+        fix.as_str(),
+        "--path",
+        "app.txt",
+        "--from-rev",
+        fix.as_str(),
+        "--to-rev",
+        introducing.as_str(),
+    ]);
+    assert_eq!(invalid.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&invalid.stderr)
+            .contains("--from-rev must be an ancestor of --to-rev")
+    );
+
+    let human = repo.run([
+        "trace-fix",
+        fix.as_str(),
+        "--path",
+        "app.txt",
+        "--from-rev",
+        introducing.as_str(),
+    ]);
+    assert_eq!(human.status.code(), Some(0));
+    let human = String::from_utf8_lossy(&human.stdout);
+    assert!(human.contains("Scope: commits reachable from"));
+    assert!(human.contains("No introducing change could be traced."));
+}

@@ -310,9 +310,10 @@ pub(crate) fn trace_fix(
     target: &TraceFixTarget,
     reachable: &HashSet<String>,
     limit: usize,
+    scope_applied: bool,
 ) -> Result<Report, AppError> {
     validate_limit(limit)?;
-    capabilities::trace_fix(session, target, reachable, limit)
+    capabilities::trace_fix(session, target, reachable, limit, scope_applied)
 }
 
 pub(crate) fn failures(

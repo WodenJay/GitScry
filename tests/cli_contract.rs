@@ -350,6 +350,40 @@ fn json_flag_is_available_only_for_query_commands() {
     assert!(search_help.contains("case-sensitive literal substring"));
     assert!(search_help.contains("default branch"));
     assert!(search_help.contains("Examples:"));
+    for name in ["regression", "trace-fix"] {
+        let help = repo.run([name, "--help"]);
+        assert_eq!(help.status.code(), Some(0), "{name}");
+        let help = String::from_utf8_lossy(&help.stdout)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        for flag in [
+            "--from-rev <REV>",
+            "--to-rev <REV>",
+            "--since <DATE_OR_TIMESTAMP>",
+            "--until <DATE_OR_TIMESTAMP>",
+        ] {
+            assert!(help.contains(flag), "{name} help missing {flag}");
+        }
+        assert!(
+            help.contains("committer time"),
+            "{name} help must explain time scope"
+        );
+        assert!(help.contains("UTC"), "{name} help must explain UTC bounds");
+        assert!(
+            help.contains("Examples:"),
+            "{name} help must include examples"
+        );
+    }
+    let regression_help = repo.run(["regression", "--help"]);
+    let regression_help = String::from_utf8_lossy(&regression_help.stdout);
+    assert!(regression_help.contains("--good"));
+    assert!(regression_help.contains("--bad"));
+    assert!(regression_help.contains("suspect window"));
+    let trace_help = repo.run(["trace-fix", "--help"]);
+    let trace_help = String::from_utf8_lossy(&trace_help.stdout);
+    assert!(trace_help.contains("FIX_REVISION"));
+    assert!(trace_help.contains("fix target"));
 
     for name in ["index", "update"] {
         let help = repo.run([name, "--help"]);

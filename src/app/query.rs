@@ -5,7 +5,7 @@ use crate::{
     git::{Repository, WhyAnchor},
     render, timeline,
 };
-use std::path::Path;
+use std::{collections::HashSet, path::Path};
 
 fn query_outcome(session: &cache::QuerySession, report: analysis::Report) -> Outcome {
     let progress = session.progress().to_vec();
@@ -20,6 +20,18 @@ fn query_outcome(session: &cache::QuerySession, report: analysis::Report) -> Out
         notices,
         report: Some(report),
     }
+}
+fn intersect_scope(
+    session: &cache::QuerySession,
+    scope: Option<&search_scope::ResolvedSearchScope>,
+    target_revision: &str,
+    reachable: &mut HashSet<String>,
+) -> Result<(), AppError> {
+    if let Some(scope) = scope {
+        let scoped_revisions = session.scoped_revisions(&scope.filter, target_revision)?;
+        reachable.retain(|revision| scoped_revisions.contains(revision));
+    }
+    Ok(())
 }
 
 /// One scoped history query: resolve scope, run its capability, and preserve the resolved bounds.
@@ -133,31 +145,47 @@ pub(super) fn run_paths(
     Ok(query_outcome(&session, report))
 }
 
+pub(super) struct RegressionWindow {
+    pub(super) good: Option<String>,
+    pub(super) bad: String,
+}
+
 pub(super) fn run_regression(
     words: Vec<String>,
     path: String,
     symbol: Option<String>,
-    good: Option<String>,
-    bad: String,
+    window: RegressionWindow,
     limit: usize,
     patch: bool,
+    scope_options: SearchScopeOptions,
 ) -> Result<Outcome, AppError> {
     let intent = analysis::Intent::symptom(&words, &path)?;
     let repository = Repository::discover()?;
-    let target =
-        repository.pin_regression_target(&bad, good.as_deref(), &path, symbol.as_deref())?;
+    let target = repository.pin_regression_target(
+        &window.bad,
+        window.good.as_deref(),
+        &path,
+        symbol.as_deref(),
+    )?;
     let session = cache::open_query()?;
     session.require_revision(&target.bad_revision)?;
     if let Some(good_revision) = &target.good_revision {
         session.require_revision(good_revision)?;
     }
+    let scope = search_scope::resolve_for_target(&session, scope_options, &target.bad_revision)?;
     let bad_reachable = session.ancestors(&target.bad_revision)?;
-    let reachable = if let Some(good_revision) = &target.good_revision {
+    let mut reachable = if let Some(good_revision) = &target.good_revision {
         let good_reachable = session.ancestors(good_revision)?;
         bad_reachable.difference(&good_reachable).cloned().collect()
     } else {
         bad_reachable
     };
+    intersect_scope(
+        &session,
+        scope.as_ref(),
+        &target.bad_revision,
+        &mut reachable,
+    )?;
     let mut report = analysis::regression(&session, &intent, &target, &reachable, limit)?;
     if patch {
         analysis::attach_regression_patch_excerpts(
@@ -167,6 +195,9 @@ pub(super) fn run_regression(
             &reachable,
             &mut report,
         )?;
+    }
+    if let Some(scope) = scope {
+        report.scope = Some(scope.report);
     }
     Ok(query_outcome(&session, report))
 }
@@ -257,15 +288,21 @@ pub(super) fn run_trace_fix(
     paths: Vec<String>,
     limit: usize,
     patch: bool,
+    scope_options: SearchScopeOptions,
 ) -> Result<Outcome, AppError> {
     let repository = Repository::discover()?;
     let target = repository.pin_trace_fix(&revision, &paths)?;
     let session = cache::open_query()?;
     session.require_revision(&target.revision)?;
-    let reachable = session.ancestors(&target.revision)?;
-    let mut report = analysis::trace_fix(&session, &target, &reachable, limit)?;
+    let scope = search_scope::resolve_for_target(&session, scope_options, &target.revision)?;
+    let mut reachable = session.ancestors(&target.revision)?;
+    intersect_scope(&session, scope.as_ref(), &target.revision, &mut reachable)?;
+    let mut report = analysis::trace_fix(&session, &target, &reachable, limit, scope.is_some())?;
     if patch {
         analysis::attach_trace_fix_patch_excerpts(&session, &mut report)?;
+    }
+    if let Some(scope) = scope {
+        report.scope = Some(scope.report);
     }
     Ok(query_outcome(&session, report))
 }
