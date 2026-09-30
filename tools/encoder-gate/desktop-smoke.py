@@ -21,6 +21,11 @@ def main():
     os.environ["ORT_PREFER_DYNAMIC_LINK"] = "0"
     if WINDOWS:
         os.environ["RUSTFLAGS"] = "-C target-feature=+crt-static"
+        # Git Bash puts its unrelated Unix link.exe ahead of Visual Studio.
+        linker = Path(os.environ["VCToolsInstallDir"]) / "bin/Hostx64/x64/link.exe"
+        if not linker.is_file():
+            raise RuntimeError(f"Missing MSVC linker: {linker}")
+        os.environ["CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER"] = str(linker)
     else:
         os.environ["MACOSX_DEPLOYMENT_TARGET"] = "11.0"
     for manifest in [ROOT / "Cargo.toml", MODULE]:

@@ -42,7 +42,7 @@ def main():
     run("cmake", "--build", BUILD / "Release", "--target", "re2", "--parallel", "2")
     run("git", "-C", SOURCE, "diff", "--exit-code")
     suffix = ".lib" if WINDOWS else ".a"
-    excluded = {"protobuf.lib", "libprotobuf.a", "protoc.lib", "libprotoc.a"}
+    excluded = {"protobuf.lib", "libprotobuf.lib", "libprotobuf.a", "protoc.lib", "libprotoc.lib", "libprotoc.a"}
     archives = sorted(p for p in (BUILD / "Release").rglob(f"*{suffix}") if p.name not in excluded)
     # Do not report a partial source build as a distributable runtime.
     names = {p.name.removeprefix("lib").removesuffix(suffix) for p in archives}

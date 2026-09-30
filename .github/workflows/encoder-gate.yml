@@ -84,10 +84,13 @@ jobs:
         with:
           path: tools/encoder-gate/.native/ort-packed
           key: encoder-${{ matrix.os }}-ort1.28.0-${{ hashFiles('tools/encoder-gate/desktop-runtime.py') }}
+          # One-time reuse: this correction only excludes Windows .lib names.
+          restore-keys: ${{ matrix.os == 'macos-14' && 'encoder-macos-14-ort1.28.0-78ad62088123f9acf2e40682767a2c269610d4ad24fd58afb5989e002feea37e' || '' }}
       - name: Build unmodified pinned CPU runtime
         shell: bash
         run: |
           set -o pipefail
+          python tools/encoder-gate/test_desktop_runtime.py
           python tools/encoder-gate/desktop-runtime.py 2>&1 | tee encoder-gate-desktop-build.log
       - name: Cache completed native archive
         if: always() && steps.native-cache.outputs.cache-hit != 'true' && (hashFiles('tools/encoder-gate/.native/ort-packed/libonnxruntime.a', 'tools/encoder-gate/.native/ort-packed/onnxruntime.lib') != '')
