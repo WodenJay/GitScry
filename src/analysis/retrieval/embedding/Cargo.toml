@@ -1,0 +1,23 @@
+[package]
+name = "gitscry-embedding"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.89"
+publish = false
+
+[lib]
+path = "lib.rs"
+
+# This reusable module has its own manifest until the dependent integration
+# tickets wire it into GitScry. Ordinary product builds need no native runtime.
+[features]
+default = ["runtime"]
+runtime = ["dep:ort", "dep:ort-sys"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tokenizers = { version = "=0.23.1", default-features = false, features = ["fancy-regex"] }
+ort = { version = "=2.0.0-rc.13", optional = true, default-features = false, features = ["std", "api-27"] }
+ort-sys = { version = "=2.0.0-rc.13", optional = true, default-features = false, features = ["std", "api-27"] }

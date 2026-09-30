@@ -1,70 +1,130 @@
-//! First gate: execute the pinned graph before integrating an encoder into GitScry.
-use ort::{session::Session, value::Tensor};
-use sha2::{Digest, Sha256};
-use std::{error::Error, fs::File, io::Read, path::Path};
+//! Release smoke harness: exercises the reusable encoder, not a second implementation.
+use gitscry_embedding::{DIMENSIONS, Document, Encoder, Vector, Workload};
+use serde::Deserialize;
+use std::{error::Error, fs, path::Path};
 
-fn main() -> Result<(), Box<dyn Error>> {
-    let model = std::env::args_os()
-        .nth(1)
-        .ok_or("usage: gitscry-encoder-gate MODEL.onnx")?;
-    verify_model(Path::new(&model))?;
-    let mut session = Session::builder()?
-        .with_intra_threads(1)?
-        .with_inter_threads(1)?
-        .commit_from_file(model)?;
-    // Pinned MiniLM tokenizer: [CLS] hello [SEP]. This is a graph/linking
-    // probe, NOT evidence of document preprocessing or encoder parity.
-    let ids = Tensor::from_array(([1usize, 3], vec![101i64, 7592, 102].into_boxed_slice()))?;
-    let mask = Tensor::from_array(([1usize, 3], vec![1i64; 3].into_boxed_slice()))?;
-    let types = Tensor::from_array(([1usize, 3], vec![0i64; 3].into_boxed_slice()))?;
-    let output = session.run(ort::inputs![
-        "input_ids" => ids,
-        "attention_mask" => mask,
-        "token_type_ids" => types
-    ])?;
-    let (shape, values) = output[0].try_extract_tensor::<f32>()?;
-    if shape.as_ref() != [1, 3, 384] || values.iter().any(|v| !v.is_finite()) {
-        return Err("invalid MiniLM token output".into());
+#[derive(Deserialize)]
+struct Fixtures {
+    max_absolute_error: f64,
+    max_cosine_distance: f64,
+    documents: Vec<ReferenceDocument>,
+    queries: Vec<ReferenceQuery>,
+}
+#[derive(Deserialize)]
+struct ReferenceDocument {
+    identity: String,
+    message: Vec<u8>,
+    paths: Vec<Vec<u8>>,
+    vector: Vec<f32>,
+}
+#[derive(Deserialize)]
+struct ReferenceQuery {
+    text: String,
+    vectors: Vec<Vec<f32>>,
+}
+
+fn compare(actual: &Vector, expected: &[f32], fixtures: &Fixtures) -> Result<(), Box<dyn Error>> {
+    if expected.len() != DIMENSIONS || actual.iter().chain(expected).any(|v| !v.is_finite()) {
+        return Err("invalid reference/output dimensions or finite values".into());
     }
-    let mut vector = [0f32; 384];
-    for token in values.as_chunks::<384>().0 {
-        for (mean, value) in vector.iter_mut().zip(token) {
-            *mean += value / 3.0;
-        }
+    let norm = |v: &[f32]| v.iter().map(|v| f64::from(*v).powi(2)).sum::<f64>().sqrt();
+    if (norm(actual) - 1.0).abs() > 1e-5 {
+        return Err("output is not normalized".into());
     }
-    let norm = vector.iter().map(|v| v * v).sum::<f32>().sqrt();
-    if !norm.is_finite() || norm <= 0.0 {
-        return Err("invalid pooled norm".into());
+    let absolute = actual
+        .iter()
+        .zip(expected)
+        .map(|(a, b)| (f64::from(*a) - f64::from(*b)).abs())
+        .fold(0.0, f64::max);
+    let dot = actual
+        .iter()
+        .zip(expected)
+        .map(|(a, b)| f64::from(*a) * f64::from(*b))
+        .sum::<f64>();
+    let cosine = 1.0 - dot / (norm(actual) * norm(expected));
+    println!("parity: dimension={DIMENSIONS}, max_abs={absolute:.9}, cosine_distance={cosine:.9}");
+    if absolute > fixtures.max_absolute_error || cosine > fixtures.max_cosine_distance {
+        return Err("independent reference tolerance exceeded".into());
     }
-    for value in &mut vector {
-        *value /= norm;
-    }
-    let normalized = vector.iter().map(|v| v * v).sum::<f32>().sqrt();
-    if (normalized - 1.0).abs() > 1e-5 {
-        return Err("normalization failed".into());
-    }
-    println!("pinned FP32 graph executed: shape={shape:?}, vector_dim=384, norm={normalized}");
     Ok(())
 }
 
-fn verify_model(path: &Path) -> Result<(), Box<dyn Error>> {
-    let mut file = File::open(path)?;
-    if file.metadata()?.len() != 90_387_630 {
-        return Err("pinned model size mismatch".into());
+fn main() -> Result<(), Box<dyn Error>> {
+    let directory = std::env::args_os()
+        .nth(1)
+        .ok_or("usage: gitscry-encoder-gate RESOURCE_DIRECTORY")?;
+    let fixtures: Fixtures = serde_json::from_str(include_str!(
+        "../../../src/analysis/retrieval/embedding/fixtures/reference.json"
+    ))?;
+    let mut encoder = Encoder::open(Path::new(&directory), Workload::Index)?;
+    // Reversed, varied lengths, repeated inputs, and >8 rows exercise padding,
+    // internal length ordering, identity restoration, and batch boundaries.
+    let references = fixtures
+        .documents
+        .iter()
+        .rev()
+        .cycle()
+        .take(13)
+        .collect::<Vec<_>>();
+    let documents = references
+        .iter()
+        .map(|d| Document {
+            identity: &d.identity,
+            message: &d.message,
+            paths: &d.paths,
+        })
+        .collect::<Vec<_>>();
+    let vectors = encoder.documents(&documents)?;
+    if vectors.len() != references.len() {
+        return Err("document output count mismatch".into());
     }
-    let mut hash = Sha256::new();
-    let mut buffer = [0u8; 65536];
-    loop {
-        let count = file.read(&mut buffer)?;
-        if count == 0 {
-            break;
+    for ((identity, vector), reference) in vectors.iter().zip(&references) {
+        if identity != &reference.identity {
+            return Err("vector identity/order mismatch".into());
         }
-        hash.update(&buffer[..count]);
+        compare(vector, &reference.vector, &fixtures)?;
+        let single = encoder.documents(&[Document {
+            identity,
+            message: &reference.message,
+            paths: &reference.paths,
+        }])?;
+        compare(&single[0].1, &reference.vector, &fixtures)?;
     }
-    if format!("{:x}", hash.finalize())
-        != "bbd7b466f6d58e646fdc2bd5fd67b2f5e93c0b687011bd4548c420f7bd46f0c5"
-    {
-        return Err("pinned model digest mismatch".into());
+    if !encoder.documents(&[])?.is_empty() {
+        return Err("empty batch was not empty".into());
     }
+    let mut encoder = Encoder::open(Path::new(&directory), Workload::Query)?;
+    for query in &fixtures.queries {
+        let vectors = encoder.query(&query.text)?;
+        if vectors.len() != query.vectors.len() {
+            return Err("query window count mismatch".into());
+        }
+        for (actual, expected) in vectors.iter().zip(&query.vectors) {
+            compare(actual, expected, &fixtures)?;
+        }
+    }
+    // Corrupt a small resource in a fresh directory. Verification must reject
+    // it before tokenizer initialization, and must not repair/download anything.
+    let corrupt = tempfile::tempdir()?;
+    for name in [
+        "model.onnx",
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "special_tokens_map.json",
+        "config.json",
+        "README.md",
+    ] {
+        fs::copy(Path::new(&directory).join(name), corrupt.path().join(name))?;
+    }
+    let config = corrupt.path().join("config.json");
+    let size = fs::metadata(&config)?.len() as usize;
+    fs::write(&config, vec![b' '; size])?;
+    let rejected = Encoder::open(corrupt.path(), Workload::Query).err();
+    if !rejected.is_some_and(|error| error.to_string().contains("config.json: SHA-256 mismatch")) {
+        return Err("corrupt pinned resource was not rejected".into());
+    }
+    println!(
+        "PASS: offline canonical document/query parity, FP32 normalization, padding, input identity and verified resources"
+    );
     Ok(())
 }

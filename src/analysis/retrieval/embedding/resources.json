@@ -1,0 +1,12 @@
+{
+  "repository": "Qdrant/all-MiniLM-L6-v2-onnx",
+  "revision": "8f518e882455312b086101e60691f5e6e2f05c3c",
+  "files": [
+    {"name": "model.onnx", "size": 90387630, "sha256": "bbd7b466f6d58e646fdc2bd5fd67b2f5e93c0b687011bd4548c420f7bd46f0c5"},
+    {"name": "tokenizer.json", "size": 711661, "sha256": "59f410da6d9dad2025f0e53b6c45554a3b3a0a5c574927f201e99d0217c1a26b"},
+    {"name": "tokenizer_config.json", "size": 1412, "sha256": "abda01c8c14c5151ae498aceb30db406d6b91242c394fd88d3b6fd5a63a101e6"},
+    {"name": "special_tokens_map.json", "size": 695, "sha256": "5d5b662e421ea9fac075174bb0688ee0d9431699900b90662acd44b2a350503a"},
+    {"name": "config.json", "size": 650, "sha256": "1b4d8e2a3988377ed8b519a31d8d31025a25f1c5f8606998e8014111438efcd7"},
+    {"name": "README.md", "size": 945, "sha256": "2c47a70b94fe29e24841acf0e177949f1c9aa543e450d43af7e872ea81e43501"}
+  ]
+}
