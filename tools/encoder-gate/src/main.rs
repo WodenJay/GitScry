@@ -56,7 +56,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let fixtures: Fixtures = serde_json::from_str(include_str!(
         "../../../src/analysis/retrieval/embedding/fixtures/reference.json"
     ))?;
+    let startup = std::time::Instant::now();
     let mut encoder = Encoder::open(Path::new(&directory), Workload::Index)?;
+    let startup_ms = startup.elapsed().as_secs_f64() * 1000.0;
     // Reversed, varied lengths, repeated inputs, and >8 rows exercise padding,
     // internal length ordering, identity restoration, and batch boundaries.
     let references = fixtures
@@ -74,7 +76,9 @@ fn main() -> Result<(), Box<dyn Error>> {
             paths: &d.paths,
         })
         .collect::<Vec<_>>();
+    let batch = std::time::Instant::now();
     let vectors = encoder.documents(&documents)?;
+    let batch_ms = batch.elapsed().as_secs_f64() * 1000.0;
     if vectors.len() != references.len() {
         return Err("document output count mismatch".into());
     }
@@ -93,7 +97,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     if !encoder.documents(&[])?.is_empty() {
         return Err("empty batch was not empty".into());
     }
+    drop(encoder);
     let mut encoder = Encoder::open(Path::new(&directory), Workload::Query)?;
+    let queries = std::time::Instant::now();
     for query in &fixtures.queries {
         let vectors = encoder.query(&query.text)?;
         if vectors.len() != query.vectors.len() {
@@ -102,6 +108,18 @@ fn main() -> Result<(), Box<dyn Error>> {
         for (actual, expected) in vectors.iter().zip(&query.vectors) {
             compare(actual, expected, &fixtures)?;
         }
+    }
+    let queries_ms = queries.elapsed().as_secs_f64() * 1000.0;
+    println!(
+        "cost: executable_bytes={}, model_bytes={}, startup_ms={startup_ms:.3}, document_batch_13_ms={batch_ms:.3}, reference_queries_ms={queries_ms:.3}",
+        fs::metadata(std::env::current_exe()?)?.len(),
+        fs::metadata(Path::new(&directory).join("model.onnx"))?.len(),
+    );
+    #[cfg(target_os = "linux")]
+    if let Ok(status) = fs::read_to_string("/proc/self/status")
+        && let Some(peak) = status.lines().find(|line| line.starts_with("VmHWM:"))
+    {
+        println!("cost: {peak}");
     }
     // Corrupt a small resource in a fresh directory. Verification must reject
     // it before tokenizer initialization, and must not repair/download anything.
