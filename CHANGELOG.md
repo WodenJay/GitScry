@@ -1,3 +1,49 @@
+## [0.4.0] - 2026-09-30
+
+### 🚀 Features
+
+- *(search)* Add changed-line code search
+- *(cli)* Add file evolution timeline
+- *(search)* Add patch excerpts
+- *(trace-fix)* Add attributed patch excerpts
+- *(trace-fix)* Merge attributed patch excerpts
+- *(search)* Scope queries by revision and time
+- *(timeline)* Add patch excerpts
+- *(timeline)* Merge patch excerpts
+- *(why)* Attach relevant patch excerpts
+- Merge target-linked patch excerpts
+- Scope why and timeline history
+- *(relations)* Scope co-change history
+- *(scope)* Scope examples and failures
+- *(scope)* Scope regression and trace-fix
+- *(scope)* Scope regression and trace-fix
+
+### 🐛 Bug Fixes
+
+- *(search)* Bound patch excerpts
+- *(search)* Rank scoped hits locally
+- *(timeline)* Scope patch availability per change
+- *(trace-fix)* Avoid false cache warning in scope
+
+### 🚜 Refactor
+
+- *(cache)* Bundle relation bindings
+- *(scope)* Reduce query and enum size
+- *(timeline)* Move into analysis
+- *(cache)* Isolate writes and publication
+- *(git)* Isolate symbol location
+- Decouple citations from output format
+- Deepen historical query execution
+- Share history with patch selection
+
+### 📚 Documentation
+
+- *(domain)* Define file evolution timeline
+- *(domain)* Define file incarnation
+- Add gitscry rule in AGENTS.md
+- Refine commit rule in AGENTS.md
+- *(domain)* Define historical query scope
+- Rename CONTEXT.md to GLOSSARY.md
 ## [0.3.1] - 2026-09-28
 
 ### 🐛 Bug Fixes
