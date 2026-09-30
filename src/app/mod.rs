@@ -64,7 +64,6 @@ pub(crate) struct Outcome {
 
 pub(crate) fn execute(
     command: Command,
-    json_output: bool,
     report: &mut dyn FnMut(Progress),
 ) -> Result<Outcome, AppError> {
     match command {
@@ -113,13 +112,13 @@ pub(crate) fn execute(
             limit,
             scope,
             ..
-        } => query::run_paths(paths, limit, json_output, scope.into(), analysis::related),
+        } => query::run_paths(paths, limit, scope.into(), analysis::related),
         Command::Tests {
             paths,
             limit,
             scope,
             ..
-        } => query::run_paths(paths, limit, json_output, scope.into(), analysis::tests),
+        } => query::run_paths(paths, limit, scope.into(), analysis::tests),
         Command::Regression {
             symptom,
             path,

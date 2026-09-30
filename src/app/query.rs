@@ -117,14 +117,12 @@ pub(super) fn run_code_search(
 pub(super) fn run_paths(
     paths: Vec<String>,
     limit: usize,
-    include_all_citations: bool,
     scope_options: SearchScopeOptions,
     capability: impl FnOnce(
         &cache::QuerySession,
         &analysis::Intent,
         &Path,
         usize,
-        bool,
         Option<&cache::SearchFilter>,
     ) -> Result<analysis::Report, AppError>,
 ) -> Result<Outcome, AppError> {
@@ -136,7 +134,6 @@ pub(super) fn run_paths(
         &intent,
         session.root(),
         limit,
-        include_all_citations,
         scope.as_ref().map(|scope| &scope.filter),
     )?;
     if let Some(scope) = scope {
