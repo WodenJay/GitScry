@@ -45,6 +45,9 @@ still includes CPU-dispatched specialized kernels; their presence does not mean
 the baseline executable requires x86-64-v3. The script builds Rust with one Cargo
 job and a static C++ standard library, rejects ELF `INTERP` and `NEEDED` entries,
 and runs a copied executable outside its build output directory.
+`onnxruntime_BUILD_UNIT_TESTS=OFF` disables upstream test/performance programs;
+`--skip_tests` alone only skips their execution. Our release inference and ELF
+dependency checks remain mandatory. No ORT source is modified.
 
 On failure, preserve the Actions log/artifact and stop for a design decision.
 Do not patch upstream, use GNU results as musl proof, change runtime/model, or
@@ -97,3 +100,14 @@ The isolated probe passed formatting, typechecking and Clippy using `DOCS_RS=1`.
 That mode supplies no native runtime and is **not** link/inference evidence.
 No model/vector fixtures or production encoder were integrated because the
 first portability gate failed. #111 remains open.
+
+### Approved candidate: 1.28.0 — retrying library-only configuration
+
+Manual run [36748881801](https://github.com/WodenJay/GitScry/actions/runs/36748881801)
+on `64096b5` took **50m46s**. The former `execinfo.h` failure disappeared and
+runtime static archives were produced, but upstream `onnxruntime_perf_test`
+failed: `strings_helper.h:18:77: error: 'int64_t' was not declared in this scope`.
+Rust linking and our inference probe had not yet run, so this is not a gate pass.
+The retry uses the documented `onnxruntime_BUILD_UNIT_TESTS=OFF` option, not a
+source patch or a different runtime/model. Evidence artifact:
+`encoder-gate-musl-36748881801` (14-day retention).

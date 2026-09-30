@@ -17,6 +17,7 @@ python3 onnxruntime/tools/ci_build/build.py \
   --parallel 2 --cmake_generator Ninja \
   --cmake_extra_defines \
     onnxruntime_BUILD_SHARED_LIB=OFF \
+    onnxruntime_BUILD_UNIT_TESTS=OFF \
     onnxruntime_BUILD_FOR_NATIVE_MACHINE=OFF \
     onnxruntime_USE_AVX=OFF onnxruntime_USE_AVX2=OFF onnxruntime_USE_AVX512=OFF
 # Never accept a silently patched runtime checkout.
