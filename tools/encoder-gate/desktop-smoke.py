@@ -15,6 +15,16 @@ def run(*args, **kwargs):
     return subprocess.run([str(arg) for arg in args], check=True, **kwargs)
 
 
+def verify_windows_dependencies(dependencies):
+    system = {"kernel32.dll", "ntdll.dll", "advapi32.dll", "bcrypt.dll", "crypt32.dll",
+              "ole32.dll", "oleaut32.dll", "userenv.dll", "ws2_32.dll", "shell32.dll",
+              "shlwapi.dll", "secur32.dll", "user32.dll", "gdi32.dll", "dbghelp.dll",
+              "bcryptprimitives.dll", "setupapi.dll", "dxgi.dll"}
+    libraries = [line.strip().lower() for line in dependencies.splitlines() if line.strip().lower().endswith(".dll")]
+    if not libraries or any(lib not in system and not lib.startswith("api-ms-win-") for lib in libraries):
+        raise RuntimeError(f"Non-system DLL dependency: {libraries}")
+
+
 def main():
     os.chdir(ROOT)
     os.environ["ORT_LIB_LOCATION"] = str(ROOT / ".native/ort-packed")
@@ -40,12 +50,7 @@ def main():
     (ROOT / ".native/dependencies.txt").write_text(dependencies)
     print(dependencies)
     if WINDOWS:
-        system = {"kernel32.dll", "ntdll.dll", "advapi32.dll", "bcrypt.dll", "crypt32.dll",
-                  "ole32.dll", "oleaut32.dll", "userenv.dll", "ws2_32.dll", "shell32.dll",
-                  "shlwapi.dll", "secur32.dll", "user32.dll", "gdi32.dll", "dbghelp.dll"}
-        libraries = [line.strip().lower() for line in dependencies.splitlines() if line.strip().lower().endswith(".dll")]
-        if not libraries or any(lib not in system and not lib.startswith("api-ms-win-") for lib in libraries):
-            raise RuntimeError(f"Non-system DLL dependency: {libraries}")
+        verify_windows_dependencies(dependencies)
     else:
         libraries = [line.strip().split(" ")[0] for line in dependencies.splitlines()[1:]]
         if not libraries or any(not lib.startswith(("/usr/lib/", "/System/Library/")) for lib in libraries):

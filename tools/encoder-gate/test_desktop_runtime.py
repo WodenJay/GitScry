@@ -32,5 +32,17 @@ class DesktopPackagingTest(unittest.TestCase):
             self.assertNotIn("/libprotoc.lib", packed)
 
 
+class DesktopDependencyTest(unittest.TestCase):
+    def test_windows_system_libraries_are_not_runtime_sidecars(self):
+        verify = runpy.run_path(str(Path(__file__).with_name("desktop-smoke.py")))["verify_windows_dependencies"]
+        verify("    KERNEL32.dll\n    bcryptPrimitives.dll\n    SETUPAPI.dll\n    dxgi.dll\n")
+
+    def test_native_runtime_and_crt_sidecars_are_rejected(self):
+        verify = runpy.run_path(str(Path(__file__).with_name("desktop-smoke.py")))["verify_windows_dependencies"]
+        for name in ["onnxruntime.dll", "vcruntime140.dll", "msvcp140.dll", "libprotobuf.dll"]:
+            with self.subTest(library=name), self.assertRaises(RuntimeError):
+                verify(f"    KERNEL32.dll\n    {name}\n")
+
+
 if __name__ == "__main__":
     unittest.main()
