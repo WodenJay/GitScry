@@ -1,0 +1,43 @@
+name: Manual encoder distribution gate
+
+# Deliberately no push or pull_request trigger. Source builds are expensive.
+on:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: encoder-gate-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  musl:
+    name: Static CPU ONNX Runtime on Linux musl
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Build unmodified upstream and execute pinned graph
+        shell: bash
+        run: |
+          set -o pipefail
+          # Linux is exercised only on GitHub's runner, never simulated locally.
+          docker run --rm \
+            -v "$PWD:/work" -w /work \
+            rust:1.89.0-alpine3.22 \
+            sh tools/encoder-gate/linux-musl.sh 2>&1 | tee encoder-gate-musl.log
+      - name: Preserve evidence even when the gate fails
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: encoder-gate-musl-${{ github.run_id }}
+          retention-days: 14
+          path: |
+            encoder-gate-musl.log
+            tools/encoder-gate/.native/elf-*.txt
+            tools/encoder-gate/.native/ort/Release/CMakeCache.txt
+            tools/encoder-gate/.native/ort/Release/CMakeFiles/CMakeConfigureLog.yaml
