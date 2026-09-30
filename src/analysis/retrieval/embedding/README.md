@@ -47,6 +47,8 @@ The no-default-feature tests exercise protocol, pooling, resource identity, quer
 boundaries/coverage, and a 20MB body without loading ORT or downloading a model.
 `fixtures/tokenizer.json` is the pinned unmodified tokenizer (Apache-2.0 model
 resources); its hash/size is checked against `resources.json`.
+See [`fixtures/NOTICE.md`](fixtures/NOTICE.md) and its included Apache-2.0 license
+for upstream attribution; the vendored tokenizer is not covered by our MIT license.
 `fixtures/reference.json` contains independent Python token/vector fixtures;
 no model weights are checked into Git. `tools/encoder-gate/reference.py` reproduces
 #109's original `embed_corpus.py` protocol and records package versions. Run it
