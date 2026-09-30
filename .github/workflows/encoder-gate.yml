@@ -26,7 +26,10 @@ jobs:
         uses: actions/cache/restore@v5
         with:
           path: tools/encoder-gate/.native/ort-packed
-          key: encoder-musl-alpine3.22-rust1.89-${{ hashFiles('tools/encoder-gate/linux-musl.sh', 'tools/encoder-gate/pack-runtime.py') }}
+          key: encoder-musl-alpine3.22-rust1.89-${{ hashFiles('tools/encoder-gate/build-runtime.sh', 'tools/encoder-gate/pack-runtime.py') }}
+          # One-time migration: identical native recipe before script extraction.
+          # Removed after the new exact key has been populated.
+          restore-keys: encoder-musl-alpine3.22-rust1.89-fccc0358307844836222986a49482454e2d344a48e2569ac1b17a4885a92441d
       - name: Build unmodified upstream and execute pinned graph
         shell: bash
         run: |

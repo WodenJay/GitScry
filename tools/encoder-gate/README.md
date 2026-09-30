@@ -134,3 +134,12 @@ interface; no runtime/model version or source changes. Evidence artifact:
 `encoder-gate-musl-36755445118` (14-day retention).
 The temporary manual bootstrap is restored on the task branch for these retries
 and will again be removed before merging.
+
+Manual run [36762175611](https://github.com/WodenJay/GitScry/actions/runs/36762175611)
+on `c4124ea` packaged **79** native archives successfully, then failed because
+rustc does not search GCC's private static C++ library directory:
+`error: could not find native static library \`stdc++\`, perhaps an -L flag is missing?`.
+The completed native archive was cached. The retry explicitly discovers
+`libstdc++.a` with the compiler and adds its directory to Rust's native search
+path. The identical build recipe is now private in `build-runtime.sh`; a one-time
+exact-key cache migration avoids rebuilding it and will be removed afterward.
