@@ -64,24 +64,31 @@ pub(crate) fn ensure() -> Result<Assets, AppError> {
     let _lock = acquire_download_lock(&directory)?;
 
     for resource in &RESOURCES {
-        let destination = directory.join(resource.path);
-        if is_valid(&destination, resource) {
-            continue;
-        }
-        download(&destination, resource)?;
-        if !is_valid(&destination, resource) {
-            return Err(AppError::operational(format!(
-                "error: pinned semantic model resource `{}` failed verification at `{}`",
-                resource.path,
-                destination.display()
-            )));
-        }
+        ensure_resource(&directory, resource)?;
     }
 
     Ok(Assets {
         model: directory.join("onnx/model.onnx"),
         tokenizer: directory.join("tokenizer.json"),
     })
+}
+
+pub(crate) fn ensure_tokenizer() -> Result<PathBuf, AppError> {
+    let directory = model_directory()?;
+    fs::create_dir_all(&directory).map_err(|error| {
+        AppError::operational(format!(
+            "error: creating semantic model directory `{}`: {error}",
+            directory.display()
+        ))
+    })?;
+    let _lock = acquire_download_lock(&directory)?;
+    for resource in RESOURCES
+        .iter()
+        .filter(|resource| resource.path != "onnx/model.onnx")
+    {
+        ensure_resource(&directory, resource)?;
+    }
+    Ok(directory.join("tokenizer.json"))
 }
 
 fn model_directory() -> Result<PathBuf, AppError> {
@@ -136,6 +143,22 @@ fn acquire_download_lock(directory: &Path) -> Result<File, AppError> {
             }
         }
     }
+}
+
+fn ensure_resource(directory: &Path, resource: &Resource) -> Result<(), AppError> {
+    let destination = directory.join(resource.path);
+    if is_valid(&destination, resource) {
+        return Ok(());
+    }
+    download(&destination, resource)?;
+    if !is_valid(&destination, resource) {
+        return Err(AppError::operational(format!(
+            "error: pinned semantic model resource `{}` failed verification at `{}`",
+            resource.path,
+            destination.display()
+        )));
+    }
+    Ok(())
 }
 
 fn is_valid(path: &Path, resource: &Resource) -> bool {

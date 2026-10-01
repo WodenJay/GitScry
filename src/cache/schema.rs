@@ -53,6 +53,7 @@ CREATE TABLE changes (
 ) STRICT;
 CREATE TABLE semantic_vectors (
     commit_id INTEGER PRIMARY KEY REFERENCES commits(commit_id) ON DELETE CASCADE,
+    commit_oid TEXT NOT NULL,
     embedding BLOB NOT NULL CHECK (length(embedding) = 1536),
     source_fingerprint TEXT NOT NULL CHECK (length(source_fingerprint) = 64),
     input_fingerprint TEXT NOT NULL CHECK (length(input_fingerprint) = 64),

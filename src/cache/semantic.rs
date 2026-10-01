@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     app::{AppError, IndexStage},
-    semantic::{self, CommitDocument, Encoder, PreparedInput},
+    semantic::{self, CommitDocument, Encoder, InputPreprocessor, PreparedInput},
 };
 
 use super::cache_error;
@@ -52,18 +52,43 @@ pub(crate) fn maintain(
 
     let (tip, commit_count) = completed_generation(&connection)?;
     let encoder_fingerprint = semantic::encoder_fingerprint();
-    if is_ready(&connection, &tip, commit_count, &encoder_fingerprint)? {
+    let mut preprocessor = None;
+    let ready = match is_ready(
+        &connection,
+        &tip,
+        commit_count,
+        &encoder_fingerprint,
+        &mut preprocessor,
+    ) {
+        Ok(ready) => ready,
+        Err(error) => {
+            set_metadata_transaction(
+                &mut connection,
+                &[("semantic_enabled", "1"), ("semantic_ready", "0")],
+            )?;
+            return Err(error);
+        }
+    };
+    if ready {
         return Ok(());
     }
     set_metadata_transaction(
         &mut connection,
         &[("semantic_enabled", "1"), ("semantic_ready", "0")],
     )?;
+    if matches!(preference, SemanticPreference::Preserve)
+        && has_incompatible_encoder(&connection, &encoder_fingerprint, commit_count)?
+    {
+        return Err(AppError::operational(
+            "error: semantic vectors use a different encoder; the ordinary history cache is usable and semantic indexing remains enabled; rerun `gitscry index --semantic` to rebuild them",
+        ));
+    }
 
     let runtime_provenance = maintain_vectors(
         &mut connection,
         &encoder_fingerprint,
         report,
+        &mut preprocessor,
     )
     .map_err(|error| {
         AppError::operational(format!(
@@ -143,11 +168,24 @@ fn completed_generation(connection: &Connection) -> Result<(String, i64), AppErr
     Ok((tip, count))
 }
 
+fn commit_document(message: &[u8], paths: &[Vec<u8>]) -> CommitDocument {
+    let (title, body) = super::message_parts(message);
+    CommitDocument {
+        title,
+        body,
+        paths: paths
+            .iter()
+            .map(|path| String::from_utf8_lossy(path).into_owned())
+            .collect(),
+    }
+}
+
 fn is_ready(
     connection: &Connection,
     tip: &str,
     commit_count: i64,
     encoder_fingerprint: &str,
+    preprocessor: &mut Option<InputPreprocessor>,
 ) -> Result<bool, AppError> {
     if metadata(connection, "semantic_ready")?.as_deref() != Some("1")
         || metadata(connection, "semantic_coverage_tip")?.as_deref() != Some(tip)
@@ -155,19 +193,116 @@ fn is_ready(
             != Some(commit_count.to_string().as_str())
         || metadata(connection, "semantic_encoder_fingerprint")?.as_deref()
             != Some(encoder_fingerprint)
+        || count_vectors(connection)? != commit_count
     {
         return Ok(false);
     }
-    Ok(count_vectors(connection)? == commit_count)
+    let mut last_position = -1_i64;
+    loop {
+        let page = read_page(connection, last_position)?;
+        if page.is_empty() {
+            break;
+        }
+        last_position = page.last().expect("page is non-empty").position;
+        let commit_ids = page.iter().map(|commit| commit.id).collect::<Vec<_>>();
+        let mut paths = paths_for_page(connection, &commit_ids)?;
+        for commit in page {
+            let message = super::decode_message(&commit.message, commit.message_length)?;
+            let commit_paths = paths.remove(&commit.id).unwrap_or_default();
+            let current_source_fingerprint = source_fingerprint(&message, &commit_paths);
+            if !reusable_vector(&commit, encoder_fingerprint)
+                || commit.source_fingerprint.as_deref() != Some(current_source_fingerprint.as_str())
+            {
+                return Ok(false);
+            }
+            let document = commit_document(&message, &commit_paths);
+            if preprocessor.is_none() {
+                *preprocessor = Some(InputPreprocessor::load()?);
+            }
+            let prepared = preprocessor
+                .as_ref()
+                .expect("preprocessor was initialized")
+                .prepare(&document)?;
+            if commit.input_fingerprint.as_deref() != Some(prepared.fingerprint()) {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
+}
+
+fn reusable_vector(commit: &CachedCommit, encoder_fingerprint: &str) -> bool {
+    commit.cached_commit_oid.as_deref() == Some(commit.oid.as_str())
+        && valid_embedding(commit.embedding.as_deref())
+        && commit.encoder_fingerprint.as_deref() == Some(encoder_fingerprint)
+        && valid_fingerprint(commit.input_fingerprint.as_deref())
+}
+
+fn has_incompatible_encoder(
+    connection: &Connection,
+    encoder_fingerprint: &str,
+    commit_count: i64,
+) -> Result<bool, AppError> {
+    let stored_fingerprint = metadata(connection, "semantic_encoder_fingerprint")?;
+    let stale_metadata = stored_fingerprint
+        .as_deref()
+        .is_some_and(|stored| !stored.is_empty() && stored != encoder_fingerprint);
+    let incompatible_vectors = connection
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM semantic_vectors WHERE encoder_fingerprint != ?1
+            )",
+            [encoder_fingerprint],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|error| cache_error("checking semantic encoder compatibility", error))?;
+    let incomplete = count_vectors(connection)? < commit_count;
+    Ok(incompatible_vectors || (stale_metadata && incomplete))
+}
+
+fn valid_fingerprint(value: Option<&str>) -> bool {
+    value.is_some_and(|value| {
+        value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+    })
+}
+
+fn valid_embedding(embedding: Option<&[u8]>) -> bool {
+    let Some(embedding) = embedding else {
+        return false;
+    };
+    if embedding.len() != EMBEDDING_BYTES {
+        return false;
+    }
+    let mut norm_squared = 0.0_f64;
+    let (chunks, remainder) = embedding.as_chunks::<{ std::mem::size_of::<f32>() }>();
+    if !remainder.is_empty() {
+        return false;
+    }
+    for chunk in chunks {
+        let value = f32::from_le_bytes(*chunk);
+        if !value.is_finite() {
+            return false;
+        }
+        norm_squared += f64::from(value).powi(2);
+    }
+    (norm_squared.sqrt() - 1.0).abs() <= 1.0e-3
+}
+fn report_semantic_index(report: &mut dyn FnMut(IndexStage), reported: &mut bool) {
+    if !*reported {
+        report(IndexStage::BuildingSemanticIndex);
+        *reported = true;
+    }
 }
 
 fn maintain_vectors(
     connection: &mut Connection,
     encoder_fingerprint: &str,
     report: &mut dyn FnMut(IndexStage),
+    preprocessor: &mut Option<InputPreprocessor>,
 ) -> Result<Option<String>, AppError> {
     let mut last_position = -1_i64;
     let mut encoder = None;
+    let mut stage_reported = false;
     loop {
         let page = read_page(connection, last_position)?;
         if page.is_empty() {
@@ -183,40 +318,39 @@ fn maintain_vectors(
             let message = super::decode_message(&commit.message, commit.message_length)?;
             let commit_paths = paths.remove(&commit.id).unwrap_or_default();
             let source_fingerprint = source_fingerprint(&message, &commit_paths);
-            if commit.source_fingerprint.as_deref() == Some(source_fingerprint.as_str())
-                && commit.encoder_fingerprint.as_deref() == Some(encoder_fingerprint)
-            {
-                continue;
-            }
+            let vector_is_reusable = reusable_vector(&commit, encoder_fingerprint);
+            let document = commit_document(&message, &commit_paths);
 
-            let (title, body) = super::message_parts(&message);
-            let document = CommitDocument {
-                title,
-                body,
-                paths: commit_paths
-                    .iter()
-                    .map(|path| String::from_utf8_lossy(path).into_owned())
-                    .collect(),
-            };
-            if encoder.is_none() {
-                report(IndexStage::BuildingSemanticIndex);
-                encoder = Some(Encoder::load()?);
+            if encoder.is_none() && preprocessor.is_none() {
+                report_semantic_index(report, &mut stage_reported);
+                if vector_is_reusable {
+                    *preprocessor = Some(InputPreprocessor::load()?);
+                } else {
+                    encoder = Some(Encoder::load(None)?);
+                }
             }
-            let prepared = encoder
-                .as_ref()
-                .expect("encoder was initialized")
-                .prepare(&document)?;
-            if commit.encoder_fingerprint.as_deref() == Some(encoder_fingerprint)
+            let prepared = if let Some(preprocessor) = preprocessor.as_ref() {
+                preprocessor.prepare(&document)?
+            } else {
+                encoder
+                    .as_ref()
+                    .expect("encoder or preprocessor was initialized")
+                    .prepare(&document)?
+            };
+            if vector_is_reusable
                 && commit.input_fingerprint.as_deref() == Some(prepared.fingerprint())
             {
-                source_updates.push(SourceFingerprintUpdate {
-                    commit_id: commit.id,
-                    source_fingerprint,
-                });
+                if commit.source_fingerprint.as_deref() != Some(source_fingerprint.as_str()) {
+                    source_updates.push(SourceFingerprintUpdate {
+                        commit_id: commit.id,
+                        source_fingerprint,
+                    });
+                }
                 continue;
             }
             page_vectors.push(PendingVector {
                 commit_id: commit.id,
+                commit_oid: commit.oid,
                 source_fingerprint,
                 input_fingerprint: prepared.fingerprint().to_owned(),
                 input: prepared,
@@ -231,9 +365,9 @@ fn maintain_vectors(
             flush_batch(
                 connection,
                 &mut encoder,
+                preprocessor,
                 &mut batch,
                 encoder_fingerprint,
-                report,
             )?;
         }
         flush_source_updates(connection, &mut source_updates)?;
@@ -243,6 +377,7 @@ fn maintain_vectors(
 
 struct PendingVector {
     commit_id: i64,
+    commit_oid: String,
     source_fingerprint: String,
     input_fingerprint: String,
     input: PreparedInput,
@@ -256,18 +391,21 @@ struct SourceFingerprintUpdate {
 struct CachedCommit {
     id: i64,
     position: i64,
+    oid: String,
     message: Vec<u8>,
     message_length: i64,
+    cached_commit_oid: Option<String>,
+    embedding: Option<Vec<u8>>,
     source_fingerprint: Option<String>,
     input_fingerprint: Option<String>,
     encoder_fingerprint: Option<String>,
 }
-
 fn read_page(connection: &Connection, after_position: i64) -> Result<Vec<CachedCommit>, AppError> {
     let mut statement = connection
         .prepare(
-            "SELECT c.commit_id, c.position, c.message, c.message_length,
-                    v.source_fingerprint, v.input_fingerprint, v.encoder_fingerprint
+            "SELECT c.commit_id, c.position, c.oid, c.message, c.message_length,
+                    v.commit_oid, v.embedding, v.source_fingerprint,
+                    v.input_fingerprint, v.encoder_fingerprint
              FROM commits AS c
              LEFT JOIN semantic_vectors AS v ON v.commit_id = c.commit_id
              WHERE c.position > ?1
@@ -280,11 +418,14 @@ fn read_page(connection: &Connection, after_position: i64) -> Result<Vec<CachedC
             Ok(CachedCommit {
                 id: row.get(0)?,
                 position: row.get(1)?,
-                message: row.get(2)?,
-                message_length: row.get(3)?,
-                source_fingerprint: row.get(4)?,
-                input_fingerprint: row.get(5)?,
-                encoder_fingerprint: row.get(6)?,
+                oid: row.get(2)?,
+                message: row.get(3)?,
+                message_length: row.get(4)?,
+                cached_commit_oid: row.get(5)?,
+                embedding: row.get(6)?,
+                source_fingerprint: row.get(7)?,
+                input_fingerprint: row.get(8)?,
+                encoder_fingerprint: row.get(9)?,
             })
         })
         .map_err(|error| cache_error("reading semantic commit page", error))?
@@ -324,16 +465,15 @@ fn paths_for_page(
 fn flush_batch(
     connection: &mut Connection,
     encoder: &mut Option<Encoder>,
+    preprocessor: &mut Option<InputPreprocessor>,
     batch: &mut Vec<PendingVector>,
     encoder_fingerprint: &str,
-    report: &mut dyn FnMut(IndexStage),
 ) -> Result<(), AppError> {
     if batch.is_empty() {
         return Ok(());
     }
     if encoder.is_none() {
-        report(IndexStage::BuildingSemanticIndex);
-        *encoder = Some(Encoder::load()?);
+        *encoder = Some(Encoder::load(preprocessor.take())?);
     }
     let encoder = encoder.as_mut().expect("encoder was initialized");
     let inputs = batch.iter().map(|item| &item.input).collect::<Vec<_>>();
@@ -357,13 +497,19 @@ fn flush_batch(
         for value in vector {
             embedding.extend_from_slice(&value.to_le_bytes());
         }
+        if !valid_embedding(Some(&embedding)) {
+            return Err(AppError::operational(
+                "error: semantic encoder returned an invalid normalized vector",
+            ));
+        }
         transaction
             .execute(
                 "INSERT INTO semantic_vectors(
-                    commit_id, source_fingerprint, embedding, input_fingerprint,
+                    commit_id, commit_oid, source_fingerprint, embedding, input_fingerprint,
                     encoder_fingerprint, runtime_provenance
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                  ON CONFLICT(commit_id) DO UPDATE SET
+                    commit_oid = excluded.commit_oid,
                     source_fingerprint = excluded.source_fingerprint,
                     embedding = excluded.embedding,
                     input_fingerprint = excluded.input_fingerprint,
@@ -371,6 +517,7 @@ fn flush_batch(
                     runtime_provenance = excluded.runtime_provenance",
                 params![
                     pending.commit_id,
+                    pending.commit_oid,
                     pending.source_fingerprint,
                     embedding,
                     pending.input_fingerprint,
@@ -489,8 +636,25 @@ fn set_metadata(connection: &Connection, values: &[(&str, &str)]) -> Result<(), 
 mod tests {
     use super::*;
 
+    use tokenizers::{
+        Tokenizer, models::wordlevel::WordLevel, pre_tokenizers::whitespace::Whitespace,
+    };
+
+    fn test_preprocessor() -> InputPreprocessor {
+        let vocabulary = [("[UNK]".to_owned(), 0), ("[PAD]".to_owned(), 1)]
+            .into_iter()
+            .collect();
+        let model = WordLevel::builder()
+            .vocab(vocabulary)
+            .unk_token("[UNK]".to_owned())
+            .build()
+            .unwrap();
+        let mut tokenizer = Tokenizer::new(model);
+        tokenizer.with_pre_tokenizer(Some(Whitespace));
+        InputPreprocessor::from_tokenizer(tokenizer).unwrap()
+    }
     #[test]
-    fn ready_semantic_index_is_noop_without_runtime() {
+    fn ready_semantic_index_rejects_mismatched_input_fingerprint() {
         let directory = tempfile::tempdir().unwrap();
         let cache_directory = directory.path().join(".gitscry");
         std::fs::create_dir_all(&cache_directory).unwrap();
@@ -499,9 +663,36 @@ mod tests {
         connection
             .execute_batch(
                 "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-                 CREATE TABLE semantic_vectors (commit_id INTEGER PRIMARY KEY);",
+                 CREATE TABLE commits (
+                    commit_id INTEGER PRIMARY KEY, position INTEGER, oid TEXT,
+                    message BLOB, message_length INTEGER
+                 );
+                 CREATE TABLE semantic_vectors (
+                    commit_id INTEGER PRIMARY KEY, commit_oid TEXT, embedding BLOB,
+                    source_fingerprint TEXT, input_fingerprint TEXT,
+                    encoder_fingerprint TEXT, runtime_provenance TEXT
+                 );
+                 CREATE TABLE commit_paths (
+                    commit_id INTEGER, path_order INTEGER, raw_path BLOB
+                 );",
             )
             .unwrap();
+        let message = b"commit title";
+        let compressed = lz4_flex::compress(message);
+        let paths = vec![b"src/lib.rs".to_vec()];
+        connection
+            .execute(
+                "INSERT INTO commits VALUES (1, 0, 'oid', ?1, ?2)",
+                params![compressed, message.len() as i64],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO commit_paths VALUES (1, 0, ?1)",
+                params![paths[0].as_slice()],
+            )
+            .unwrap();
+        let expected_source_fingerprint = source_fingerprint(message, &paths);
 
         let encoder_fingerprint = semantic::encoder_fingerprint();
         for (key, value) in [
@@ -520,17 +711,109 @@ mod tests {
                 )
                 .unwrap();
         }
+        let mut embedding = vec![0.0_f32; 384];
+        embedding[0] = 1.0;
+        let embedding = embedding
+            .into_iter()
+            .flat_map(f32::to_le_bytes)
+            .collect::<Vec<_>>();
         connection
-            .execute("INSERT INTO semantic_vectors(commit_id) VALUES (1)", [])
+            .execute(
+                "INSERT INTO semantic_vectors(
+                    commit_id, commit_oid, embedding, source_fingerprint, input_fingerprint,
+                    encoder_fingerprint, runtime_provenance
+                 ) VALUES (1, 'oid', ?1, ?2, ?3, ?4, 'previous-runtime')",
+                params![
+                    embedding,
+                    expected_source_fingerprint,
+                    "b".repeat(64),
+                    encoder_fingerprint
+                ],
+            )
             .unwrap();
         drop(connection);
 
-        let mut progress_reports = 0;
-        maintain(directory.path(), SemanticPreference::Preserve, &mut |_| {
-            progress_reports += 1;
-        })
-        .unwrap();
-
-        assert_eq!(progress_reports, 0);
+        let mut connection = Connection::open(cache_path).unwrap();
+        let mut preprocessor = Some(test_preprocessor());
+        let document = commit_document(message, &paths);
+        let input_fingerprint = preprocessor
+            .as_ref()
+            .unwrap()
+            .prepare(&document)
+            .unwrap()
+            .fingerprint()
+            .to_owned();
+        connection
+            .execute(
+                "UPDATE semantic_vectors SET input_fingerprint = ?1",
+                [&input_fingerprint],
+            )
+            .unwrap();
+        assert!(
+            maintain_vectors(
+                &mut connection,
+                &encoder_fingerprint,
+                &mut |_| {},
+                &mut preprocessor,
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert!(
+            is_ready(
+                &connection,
+                "tip",
+                1,
+                &encoder_fingerprint,
+                &mut preprocessor,
+            )
+            .unwrap()
+        );
+        connection
+            .execute(
+                "UPDATE semantic_vectors SET input_fingerprint = ?1",
+                ["b".repeat(64)],
+            )
+            .unwrap();
+        assert!(
+            !is_ready(
+                &connection,
+                "tip",
+                1,
+                &encoder_fingerprint,
+                &mut preprocessor,
+            )
+            .unwrap(),
+            "a well-formed but incorrect input fingerprint must not establish readiness"
+        );
+        connection
+            .execute("UPDATE semantic_vectors SET commit_oid = 'other'", [])
+            .unwrap();
+        assert!(
+            !is_ready(
+                &connection,
+                "tip",
+                1,
+                &encoder_fingerprint,
+                &mut preprocessor,
+            )
+            .unwrap()
+        );
+        connection
+            .execute(
+                "UPDATE semantic_vectors SET commit_oid = 'oid', source_fingerprint = ?1",
+                ["d".repeat(64)],
+            )
+            .unwrap();
+        assert!(
+            !is_ready(
+                &connection,
+                "tip",
+                1,
+                &encoder_fingerprint,
+                &mut preprocessor,
+            )
+            .unwrap()
+        );
     }
 }
