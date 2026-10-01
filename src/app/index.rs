@@ -2,17 +2,31 @@ use crate::{cache, git};
 
 use super::{AppError, IndexStage, Outcome};
 
-pub(super) fn run(report: &mut dyn FnMut(IndexStage)) -> Result<Outcome, AppError> {
+pub(super) fn run(
+    semantic: bool,
+    no_semantic: bool,
+    report: &mut dyn FnMut(IndexStage),
+) -> Result<Outcome, AppError> {
     let repository = git::Repository::discover()?;
     let prepared = cache::prepare(&repository, report)?;
+    let (progress, commit_count, semantic_enabled) = prepared.release();
+    let preference = match (semantic, no_semantic) {
+        (true, false) => cache::SemanticPreference::Enable,
+        (false, true) => cache::SemanticPreference::Disable,
+        (false, false) => cache::SemanticPreference::Preserve,
+        (true, true) => unreachable!("clap prevents conflicting semantic options"),
+    };
+    if !matches!(preference, cache::SemanticPreference::Preserve) || semantic_enabled {
+        cache::maintain_semantic(&repository.root, preference, report)?;
+    }
+    report(IndexStage::Complete);
 
     Ok(Outcome {
-        progress: prepared.progress,
+        progress,
         warnings: Vec::new(),
         message: format!(
-            "Indexed {} commit{}.",
-            prepared.commit_count,
-            if prepared.commit_count == 1 { "" } else { "s" }
+            "Indexed {commit_count} commit{}.",
+            if commit_count == 1 { "" } else { "s" }
         ),
         notices: Vec::new(),
         report: None,

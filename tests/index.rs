@@ -53,6 +53,17 @@ fn first_index_publishes_complete_cache() {
             .unwrap(),
         1
     );
+    let semantic_state: (String, String, i64) = cache
+        .query_row(
+            "SELECT
+                (SELECT value FROM metadata WHERE key = 'semantic_enabled'),
+                (SELECT value FROM metadata WHERE key = 'semantic_ready'),
+                (SELECT COUNT(*) FROM semantic_vectors)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!(semantic_state, ("0".to_owned(), "0".to_owned(), 0));
     assert_eq!(
         cache
             .query_row(
@@ -374,6 +385,236 @@ fn invalid_cli_input_exits_two() {
 }
 
 #[test]
+fn semantic_index_options_are_exposed_and_mutually_exclusive() {
+    let help = Command::new(env!("CARGO_BIN_EXE_gitscry"))
+        .args(["index", "--help"])
+        .output()
+        .unwrap();
+    assert!(help.status.success());
+    let help = String::from_utf8_lossy(&help.stdout);
+    assert!(help.contains("--semantic"), "{help}");
+    assert!(help.contains("--no-semantic"), "{help}");
+
+    let conflict = Command::new(env!("CARGO_BIN_EXE_gitscry"))
+        .args(["index", "--semantic", "--no-semantic"])
+        .output()
+        .unwrap();
+    assert_eq!(conflict.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&conflict.stderr).contains("cannot be used with"));
+}
+
+#[test]
+fn semantic_index_failure_preserves_history_until_explicitly_disabled() {
+    let repo = TestRepo::new();
+    repo.commit("hello.txt", b"hello\n", "initial commit");
+    let run_with_missing_runtime = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_gitscry"))
+            .args(args)
+            .current_dir(repo.dir.path())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", repo.dir.path().join("global-config"))
+            .env(
+                "ORT_DYLIB_PATH",
+                repo.dir.path().join("missing-onnxruntime"),
+            )
+            .output()
+            .unwrap()
+    };
+
+    let initial = repo.run(["index"]);
+    assert!(
+        initial.status.success(),
+        "{}",
+        String::from_utf8_lossy(&initial.stderr)
+    );
+    let failed = run_with_missing_runtime(&["index", "--semantic"]);
+    assert_eq!(failed.status.code(), Some(1));
+    let error = String::from_utf8_lossy(&failed.stderr);
+    assert!(error.contains("ORT_DYLIB_PATH"), "{error}");
+    assert!(
+        error.contains("ordinary history cache is usable"),
+        "{error}"
+    );
+
+    let cache_path = repo.dir.path().join(".gitscry/cache.sqlite");
+    let cache = Connection::open(&cache_path).unwrap();
+    let metadata = |key: &str| {
+        cache
+            .query_row("SELECT value FROM metadata WHERE key = ?1", [key], |row| {
+                row.get::<_, String>(0)
+            })
+            .unwrap()
+    };
+    assert_eq!(metadata("semantic_enabled"), "1");
+    assert_eq!(metadata("semantic_ready"), "0");
+    assert_eq!(
+        cache
+            .query_row("SELECT COUNT(*) FROM semantic_vectors", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert!(repo.run(["search", "initial"]).status.success());
+
+    repo.commit("next.txt", b"next\n", "forward commit");
+    let retried = run_with_missing_runtime(&["index"]);
+    assert_eq!(retried.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&retried.stderr).contains("semantic indexing remains enabled"));
+    assert_eq!(metadata("completed_commit_count"), "2");
+
+    assert_eq!(
+        cache
+            .execute(
+                "INSERT INTO semantic_vectors(
+                    commit_id, source_fingerprint, embedding, input_fingerprint,
+                    encoder_fingerprint, runtime_provenance
+                ) SELECT commit_id, printf('%064d', 0), zeroblob(1536),
+                         printf('%064d', 0), printf('%064d', 0), 'test'
+                  FROM commits LIMIT 1",
+                [],
+            )
+            .unwrap(),
+        1
+    );
+    let disabled = repo.run(["index", "--no-semantic"]);
+    assert!(
+        disabled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&disabled.stderr)
+    );
+    assert_eq!(metadata("semantic_enabled"), "0");
+    assert_eq!(metadata("semantic_ready"), "0");
+    assert_eq!(
+        cache
+            .query_row("SELECT COUNT(*) FROM semantic_vectors", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+
+    let ordinary = run_with_missing_runtime(&["index"]);
+    assert!(
+        ordinary.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ordinary.stderr)
+    );
+    let reenabled = run_with_missing_runtime(&["index", "--semantic"]);
+    assert_eq!(reenabled.status.code(), Some(1));
+    let error = String::from_utf8_lossy(&reenabled.stderr);
+    assert!(
+        error.contains("semantic indexing remains enabled"),
+        "{error}"
+    );
+    assert_eq!(metadata("semantic_enabled"), "1");
+    assert_eq!(metadata("semantic_ready"), "0");
+}
+
+#[test]
+fn semantic_enablement_survives_cache_rebuild() {
+    let repo = TestRepo::new();
+    repo.commit("hello.txt", b"hello\n", "initial commit");
+    let run_with_missing_runtime = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_gitscry"))
+            .args(args)
+            .current_dir(repo.dir.path())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", repo.dir.path().join("global-config"))
+            .env(
+                "ORT_DYLIB_PATH",
+                repo.dir.path().join("missing-onnxruntime"),
+            )
+            .output()
+            .unwrap()
+    };
+
+    assert_eq!(
+        run_with_missing_runtime(&["index", "--semantic"])
+            .status
+            .code(),
+        Some(1)
+    );
+    let cache_path = repo.dir.path().join(".gitscry/cache.sqlite");
+    let cache = Connection::open(&cache_path).unwrap();
+    cache
+        .execute(
+            "UPDATE metadata SET value = '6' WHERE key = 'schema_version'",
+            [],
+        )
+        .unwrap();
+    drop(cache);
+
+    let rebuilt = run_with_missing_runtime(&["index"]);
+    assert_eq!(rebuilt.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&rebuilt.stderr).contains("ordinary history cache is usable"));
+
+    let cache = Connection::open(&cache_path).unwrap();
+    let state: (String, String, String, i64) = cache
+        .query_row(
+            "SELECT
+                (SELECT value FROM metadata WHERE key = 'schema_version'),
+                (SELECT value FROM metadata WHERE key = 'semantic_enabled'),
+                (SELECT value FROM metadata WHERE key = 'semantic_ready'),
+                (SELECT COUNT(*) FROM commits)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(state, ("7".to_owned(), "1".to_owned(), "0".to_owned(), 1));
+}
+
+#[test]
+fn damaged_cache_rebuild_preserves_semantic_enablement() {
+    let repo = TestRepo::new();
+    repo.commit("hello.txt", b"hello\n", "initial commit");
+    let run_with_missing_runtime = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_gitscry"))
+            .args(args)
+            .current_dir(repo.dir.path())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", repo.dir.path().join("global-config"))
+            .env(
+                "ORT_DYLIB_PATH",
+                repo.dir.path().join("missing-onnxruntime"),
+            )
+            .output()
+            .unwrap()
+    };
+
+    assert_eq!(
+        run_with_missing_runtime(&["index", "--semantic"])
+            .status
+            .code(),
+        Some(1)
+    );
+    let cache_path = repo.dir.path().join(".gitscry/cache.sqlite");
+    let cache = Connection::open(&cache_path).unwrap();
+    cache.execute_batch("DROP TABLE semantic_vectors").unwrap();
+    drop(cache);
+
+    let rebuilt = run_with_missing_runtime(&["index"]);
+    assert_eq!(rebuilt.status.code(), Some(1));
+    let error = String::from_utf8_lossy(&rebuilt.stderr);
+    assert!(
+        error.contains("semantic indexing remains enabled"),
+        "{error}"
+    );
+
+    let cache = Connection::open(cache_path).unwrap();
+    let state: (String, String, String, i64) = cache
+        .query_row(
+            "SELECT
+                (SELECT value FROM metadata WHERE key = 'schema_version'),
+                (SELECT value FROM metadata WHERE key = 'semantic_enabled'),
+                (SELECT value FROM metadata WHERE key = 'semantic_ready'),
+                (SELECT COUNT(*) FROM commits)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(state, ("7".to_owned(), "1".to_owned(), "0".to_owned(), 1));
+}
+
+#[test]
 fn help_is_successful_output() {
     let output = Command::new(env!("CARGO_BIN_EXE_gitscry"))
         .arg("--help")
@@ -382,6 +623,10 @@ fn help_is_successful_output() {
 
     assert_eq!(output.status.code(), Some(0));
     assert!(String::from_utf8_lossy(&output.stdout).contains("Usage:"));
+    let root_help = String::from_utf8_lossy(&output.stdout);
+    assert!(!root_help.contains("--semantic"), "{root_help}");
+    assert!(!root_help.contains("--no-semantic"), "{root_help}");
+    assert!(!root_help.contains("gitscry timeline PATH"), "{root_help}");
     assert!(output.stderr.is_empty());
 }
 

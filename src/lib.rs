@@ -5,6 +5,7 @@ mod cli;
 mod git;
 mod github;
 mod render;
+mod semantic;
 
 pub fn run() -> i32 {
     match cli::parse(std::env::args_os()) {

@@ -93,6 +93,7 @@ impl<W: Write> IndexProgress<W> {
                 IndexStage::ReadingChanges => (8, "Reading changes"),
                 IndexStage::ReadingPatches => (12, "Reading patches"),
                 IndexStage::WritingCache => (16, "Writing cache"),
+                IndexStage::BuildingSemanticIndex => (18, "Building semantic index"),
                 IndexStage::Complete => (20, "Complete"),
             };
             let line = format!(
@@ -107,6 +108,8 @@ impl<W: Write> IndexProgress<W> {
             }
         } else if matches!(stage, IndexStage::ReadingCommits) {
             writeln!(self.output, "Indexing local history...")
+        } else if matches!(stage, IndexStage::BuildingSemanticIndex) {
+            writeln!(self.output, "Building semantic index...")
         } else {
             Ok(())
         };

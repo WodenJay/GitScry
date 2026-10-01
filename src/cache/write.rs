@@ -28,7 +28,13 @@ pub(super) fn append(path: &Path, snapshot: &Snapshot) -> Result<usize, AppError
         .transaction()
         .map_err(|error| cache_error("starting cache transaction", error))?;
     write_snapshot_rows(&transaction, snapshot, replace_commit)?;
-    replace_metadata(&transaction, snapshot)?;
+    replace_metadata(&transaction, snapshot, None)?;
+    transaction
+        .execute(
+            "UPDATE metadata SET value = '0' WHERE key = 'semantic_ready'",
+            [],
+        )
+        .map_err(|error| cache_error("invalidating semantic readiness", error))?;
     transaction
         .execute("DELETE FROM shallow_boundaries", [])
         .map_err(|error| cache_error("updating shallow boundaries", error))?;
@@ -63,7 +69,11 @@ pub(super) fn append(path: &Path, snapshot: &Snapshot) -> Result<usize, AppError
         .map_err(|_| cache_error("counting cached commits", "count exceeded platform limits"))
 }
 
-pub(super) fn build(path: &Path, snapshot: &Snapshot) -> Result<(), AppError> {
+pub(super) fn build(
+    path: &Path,
+    snapshot: &Snapshot,
+    semantic_enabled: bool,
+) -> Result<(), AppError> {
     let mut connection =
         Connection::open(path).map_err(|error| cache_error("opening staging cache", error))?;
     connection
@@ -72,7 +82,7 @@ pub(super) fn build(path: &Path, snapshot: &Snapshot) -> Result<(), AppError> {
     let transaction = connection
         .transaction()
         .map_err(|error| cache_error("starting cache transaction", error))?;
-    replace_metadata(&transaction, snapshot)?;
+    replace_metadata(&transaction, snapshot, Some(semantic_enabled))?;
     write_snapshot_rows(&transaction, snapshot, insert_commit)?;
     for oid in &snapshot.shallow_boundaries {
         transaction
@@ -177,14 +187,32 @@ fn projected_paths_by_commit(snapshot: &Snapshot) -> HashMap<String, Vec<Project
     }
     paths_by_commit
 }
-fn replace_metadata(connection: &Connection, snapshot: &Snapshot) -> Result<(), AppError> {
-    for (key, value) in [
+fn replace_metadata(
+    connection: &Connection,
+    snapshot: &Snapshot,
+    semantic_enabled: Option<bool>,
+) -> Result<(), AppError> {
+    let mut metadata = vec![
         ("schema_version", SCHEMA_VERSION.to_owned()),
         ("object_format", snapshot.object_format.clone()),
         ("default_ref", snapshot.default_ref.clone()),
         ("completed_tip", snapshot.tip.clone()),
         ("completed_commit_count", snapshot.commits.len().to_string()),
-    ] {
+    ];
+    if let Some(enabled) = semantic_enabled {
+        metadata.extend([
+            (
+                "semantic_enabled",
+                if enabled { "1" } else { "0" }.to_owned(),
+            ),
+            ("semantic_ready", "0".to_owned()),
+            ("semantic_coverage_tip", String::new()),
+            ("semantic_coverage_count", "0".to_owned()),
+            ("semantic_encoder_fingerprint", String::new()),
+            ("semantic_runtime_provenance", String::new()),
+        ]);
+    }
+    for (key, value) in metadata {
         connection
             .execute(
                 "INSERT INTO metadata(key, value) VALUES (?1, ?2)

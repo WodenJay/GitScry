@@ -6,6 +6,7 @@ mod history;
 mod payload;
 mod query;
 mod schema;
+mod semantic;
 mod write;
 use crate::app::AppError;
 pub(crate) use generation::prepare;
@@ -14,13 +15,14 @@ pub(crate) use history::{CodeHunk, HistoryCommit, HistoryHunk, PatchHistory, Pat
 use payload::HunkReader;
 pub(crate) use query::{RelationHistory, SearchFilter};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
+pub(crate) use semantic::{SemanticPreference, maintain as maintain_semantic};
 use std::{
     fs::{self, File, OpenOptions},
     path::{Path, PathBuf},
     thread,
     time::Duration,
 };
-const SCHEMA_VERSION: &str = "6";
+const SCHEMA_VERSION: &str = "7";
 const WAITING_MESSAGE: &str = "Waiting for another GitScry process...";
 
 struct SharedLock {

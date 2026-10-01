@@ -21,6 +21,7 @@ pub(crate) enum IndexStage {
     ReadingPatches,
     WritingCache,
     Complete,
+    BuildingSemanticIndex,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -62,7 +63,14 @@ pub(crate) fn execute(
 ) -> Result<Outcome, AppError> {
     let mut github_link_request = None;
     let (request, limit, patch, scope) = match command {
-        Command::Index => return index::run(&mut |stage| report(Progress::Index(stage))),
+        Command::Index {
+            semantic,
+            no_semantic,
+        } => {
+            return index::run(semantic, no_semantic, &mut |stage| {
+                report(Progress::Index(stage))
+            });
+        }
         Command::Update => return update::run(&mut |stage| report(Progress::Update(stage))),
         Command::Search {
             query,

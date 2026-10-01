@@ -51,6 +51,14 @@ CREATE TABLE changes (
     new_mode TEXT NOT NULL,
     UNIQUE (commit_id, ordinal)
 ) STRICT;
+CREATE TABLE semantic_vectors (
+    commit_id INTEGER PRIMARY KEY REFERENCES commits(commit_id) ON DELETE CASCADE,
+    embedding BLOB NOT NULL CHECK (length(embedding) = 1536),
+    source_fingerprint TEXT NOT NULL CHECK (length(source_fingerprint) = 64),
+    input_fingerprint TEXT NOT NULL CHECK (length(input_fingerprint) = 64),
+    encoder_fingerprint TEXT NOT NULL CHECK (length(encoder_fingerprint) = 64),
+    runtime_provenance TEXT NOT NULL
+) STRICT;
 CREATE TABLE commit_paths (
     commit_id INTEGER NOT NULL REFERENCES commits(commit_id),
     path_key TEXT NOT NULL,

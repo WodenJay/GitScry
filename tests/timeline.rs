@@ -191,6 +191,9 @@ fn timeline_json_pages_topologically_and_follows_renames() {
     ] {
         assert!(help.contains(option), "timeline help is missing {option}");
     }
+    let root_help = repo.run(["--help"]);
+    let root_help_text = String::from_utf8_lossy(&root_help.stdout);
+    assert!(root_help_text.contains("gitscry <command> --help"));
 
     let unindexed = commit(
         &repo,
