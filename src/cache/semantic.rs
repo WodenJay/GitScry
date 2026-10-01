@@ -654,7 +654,7 @@ mod tests {
         InputPreprocessor::from_tokenizer(tokenizer).unwrap()
     }
     #[test]
-    fn ready_semantic_index_rejects_mismatched_input_fingerprint() {
+    fn ready_semantic_index_validates_vectors_not_runtime_provenance() {
         let directory = tempfile::tempdir().unwrap();
         let cache_directory = directory.path().join(".gitscry");
         std::fs::create_dir_all(&cache_directory).unwrap();
@@ -701,6 +701,7 @@ mod tests {
             ("semantic_coverage_tip", "tip"),
             ("semantic_coverage_count", "1"),
             ("semantic_encoder_fingerprint", encoder_fingerprint.as_str()),
+            ("semantic_runtime_provenance", "previous-runtime"),
             ("completed_tip", "tip"),
             ("completed_commit_count", "1"),
         ] {
@@ -749,6 +750,12 @@ mod tests {
                 [&input_fingerprint],
             )
             .unwrap();
+        connection
+            .execute(
+                "UPDATE metadata SET value = 'new-runtime' WHERE key = 'semantic_runtime_provenance'",
+                [],
+            )
+            .unwrap();
         assert!(
             maintain_vectors(
                 &mut connection,
@@ -769,6 +776,20 @@ mod tests {
             )
             .unwrap()
         );
+        assert_eq!(
+            metadata(&connection, "semantic_runtime_provenance")
+                .unwrap()
+                .as_deref(),
+            Some("new-runtime")
+        );
+        let vector_runtime_provenance = connection
+            .query_row(
+                "SELECT runtime_provenance FROM semantic_vectors WHERE commit_id = 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+        assert_eq!(vector_runtime_provenance, "previous-runtime");
         connection
             .execute(
                 "UPDATE semantic_vectors SET input_fingerprint = ?1",
