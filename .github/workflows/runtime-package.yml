@@ -23,6 +23,7 @@ on:
       - 'src/runtime/**'
       - 'src/semantic/**'
       - 'tests/index.rs'
+      - 'tests/github_links.rs'
       - 'tests/fixtures/**'
       - 'xtask/**'
   push:
@@ -48,6 +49,7 @@ on:
       - 'src/runtime/**'
       - 'src/semantic/**'
       - 'tests/index.rs'
+      - 'tests/github_links.rs'
       - 'tests/fixtures/**'
       - 'xtask/**'
 
