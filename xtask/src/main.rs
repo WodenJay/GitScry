@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::error::Error;
 use std::fs;
 use std::io::{Cursor, Read};
-use std::path::Path;
+use std::path::{Component, Path};
 use std::process;
 
 use flate2::read::GzDecoder;
@@ -129,7 +129,10 @@ fn extract_files(
             let mut archive = tar::Archive::new(decoder);
             for entry in archive.entries()? {
                 let mut entry = entry?;
-                let path = entry.path()?.to_string_lossy().into_owned();
+                let archive_path = entry.path()?;
+                let Some(path) = normalize_archive_path(&archive_path) else {
+                    continue;
+                };
                 let Some(index) = expected.get(path.as_str()).copied() else {
                     continue;
                 };
@@ -194,6 +197,23 @@ fn extract_files(
         .collect()
 }
 
+fn normalize_archive_path(path: &Path) -> Option<String> {
+    let mut normalized = String::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(segment) => {
+                if !normalized.is_empty() {
+                    normalized.push('/');
+                }
+                normalized.push_str(segment.to_str()?);
+            }
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    (!normalized.is_empty()).then_some(normalized)
+}
+
 fn store_verified_file(
     files: &mut [Option<Vec<u8>>],
     index: usize,
@@ -240,4 +260,31 @@ fn stage_runtime_package(
         serde_json::to_vec_pretty(manifest)?,
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_archive_path;
+    use std::path::Path;
+
+    #[test]
+    fn normalizes_tar_members_with_leading_current_directory() {
+        let member = "onnxruntime-osx-arm64-1.23.2/lib/libonnxruntime.1.23.2.dylib";
+        assert_eq!(
+            normalize_archive_path(Path::new(&format!("./{member}"))).as_deref(),
+            Some(member)
+        );
+    }
+
+    #[test]
+    fn rejects_archive_paths_that_escape_the_member_root() {
+        assert_eq!(
+            normalize_archive_path(Path::new("../libonnxruntime.dylib")),
+            None
+        );
+        assert_eq!(
+            normalize_archive_path(Path::new("/libonnxruntime.dylib")),
+            None
+        );
+    }
 }
