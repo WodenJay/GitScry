@@ -60,7 +60,7 @@ pub(crate) fn run(
     intent: &Intent,
     limit: usize,
     scope: Option<&SearchFilter>,
-    query_vectors: &[Vec<f32>],
+    query_vector: &[f32],
 ) -> Result<Report, AppError> {
     let depth = limit.max(MINIMUM_CANDIDATE_DEPTH);
     let mut candidates = HashMap::<i64, FusedCandidate>::new();
@@ -96,7 +96,7 @@ pub(crate) fn run(
         }
     }
 
-    let semantic = session.semantic_top_k(query_vectors, depth, scope)?;
+    let semantic = session.semantic_top_k(query_vector, depth, scope)?;
     let mut seen = HashSet::new();
     for (index, candidate) in semantic
         .into_iter()

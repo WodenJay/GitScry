@@ -68,16 +68,20 @@ fn search_help_documents_historical_scope() {
 }
 
 #[test]
-fn hybrid_search_help_documents_long_queries_and_candidate_count() {
+fn hybrid_search_help_documents_short_query_limit_and_candidate_count() {
     let repo = TestRepo::new();
     let output = repo.run(["search", "--help"]);
     assert_eq!(output.status.code(), Some(0));
     let help = String::from_utf8_lossy(&output.stdout);
-    for expected in ["--hybrid", "220", "40", "32 chunks", "matched_count"] {
+    for expected in [
+        "--hybrid",
+        "256-token limit",
+        "special tokens",
+        "matched_count",
+    ] {
         assert!(help.contains(expected), "missing {expected:?} in:\n{help}");
     }
 }
-
 #[test]
 fn hybrid_search_requires_text_query_and_enabled_semantic_index() {
     let repo = TestRepo::new();

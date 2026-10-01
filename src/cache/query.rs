@@ -169,14 +169,13 @@ impl QuerySession {
     pub(crate) fn require_semantic_ready(&self) -> Result<(), AppError> {
         super::semantic::require_ready_for_query(&self.connection)
     }
-
     pub(crate) fn semantic_top_k(
         &self,
-        query_vectors: &[Vec<f32>],
+        query_vector: &[f32],
         limit: usize,
         scope: Option<&SearchFilter>,
     ) -> Result<Vec<SemanticCandidate>, AppError> {
-        semantic_top_k(&self.connection, query_vectors, limit, scope)
+        semantic_top_k(&self.connection, query_vector, limit, scope)
     }
 
     pub(crate) fn semantic_materials(
@@ -754,14 +753,14 @@ const VECTOR_NORMALIZATION_TOLERANCE: f64 = 1e-3;
 
 fn semantic_top_k(
     connection: &Connection,
-    query_vectors: &[Vec<f32>],
+    query_vector: &[f32],
     limit: usize,
     scope: Option<&SearchFilter>,
 ) -> Result<Vec<SemanticCandidate>, AppError> {
     if limit == 0 {
         return Ok(Vec::new());
     }
-    validate_query_vectors(query_vectors)?;
+    validate_query_vector(query_vector)?;
     let encoder_fingerprint = crate::semantic::encoder_fingerprint();
     let sql = match scope {
         Some(_) => format!(
@@ -826,10 +825,7 @@ fn semantic_top_k(
             )));
         }
         let vector = decode_semantic_vector(&embedding, &oid)?;
-        let cosine = query_vectors
-            .iter()
-            .map(|query| cosine_similarity(query, &vector))
-            .fold(f64::NEG_INFINITY, f64::max);
+        let cosine = cosine_similarity(query_vector, &vector);
         top.insert(SemanticCandidate {
             commit_id,
             oid,
@@ -843,18 +839,11 @@ fn semantic_top_k(
     Ok(top.into_iter().collect())
 }
 
-fn validate_query_vectors(query_vectors: &[Vec<f32>]) -> Result<(), AppError> {
-    if query_vectors.is_empty() {
+fn validate_query_vector(query_vector: &[f32]) -> Result<(), AppError> {
+    if !normalized_vector(query_vector) {
         return Err(AppError::operational(
-            "error: semantic query produced no embedding vectors",
+            "error: semantic query vector has an invalid dimension, value, or normalization",
         ));
-    }
-    for vector in query_vectors {
-        if !normalized_vector(vector) {
-            return Err(AppError::operational(
-                "error: semantic query vector has an invalid dimension, value, or normalization",
-            ));
-        }
     }
     Ok(())
 }
@@ -1386,18 +1375,13 @@ mod semantic_tests {
     }
 
     #[test]
-    fn semantic_top_k_uses_best_query_chunk_and_ties_by_oid() {
+    fn semantic_top_k_breaks_equal_scores_by_oid() {
         let connection = database();
-        let first = unit_vector(0);
-        let second = unit_vector(1);
-        let mut diagonal = vec![0.0; crate::semantic::EMBEDDING_DIMENSION];
-        diagonal[0] = std::f32::consts::FRAC_1_SQRT_2;
-        diagonal[1] = std::f32::consts::FRAC_1_SQRT_2;
-        insert_vector(&connection, 1, "b", &first);
-        insert_vector(&connection, 2, "a", &second);
-        insert_vector(&connection, 3, "c", &diagonal);
+        let query = unit_vector(0);
+        insert_vector(&connection, 1, "b", &query);
+        insert_vector(&connection, 2, "a", &query);
 
-        let results = semantic_top_k(&connection, &[first, second], 2, None).unwrap();
+        let results = semantic_top_k(&connection, &query, 2, None).unwrap();
         assert_eq!(
             results
                 .iter()
@@ -1423,7 +1407,7 @@ mod semantic_tests {
             until: None,
         };
 
-        let results = semantic_top_k(&connection, &[outside], 1, Some(&scope)).unwrap();
+        let results = semantic_top_k(&connection, &outside, 1, Some(&scope)).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].oid, "target");
         assert_eq!(results[0].cosine, 0.0);
@@ -1437,7 +1421,7 @@ mod semantic_tests {
             insert_vector(&connection, id, &format!("{id:040x}"), &query);
         }
 
-        let results = semantic_top_k(&connection, &[query], 101, None).unwrap();
+        let results = semantic_top_k(&connection, &query, 101, None).unwrap();
         assert_eq!(results.len(), 101);
         assert_eq!(results[0].oid, format!("{:040x}", 0));
         assert_eq!(results[100].oid, format!("{:040x}", 100));
@@ -1452,7 +1436,7 @@ mod semantic_tests {
             .execute("UPDATE semantic_vectors SET embedding = X'00'", [])
             .unwrap();
 
-        let error = semantic_top_k(&connection, &[query], 1, None).unwrap_err();
+        let error = semantic_top_k(&connection, &query, 1, None).unwrap_err();
         assert!(error.to_string().contains("invalid dimension"));
     }
 }
