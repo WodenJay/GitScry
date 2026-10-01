@@ -484,3 +484,53 @@ fn set_metadata(connection: &Connection, values: &[(&str, &str)]) -> Result<(), 
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ready_semantic_index_is_noop_without_runtime() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache_directory = directory.path().join(".gitscry");
+        std::fs::create_dir_all(&cache_directory).unwrap();
+        let cache_path = cache_directory.join("cache.sqlite");
+        let connection = Connection::open(&cache_path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                 CREATE TABLE semantic_vectors (commit_id INTEGER PRIMARY KEY);",
+            )
+            .unwrap();
+
+        let encoder_fingerprint = semantic::encoder_fingerprint();
+        for (key, value) in [
+            ("semantic_enabled", "1"),
+            ("semantic_ready", "1"),
+            ("semantic_coverage_tip", "tip"),
+            ("semantic_coverage_count", "1"),
+            ("semantic_encoder_fingerprint", encoder_fingerprint.as_str()),
+            ("completed_tip", "tip"),
+            ("completed_commit_count", "1"),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO metadata(key, value) VALUES (?1, ?2)",
+                    params![key, value],
+                )
+                .unwrap();
+        }
+        connection
+            .execute("INSERT INTO semantic_vectors(commit_id) VALUES (1)", [])
+            .unwrap();
+        drop(connection);
+
+        let mut progress_reports = 0;
+        maintain(directory.path(), SemanticPreference::Preserve, &mut |_| {
+            progress_reports += 1;
+        })
+        .unwrap();
+
+        assert_eq!(progress_reports, 0);
+    }
+}

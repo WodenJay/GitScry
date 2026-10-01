@@ -31,7 +31,7 @@ struct CacheState {
 enum Inspection {
     Missing,
     Stale { semantic_enabled: bool },
-    Damaged,
+    Damaged { semantic_enabled: bool },
     Ready(CacheState),
 }
 
@@ -223,11 +223,12 @@ fn evaluate(
     let semantic_enabled = match &inspection {
         Inspection::Ready(state) => state.semantic_enabled,
         Inspection::Stale { semantic_enabled } => *semantic_enabled,
+        Inspection::Damaged { semantic_enabled } => *semantic_enabled,
         _ => false,
     };
     let Inspection::Ready(state) = inspection else {
         return Ok(Plan::Rebuild {
-            damaged: matches!(inspection, Inspection::Damaged),
+            damaged: matches!(inspection, Inspection::Damaged { .. }),
             semantic_enabled,
         });
     };
@@ -341,7 +342,9 @@ fn inspect(root: &Path) -> Inspection {
     }
     let Ok(connection) = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
     else {
-        return Inspection::Damaged;
+        return Inspection::Damaged {
+            semantic_enabled: false,
+        };
     };
     let semantic_enabled = matches!(
         metadata(&connection, "semantic_enabled")
@@ -359,7 +362,7 @@ fn inspect(root: &Path) -> Inspection {
     }
     match inspect_connection(&connection) {
         Ok(state) => Inspection::Ready(state),
-        Err(()) => Inspection::Damaged,
+        Err(()) => Inspection::Damaged { semantic_enabled },
     }
 }
 

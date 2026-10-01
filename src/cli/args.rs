@@ -13,10 +13,12 @@ pub(super) struct Cli {
     pub(super) command: Command,
 }
 
+// `gitscry --help` is the top-level overview; keep command `about`s concise and put details
+// in each command's `long_about` for the `gitscry <command> --help` entry point.
 const ROOT_LONG_HELP: &str = "\
 Your Git history is a treasure trove. GitScry uncovers the implementation examples, failed approaches, code relationships, and regression context hidden inside.
 
-Pick one command by intent, then run `gitscry <command> --help` for inputs, options, and examples. Use `gitscry timeline PATH` to inspect a file's complete evolution in the published cache.\n\nQuery commands support `--json` for structured output.";
+Pick one command by intent, then run `gitscry <command> --help` for inputs, options, and examples.\n\nQuery commands support `--json` for structured output.";
 
 #[derive(Debug, Args, Default)]
 pub(crate) struct HistoricalScopeArgs {
@@ -44,7 +46,7 @@ pub(crate) enum Command {
     Update,
 
     #[command(
-        about = "Build history cache; semantic indexing is off by default, persists after opt-in, may download model data (--no-semantic disables)",
+        about = "Build or refresh the local history cache",
         long_about = "Build the local cache from the default branch history.\n\nUse `gitscry index` when you want to construct or refresh the local cache explicitly. The cache is a rebuildable local representation of the repository's Git history; Git remains the source of truth, and rerunning `index` rebuilds the cache from the current default branch tip.\n\nSemantic indexing is off by default; ordinary indexing without saved opt-in does not load or download a model. `--semantic` enables it and persists that choice; later `gitscry index` runs maintain the semantic index. `--no-semantic` disables it and removes semantic vectors. These options conflict. Enabling semantic indexing may download about 90 MB of pinned, hash-verified model resources shared across repositories. Subsequent indexing works offline when compatible resources and the verified ONNX Runtime 1.23.2 library are available. Missing or corrupt semantic resources or a missing/incompatible runtime return nonzero; the ordinary history cache remains usable.\n\nRequired input: none.\n\nExamples:\n\n  gitscry index\n\n  gitscry index --semantic\n\n  gitscry index --no-semantic"
     )]
     Index {

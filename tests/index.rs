@@ -421,6 +421,12 @@ fn semantic_index_failure_preserves_history_until_explicitly_disabled() {
             .unwrap()
     };
 
+    let initial = repo.run(["index"]);
+    assert!(
+        initial.status.success(),
+        "{}",
+        String::from_utf8_lossy(&initial.stderr)
+    );
     let failed = run_with_missing_runtime(&["index", "--semantic"]);
     assert_eq!(failed.status.code(), Some(1));
     let error = String::from_utf8_lossy(&failed.stderr);
@@ -450,9 +456,11 @@ fn semantic_index_failure_preserves_history_until_explicitly_disabled() {
     );
     assert!(repo.run(["search", "initial"]).status.success());
 
+    repo.commit("next.txt", b"next\n", "forward commit");
     let retried = run_with_missing_runtime(&["index"]);
     assert_eq!(retried.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&retried.stderr).contains("semantic indexing remains enabled"));
+    assert_eq!(metadata("completed_commit_count"), "2");
 
     assert_eq!(
         cache
@@ -490,6 +498,15 @@ fn semantic_index_failure_preserves_history_until_explicitly_disabled() {
         "{}",
         String::from_utf8_lossy(&ordinary.stderr)
     );
+    let reenabled = run_with_missing_runtime(&["index", "--semantic"]);
+    assert_eq!(reenabled.status.code(), Some(1));
+    let error = String::from_utf8_lossy(&reenabled.stderr);
+    assert!(
+        error.contains("semantic indexing remains enabled"),
+        "{error}"
+    );
+    assert_eq!(metadata("semantic_enabled"), "1");
+    assert_eq!(metadata("semantic_ready"), "0");
 }
 
 #[test]
@@ -546,6 +563,58 @@ fn semantic_enablement_survives_cache_rebuild() {
 }
 
 #[test]
+fn damaged_cache_rebuild_preserves_semantic_enablement() {
+    let repo = TestRepo::new();
+    repo.commit("hello.txt", b"hello\n", "initial commit");
+    let run_with_missing_runtime = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_gitscry"))
+            .args(args)
+            .current_dir(repo.dir.path())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", repo.dir.path().join("global-config"))
+            .env(
+                "ORT_DYLIB_PATH",
+                repo.dir.path().join("missing-onnxruntime"),
+            )
+            .output()
+            .unwrap()
+    };
+
+    assert_eq!(
+        run_with_missing_runtime(&["index", "--semantic"])
+            .status
+            .code(),
+        Some(1)
+    );
+    let cache_path = repo.dir.path().join(".gitscry/cache.sqlite");
+    let cache = Connection::open(&cache_path).unwrap();
+    cache.execute_batch("DROP TABLE semantic_vectors").unwrap();
+    drop(cache);
+
+    let rebuilt = run_with_missing_runtime(&["index"]);
+    assert_eq!(rebuilt.status.code(), Some(1));
+    let error = String::from_utf8_lossy(&rebuilt.stderr);
+    assert!(
+        error.contains("semantic indexing remains enabled"),
+        "{error}"
+    );
+
+    let cache = Connection::open(cache_path).unwrap();
+    let state: (String, String, String, i64) = cache
+        .query_row(
+            "SELECT
+                (SELECT value FROM metadata WHERE key = 'schema_version'),
+                (SELECT value FROM metadata WHERE key = 'semantic_enabled'),
+                (SELECT value FROM metadata WHERE key = 'semantic_ready'),
+                (SELECT COUNT(*) FROM commits)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(state, ("7".to_owned(), "1".to_owned(), "0".to_owned(), 1));
+}
+
+#[test]
 fn help_is_successful_output() {
     let output = Command::new(env!("CARGO_BIN_EXE_gitscry"))
         .arg("--help")
@@ -554,6 +623,10 @@ fn help_is_successful_output() {
 
     assert_eq!(output.status.code(), Some(0));
     assert!(String::from_utf8_lossy(&output.stdout).contains("Usage:"));
+    let root_help = String::from_utf8_lossy(&output.stdout);
+    assert!(!root_help.contains("--semantic"), "{root_help}");
+    assert!(!root_help.contains("--no-semantic"), "{root_help}");
+    assert!(!root_help.contains("gitscry timeline PATH"), "{root_help}");
     assert!(output.stderr.is_empty());
 }
 
