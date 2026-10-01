@@ -1111,9 +1111,7 @@ pub(crate) struct StoredCommit {
 /// Every cached commit, oldest first.
 fn commits(connection: &Connection) -> Result<Vec<StoredCommit>, AppError> {
     let mut statement = connection
-        .prepare(
-            "SELECT position, oid, message, message_length FROM commits ORDER BY commit_time, oid",
-        )
+        .prepare("SELECT position, oid, message, message_length FROM commits ORDER BY position")
         .map_err(|error| search_error("preparing history scan", error))?;
     statement
         .query_map([], |row| {
@@ -1138,7 +1136,7 @@ fn commits_scoped(
          SELECT c.position, c.oid, c.message, c.message_length
          FROM commits AS c
          JOIN eligible ON eligible.commit_id = c.commit_id
-         ORDER BY c.commit_time, c.oid"
+         ORDER BY c.position"
     );
     let mut statement = connection
         .prepare(&query)
