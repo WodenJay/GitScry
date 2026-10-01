@@ -10,8 +10,8 @@ target=$1
 archive=$2
 checksum=$3
 case "$target" in
-    aarch64-apple-darwin) runtime_library=libonnxruntime.dylib ;;
-    x86_64-unknown-linux-gnu) runtime_library=libonnxruntime.so ;;
+    aarch64-apple-darwin) runtime_library=libonnxruntime.1.23.2.dylib ;;
+    x86_64-unknown-linux-gnu) runtime_library=libonnxruntime.so.1.23.2 ;;
     *) echo "unsupported Unix package target: $target" >&2; exit 2 ;;
 esac
 
