@@ -20,7 +20,7 @@ pub(crate) const TOKENIZER_SHA256: &str =
 pub(crate) const REVISION: &str = "8f518e882455312b086101e60691f5e6e2f05c3c";
 const RESOURCES: [Resource; 5] = [
     Resource {
-        path: "onnx/model.onnx",
+        path: "model.onnx",
         bytes: 90_387_630,
         sha256: MODEL_SHA256,
     },
@@ -83,7 +83,7 @@ pub(crate) fn ensure() -> Result<Assets, AppError> {
     }
 
     Ok(Assets {
-        model: directory.join("onnx/model.onnx"),
+        model: directory.join("model.onnx"),
         tokenizer: directory.join("tokenizer.json"),
     })
 }
