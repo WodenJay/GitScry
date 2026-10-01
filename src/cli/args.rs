@@ -16,7 +16,7 @@ pub(super) struct Cli {
 const ROOT_LONG_HELP: &str = "\
 Your Git history is a treasure trove. GitScry uncovers the implementation examples, failed approaches, code relationships, and regression context hidden inside.
 
-Pick one command by intent, then run `gitscry <command> --help` for inputs, options, and examples. Use `gitscry timeline PATH` to inspect a file's complete evolution in the published cache.\n\nQuery commands support `--json` for structured output.";
+Pick one command by intent, then run `gitscry <command> --help` for inputs, options, and examples.\n\nQuery commands support `--json` for structured output.";
 
 #[derive(Debug, Args, Default)]
 pub(crate) struct HistoricalScopeArgs {
