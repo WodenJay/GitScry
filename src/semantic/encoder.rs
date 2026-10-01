@@ -41,26 +41,52 @@ impl PreparedInput {
     }
 }
 
-pub(crate) struct Encoder {
+pub(crate) struct InputPreprocessor {
     tokenizer: Tokenizer,
-    session: Session,
-    runtime_provenance: String,
 }
 
-impl Encoder {
+impl InputPreprocessor {
     pub(crate) fn load() -> Result<Self, AppError> {
-        let runtime_hash = load_pinned_runtime()?;
-        let assets = resources::ensure()?;
-        let tokenizer = Tokenizer::from_file(&assets.tokenizer).map_err(|error| {
+        Self::from_file(resources::ensure_tokenizer()?)
+    }
+
+    fn from_file(path: PathBuf) -> Result<Self, AppError> {
+        let tokenizer = Tokenizer::from_file(path).map_err(|error| {
             AppError::operational(format!(
                 "error: loading the pinned semantic tokenizer: {error}"
             ))
         })?;
+        Self::from_tokenizer(tokenizer)
+    }
+
+    pub(crate) fn from_tokenizer(tokenizer: Tokenizer) -> Result<Self, AppError> {
         if tokenizer.token_to_id("[PAD]").is_none() {
             return Err(AppError::operational(
                 "error: the pinned semantic tokenizer has no [PAD] token",
             ));
         }
+        Ok(Self { tokenizer })
+    }
+
+    pub(crate) fn prepare(&self, document: &CommitDocument) -> Result<PreparedInput, AppError> {
+        let tokens = bounded_input_ids(&self.tokenizer, document)?;
+        let fingerprint = token_fingerprint(&tokens);
+        Ok(PreparedInput {
+            tokens,
+            fingerprint,
+        })
+    }
+}
+
+pub(crate) struct Encoder {
+    preprocessor: InputPreprocessor,
+    session: Session,
+    runtime_provenance: String,
+}
+impl Encoder {
+    pub(crate) fn load(preprocessor: Option<InputPreprocessor>) -> Result<Self, AppError> {
+        let runtime_hash = load_pinned_runtime()?;
+        let assets = resources::ensure()?;
         let session = Session::builder()
             .map_err(|error| {
                 AppError::operational(format!("error: creating semantic ONNX session: {error}"))
@@ -84,29 +110,30 @@ impl Encoder {
             ort::MINOR_VERSION
         );
         Ok(Self {
-            tokenizer,
+            preprocessor: match preprocessor {
+                Some(preprocessor) => preprocessor,
+                None => InputPreprocessor::from_file(assets.tokenizer)?,
+            },
             session,
             runtime_provenance,
         })
     }
-
     pub(crate) fn runtime_provenance(&self) -> &str {
         &self.runtime_provenance
     }
 
     pub(crate) fn prepare(&self, document: &CommitDocument) -> Result<PreparedInput, AppError> {
-        let tokens = bounded_input_ids(&self.tokenizer, document)?;
-        let fingerprint = token_fingerprint(&tokens);
-        Ok(PreparedInput {
-            tokens,
-            fingerprint,
-        })
+        self.preprocessor.prepare(document)
     }
 
     pub(crate) fn embed(&mut self, inputs: &[&PreparedInput]) -> Result<Vec<Vec<f32>>, AppError> {
-        let pad_id = self.tokenizer.token_to_id("[PAD]").ok_or_else(|| {
-            AppError::operational("error: semantic tokenizer lost its [PAD] token")
-        })? as i64;
+        let pad_id = self
+            .preprocessor
+            .tokenizer
+            .token_to_id("[PAD]")
+            .ok_or_else(|| {
+                AppError::operational("error: semantic tokenizer lost its [PAD] token")
+            })? as i64;
         let sequences = inputs
             .iter()
             .map(|input| input.tokens.as_slice())

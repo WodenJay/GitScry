@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 mod support;
 
 use std::{
@@ -11,6 +12,7 @@ use std::{
 use support::{TestRepo, git, git_command, git_stdout};
 
 use rusqlite::Connection;
+use sha2::Digest;
 
 impl TestRepo {
     fn commit(&self, path: &str, contents: &[u8], message: &str) {
@@ -466,9 +468,9 @@ fn semantic_index_failure_preserves_history_until_explicitly_disabled() {
         cache
             .execute(
                 "INSERT INTO semantic_vectors(
-                    commit_id, source_fingerprint, embedding, input_fingerprint,
+                    commit_id, commit_oid, source_fingerprint, embedding, input_fingerprint,
                     encoder_fingerprint, runtime_provenance
-                ) SELECT commit_id, printf('%064d', 0), zeroblob(1536),
+                ) SELECT commit_id, oid, printf('%064d', 0), zeroblob(1536),
                          printf('%064d', 0), printf('%064d', 0), 'test'
                   FROM commits LIMIT 1",
                 [],
@@ -507,6 +509,377 @@ fn semantic_index_failure_preserves_history_until_explicitly_disabled() {
     );
     assert_eq!(metadata("semantic_enabled"), "1");
     assert_eq!(metadata("semantic_ready"), "0");
+}
+
+#[test]
+fn semantic_vectors_survive_rebuild_by_commit_identity() {
+    let repo = TestRepo::new();
+    repo.commit("one.txt", b"one\n", "first commit");
+    let first = repo.head();
+    repo.commit("two.txt", b"two\n", "second commit");
+    let second = repo.head();
+    assert!(repo.run(["index"]).status.success());
+
+    let cache_path = repo.dir.path().join(".gitscry/cache.sqlite");
+    let cache = Connection::open(&cache_path).unwrap();
+    let encoder_fingerprint = expected_encoder_fingerprint();
+    cache
+        .execute(
+            "UPDATE metadata SET value = '1' WHERE key = 'semantic_enabled'",
+            [],
+        )
+        .unwrap();
+    cache
+        .execute(
+            "UPDATE metadata SET value = ?1 WHERE key = 'semantic_encoder_fingerprint'",
+            [&encoder_fingerprint],
+        )
+        .unwrap();
+    cache
+        .execute(
+            "UPDATE metadata SET value = 'previous-runtime' WHERE key = 'semantic_runtime_provenance'",
+            [],
+        )
+        .unwrap();
+
+    let commits = cache
+        .prepare("SELECT commit_id, oid FROM commits ORDER BY position")
+        .unwrap()
+        .query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let vectors_by_oid = HashMap::from([
+        (first.clone(), normalized_vector(0)),
+        (second.clone(), normalized_vector(1)),
+    ]);
+    for (commit_id, oid) in commits {
+        let embedding = vectors_by_oid.get(&oid).unwrap();
+        let source_fingerprint = expected_source_fingerprint(&cache, commit_id);
+        let vector_oid = if oid == second {
+            first.as_str()
+        } else {
+            oid.as_str()
+        };
+        cache
+            .execute(
+                "INSERT INTO semantic_vectors(
+                    commit_id, commit_oid, source_fingerprint, embedding, input_fingerprint,
+                    encoder_fingerprint, runtime_provenance
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                rusqlite::params![
+                    commit_id,
+                    vector_oid,
+                    source_fingerprint,
+                    embedding,
+                    "c".repeat(64),
+                    encoder_fingerprint,
+                    "previous-runtime"
+                ],
+            )
+            .unwrap();
+    }
+    // Make position order disagree with SHA identity so a rebuild must remap by OID.
+    cache
+        .execute_batch(
+            "UPDATE commits SET position = -1 WHERE position = 0;
+             UPDATE commits SET position = 0 WHERE position = 1;
+             UPDATE commits SET position = 1 WHERE position = -1",
+        )
+        .unwrap();
+    cache
+        .execute(
+            "UPDATE metadata SET value = '7' WHERE key = 'schema_version'",
+            [],
+        )
+        .unwrap();
+    drop(cache);
+
+    let rebuilt = Command::new(env!("CARGO_BIN_EXE_gitscry"))
+        .arg("index")
+        .current_dir(repo.dir.path())
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", repo.dir.path().join("global-config"))
+        .env(
+            "ORT_DYLIB_PATH",
+            repo.dir.path().join("missing-onnxruntime"),
+        )
+        .output()
+        .unwrap();
+    assert_eq!(
+        rebuilt.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&rebuilt.stderr)
+    );
+
+    let cache = Connection::open(&cache_path).unwrap();
+    let (ready, count): (String, i64) = cache
+        .query_row(
+            "SELECT
+                (SELECT value FROM metadata WHERE key = 'semantic_ready'),
+                (SELECT COUNT(*) FROM semantic_vectors)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((ready.as_str(), count), ("0", 1));
+    let preserved = cache
+        .prepare(
+            "SELECT c.oid, v.embedding FROM commits AS c
+             JOIN semantic_vectors AS v USING (commit_id)",
+        )
+        .unwrap()
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })
+        .unwrap()
+        .collect::<Result<HashMap<_, _>, _>>()
+        .unwrap();
+    assert_eq!(
+        preserved,
+        HashMap::from([(first.clone(), normalized_vector(0))])
+    );
+    assert!(repo.run(["search", "first"]).status.success());
+
+    let (commit_id, oid): (i64, String) = cache
+        .query_row(
+            "SELECT commit_id, oid FROM commits WHERE oid = ?1",
+            [&second],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    cache
+        .execute(
+            "INSERT INTO semantic_vectors(
+                commit_id, commit_oid, source_fingerprint, embedding, input_fingerprint,
+                encoder_fingerprint, runtime_provenance
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![
+                commit_id,
+                oid,
+                expected_source_fingerprint(&cache, commit_id),
+                vectors_by_oid.get(&second).unwrap(),
+                "c".repeat(64),
+                encoder_fingerprint,
+                "previous-runtime"
+            ],
+        )
+        .unwrap();
+    drop(cache);
+
+    let resumed = Command::new(env!("CARGO_BIN_EXE_gitscry"))
+        .arg("index")
+        .current_dir(repo.dir.path())
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", repo.dir.path().join("global-config"))
+        .env(
+            "ORT_DYLIB_PATH",
+            repo.dir.path().join("missing-onnxruntime"),
+        )
+        .output()
+        .unwrap();
+    assert_eq!(
+        resumed.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+
+    let cache = Connection::open(&cache_path).unwrap();
+    let (ready, count): (String, i64) = cache
+        .query_row(
+            "SELECT
+                (SELECT value FROM metadata WHERE key = 'semantic_ready'),
+                (SELECT COUNT(*) FROM semantic_vectors)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((ready.as_str(), count), ("0", 2));
+    let published = cache
+        .prepare(
+            "SELECT c.oid, v.embedding FROM commits AS c
+             JOIN semantic_vectors AS v USING (commit_id)",
+        )
+        .unwrap()
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })
+        .unwrap()
+        .collect::<Result<HashMap<_, _>, _>>()
+        .unwrap();
+    assert_eq!(published, vectors_by_oid);
+    cache
+        .execute_batch(
+            "CREATE TABLE semantic_vectors_v7 (
+                commit_id INTEGER PRIMARY KEY REFERENCES commits(commit_id) ON DELETE CASCADE,
+                embedding BLOB NOT NULL CHECK (length(embedding) = 1536),
+                source_fingerprint TEXT NOT NULL CHECK (length(source_fingerprint) = 64),
+                input_fingerprint TEXT NOT NULL CHECK (length(input_fingerprint) = 64),
+                encoder_fingerprint TEXT NOT NULL CHECK (length(encoder_fingerprint) = 64),
+                runtime_provenance TEXT NOT NULL
+             ) STRICT;
+             INSERT INTO semantic_vectors_v7(
+                commit_id, embedding, source_fingerprint, input_fingerprint,
+                encoder_fingerprint, runtime_provenance
+             )
+             SELECT commit_id, embedding, source_fingerprint, input_fingerprint,
+                    encoder_fingerprint, runtime_provenance FROM semantic_vectors;
+             DROP TABLE semantic_vectors;
+             ALTER TABLE semantic_vectors_v7 RENAME TO semantic_vectors;
+             UPDATE metadata SET value = '7' WHERE key = 'schema_version';",
+        )
+        .unwrap();
+    drop(cache);
+    let legacy_rebuilt = Command::new(env!("CARGO_BIN_EXE_gitscry"))
+        .arg("index")
+        .current_dir(repo.dir.path())
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", repo.dir.path().join("global-config"))
+        .env(
+            "ORT_DYLIB_PATH",
+            repo.dir.path().join("missing-onnxruntime"),
+        )
+        .output()
+        .unwrap();
+    assert_eq!(
+        legacy_rebuilt.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&legacy_rebuilt.stderr)
+    );
+    let cache = Connection::open(&cache_path).unwrap();
+    let (ready, count): (String, i64) = cache
+        .query_row(
+            "SELECT
+                (SELECT value FROM metadata WHERE key = 'semantic_ready'),
+                (SELECT COUNT(*) FROM semantic_vectors)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((ready.as_str(), count), ("0", 2));
+    let legacy_vectors = cache
+        .prepare(
+            "SELECT c.oid, v.embedding FROM commits AS c
+             JOIN semantic_vectors AS v USING (commit_id)",
+        )
+        .unwrap()
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })
+        .unwrap()
+        .collect::<Result<HashMap<_, _>, _>>()
+        .unwrap();
+    assert_eq!(legacy_vectors, vectors_by_oid);
+    cache
+        .execute_batch(
+            "PRAGMA ignore_check_constraints = ON;
+             UPDATE semantic_vectors SET embedding = zeroblob(4)
+             WHERE commit_id = (SELECT MIN(commit_id) FROM semantic_vectors)",
+        )
+        .unwrap();
+    drop(cache);
+    let damaged = Command::new(env!("CARGO_BIN_EXE_gitscry"))
+        .arg("index")
+        .current_dir(repo.dir.path())
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", repo.dir.path().join("global-config"))
+        .env(
+            "ORT_DYLIB_PATH",
+            repo.dir.path().join("missing-onnxruntime"),
+        )
+        .output()
+        .unwrap();
+    assert_eq!(damaged.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&damaged.stderr).contains("ORT_DYLIB_PATH"));
+    let cache = Connection::open(cache_path).unwrap();
+    let (ready, count): (String, i64) = cache
+        .query_row(
+            "SELECT
+                (SELECT value FROM metadata WHERE key = 'semantic_ready'),
+                (SELECT COUNT(*) FROM semantic_vectors)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((ready.as_str(), count), ("0", 2));
+    assert!(repo.run(["search", "first"]).status.success());
+}
+
+fn normalized_vector(axis: usize) -> Vec<u8> {
+    let mut vector = vec![0.0_f32; 384];
+    vector[axis] = 1.0;
+    vector.into_iter().flat_map(f32::to_le_bytes).collect()
+}
+
+fn expected_encoder_fingerprint() -> String {
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(b"gitscry-semantic-encoder-v2;title=64;paths=32;total=256;field-prefix-chars=4096;path-separator=newline;right-pad;token-types=zero;mask-mean-f32-l2;dimension=384");
+    hasher.update(b"8f518e882455312b086101e60691f5e6e2f05c3c");
+    for (path, bytes, hash) in [
+        (
+            "onnx/model.onnx",
+            90_387_630_u64,
+            "bbd7b466f6d58e646fdc2bd5fd67b2f5e93c0b687011bd4548c420f7bd46f0c5",
+        ),
+        (
+            "tokenizer.json",
+            711_661,
+            "59f410da6d9dad2025f0e53b6c45554a3b3a0a5c574927f201e99d0217c1a26b",
+        ),
+        (
+            "tokenizer_config.json",
+            1_412,
+            "abda01c8c14c5151ae498aceb30db406d6b91242c394fd88d3b6fd5a63a101e6",
+        ),
+        (
+            "special_tokens_map.json",
+            695,
+            "5d5b662e421ea9fac075174bb0688ee0d9431699900b90662acd44b2a350503a",
+        ),
+        (
+            "config.json",
+            650,
+            "1b4d8e2a3988377ed8b519a31d8d31025a25f1c5f8606998e8014111438efcd7",
+        ),
+    ] {
+        hasher.update(path.as_bytes());
+        hasher.update(bytes.to_le_bytes());
+        hasher.update(hash.as_bytes());
+    }
+    format!("{:x}", hasher.finalize())
+}
+
+fn expected_source_fingerprint(cache: &Connection, commit_id: i64) -> String {
+    let (compressed, length): (Vec<u8>, i64) = cache
+        .query_row(
+            "SELECT message, message_length FROM commits WHERE commit_id = ?1",
+            [commit_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    let message = lz4_flex::decompress(&compressed, length as usize).unwrap();
+    let paths = cache
+        .prepare("SELECT raw_path FROM commit_paths WHERE commit_id = ?1 ORDER BY path_order")
+        .unwrap()
+        .query_map([commit_id], |row| row.get::<_, Vec<u8>>(0))
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(b"gitscry-semantic-source-v1\0");
+    hasher.update((message.len() as u64).to_le_bytes());
+    hasher.update(&message);
+    hasher.update((paths.len() as u64).to_le_bytes());
+    for path in paths {
+        hasher.update((path.len() as u64).to_le_bytes());
+        hasher.update(path);
+    }
+    format!("{:x}", hasher.finalize())
 }
 
 #[test]
@@ -559,7 +932,7 @@ fn semantic_enablement_survives_cache_rebuild() {
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .unwrap();
-    assert_eq!(state, ("7".to_owned(), "1".to_owned(), "0".to_owned(), 1));
+    assert_eq!(state, ("8".to_owned(), "1".to_owned(), "0".to_owned(), 1));
 }
 
 #[test]
@@ -611,7 +984,7 @@ fn damaged_cache_rebuild_preserves_semantic_enablement() {
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .unwrap();
-    assert_eq!(state, ("7".to_owned(), "1".to_owned(), "0".to_owned(), 1));
+    assert_eq!(state, ("8".to_owned(), "1".to_owned(), "0".to_owned(), 1));
 }
 
 #[test]
@@ -1223,6 +1596,97 @@ fn concurrent_indexers_leave_one_complete_generation() {
             .unwrap(),
         1
     );
+}
+
+#[test]
+fn plain_index_requires_explicit_semantic_encoder_migration() {
+    let repo = TestRepo::new();
+    repo.commit("one.txt", b"one\n", "initial commit");
+    assert!(repo.run(["index"]).status.success());
+
+    let cache_path = repo.dir.path().join(".gitscry/cache.sqlite");
+    let cache = Connection::open(&cache_path).unwrap();
+    let (commit_id, oid): (i64, String) = cache
+        .query_row("SELECT commit_id, oid FROM commits", [], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .unwrap();
+    let source_fingerprint = expected_source_fingerprint(&cache, commit_id);
+    let embedding = normalized_vector(0);
+    let stale_fingerprint = "d".repeat(64);
+    let tip = repo.head();
+    for (key, value) in [
+        ("semantic_enabled", "1"),
+        ("semantic_ready", "1"),
+        ("semantic_coverage_tip", tip.as_str()),
+        ("semantic_coverage_count", "1"),
+        ("semantic_encoder_fingerprint", stale_fingerprint.as_str()),
+        ("semantic_runtime_provenance", "previous-runtime"),
+    ] {
+        cache
+            .execute(
+                "UPDATE metadata SET value = ?1 WHERE key = ?2",
+                [value, key],
+            )
+            .unwrap();
+    }
+    cache
+        .execute(
+            "INSERT INTO semantic_vectors(
+                commit_id, commit_oid, embedding, source_fingerprint, input_fingerprint,
+                encoder_fingerprint, runtime_provenance
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![
+                commit_id,
+                oid,
+                embedding,
+                source_fingerprint,
+                "c".repeat(64),
+                stale_fingerprint,
+                "previous-runtime"
+            ],
+        )
+        .unwrap();
+    drop(cache);
+
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_gitscry"))
+            .args(args)
+            .current_dir(repo.dir.path())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", repo.dir.path().join("global-config"))
+            .env(
+                "ORT_DYLIB_PATH",
+                repo.dir.path().join("missing-onnxruntime"),
+            )
+            .output()
+            .unwrap()
+    };
+    let plain = run(&["index"]);
+    assert_eq!(plain.status.code(), Some(1));
+    let error = String::from_utf8_lossy(&plain.stderr);
+    assert!(
+        error.contains("ordinary history cache is usable"),
+        "{error}"
+    );
+    assert!(error.contains("gitscry index --semantic"), "{error}");
+    assert!(repo.run(["search", "initial"]).status.success());
+
+    let explicit = run(&["index", "--semantic"]);
+    assert_eq!(explicit.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&explicit.stderr).contains("ORT_DYLIB_PATH"));
+    let cache = Connection::open(cache_path).unwrap();
+    let (enabled, ready, count): (String, String, i64) = cache
+        .query_row(
+            "SELECT
+                (SELECT value FROM metadata WHERE key = 'semantic_enabled'),
+                (SELECT value FROM metadata WHERE key = 'semantic_ready'),
+                (SELECT COUNT(*) FROM semantic_vectors)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!((enabled.as_str(), ready.as_str(), count), ("1", "0", 1));
 }
 
 #[test]
