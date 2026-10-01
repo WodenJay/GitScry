@@ -72,6 +72,23 @@ pub(crate) fn ensure() -> Result<Assets, AppError> {
         tokenizer: directory.join("tokenizer.json"),
     })
 }
+pub(crate) fn existing() -> Result<Assets, AppError> {
+    let directory = model_directory()?;
+    for resource in &RESOURCES {
+        let path = directory.join(resource.path);
+        if !is_valid(&path, resource) {
+            return Err(AppError::operational(format!(
+                "error: pinned semantic model resource `{}` is missing or invalid at `{}`; run `gitscry index --semantic` while online to install or repair it",
+                resource.path,
+                path.display()
+            )));
+        }
+    }
+    Ok(Assets {
+        model: directory.join("onnx/model.onnx"),
+        tokenizer: directory.join("tokenizer.json"),
+    })
+}
 
 pub(crate) fn ensure_tokenizer() -> Result<PathBuf, AppError> {
     let directory = model_directory()?;

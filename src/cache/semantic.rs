@@ -5,14 +5,16 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     app::{AppError, IndexStage},
-    semantic::{self, CommitDocument, Encoder, InputPreprocessor, PreparedInput},
+    semantic::{
+        self, CommitDocument, EMBEDDING_BATCH_SIZE, EMBEDDING_DIMENSION, Encoder,
+        InputPreprocessor, PreparedInput,
+    },
 };
 
 use super::cache_error;
 
 const PAGE_SIZE: usize = 256;
-const EMBEDDING_BATCH_SIZE: usize = 8;
-const EMBEDDING_BYTES: usize = 384 * std::mem::size_of::<f32>();
+const EMBEDDING_BYTES: usize = EMBEDDING_DIMENSION * std::mem::size_of::<f32>();
 
 #[derive(Clone, Copy)]
 pub(crate) enum SemanticPreference {
@@ -180,6 +182,24 @@ fn commit_document(message: &[u8], paths: &[Vec<u8>]) -> CommitDocument {
     }
 }
 
+fn ready_metadata_matches(
+    connection: &Connection,
+    tip: &str,
+    commit_count: i64,
+    encoder_fingerprint: &str,
+) -> Result<bool, AppError> {
+    let coverage_count = commit_count.to_string();
+    Ok(
+        metadata(connection, "semantic_ready")?.as_deref() == Some("1")
+            && metadata(connection, "semantic_coverage_tip")?.as_deref() == Some(tip)
+            && metadata(connection, "semantic_coverage_count")?.as_deref()
+                == Some(coverage_count.as_str())
+            && metadata(connection, "semantic_encoder_fingerprint")?.as_deref()
+                == Some(encoder_fingerprint)
+            && count_vectors(connection)? == commit_count,
+    )
+}
+
 fn is_ready(
     connection: &Connection,
     tip: &str,
@@ -187,14 +207,7 @@ fn is_ready(
     encoder_fingerprint: &str,
     preprocessor: &mut Option<InputPreprocessor>,
 ) -> Result<bool, AppError> {
-    if metadata(connection, "semantic_ready")?.as_deref() != Some("1")
-        || metadata(connection, "semantic_coverage_tip")?.as_deref() != Some(tip)
-        || metadata(connection, "semantic_coverage_count")?.as_deref()
-            != Some(commit_count.to_string().as_str())
-        || metadata(connection, "semantic_encoder_fingerprint")?.as_deref()
-            != Some(encoder_fingerprint)
-        || count_vectors(connection)? != commit_count
-    {
+    if !ready_metadata_matches(connection, tip, commit_count, encoder_fingerprint)? {
         return Ok(false);
     }
     let mut last_position = -1_i64;
@@ -292,6 +305,35 @@ fn report_semantic_index(report: &mut dyn FnMut(IndexStage), reported: &mut bool
         report(IndexStage::BuildingSemanticIndex);
         *reported = true;
     }
+}
+
+pub(super) fn require_ready_for_query(connection: &Connection) -> Result<(), AppError> {
+    if !semantic_enabled(connection)? {
+        return Err(AppError::operational(
+            "error: semantic search is disabled; run `gitscry index --semantic` while online to enable it. Ordinary history search remains available.",
+        ));
+    }
+    let (tip, commit_count) = completed_generation(connection)?;
+    let encoder_fingerprint = semantic::encoder_fingerprint();
+    if !ready_metadata_matches(connection, &tip, commit_count, &encoder_fingerprint)? {
+        return Err(AppError::operational(
+            "error: semantic index is missing, stale, or incomplete; run `gitscry index --semantic` while online to repair it. Ordinary history search remains available.",
+        ));
+    }
+    let linked_count = connection
+        .query_row(
+            "SELECT count(*) FROM semantic_vectors
+             JOIN commits USING (commit_id)",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|error| super::cache_error("checking semantic vector identities", error))?;
+    if linked_count != commit_count {
+        return Err(AppError::operational(
+            "error: semantic index is missing, stale, or incomplete; run `gitscry index --semantic` while online to repair it. Ordinary history search remains available.",
+        ));
+    }
+    Ok(())
 }
 
 fn maintain_vectors(

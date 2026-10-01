@@ -13,7 +13,7 @@ pub(crate) use generation::prepare;
 pub(crate) use history::HunkId;
 pub(crate) use history::{CodeHunk, HistoryCommit, HistoryHunk, PatchHistory, PatchHistoryHunk};
 use payload::HunkReader;
-pub(crate) use query::{RelationHistory, SearchFilter};
+pub(crate) use query::{RelationHistory, SearchCandidate, SearchFilter, SearchMaterial};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 pub(crate) use semantic::{SemanticPreference, maintain as maintain_semantic};
 use std::{

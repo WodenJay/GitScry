@@ -75,6 +75,7 @@ pub(crate) fn execute(
         Command::Search {
             query,
             code,
+            hybrid,
             change,
             path,
             limit,
@@ -85,7 +86,7 @@ pub(crate) fn execute(
             ..
         } => {
             let request = match (query, code) {
-                (Some(words), None) => Request::Search(words),
+                (Some(words), None) => Request::Search { words, hybrid },
                 (None, Some(query)) => Request::CodeSearch {
                     query,
                     path,
