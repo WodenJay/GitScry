@@ -7,6 +7,7 @@ pub(crate) struct Intent {
     terms: Vec<String>,
     /// Repository-relative anchors, from `--path` and from path-like query words.
     anchors: Vec<String>,
+    explicit_paths: Vec<String>,
 }
 
 impl Intent {
@@ -15,14 +16,16 @@ impl Intent {
         if input.trim().is_empty() {
             return Err(AppError::input("query must not be empty"));
         }
+        let explicit_paths = normalize_anchors(paths.iter().cloned())?;
         let anchors = normalize_anchors(
             path_like_words(&input)
                 .into_iter()
-                .chain(paths.iter().cloned()),
+                .chain(explicit_paths.iter().cloned()),
         )?;
         Ok(Self {
             terms: tokenize(&input),
             anchors,
+            explicit_paths,
         })
     }
 
@@ -34,6 +37,7 @@ impl Intent {
         Ok(Self {
             terms: tokenize(&input),
             anchors: normalize_anchors([path.to_owned()])?,
+            explicit_paths: Vec::new(),
         })
     }
 
@@ -44,6 +48,7 @@ impl Intent {
         Ok(Self {
             terms: Vec::new(),
             anchors: normalize_anchors(paths.iter().cloned())?,
+            explicit_paths: Vec::new(),
         })
     }
 
@@ -54,6 +59,10 @@ impl Intent {
     /// Every anchor the caller supplied, path-like query words included.
     pub(crate) fn anchors(&self) -> &[String] {
         &self.anchors
+    }
+    /// Paths passed explicitly by the caller, not inferred from query words.
+    pub(crate) fn explicit_paths(&self) -> &[String] {
+        &self.explicit_paths
     }
 }
 
