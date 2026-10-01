@@ -846,3 +846,59 @@ fn timeline_scope_intersects_target_and_preserves_renames() {
     assert_eq!(text.status.code(), Some(0));
     assert!(String::from_utf8_lossy(&text.stdout).contains("intersected with target revision"));
 }
+
+#[test]
+fn timeline_orders_history_after_shallow_clone_is_deepened() {
+    let source = TestRepo::new();
+    let oldest = commit(
+        &source,
+        "history.txt",
+        b"oldest\n",
+        "Oldest commit",
+        "2020-01-01T00:00:00+0000",
+    );
+    let newest = commit(
+        &source,
+        "history.txt",
+        b"newest\n",
+        "Newest commit",
+        "2020-01-02T00:00:00+0000",
+    );
+
+    let parent = tempfile::tempdir().unwrap();
+    let clone = parent.path().join("clone");
+    let cloned = git_command(parent.path())
+        .args(["clone", "--depth", "1", "--no-local"])
+        .arg(source.dir.path())
+        .arg(&clone)
+        .output()
+        .unwrap();
+    assert!(
+        cloned.status.success(),
+        "{}",
+        String::from_utf8_lossy(&cloned.stderr)
+    );
+
+    let first_index = TestRepo::run_at(&clone, ["index"]);
+    assert!(
+        first_index.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first_index.stderr)
+    );
+    git(&clone, ["fetch", "--deepen=1"]);
+    assert_eq!(git_stdout(&clone, ["rev-list", "--count", "HEAD"]), "2");
+    let deepened_index = TestRepo::run_at(&clone, ["index"]);
+    assert!(
+        deepened_index.status.success(),
+        "{}",
+        String::from_utf8_lossy(&deepened_index.stderr)
+    );
+
+    let timeline = json(&TestRepo::run_at(
+        &clone,
+        ["timeline", "history.txt", "--json"],
+    ));
+    assert_eq!(timeline["total"], 2, "timeline response: {timeline}");
+    assert_eq!(timeline["entries"][0]["commit_id"], oldest);
+    assert_eq!(timeline["entries"][1]["commit_id"], newest);
+}
