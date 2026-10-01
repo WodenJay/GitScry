@@ -12,12 +12,16 @@ use crate::{
     app::AppError,
     cache::{self, QuerySession, SearchFilter},
     git::{Repository, WhyAnchor},
+    semantic::Encoder,
 };
 
 pub(crate) use scope::SearchScopeOptions;
 
 pub(crate) enum Request {
-    Search(Vec<String>),
+    Search {
+        words: Vec<String>,
+        hybrid: bool,
+    },
     CodeSearch {
         query: String,
         path: Option<String>,
@@ -150,7 +154,13 @@ pub(crate) fn execute(request: Request, options: Options) -> Result<Outcome, App
         return Err(AppError::input("limit must be greater than zero"));
     }
     match request {
-        Request::Search(words) => run_search(words, options),
+        Request::Search { words, hybrid } => {
+            if hybrid {
+                run_hybrid_search(words, options)
+            } else {
+                run_search(words, options)
+            }
+        }
         Request::CodeSearch {
             query,
             path,
@@ -221,6 +231,27 @@ fn run_search(words: Vec<String>, options: Options) -> Result<Outcome, AppError>
         }
         None => capabilities::search(&context.session, &intent, options.limit)?,
     };
+    if options.patch {
+        patch::attach_patch_excerpts(&context.session, &intent, &mut report, false, &[])?;
+    }
+    Ok(context.finish(QueryReport::Analysis(report)))
+}
+
+fn run_hybrid_search(words: Vec<String>, options: Options) -> Result<Outcome, AppError> {
+    let intent = Intent::parse(&words, &[])?;
+    let context = Context::open(options.scope)?;
+    context.session.require_semantic_ready()?;
+
+    let query = words.join(" ");
+    let (mut encoder, inputs) = Encoder::load_for_query(&query)?;
+    let query_vectors = encoder.embed_query(&inputs)?;
+    let mut report = capabilities::hybrid_search(
+        &context.session,
+        &intent,
+        options.limit,
+        context.filter(),
+        &query_vectors,
+    )?;
     if options.patch {
         patch::attach_patch_excerpts(&context.session, &intent, &mut report, false, &[])?;
     }

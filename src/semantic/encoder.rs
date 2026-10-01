@@ -11,13 +11,16 @@ use tokenizers::{Encoding, Tokenizer};
 
 use crate::app::AppError;
 
-use super::resources;
+use super::{EMBEDDING_BATCH_SIZE, EMBEDDING_DIMENSION, resources};
 
 const TOTAL_TOKEN_LIMIT: usize = 256;
 const TITLE_TOKEN_LIMIT: usize = 64;
 const PATH_TOKEN_LIMIT: usize = 32;
-const EMBEDDING_DIMENSION: usize = 384;
 const CPU_THREADS: usize = 10;
+const QUERY_CPU_THREADS: usize = 4;
+const QUERY_CHUNK_CONTENT_TOKENS: usize = 220;
+const QUERY_CHUNK_OVERLAP_TOKENS: usize = 40;
+const MAX_QUERY_CHUNKS: usize = 32;
 
 const MAX_TOKENIZER_INPUT_CHARS: usize = 4096;
 pub(crate) struct CommitDocument {
@@ -51,29 +54,59 @@ impl Encoder {
     pub(crate) fn load() -> Result<Self, AppError> {
         let runtime_hash = load_pinned_runtime()?;
         let assets = resources::ensure()?;
-        let tokenizer = Tokenizer::from_file(&assets.tokenizer).map_err(|error| {
+        Self::with_assets(assets, runtime_hash, CPU_THREADS)
+    }
+
+    pub(crate) fn load_for_query(query: &str) -> Result<(Self, Vec<PreparedInput>), AppError> {
+        let assets = resources::existing()?;
+        let mut tokenizer = load_tokenizer(&assets)?;
+        clear_query_truncation(&mut tokenizer)?;
+        let encoded = encode(&tokenizer, query, true)?;
+        let cls_id = tokenizer.token_to_id("[CLS]").ok_or_else(|| {
+            AppError::operational("error: the pinned semantic tokenizer has no [CLS] token")
+        })?;
+        let sep_id = tokenizer.token_to_id("[SEP]").ok_or_else(|| {
+            AppError::operational("error: the pinned semantic tokenizer has no [SEP] token")
+        })?;
+        let inputs = query_input_ids(encoded.get_ids(), cls_id, sep_id)?;
+        let runtime_hash = load_pinned_runtime().map_err(|error| {
             AppError::operational(format!(
-                "error: loading the pinned semantic tokenizer: {error}"
+                "{error}; repair or reinstall GitScry using the official installer. For controlled semantic-index testing, set ORT_DYLIB_PATH to the verified platform library."
             ))
         })?;
-        if tokenizer.token_to_id("[PAD]").is_none() {
-            return Err(AppError::operational(
-                "error: the pinned semantic tokenizer has no [PAD] token",
-            ));
-        }
+        let encoder =
+            Self::with_tokenizer(tokenizer, assets.model, runtime_hash, QUERY_CPU_THREADS)?;
+        Ok((encoder, inputs))
+    }
+
+    fn with_assets(
+        assets: resources::Assets,
+        runtime_hash: String,
+        thread_limit: usize,
+    ) -> Result<Self, AppError> {
+        let tokenizer = load_tokenizer(&assets)?;
+        Self::with_tokenizer(tokenizer, assets.model, runtime_hash, thread_limit)
+    }
+
+    fn with_tokenizer(
+        tokenizer: Tokenizer,
+        model: PathBuf,
+        runtime_hash: String,
+        thread_limit: usize,
+    ) -> Result<Self, AppError> {
         let session = Session::builder()
             .map_err(|error| {
                 AppError::operational(format!("error: creating semantic ONNX session: {error}"))
             })?
             .with_intra_threads(
                 std::thread::available_parallelism()
-                    .map(|count| count.get().min(CPU_THREADS))
+                    .map(|count| count.get().min(thread_limit))
                     .unwrap_or(1),
             )
             .map_err(|error| {
                 AppError::operational(format!("error: configuring semantic CPU threads: {error}"))
             })?
-            .commit_from_file(&assets.model)
+            .commit_from_file(&model)
             .map_err(|error| {
                 AppError::operational(format!(
                     "error: loading the pinned semantic ONNX model: {error}"
@@ -203,6 +236,107 @@ impl Encoder {
             })
             .collect()
     }
+
+    pub(crate) fn embed_query(
+        &mut self,
+        inputs: &[PreparedInput],
+    ) -> Result<Vec<Vec<f32>>, AppError> {
+        if inputs.is_empty() {
+            return Err(AppError::operational(
+                "error: semantic query produced no embedding inputs",
+            ));
+        }
+        let mut vectors = Vec::with_capacity(inputs.len());
+        for batch in inputs.chunks(EMBEDDING_BATCH_SIZE) {
+            let batch = batch.iter().collect::<Vec<_>>();
+            vectors.extend(self.embed(&batch)?);
+        }
+        Ok(vectors)
+    }
+}
+
+fn load_tokenizer(assets: &resources::Assets) -> Result<Tokenizer, AppError> {
+    let tokenizer = Tokenizer::from_file(&assets.tokenizer).map_err(|error| {
+        AppError::operational(format!(
+            "error: loading the pinned semantic tokenizer: {error}"
+        ))
+    })?;
+    if tokenizer.token_to_id("[PAD]").is_none() {
+        return Err(AppError::operational(
+            "error: the pinned semantic tokenizer has no [PAD] token",
+        ));
+    }
+    Ok(tokenizer)
+}
+
+fn clear_query_truncation(tokenizer: &mut Tokenizer) -> Result<(), AppError> {
+    tokenizer
+        .with_truncation(None)
+        .map(|_| ())
+        .map_err(|error| {
+            AppError::operational(format!(
+                "error: disabling tokenizer truncation for hybrid query: {error}"
+            ))
+        })
+}
+
+fn query_input_ids(
+    encoded_ids: &[u32],
+    cls_id: u32,
+    sep_id: u32,
+) -> Result<Vec<PreparedInput>, AppError> {
+    if encoded_ids.len() < 2
+        || encoded_ids.first() != Some(&cls_id)
+        || encoded_ids.last() != Some(&sep_id)
+    {
+        return Err(AppError::operational(
+            "error: the pinned semantic tokenizer did not add the expected [CLS]/[SEP] query tokens",
+        ));
+    }
+    let token_sequences = if encoded_ids.len() <= TOTAL_TOKEN_LIMIT {
+        vec![encoded_ids.to_vec()]
+    } else {
+        let content = &encoded_ids[1..encoded_ids.len() - 1];
+        let chunk_count = query_chunk_count(content.len());
+        if chunk_count > MAX_QUERY_CHUNKS {
+            return Err(AppError::input(format!(
+                "hybrid query exceeds the {MAX_QUERY_CHUNKS}-chunk limit; shorten the query or rerun without `--hybrid`"
+            )));
+        }
+        let mut chunks = Vec::with_capacity(chunk_count);
+        let mut start = 0;
+        while start < content.len() {
+            let end = start
+                .saturating_add(QUERY_CHUNK_CONTENT_TOKENS)
+                .min(content.len());
+            let mut tokens = Vec::with_capacity(end - start + 2);
+            tokens.push(cls_id);
+            tokens.extend_from_slice(&content[start..end]);
+            tokens.push(sep_id);
+            chunks.push(tokens);
+            if end == content.len() {
+                break;
+            }
+            start = start.saturating_add(QUERY_CHUNK_CONTENT_TOKENS - QUERY_CHUNK_OVERLAP_TOKENS);
+        }
+        chunks
+    };
+
+    Ok(token_sequences
+        .into_iter()
+        .map(|tokens| PreparedInput {
+            fingerprint: token_fingerprint(&tokens),
+            tokens,
+        })
+        .collect())
+}
+
+fn query_chunk_count(content_token_count: usize) -> usize {
+    let stride = QUERY_CHUNK_CONTENT_TOKENS - QUERY_CHUNK_OVERLAP_TOKENS;
+    if content_token_count <= QUERY_CHUNK_CONTENT_TOKENS {
+        return 1;
+    }
+    1 + (content_token_count - QUERY_CHUNK_CONTENT_TOKENS).div_ceil(stride)
 }
 
 fn bounded_input_ids(
@@ -398,4 +532,67 @@ fn hash_file(path: &std::path::Path) -> io::Result<String> {
         hasher.update(&buffer[..read]);
     }
     Ok(format!("{:x}", hasher.finalize()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{clear_query_truncation, query_input_ids};
+    use tokenizers::{
+        Tokenizer, models::wordlevel::WordLevel, utils::truncation::TruncationParams,
+    };
+
+    const CLS: u32 = 101;
+    const SEP: u32 = 102;
+
+    fn encoded_query(content_tokens: usize) -> Vec<u32> {
+        let mut ids = Vec::with_capacity(content_tokens + 2);
+        ids.push(CLS);
+        ids.extend((0..content_tokens).map(|token| token as u32));
+        ids.push(SEP);
+        ids
+    }
+
+    #[test]
+    fn short_query_limit_includes_special_tokens() {
+        let inputs = query_input_ids(&encoded_query(254), CLS, SEP).unwrap();
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].token_count(), 256);
+    }
+
+    #[test]
+    fn long_query_chunks_preserve_token_ids_and_stop_when_covered() {
+        let encoded = encoded_query(400);
+        let inputs = query_input_ids(&encoded, CLS, SEP).unwrap();
+        assert_eq!(inputs.len(), 2);
+        assert_eq!(inputs[0].tokens[0], CLS);
+        assert_eq!(inputs[0].tokens.last(), Some(&SEP));
+        assert_eq!(&inputs[0].tokens[1..221], &encoded[1..221]);
+        assert_eq!(&inputs[1].tokens[1..221], &encoded[181..401]);
+    }
+
+    #[test]
+    fn query_chunk_cap_accepts_32_and_rejects_33_before_embedding() {
+        let accepted = query_input_ids(&encoded_query(5_800), CLS, SEP).unwrap();
+        assert_eq!(accepted.len(), 32);
+
+        let error = match query_input_ids(&encoded_query(5_801), CLS, SEP) {
+            Ok(_) => panic!("33 chunks should be rejected"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("32-chunk limit"));
+        assert!(error.to_string().contains("rerun without `--hybrid`"));
+    }
+    #[test]
+    fn query_tokenizer_clears_configured_truncation() {
+        let mut tokenizer = Tokenizer::new(WordLevel::default());
+        let truncation = TruncationParams {
+            max_length: 256,
+            ..TruncationParams::default()
+        };
+        tokenizer.with_truncation(Some(truncation)).unwrap();
+        assert_eq!(tokenizer.get_truncation().unwrap().max_length, 256);
+
+        clear_query_truncation(&mut tokenizer).unwrap();
+        assert!(tokenizer.get_truncation().is_none());
+    }
 }

@@ -34,6 +34,7 @@ const CANDIDATE_MULTIPLIER: usize = 20;
 pub(in crate::analysis) struct Scored {
     /// Position in the cache generation, which orders commits recorded in the same second.
     pub(in crate::analysis) position: i64,
+    pub(in crate::analysis) commit_id: i64,
     pub(in crate::analysis) oid: String,
     pub(in crate::analysis) commit_time: i64,
     pub(in crate::analysis) subject: String,
@@ -84,28 +85,63 @@ pub(in crate::analysis) fn pool(
     let candidates = match scope {
         Some(scope) => session.candidates_scoped(&query, scope)?,
         None => session.candidates(&query, candidate_limit(limit))?,
-    }
-    .into_iter()
-    .map(|candidate| Scored {
-        signals: lexical::signals(
-            intent,
-            &candidate.subject,
-            &candidate.body,
-            &candidate.paths,
-            candidate.bm25,
-        ),
-        position: candidate.position,
-        oid: candidate.oid,
-        commit_time: candidate.commit_time,
-        subject: candidate.subject,
-        path_keys: candidate.path_keys,
-        paths: candidate.paths,
-    })
-    .collect();
+    };
+    let candidates = score_candidates(intent, candidates);
     Ok(Some(Pool {
         matched_count,
         candidates,
     }))
+}
+
+pub(in crate::analysis) fn pool_with_depth(
+    session: &QuerySession,
+    intent: &Intent,
+    depth: usize,
+    scope: Option<&SearchFilter>,
+) -> Result<Option<Pool>, AppError> {
+    let terms = intent.terms();
+    if terms.is_empty() {
+        return Ok(None);
+    }
+    let query = match_query(terms);
+    let candidates = match scope {
+        Some(scope) => session.candidates_scoped(&query, scope)?,
+        None => session.candidates(&query, candidate_limit(depth))?,
+    };
+    let candidates = score_candidates(intent, candidates);
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+    let matched_count = candidates.len();
+    Ok(Some(Pool {
+        matched_count,
+        candidates,
+    }))
+}
+
+fn score_candidates(
+    intent: &Intent,
+    candidates: Vec<crate::cache::SearchCandidate>,
+) -> Vec<Scored> {
+    candidates
+        .into_iter()
+        .map(|candidate| Scored {
+            signals: lexical::signals(
+                intent,
+                &candidate.subject,
+                &candidate.body,
+                &candidate.paths,
+                candidate.bm25,
+            ),
+            position: candidate.position,
+            commit_id: candidate.commit_id,
+            oid: candidate.oid,
+            commit_time: candidate.commit_time,
+            subject: candidate.subject,
+            path_keys: candidate.path_keys,
+            paths: candidate.paths,
+        })
+        .collect()
 }
 
 pub(in crate::analysis) fn steps(session: &QuerySession, oid: &str) -> Result<Vec<Step>, AppError> {

@@ -65,6 +65,8 @@ pub(crate) enum Command {
 
 Use `gitscry search QUERY...` to search commit subjects, bodies, and touched paths. Use `--code TEXT` to find a case-sensitive literal substring in added or removed lines from cached diffs. Code queries are non-empty, single-line text; punctuation and spaces are matched literally. Unchanged context lines are not searched.
 
+Use `--hybrid` with text queries to merge lexical ranking with exact semantic cosine retrieval. It requires a ready semantic index; search never downloads or repairs model resources. Run `gitscry index --semantic` to enable or repair semantic coverage while online. Query sequences up to 256 tokens total, including special tokens, use one embedding. Longer queries are split into 220-content-token chunks with 40-token overlap; at most 32 chunks are allowed. Shorten longer queries or rerun without `--hybrid`. Hybrid search scans eligible vectors once and keeps `max(100, --limit)` candidates per branch. In JSON, `matched_count` is the deduplicated union of those bounded branch lists, not a corpus-wide match count; a notice reports the candidate depth.
+
 In code mode, `--change added|removed` selects one direction and `--path PATH` matches an exact historical path: additions use the new path and removals use the old path. Rename history is not followed. No file-type filter is applied.
 
 Scope applies to both search modes and is limited to the published cache. `--from-rev REV` excludes that commit and its ancestors; `--to-rev REV` includes that commit and its ancestors. The lower revision must be an ancestor of the upper revision. Revisions must exist in the published cache. If `--to-rev` is omitted, the effective upper revision is the cache tip.
@@ -87,6 +89,9 @@ Examples:
         /// Query words matched against commit subjects, bodies, and touched paths.
         #[arg(num_args = 1..)]
         query: Option<Vec<String>>,
+        /// Combine lexical ranking with exact semantic retrieval.
+        #[arg(long, requires = "query", conflicts_with = "code")]
+        hybrid: bool,
         /// Case-sensitive literal substring matched on changed lines.
         #[arg(long, value_name = "TEXT", value_parser = parse_code_query)]
         code: Option<String>,
