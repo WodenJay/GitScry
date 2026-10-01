@@ -358,6 +358,90 @@ fn examples_demotes_reverted_work_and_cites_the_revert() {
 }
 
 #[test]
+fn failures_choose_the_earliest_revert_by_history_order_not_timestamp() {
+    let repo = TestRepo::new();
+    let abandoned = repo.commit_at(
+        "src/db/index.rs",
+        b"cron sessions excluded\n",
+        "Exclude cron sessions from the FTS index",
+        "2026-01-01T00:00:00+0000",
+    );
+    let earliest_revert = repo.commit_at(
+        "src/db/index.rs",
+        b"cron sessions restored\n",
+        &format!(
+            "revert: exclude cron sessions from the FTS index\n\n\
+             This reverts commit {abandoned}.\n\n\
+             The earlier approach failed because it blocked the scheduled writer.\n"
+        ),
+        "2026-03-01T00:00:00+0000",
+    );
+    let later_revert = repo.commit_at(
+        "src/db/index.rs",
+        b"cron sessions reconfigured\n",
+        &format!(
+            "revert: exclude cron sessions from the FTS index\n\n\
+             This reverts commit {abandoned}.\n\n\
+             The later revert claims the flag broke lookups.\n"
+        ),
+        "2026-02-01T00:00:00+0000",
+    );
+    repo.index();
+
+    let outputs = [
+        (
+            "unscoped",
+            repo.run(["failures", "cron", "sessions", "--json"]),
+        ),
+        (
+            "scoped",
+            repo.run([
+                "failures",
+                "cron",
+                "sessions",
+                "--to-rev",
+                later_revert.as_str(),
+                "--json",
+            ]),
+        ),
+    ];
+    let observations = outputs
+        .into_iter()
+        .map(|(scope, output)| {
+            assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+            let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            let entry = report["materials"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|material| material["subject"] == "Exclude cron sessions from the FTS index")
+                .expect("abandoned change in failures report");
+            let reason = entry["detail"]["reason"]
+                .as_str()
+                .unwrap_or("<missing reason>")
+                .to_owned();
+            let revert_oid = entry["citations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|citation| citation["note"] == "reverts this change")
+                .and_then(|citation| citation["oid"].as_str())
+                .unwrap_or("<missing revert citation>")
+                .to_owned();
+            (scope, reason, revert_oid)
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        observations.iter().all(|(_, reason, oid)| {
+            reason == "The earlier approach failed because it blocked the scheduled writer"
+                && oid == &earliest_revert
+                && oid != &later_revert
+        }),
+        "unexpected failure links: {observations:#?}"
+    );
+}
+
+#[test]
 fn failures_reports_the_stated_reason_and_the_corrective_follow_up() {
     let repo = TestRepo::new();
     let abandoned = repo.commit_at(
