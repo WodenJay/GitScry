@@ -127,12 +127,12 @@ pub(crate) fn run(
     intent: &Intent,
     limit: usize,
     scope: Option<&SearchFilter>,
-    query_vector: &[f32],
+    query_vectors: &[Vec<f32>],
 ) -> Result<Report, AppError> {
     let depth = limit.max(MINIMUM_CANDIDATE_DEPTH);
     let lexical = retrieval::pool_with_depth(session, intent, depth, scope)?
         .map_or_else(Vec::new, |pool| pool.candidates);
-    let semantic = session.semantic_top_k(query_vector, depth, scope)?;
+    let semantic = session.semantic_top_k(query_vectors, depth, scope)?;
     let mut candidates = rank_candidates(lexical, semantic, depth)?;
     let semantic_only_ids = candidates
         .values()

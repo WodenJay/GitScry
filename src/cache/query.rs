@@ -171,11 +171,11 @@ impl QuerySession {
     }
     pub(crate) fn semantic_top_k(
         &self,
-        query_vector: &[f32],
+        query_vectors: &[Vec<f32>],
         limit: usize,
         scope: Option<&SearchFilter>,
     ) -> Result<Vec<SemanticCandidate>, AppError> {
-        semantic_top_k(&self.connection, query_vector, limit, scope)
+        semantic_top_k(&self.connection, query_vectors, limit, scope)
     }
 
     pub(crate) fn semantic_materials(
@@ -753,14 +753,21 @@ const VECTOR_NORMALIZATION_TOLERANCE: f64 = 1e-3;
 
 fn semantic_top_k(
     connection: &Connection,
-    query_vector: &[f32],
+    query_vectors: &[Vec<f32>],
     limit: usize,
     scope: Option<&SearchFilter>,
 ) -> Result<Vec<SemanticCandidate>, AppError> {
     if limit == 0 {
         return Ok(Vec::new());
     }
-    validate_query_vector(query_vector)?;
+    if query_vectors.is_empty() {
+        return Err(AppError::operational(
+            "error: semantic query has no chunk embeddings",
+        ));
+    }
+    for query_vector in query_vectors {
+        validate_query_vector(query_vector)?;
+    }
     let encoder_fingerprint = crate::semantic::encoder_fingerprint();
     let sql = match scope {
         Some(_) => format!(
@@ -825,7 +832,10 @@ fn semantic_top_k(
             )));
         }
         let vector = decode_semantic_vector(&embedding, &oid)?;
-        let cosine = cosine_similarity(query_vector, &vector);
+        let cosine = query_vectors
+            .iter()
+            .map(|query_vector| cosine_similarity(query_vector, &vector))
+            .fold(f64::NEG_INFINITY, f64::max);
         top.insert(SemanticCandidate {
             commit_id,
             oid,
@@ -1381,7 +1391,7 @@ mod semantic_tests {
         insert_vector(&connection, 1, "b", &query);
         insert_vector(&connection, 2, "a", &query);
 
-        let results = semantic_top_k(&connection, &query, 2, None).unwrap();
+        let results = semantic_top_k(&connection, std::slice::from_ref(&query), 2, None).unwrap();
         assert_eq!(
             results
                 .iter()
@@ -1391,6 +1401,39 @@ mod semantic_tests {
         );
         assert_eq!(results[0].cosine, 1.0);
         assert_eq!(results[0].commit_id, 2);
+    }
+
+    #[test]
+    fn semantic_top_k_uses_each_commits_best_chunk_score() {
+        let connection = database();
+        let head = unit_vector(0);
+        let middle = unit_vector(1);
+        let tail = unit_vector(2);
+        let mut between = vec![0.0; crate::semantic::EMBEDDING_DIMENSION];
+        between[0] = 0.8;
+        between[1] = 0.6;
+        let miss = unit_vector(3);
+        insert_vector(&connection, 1, "tail", &tail);
+        insert_vector(&connection, 2, "between", &between);
+        insert_vector(&connection, 3, "head", &head);
+        insert_vector(&connection, 4, "miss", &miss);
+        insert_vector(&connection, 5, "middle", &middle);
+
+        let query_chunks = [head, middle, tail];
+        let results = semantic_top_k(&connection, &query_chunks, 5, None).unwrap();
+
+        assert_eq!(
+            results
+                .iter()
+                .map(|hit| hit.oid.as_str())
+                .collect::<Vec<_>>(),
+            ["head", "middle", "tail", "between", "miss"]
+        );
+        assert_eq!(results[0].cosine, 1.0);
+        assert_eq!(results[1].cosine, 1.0);
+        assert_eq!(results[2].cosine, 1.0);
+        assert!((results[3].cosine - 0.8).abs() < 1e-6);
+        assert_eq!(results[4].cosine, 0.0);
     }
 
     #[test]
@@ -1407,7 +1450,8 @@ mod semantic_tests {
             until: None,
         };
 
-        let results = semantic_top_k(&connection, &outside, 1, Some(&scope)).unwrap();
+        let results =
+            semantic_top_k(&connection, std::slice::from_ref(&outside), 1, Some(&scope)).unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].oid, "target");
         assert_eq!(results[0].cosine, 0.0);
@@ -1421,7 +1465,7 @@ mod semantic_tests {
             insert_vector(&connection, id, &format!("{id:040x}"), &query);
         }
 
-        let results = semantic_top_k(&connection, &query, 101, None).unwrap();
+        let results = semantic_top_k(&connection, std::slice::from_ref(&query), 101, None).unwrap();
         assert_eq!(results.len(), 101);
         assert_eq!(results[0].oid, format!("{:040x}", 0));
         assert_eq!(results[100].oid, format!("{:040x}", 100));
@@ -1436,7 +1480,7 @@ mod semantic_tests {
             .execute("UPDATE semantic_vectors SET embedding = X'00'", [])
             .unwrap();
 
-        let error = semantic_top_k(&connection, &query, 1, None).unwrap_err();
+        let error = semantic_top_k(&connection, std::slice::from_ref(&query), 1, None).unwrap_err();
         assert!(error.to_string().contains("invalid dimension"));
     }
 }
