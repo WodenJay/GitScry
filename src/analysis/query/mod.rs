@@ -244,14 +244,14 @@ fn run_hybrid_search(words: Vec<String>, options: Options) -> Result<Outcome, Ap
     context.session.require_semantic_ready()?;
 
     let query = words.join(" ");
-    let (mut encoder, input) = Encoder::load_for_query(&query)?;
-    let query_vector = encoder.embed_query(&input)?;
+    let (mut encoder, inputs) = Encoder::load_for_query(&query)?;
+    let query_vectors = encoder.embed_query_chunks(&inputs)?;
     let mut report = capabilities::hybrid_search(
         &context.session,
         &intent,
         options.limit,
         context.filter(),
-        &query_vector,
+        &query_vectors,
     )?;
     if options.patch {
         patch::attach_patch_excerpts(&context.session, &intent, &mut report, false, &[])?;

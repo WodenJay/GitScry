@@ -11,14 +11,17 @@ use tokenizers::{Encoding, Tokenizer};
 
 use crate::app::AppError;
 
-use super::{EMBEDDING_DIMENSION, resources};
+use super::{EMBEDDING_BATCH_SIZE, EMBEDDING_DIMENSION, resources};
 
 const TOTAL_TOKEN_LIMIT: usize = 256;
+const QUERY_CHUNK_CONTENT_TOKENS: usize = 220;
+const QUERY_CHUNK_OVERLAP_TOKENS: usize = 40;
+const QUERY_CHUNK_STRIDE: usize = QUERY_CHUNK_CONTENT_TOKENS - QUERY_CHUNK_OVERLAP_TOKENS;
+const MAX_QUERY_CHUNKS: usize = 32;
 const TITLE_TOKEN_LIMIT: usize = 64;
 const PATH_TOKEN_LIMIT: usize = 32;
 const CPU_THREADS: usize = 10;
 const QUERY_CPU_THREADS: usize = 4;
-
 const MAX_TOKENIZER_INPUT_CHARS: usize = 4096;
 pub(crate) struct CommitDocument {
     pub(crate) title: String,
@@ -77,7 +80,7 @@ impl InputPreprocessor {
         })
     }
 
-    fn prepare_query(&mut self, query: &str) -> Result<PreparedInput, AppError> {
+    fn prepare_query(&mut self, query: &str) -> Result<Vec<PreparedInput>, AppError> {
         clear_query_truncation(&mut self.tokenizer)?;
         let encoded = encode(&self.tokenizer, query, true)?;
         let cls_id = self.tokenizer.token_to_id("[CLS]").ok_or_else(|| {
@@ -102,10 +105,10 @@ impl Encoder {
         Self::with_assets(assets, runtime_hash, CPU_THREADS, preprocessor)
     }
 
-    pub(crate) fn load_for_query(query: &str) -> Result<(Self, PreparedInput), AppError> {
+    pub(crate) fn load_for_query(query: &str) -> Result<(Self, Vec<PreparedInput>), AppError> {
         let assets = resources::existing()?;
         let mut preprocessor = InputPreprocessor::from_file(assets.tokenizer.clone())?;
-        let input = preprocessor.prepare_query(query)?;
+        let inputs = preprocessor.prepare_query(query)?;
         let runtime_hash = load_pinned_runtime().map_err(|error| {
             AppError::operational(format!(
                 "{error}; repair or reinstall GitScry using the official installer. For controlled semantic-index testing, set ORT_DYLIB_PATH to the verified platform library."
@@ -113,7 +116,7 @@ impl Encoder {
         })?;
         let encoder =
             Self::with_assets(assets, runtime_hash, QUERY_CPU_THREADS, Some(preprocessor))?;
-        Ok((encoder, input))
+        Ok((encoder, inputs))
     }
 
     fn with_assets(
@@ -266,11 +269,21 @@ impl Encoder {
             .collect()
     }
 
-    pub(crate) fn embed_query(&mut self, input: &PreparedInput) -> Result<Vec<f32>, AppError> {
-        self.embed(&[input])?
-            .into_iter()
-            .next()
-            .ok_or_else(|| AppError::operational("error: semantic query produced no embedding"))
+    pub(crate) fn embed_query_chunks(
+        &mut self,
+        inputs: &[PreparedInput],
+    ) -> Result<Vec<Vec<f32>>, AppError> {
+        if inputs.is_empty() {
+            return Err(AppError::operational(
+                "error: semantic query produced no chunks to embed",
+            ));
+        }
+        let mut embeddings = Vec::with_capacity(inputs.len());
+        for batch in inputs.chunks(EMBEDDING_BATCH_SIZE) {
+            let batch = batch.iter().collect::<Vec<_>>();
+            embeddings.extend(self.embed(&batch)?);
+        }
+        Ok(embeddings)
     }
 }
 
@@ -289,7 +302,7 @@ fn query_input_ids(
     encoded_ids: &[u32],
     cls_id: u32,
     sep_id: u32,
-) -> Result<PreparedInput, AppError> {
+) -> Result<Vec<PreparedInput>, AppError> {
     if encoded_ids.len() < 2
         || encoded_ids.first() != Some(&cls_id)
         || encoded_ids.last() != Some(&sep_id)
@@ -298,16 +311,40 @@ fn query_input_ids(
             "error: the pinned semantic tokenizer did not add the expected [CLS]/[SEP] query tokens",
         ));
     }
-    if encoded_ids.len() > TOTAL_TOKEN_LIMIT {
-        return Err(AppError::input(format!(
-            "hybrid query exceeds the {TOTAL_TOKEN_LIMIT}-token limit including special tokens; shorten the query or rerun ordinary lexical search without `--hybrid`"
-        )));
-    }
-    let tokens = encoded_ids.to_vec();
-    Ok(PreparedInput {
-        fingerprint: token_fingerprint(&tokens),
-        tokens,
-    })
+    let token_sequences = if encoded_ids.len() <= TOTAL_TOKEN_LIMIT {
+        vec![encoded_ids.to_vec()]
+    } else {
+        let content = &encoded_ids[1..encoded_ids.len() - 1];
+        let mut sequences = Vec::with_capacity(MAX_QUERY_CHUNKS);
+        let mut start = 0;
+        while start < content.len() {
+            if sequences.len() == MAX_QUERY_CHUNKS {
+                return Err(AppError::input(format!(
+                    "hybrid query exceeds the {MAX_QUERY_CHUNKS}-chunk limit ({QUERY_CHUNK_CONTENT_TOKENS} content tokens per chunk, {QUERY_CHUNK_OVERLAP_TOKENS}-token overlap); shorten the query or rerun ordinary lexical search without `--hybrid`"
+                )));
+            }
+            let end = start
+                .saturating_add(QUERY_CHUNK_CONTENT_TOKENS)
+                .min(content.len());
+            let mut tokens = Vec::with_capacity(end - start + 2);
+            tokens.push(cls_id);
+            tokens.extend_from_slice(&content[start..end]);
+            tokens.push(sep_id);
+            sequences.push(tokens);
+            if end == content.len() {
+                break;
+            }
+            start += QUERY_CHUNK_STRIDE;
+        }
+        sequences
+    };
+    Ok(token_sequences
+        .into_iter()
+        .map(|tokens| PreparedInput {
+            fingerprint: token_fingerprint(&tokens),
+            tokens,
+        })
+        .collect())
 }
 fn bounded_input_ids(
     tokenizer: &Tokenizer,
@@ -523,19 +560,66 @@ mod tests {
     }
 
     #[test]
-    fn short_query_limit_includes_special_tokens() {
-        let input = query_input_ids(&encoded_query(254), CLS, SEP).unwrap();
-        assert_eq!(input.token_count(), 256);
+    fn short_query_limit_includes_special_tokens_and_preserves_its_tokens() {
+        let expected = encoded_query(254);
+        let inputs = query_input_ids(&expected, CLS, SEP).unwrap();
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].token_count(), 256);
+        assert_eq!(inputs[0].tokens, expected);
     }
 
     #[test]
-    fn long_query_exceeding_total_limit_is_rejected_before_embedding() {
-        let error = match query_input_ids(&encoded_query(255), CLS, SEP) {
-            Ok(_) => panic!("query beyond 256 total tokens should be rejected"),
+    fn query_one_token_over_short_limit_uses_overlapping_chunks() {
+        let inputs = query_input_ids(&encoded_query(255), CLS, SEP).unwrap();
+        assert_eq!(inputs.len(), 2);
+        assert_eq!(inputs[0].tokens[0], CLS);
+        assert_eq!(inputs[0].tokens[1..221], (0..220).collect::<Vec<_>>());
+        assert_eq!(inputs[0].tokens[221], SEP);
+        assert_eq!(inputs[1].tokens[0], CLS);
+        assert_eq!(inputs[1].tokens[1..76], (180..255).collect::<Vec<_>>());
+        assert_eq!(inputs[1].tokens[76], SEP);
+    }
+
+    #[test]
+    fn long_query_chunks_cover_head_middle_and_tail_without_retokenizing() {
+        let inputs = query_input_ids(&encoded_query(401), CLS, SEP).unwrap();
+        assert_eq!(inputs.len(), 3);
+        assert_eq!(inputs[0].tokens[1..221], (0..220).collect::<Vec<_>>());
+        assert_eq!(inputs[1].tokens[1..221], (180..400).collect::<Vec<_>>());
+        assert_eq!(inputs[2].tokens[1..42], (360..401).collect::<Vec<_>>());
+        assert!(inputs.iter().all(|input| {
+            input.tokens.first() == Some(&CLS) && input.tokens.last() == Some(&SEP)
+        }));
+    }
+
+    #[test]
+    fn query_ending_at_a_window_boundary_has_no_redundant_tail_chunk() {
+        let inputs = query_input_ids(&encoded_query(400), CLS, SEP).unwrap();
+        assert_eq!(inputs.len(), 2);
+        assert_eq!(inputs[1].tokens[1..221], (180..400).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn query_chunk_limit_accepts_32_and_rejects_33_with_actionable_error() {
+        let inputs = query_input_ids(&encoded_query(5_800), CLS, SEP).unwrap();
+        assert_eq!(inputs.len(), 32);
+        assert!(inputs.iter().all(|input| input.token_count() <= 222));
+        assert_eq!(
+            inputs[31].tokens[1..221],
+            (5_580..5_800).collect::<Vec<_>>()
+        );
+
+        let error = match query_input_ids(&encoded_query(5_801), CLS, SEP) {
+            Ok(_) => panic!("queries requiring a 33rd chunk must be rejected"),
             Err(error) => error,
         };
-        assert!(error.to_string().contains("256-token limit"));
-        assert!(error.to_string().contains("special tokens"));
+        let message = error.to_string();
+        assert!(message.contains("32-chunk limit"), "{message}");
+        assert!(message.contains("shorten the query"), "{message}");
+        assert!(
+            message.contains("ordinary lexical search without `--hybrid`"),
+            "{message}"
+        );
     }
     #[test]
     fn query_tokenizer_clears_configured_truncation() {
