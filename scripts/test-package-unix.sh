@@ -70,7 +70,7 @@ export GITSCRY_TEST_ARCHIVE="$archive"
 export GITSCRY_TEST_CHECKSUM="$checksum"
 export GITSCRY_INSTALL_DIR="$install_dir"
 export TMPDIR="$scratch"
-PATH="$mock_bin:$PATH" ./scripts/gitscry-installer.sh
+PATH="$mock_bin:$PATH" sh ./scripts/gitscry-installer.sh
 test -x "$install_dir/gitscry"
 test -f "$install_dir/runtime/manifests/$version.json"
 find "$install_dir/runtime" -type f -name "$runtime_library" -print -quit | grep -q .
