@@ -2,6 +2,7 @@ mod error;
 mod index;
 mod update;
 
+use crate::github;
 use crate::{
     analysis::{
         CodeDirection,
@@ -41,6 +42,7 @@ pub(crate) struct Outcome {
     pub(crate) message: String,
     pub(crate) notices: Vec<String>,
     pub(crate) report: Option<query::QueryReport>,
+    pub(crate) github_links: Option<crate::github::LinksReport>,
 }
 
 impl From<HistoricalScopeArgs> for SearchScopeOptions {
@@ -58,6 +60,7 @@ pub(crate) fn execute(
     command: Command,
     report: &mut dyn FnMut(Progress),
 ) -> Result<Outcome, AppError> {
+    let mut github_repository = None;
     let (request, limit, patch, scope) = match command {
         Command::Index => return index::run(&mut |stage| report(Progress::Index(stage))),
         Command::Update => return update::run(&mut |stage| report(Progress::Update(stage))),
@@ -69,6 +72,8 @@ pub(crate) fn execute(
             limit,
             patch,
             scope,
+            github_links,
+            github_repo,
             ..
         } => {
             let request = match (query, code) {
@@ -83,6 +88,7 @@ pub(crate) fn execute(
                 },
                 _ => unreachable!("clap enforces exactly one search mode"),
             };
+            github_repository = github_links.then_some(github_repo);
             (request, limit, patch, scope.into())
         }
         Command::Examples {
@@ -231,11 +237,18 @@ pub(crate) fn execute(
             scope,
         },
     )?;
+    let github_links = github_repository.map(|explicit_repo| {
+        let query::QueryReport::Analysis(report) = &result.report else {
+            unreachable!("GitHub links are enabled only for text search");
+        };
+        github::fetch(report, explicit_repo.as_deref())
+    });
     Ok(Outcome {
         progress: result.progress,
         warnings: result.warnings,
         message: String::new(),
         notices: result.report.notices().to_vec(),
         report: Some(result.report),
+        github_links,
     })
 }

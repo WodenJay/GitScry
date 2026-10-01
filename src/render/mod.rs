@@ -4,6 +4,7 @@
 //! stderr; query reports go to stdout as either human-readable English or schema-versioned JSON.
 
 mod escape;
+mod github_links;
 mod json;
 mod material;
 
@@ -15,9 +16,19 @@ use crate::{
 };
 use std::io::{self, IsTerminal, Write};
 
-fn format_report(report: &QueryReport) -> String {
+fn format_report(
+    report: &QueryReport,
+    github_links: Option<&crate::github::LinksReport>,
+) -> String {
     match report {
-        QueryReport::Analysis(report) => material::format_report(report),
+        QueryReport::Analysis(report) => {
+            let mut output = material::format_report(report);
+            if let Some(github_links) = github_links {
+                output.push_str("\n\n");
+                output.push_str(&github_links::format(github_links));
+            }
+            output
+        }
         QueryReport::Timeline(report) => timeline::format_report(report),
     }
 }
@@ -25,9 +36,12 @@ fn format_report(report: &QueryReport) -> String {
 fn format_json_report(
     report: &QueryReport,
     additional_warnings: &[String],
+    github_links: Option<&crate::github::LinksReport>,
 ) -> Result<String, serde_json::Error> {
     match report {
-        QueryReport::Analysis(report) => json::format_json_report(report, additional_warnings),
+        QueryReport::Analysis(report) => {
+            json::format_json_report(report, additional_warnings, github_links)
+        }
         QueryReport::Timeline(report) => timeline::format_json_report(report, additional_warnings),
     }
 }
@@ -171,7 +185,7 @@ fn write_outcome(outcome: Outcome, json_output: bool) -> io::Result<()> {
                 "JSON output requires a query report",
             )
         })?;
-        let json = format_json_report(report, &outcome.warnings)
+        let json = format_json_report(report, &outcome.warnings, outcome.github_links.as_ref())
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         writeln!(io::stdout().lock(), "{json}")
     } else {
@@ -186,10 +200,10 @@ fn write_outcome(outcome: Outcome, json_output: bool) -> io::Result<()> {
         for notice in &outcome.notices {
             writeln!(stderr, "{notice}")?;
         }
-        let message = outcome
-            .report
-            .as_ref()
-            .map_or_else(|| outcome.message.clone(), format_report);
+        let message = outcome.report.as_ref().map_or_else(
+            || outcome.message.clone(),
+            |report| format_report(report, outcome.github_links.as_ref()),
+        );
         writeln!(io::stdout().lock(), "{message}")
     }
 }

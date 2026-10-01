@@ -11,10 +11,17 @@ const SCHEMA_VERSION: u8 = 1;
 pub(crate) fn format_json_report(
     report: &Report,
     additional_warnings: &[String],
+    github_links: Option<&crate::github::LinksReport>,
 ) -> Result<String, serde_json::Error> {
     let warnings = additional_warnings.iter().chain(&report.warnings).collect();
     serde_json::to_string(&JsonReport {
-        schema_version: if report.patch_mode { 2 } else { SCHEMA_VERSION },
+        schema_version: if github_links.is_some() {
+            3
+        } else if report.patch_mode {
+            2
+        } else {
+            SCHEMA_VERSION
+        },
         kind: report_kind(report.kind),
         matched_count: report.matched_count,
         truncated: report.truncated,
@@ -23,6 +30,7 @@ pub(crate) fn format_json_report(
             .then(|| report.code_matches.iter().map(json_code_match).collect()),
         warnings,
         notices: &report.notices,
+        github_links,
         scope: report.scope.as_ref().map(json_scope),
     })
 }
@@ -38,6 +46,8 @@ struct JsonReport<'a> {
     code_matches: Option<Vec<JsonCodeMatch<'a>>>,
     warnings: Vec<&'a String>,
     notices: &'a [String],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    github_links: Option<&'a crate::github::LinksReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     scope: Option<JsonSearchScope<'a>>,
 }

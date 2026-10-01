@@ -3,6 +3,7 @@ mod app;
 mod cache;
 mod cli;
 mod git;
+mod github;
 mod render;
 
 pub fn run() -> i32 {

@@ -349,6 +349,14 @@ fn json_flag_is_available_only_for_query_commands() {
     assert!(search_help.contains("--path <PATH>"));
     assert!(search_help.contains("case-sensitive literal substring"));
     assert!(search_help.contains("default branch"));
+    assert!(search_help.contains("--github-links"));
+    assert!(search_help.contains("--github-repo <OWNER/REPO>"));
+    assert!(search_help.contains("Commit.associatedPullRequests"));
+    assert!(search_help.contains("existing GitHub login"));
+    assert!(search_help.contains("PR number, title, URL, repository identity"));
+    assert!(search_help.contains("does not audit or claim a minimum permission set"));
+    assert!(search_help.contains("cannot guarantee every PR containing a commit"));
+    assert!(search_help.contains("search does not contact GitHub"));
     assert!(search_help.contains("Examples:"));
     for name in ["regression", "trace-fix"] {
         let help = repo.run([name, "--help"]);

@@ -178,6 +178,11 @@ This is enough! GitScry intentionally uses a single lightweight instruction inst
 | **`index`** | Builds or refreshes the local cache from the repository's default-branch history. | `gitscry index` |
 | **`update`** | Updates GitScry to the latest stable release. | `gitscry update` |
 
+### GitHub pull-request links
+
+`gitscry search QUERY --github-links [--github-repo OWNER/REPO]` adds an independent commit-to-PR link section. The optional lookup uses the `gh` CLI’s existing GitHub login and queries GitHub.com’s `Commit.associatedPullRequests` connection for returned commits (up to the first 50 PRs per commit), reading PR number, title, URL, repository identity and pagination metadata; GitScry does not audit or claim a minimum permission set. If no repository is specified, GitScry uses local remotes only when they identify one unique GitHub.com repository; an explicit repository takes precedence. `--github-repo` alone never enables network access.
+
+Association lookup is limited to 15 seconds, 20 API requests, and 200 deduplicated PR objects. It does not fetch PR bodies or issues, and the first page cannot guarantee every PR containing a commit. Links are navigation context, not proof of intent or causality; output marks incomplete or unavailable lookups instead of treating them as no associations.
 Use `gitscry --help` to learn more.
 
 ## Feedback & Issues

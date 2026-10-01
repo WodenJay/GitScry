@@ -64,6 +64,8 @@ Scope applies to both search modes and is limited to the published cache. `--fro
 
 Run `gitscry index` to refresh the cache; incomplete or shallow history is reported as a warning. `--limit` limits matching commits in ordinary mode and matching lines in code mode. `--json` returns structured output.
 
+`--github-links` fetches only the first 50 `Commit.associatedPullRequests` results per returned commit. It does not fetch PR bodies or issues and cannot guarantee every PR containing a commit. Links are navigation evidence, not proof of intent or causality. Lookup uses the `gh` CLI's existing GitHub login; GitScry does not audit or claim a minimum permission set. It reads PR number, title, URL, repository identity and pagination metadata, within a 15-second, 20-request budget of 200 deduplicated PR objects. Without `--github-links`, search does not contact GitHub; `--github-repo OWNER/REPO` alone only selects a repository. If omitted, a repository is inferred only when local remotes identify one unique github.com repository.
+
 Required input: choose one mode—one or more QUERY words, or `--code TEXT`.
 
 Examples:
@@ -96,6 +98,12 @@ Examples:
         /// Include bounded relevant cached text hunks; unavailable history is reported.
         #[arg(long, requires = "query", conflicts_with = "code")]
         patch: bool,
+        /// Fetch bounded first-page GitHub PR associations for returned text-search commits; requires an authenticated gh CLI.
+        #[arg(long, requires = "query", conflicts_with = "code")]
+        github_links: bool,
+        /// GitHub repository to query; does not enable link fetching by itself.
+        #[arg(long = "github-repo", value_name = "OWNER/REPO")]
+        github_repo: Option<String>,
     },
 
     #[command(

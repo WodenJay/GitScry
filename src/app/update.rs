@@ -72,6 +72,7 @@ fn run_with<S: ReleaseSource>(
                 warnings: Vec::new(),
                 notices: Vec::new(),
                 report: None,
+                github_links: None,
             });
         }
         std::cmp::Ordering::Greater => {}
@@ -97,6 +98,7 @@ fn run_with<S: ReleaseSource>(
         warnings,
         notices: Vec::new(),
         report: None,
+        github_links: None,
     })
 }
 
