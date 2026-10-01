@@ -215,6 +215,31 @@ fn prepare_at(
     })
 }
 
+fn shallow_history_expanded(
+    repository: &Repository,
+    previous_boundaries: &[String],
+    current_boundaries: &[String],
+) -> Result<bool, AppError> {
+    if previous_boundaries == current_boundaries {
+        return Ok(false);
+    }
+    if current_boundaries.is_empty() {
+        return Ok(true);
+    }
+
+    for previous_boundary in previous_boundaries {
+        for current_boundary in current_boundaries {
+            if previous_boundary != current_boundary
+                && repository.is_ancestor(current_boundary, previous_boundary)?
+            {
+                return Ok(true);
+            }
+        }
+    }
+
+    Ok(false)
+}
+
 fn evaluate(
     repository: &Repository,
     expected: &Expected,
@@ -256,6 +281,18 @@ fn evaluate(
         || state.default_ref != expected.default_ref
         || state.object_format != expected.object_format
     {
+        return Ok(Plan::Rebuild {
+            damaged: false,
+            semantic_enabled: state.semantic_enabled,
+        });
+    }
+
+    // Appending positions is unsafe when newly visible commits precede cached history.
+    if shallow_history_expanded(
+        repository,
+        &state.shallow_boundaries,
+        &expected.shallow_boundaries,
+    )? {
         return Ok(Plan::Rebuild {
             damaged: false,
             semantic_enabled: state.semantic_enabled,
