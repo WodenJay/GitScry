@@ -25,11 +25,12 @@ struct CacheState {
     referenced_objects: Vec<String>,
     commits: Vec<String>,
     commit_count: usize,
+    semantic_enabled: bool,
 }
 
 enum Inspection {
     Missing,
-    Stale,
+    Stale { semantic_enabled: bool },
     Damaged,
     Ready(CacheState),
 }
@@ -37,7 +38,21 @@ enum Inspection {
 pub(crate) struct PreparedCache {
     pub(crate) progress: Vec<String>,
     pub(crate) commit_count: usize,
+    pub(crate) semantic_enabled: bool,
     _lock: SharedLock,
+}
+
+impl PreparedCache {
+    pub(crate) fn release(self) -> (Vec<String>, usize, bool) {
+        let Self {
+            progress,
+            commit_count,
+            semantic_enabled,
+            _lock,
+        } = self;
+        drop(_lock);
+        (progress, commit_count, semantic_enabled)
+    }
 }
 
 struct Expected {
@@ -59,6 +74,7 @@ enum Plan {
     },
     Rebuild {
         damaged: bool,
+        semantic_enabled: bool,
     },
 }
 
@@ -94,6 +110,7 @@ fn prepare_at(
         return Ok(PreparedCache {
             progress,
             commit_count: state.commit_count,
+            semantic_enabled: state.semantic_enabled,
             _lock: shared,
         });
     }
@@ -113,12 +130,16 @@ fn prepare_at(
         return Ok(PreparedCache {
             progress,
             commit_count: state.commit_count,
+            semantic_enabled: state.semantic_enabled,
             _lock: shared,
         });
     }
 
     match plan {
-        Plan::Rebuild { damaged } => {
+        Plan::Rebuild {
+            damaged,
+            semantic_enabled,
+        } => {
             if damaged {
                 preserve_damaged(&repository.root)?;
             }
@@ -134,7 +155,7 @@ fn prepare_at(
             )?;
             let count = snapshot.commits.len();
             report(IndexStage::WritingCache);
-            publish(&repository.root, &snapshot)?;
+            publish(&repository.root, &snapshot, semantic_enabled)?;
             count
         }
         Plan::Incremental {
@@ -186,10 +207,10 @@ fn prepare_at(
         }
     };
     add_warnings(&mut progress, &expected, &state.missing_objects);
-    report(IndexStage::Complete);
     Ok(PreparedCache {
         progress,
         commit_count: state.commit_count,
+        semantic_enabled: state.semantic_enabled,
         _lock: shared,
     })
 }
@@ -199,14 +220,23 @@ fn evaluate(
     expected: &Expected,
     inspection: Inspection,
 ) -> Result<Plan, AppError> {
+    let semantic_enabled = match &inspection {
+        Inspection::Ready(state) => state.semantic_enabled,
+        Inspection::Stale { semantic_enabled } => *semantic_enabled,
+        _ => false,
+    };
     let Inspection::Ready(state) = inspection else {
         return Ok(Plan::Rebuild {
             damaged: matches!(inspection, Inspection::Damaged),
+            semantic_enabled,
         });
     };
 
     if !repository.missing_objects(&state.commits)?.is_empty() {
-        return Ok(Plan::Rebuild { damaged: false });
+        return Ok(Plan::Rebuild {
+            damaged: false,
+            semantic_enabled: state.semantic_enabled,
+        });
     }
     let current_missing = repository.missing_objects(&state.referenced_objects)?;
     let previous_missing = state.missing_objects.iter().collect::<HashSet<_>>();
@@ -225,7 +255,10 @@ fn evaluate(
         || state.default_ref != expected.default_ref
         || state.object_format != expected.object_format
     {
-        return Ok(Plan::Rebuild { damaged: false });
+        return Ok(Plan::Rebuild {
+            damaged: false,
+            semantic_enabled: state.semantic_enabled,
+        });
     }
 
     let shallow_is_usable = if state.shallow_boundaries == expected.shallow_boundaries {
@@ -248,7 +281,10 @@ fn evaluate(
             })
     };
     if !shallow_is_usable {
-        return Ok(Plan::Rebuild { damaged: false });
+        return Ok(Plan::Rebuild {
+            damaged: false,
+            semantic_enabled: state.semantic_enabled,
+        });
     }
 
     let tip_is_forward = if state.tip == expected.tip {
@@ -262,7 +298,10 @@ fn evaluate(
         false
     };
     if !tip_is_forward {
-        return Ok(Plan::Rebuild { damaged: false });
+        return Ok(Plan::Rebuild {
+            damaged: false,
+            semantic_enabled: state.semantic_enabled,
+        });
     }
 
     if state.tip == expected.tip
@@ -304,12 +343,19 @@ fn inspect(root: &Path) -> Inspection {
     else {
         return Inspection::Damaged;
     };
+    let semantic_enabled = matches!(
+        metadata(&connection, "semantic_enabled")
+            .ok()
+            .flatten()
+            .as_deref(),
+        Some("1")
+    );
     if metadata(&connection, "schema_version")
         .ok()
         .flatten()
         .is_some_and(|version| version != SCHEMA_VERSION)
     {
-        return Inspection::Stale;
+        return Inspection::Stale { semantic_enabled };
     }
     match inspect_connection(&connection) {
         Ok(state) => Inspection::Ready(state),
@@ -342,6 +388,7 @@ fn inspect_connection(connection: &Connection) -> Result<CacheState, ()> {
         "changes",
         "hunks",
         "commit_paths",
+        "semantic_vectors",
         "commit_path_counts",
         "hunk_line_blocks",
         "hunk_token_blocks",
@@ -371,6 +418,11 @@ fn inspect_connection(connection: &Connection) -> Result<CacheState, ()> {
         .ok_or(())?
         .parse::<usize>()
         .map_err(|_| ())?;
+    let semantic_enabled = match metadata(connection, "semantic_enabled")?.as_deref() {
+        Some("0") => false,
+        Some("1") => true,
+        _ => return Err(()),
+    };
 
     let shallow_boundaries = string_rows(
         connection,
@@ -410,6 +462,7 @@ fn inspect_connection(connection: &Connection) -> Result<CacheState, ()> {
         referenced_objects,
         commits,
         commit_count,
+        semantic_enabled,
     })
 }
 
@@ -466,7 +519,7 @@ fn recover_previous(root: &Path) -> Result<(), AppError> {
     Ok(())
 }
 
-fn publish(root: &Path, snapshot: &Snapshot) -> Result<(), AppError> {
+fn publish(root: &Path, snapshot: &Snapshot, semantic_enabled: bool) -> Result<(), AppError> {
     let directory = root.join(".gitscry");
     fs::create_dir_all(&directory).map_err(|error| cache_error("creating .gitscry", error))?;
     super::ensure_ignored(&directory)?;
@@ -474,7 +527,7 @@ fn publish(root: &Path, snapshot: &Snapshot) -> Result<(), AppError> {
     let final_path = directory.join("cache.sqlite");
     let staging = directory.join(format!("cache.sqlite.staging-{}", std::process::id()));
     let _ = fs::remove_file(&staging);
-    if let Err(error) = write::build(&staging, snapshot) {
+    if let Err(error) = write::build(&staging, snapshot, semantic_enabled) {
         let _ = fs::remove_file(&staging);
         return Err(error);
     }
