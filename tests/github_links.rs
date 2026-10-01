@@ -106,7 +106,7 @@ mod unix {
         process::{Command, Output},
     };
 
-    use support::{TestRepo, git};
+    use super::support::{TestRepo, git};
     use tempfile::TempDir;
 
     struct FakeGh {
