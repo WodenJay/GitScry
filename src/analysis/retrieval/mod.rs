@@ -144,6 +144,29 @@ fn score_candidates(
         .collect()
 }
 
+#[cfg(test)]
+pub(in crate::analysis) fn test_scored_candidate(
+    commit_id: i64,
+    oid: &str,
+    subject: &str,
+) -> Scored {
+    let intent = Intent::parse(&["test".to_owned()], &[]).expect("test intent is valid");
+    let candidate = crate::cache::SearchCandidate {
+        commit_id,
+        position: commit_id,
+        oid: oid.to_owned(),
+        commit_time: commit_id,
+        subject: subject.to_owned(),
+        body: String::new(),
+        paths: Vec::new(),
+        path_keys: Vec::new(),
+        bm25: 0.0,
+    };
+    score_candidates(&intent, vec![candidate])
+        .pop()
+        .expect("one candidate was scored")
+}
+
 pub(in crate::analysis) fn steps(session: &QuerySession, oid: &str) -> Result<Vec<Step>, AppError> {
     let mut steps = Vec::new();
     for change in session.changes(oid)? {
