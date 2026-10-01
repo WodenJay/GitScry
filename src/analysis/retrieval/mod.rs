@@ -75,16 +75,16 @@ pub(in crate::analysis) fn pool(
     }
     let query = match_query(terms);
     let matched_count = match scope {
-        Some(scope) => session.match_count_scoped(&query, scope)?,
-        None => session.match_count(&query)?,
+        Some(scope) => session.match_count_scoped(&query, scope, intent.explicit_paths())?,
+        None => session.match_count(&query, intent.explicit_paths())?,
     };
     if matched_count == 0 {
         return Ok(None);
     }
 
     let candidates = match scope {
-        Some(scope) => session.candidates_scoped(&query, scope)?,
-        None => session.candidates(&query, candidate_limit(limit))?,
+        Some(scope) => session.candidates_scoped(&query, scope, intent.explicit_paths())?,
+        None => session.candidates(&query, candidate_limit(limit), intent.explicit_paths())?,
     };
     let candidates = score_candidates(intent, candidates);
     Ok(Some(Pool {
@@ -105,8 +105,8 @@ pub(in crate::analysis) fn pool_with_depth(
     }
     let query = match_query(terms);
     let candidates = match scope {
-        Some(scope) => session.candidates_scoped(&query, scope)?,
-        None => session.candidates(&query, candidate_limit(depth))?,
+        Some(scope) => session.candidates_scoped(&query, scope, intent.explicit_paths())?,
+        None => session.candidates(&query, candidate_limit(depth), intent.explicit_paths())?,
     };
     let candidates = score_candidates(intent, candidates);
     if candidates.is_empty() {

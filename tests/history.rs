@@ -168,6 +168,136 @@ fn examples_accepts_an_anchored_path_and_prefers_overlapping_change() {
 }
 
 #[test]
+fn examples_excludes_candidates_from_unmatched_paths() {
+    let repo = TestRepo::new();
+    let matching = repo.commit_at(
+        "src/a.rs",
+        b"provider implementation\n",
+        "Retire provider implementation",
+        "2020-01-01T00:00:00+0000",
+    );
+    let unrelated = repo.commit_at(
+        "docs/providers.md",
+        b"provider documentation\n",
+        "Retire provider documentation",
+        "2020-02-01T00:00:00+0000",
+    );
+    repo.index();
+
+    let output = repo.run(["examples", "retire", "provider", "--path", "./SRC/a.rs"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.starts_with("Historical examples (1 match):"), "{text}");
+    assert!(text.contains(&matching[..12]), "{text}");
+    assert!(
+        !text.contains(&unrelated[..12]),
+        "candidate from an unmatched path was returned:\n{text}"
+    );
+}
+
+#[test]
+fn examples_filters_paths_before_candidate_limit() {
+    let repo = TestRepo::new();
+    let matching = repo.commit_at(
+        "src/very/long/neutral/path/with/many/components/that/do/not/match/the/query/words/target.rs",
+        b"implementation\n",
+        "Retire provider implementation",
+        "2020-01-01T00:00:00+0000",
+    );
+    for day in 2..=22 {
+        repo.commit_at(
+            "z",
+            format!("documentation {day}\n").as_bytes(),
+            "Retire provider implementation",
+            &format!("2020-01-{day:02}T00:00:00+0000"),
+        );
+    }
+    repo.index();
+
+    let output = repo.run([
+        "examples",
+        "retire",
+        "provider",
+        "--path",
+        "src/very/long/neutral/path/with/many/components/that/do/not/match/the/query/words/target.rs",
+        "--limit",
+        "1",
+    ]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.starts_with("Historical examples (1 match):"), "{text}");
+    assert!(
+        text.contains(&matching[..12]),
+        "path match fell outside lexical pool:\n{text}"
+    );
+}
+
+#[test]
+fn examples_filter_scoped_results_by_path_basename() {
+    let repo = TestRepo::new();
+    let matching = repo.commit_at(
+        "src/a.rs",
+        b"provider implementation\n",
+        "Retire provider implementation",
+        "2020-01-01T00:00:00+0000",
+    );
+    let unrelated = repo.commit_at(
+        "docs/providers.md",
+        b"provider documentation\n",
+        "Retire provider documentation",
+        "2020-01-02T00:00:00+0000",
+    );
+    repo.index();
+
+    let output = repo.run([
+        "examples",
+        "retire",
+        "provider",
+        "--path",
+        "a.rs",
+        "--since",
+        "2020-01-01",
+        "--until",
+        "2020-01-31",
+    ]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("Historical examples (1 match):"), "{text}");
+    assert!(text.contains(&matching[..12]), "{text}");
+    assert!(
+        !text.contains(&format!("\n- {} ", &unrelated[..12])),
+        "scoped candidate from an unmatched basename was returned:\n{text}"
+    );
+}
+
+#[test]
+fn path_like_query_words_remain_soft_anchors() {
+    let repo = TestRepo::new();
+    let matching = repo.commit_at(
+        "src/a.rs",
+        b"provider implementation\n",
+        "Retire provider implementation",
+        "2020-01-01T00:00:00+0000",
+    );
+    let unrelated = repo.commit_at(
+        "docs/providers.md",
+        b"provider documentation\n",
+        "Retire provider documentation",
+        "2020-01-02T00:00:00+0000",
+    );
+    repo.index();
+
+    let output = repo.run(["examples", "retire", "src/a.rs"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains(&matching[..12]), "{text}");
+    assert!(
+        text.contains(&unrelated[..12]),
+        "path-like query anchor incorrectly filtered results:\n{text}"
+    );
+}
+
+#[test]
 fn examples_demotes_reverted_work_and_cites_the_revert() {
     let repo = TestRepo::new();
     // Two changes answer the query identically, so only the revert can order them.
@@ -287,6 +417,58 @@ fn failures_reports_the_stated_reason_and_the_corrective_follow_up() {
     assert!(
         !text.contains(&format!("\n- {} ", &revert[..12])),
         "revert repeated as its own result:\n{text}"
+    );
+}
+
+#[test]
+fn failures_excludes_candidates_from_unmatched_paths() {
+    let repo = TestRepo::new();
+    let matching = repo.commit_at(
+        "src/a.rs",
+        b"cron sessions excluded\n",
+        "Exclude cron sessions from the FTS index",
+        "2020-01-01T00:00:00+0000",
+    );
+    repo.commit_at(
+        "src/a.rs",
+        b"cron sessions restored\n",
+        &format!(
+            "revert: exclude cron sessions from the FTS index\n\n\
+             This reverts commit {matching}.\n\n\
+             The shared predicate slowed ingestion.\n\n\
+             Re-land criteria: gate the exclusion to the cron writer.\n"
+        ),
+        "2020-02-01T00:00:00+0000",
+    );
+    let unrelated = repo.commit_at(
+        "docs/cron.md",
+        b"cron sessions excluded from docs\n",
+        "Exclude cron sessions from provider documentation",
+        "2020-03-01T00:00:00+0000",
+    );
+    repo.commit_at(
+        "docs/cron.md",
+        b"cron sessions restored in docs\n",
+        &format!(
+            "revert: exclude cron sessions from provider documentation\n\n\
+             This reverts commit {unrelated}.\n\n\
+             The documentation change confused users.\n\n\
+             Re-land criteria: clarify only the affected provider pages.\n"
+        ),
+        "2020-04-01T00:00:00+0000",
+    );
+    repo.index();
+
+    let output = repo.run([
+        "failures", "exclude", "cron", "sessions", "--path", "src/a.rs",
+    ]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.starts_with("Failed approaches (2 matches):"), "{text}");
+    assert!(text.contains(&matching[..12]), "{text}");
+    assert!(
+        !text.contains(&unrelated[..12]),
+        "candidate from an unmatched path was returned:\n{text}"
     );
 }
 
