@@ -257,11 +257,16 @@ mod unix {
     fn search_without_matches_never_invokes_gh() {
         let repo = indexed_repo("ExistingMarker");
         let gh = FakeGh::new(&successful_response());
+        // The empty revision interval prevents semantic ranking from returning the fixture commit.
         let output = gh.run(
             &repo,
             &[
                 "search",
                 "MissingMarker",
+                "--from-rev",
+                "HEAD",
+                "--to-rev",
+                "HEAD",
                 "--github-links",
                 "--github-repo",
                 "acme/widget",
