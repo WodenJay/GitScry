@@ -1216,6 +1216,27 @@ fn code_search_rejects_missing_empty_multiline_and_mixed_modes() {
             String::from_utf8_lossy(&output.stderr),
         );
     }
+    repo.commit("src/lib.rs", b"fn ordinary() {}\n", "ordinary search");
+    repo.index();
+    for (output, option) in [
+        (
+            repo.run(["search", "ordinary", "--change", "added"]),
+            "--change",
+        ),
+        (
+            repo.run(["search", "ordinary", "--change", "removed"]),
+            "--change",
+        ),
+        (
+            repo.run(["search", "ordinary", "--path", "src/lib.rs"]),
+            "--path",
+        ),
+    ] {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(2), "{stderr}");
+        assert!(stderr.contains(option), "{stderr}");
+        assert!(stderr.contains("--code"), "{stderr}");
+    }
 }
 
 #[test]

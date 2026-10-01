@@ -82,10 +82,15 @@ Examples:
         #[arg(long, value_name = "TEXT", value_parser = parse_code_query)]
         code: Option<String>,
         /// Restrict code matches to added or removed lines.
-        #[arg(long, value_enum, requires = "code")]
+        #[arg(long, value_enum, requires = "code", conflicts_with = "query")]
         change: Option<CodeChange>,
         /// Exact historical path; additions use the new path, removals the old path.
-        #[arg(long = "path", value_name = "PATH", requires = "code")]
+        #[arg(
+            long = "path",
+            value_name = "PATH",
+            requires = "code",
+            conflicts_with = "query"
+        )]
         path: Option<String>,
         #[command(flatten)]
         scope: HistoricalScopeArgs,
