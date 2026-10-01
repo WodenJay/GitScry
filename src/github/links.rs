@@ -23,6 +23,24 @@ pub(crate) struct LinksReport {
     pub(crate) commit_associations: Vec<CommitAssociation>,
 }
 
+impl LinksReport {
+    fn new(
+        repository: Option<String>,
+        status: FetchStatus,
+        reason: Option<String>,
+        commit_associations: Vec<CommitAssociation>,
+    ) -> Self {
+        Self {
+            repository,
+            status,
+            reason,
+            issue_status: IssueStatus::NotQueried,
+            pull_requests: Vec::new(),
+            commit_associations,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum FetchStatus {
@@ -73,14 +91,7 @@ pub(crate) fn fetch(report: &Report, explicit_repository: Option<&str>) -> Links
     debug_assert!(matches!(report.kind, ReportKind::Search));
     let commits = returned_commits(report);
     if commits.is_empty() {
-        return LinksReport {
-            repository: None,
-            status: FetchStatus::Complete,
-            reason: None,
-            issue_status: IssueStatus::NotQueried,
-            pull_requests: Vec::new(),
-            commit_associations: Vec::new(),
-        };
+        return LinksReport::new(None, FetchStatus::Complete, None, Vec::new());
     }
 
     let deadline = Instant::now() + ASSOCIATION_TIMEOUT;
@@ -103,36 +114,33 @@ fn returned_commits(report: &Report) -> Vec<String> {
 }
 
 fn failed_links(repository: Option<String>, commits: &[String], reason: &str) -> LinksReport {
-    LinksReport {
+    let commit_associations = commits
+        .iter()
+        .map(|commit_sha| CommitAssociation {
+            commit_sha: commit_sha.clone(),
+            status: CommitStatus::Failed,
+            pull_request_urls: Vec::new(),
+        })
+        .collect();
+    LinksReport::new(
         repository,
-        status: FetchStatus::Failed,
-        reason: Some(reason.to_owned()),
-        issue_status: IssueStatus::NotQueried,
-        pull_requests: Vec::new(),
-        commit_associations: commits
-            .iter()
-            .map(|commit_sha| CommitAssociation {
-                commit_sha: commit_sha.clone(),
-                status: CommitStatus::Failed,
-                pull_request_urls: Vec::new(),
-            })
-            .collect(),
-    }
+        FetchStatus::Failed,
+        Some(reason.to_owned()),
+        commit_associations,
+    )
 }
 
 fn fetch_pages(
     commits: &[String],
-    repository: String,
+    repository: remote::GitHubRepository,
     deadline: Instant,
-    mut fetch_page: impl FnMut(&str, &str, Instant) -> Result<Page, gh::FetchError>,
+    mut fetch_page: impl FnMut(&remote::GitHubRepository, &str, Instant) -> Result<Page, gh::FetchError>,
 ) -> LinksReport {
-    let mut result = LinksReport {
-        repository: Some(repository.clone()),
-        status: FetchStatus::Complete,
-        reason: None,
-        issue_status: IssueStatus::NotQueried,
-        pull_requests: Vec::new(),
-        commit_associations: commits
+    let mut result = LinksReport::new(
+        Some(repository.name_with_owner()),
+        FetchStatus::Complete,
+        None,
+        commits
             .iter()
             .map(|commit_sha| CommitAssociation {
                 commit_sha: commit_sha.clone(),
@@ -140,7 +148,7 @@ fn fetch_pages(
                 pull_request_urls: Vec::new(),
             })
             .collect(),
-    };
+    );
     let mut pull_request_indexes = HashMap::<(String, u64), usize>::new();
 
     for (commit_index, commit_sha) in commits.iter().enumerate() {
@@ -273,6 +281,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use crate::analysis::{self, Citation, Confidence, Material, ReportKind};
+    use crate::github::remote::GitHubRepository;
 
     use super::{
         CommitStatus, FetchStatus, MAX_API_REQUESTS, MAX_PULL_REQUESTS, Page, PullRequest, fetch,
@@ -296,6 +305,13 @@ mod tests {
             })
             .collect();
         analysis::report(ReportKind::Search, materials, 0, 1)
+    }
+
+    fn repository() -> GitHubRepository {
+        GitHubRepository {
+            owner: "acme".to_owned(),
+            name: "widget".to_owned(),
+        }
     }
 
     fn pull_request(number: u64) -> PullRequest {
@@ -341,7 +357,7 @@ mod tests {
         let mut seen = Vec::new();
         let links = fetch_pages(
             &commits,
-            "acme/widget".to_owned(),
+            repository(),
             Instant::now() + Duration::from_secs(1),
             |_, sha, _| {
                 seen.push(sha.to_owned());
@@ -368,7 +384,7 @@ mod tests {
         let mut calls = 0;
         let links = fetch_pages(
             &commits,
-            "acme/widget".to_owned(),
+            repository(),
             Instant::now() + Duration::from_secs(1),
             |_, _, _| {
                 calls += 1;
@@ -388,7 +404,7 @@ mod tests {
         let mut page_index = 0;
         let links = fetch_pages(
             &commits,
-            "acme/widget".to_owned(),
+            repository(),
             Instant::now() + Duration::from_secs(1),
             |_, _, _| {
                 let page_number = page_index;
@@ -410,7 +426,7 @@ mod tests {
         let commits = ["first".to_owned()];
         let links = fetch_pages(
             &commits,
-            "acme/widget".to_owned(),
+            repository(),
             Instant::now() + Duration::from_secs(1),
             |_, _, _| {
                 Ok(Page {

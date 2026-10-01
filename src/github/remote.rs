@@ -2,7 +2,23 @@ use std::process::Command;
 
 use crate::git::Repository;
 
-pub(super) fn resolve(explicit: Option<&str>) -> Result<String, &'static str> {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct GitHubRepository {
+    pub(super) owner: String,
+    pub(super) name: String,
+}
+
+impl GitHubRepository {
+    pub(super) fn name_with_owner(&self) -> String {
+        format!("{}/{}", self.owner, self.name)
+    }
+
+    fn matches_case_insensitively(&self, other: &Self) -> bool {
+        self.owner.eq_ignore_ascii_case(&other.owner) && self.name.eq_ignore_ascii_case(&other.name)
+    }
+}
+
+pub(super) fn resolve(explicit: Option<&str>) -> Result<GitHubRepository, &'static str> {
     if let Some(explicit) = explicit {
         return parse_repository(explicit).ok_or("Invalid GitHub repository; expected OWNER/REPO.");
     }
@@ -29,15 +45,17 @@ pub(super) fn resolve(explicit: Option<&str>) -> Result<String, &'static str> {
     )
 }
 
-fn unique_repository(urls: impl IntoIterator<Item = String>) -> Result<String, &'static str> {
-    let mut repositories = Vec::new();
+fn unique_repository(
+    urls: impl IntoIterator<Item = String>,
+) -> Result<GitHubRepository, &'static str> {
+    let mut repositories = Vec::<GitHubRepository>::new();
     for url in urls {
         let Some(candidate) = github_repository(&url) else {
             continue;
         };
         if !repositories
             .iter()
-            .any(|existing: &String| existing.eq_ignore_ascii_case(&candidate))
+            .any(|existing| existing.matches_case_insensitively(&candidate))
         {
             repositories.push(candidate);
         }
@@ -50,7 +68,7 @@ fn unique_repository(urls: impl IntoIterator<Item = String>) -> Result<String, &
     }
 }
 
-fn github_repository(url: &str) -> Option<String> {
+fn github_repository(url: &str) -> Option<GitHubRepository> {
     let path = if let Some((scheme, remainder)) = url.split_once("://") {
         if !matches!(scheme, "https" | "http" | "ssh" | "git") {
             return None;
@@ -75,14 +93,17 @@ fn github_repository(url: &str) -> Option<String> {
     parse_repository(path)
 }
 
-fn parse_repository(value: &str) -> Option<String> {
+fn parse_repository(value: &str) -> Option<GitHubRepository> {
     let mut parts = value.split('/');
     let owner = parts.next()?;
     let name = parts.next()?;
     if parts.next().is_some() || !valid_segment(owner) || !valid_segment(name) {
         return None;
     }
-    Some(format!("{owner}/{name}"))
+    Some(GitHubRepository {
+        owner: owner.to_owned(),
+        name: name.to_owned(),
+    })
 }
 
 fn valid_segment(value: &str) -> bool {
@@ -105,7 +126,9 @@ mod tests {
             "ssh://git@github.com/acme/widget",
             "git@github.com:acme/widget.git",
         ] {
-            assert_eq!(github_repository(remote).as_deref(), Some("acme/widget"));
+            let repository = github_repository(remote).unwrap();
+            assert_eq!(repository.owner, "acme");
+            assert_eq!(repository.name, "widget");
         }
     }
 
@@ -116,7 +139,7 @@ mod tests {
             "git@github.com:acme/WIDGET.git".to_owned(),
         ])
         .unwrap();
-        assert_eq!(duplicate, "Acme/widget");
+        assert_eq!(duplicate.name_with_owner(), "Acme/widget");
 
         let ambiguous = unique_repository([
             "https://github.com/acme/one.git".to_owned(),

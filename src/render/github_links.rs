@@ -8,23 +8,14 @@ pub(super) fn format(links: &LinksReport) -> String {
         .as_deref()
         .map(escape::subject)
         .unwrap_or_else(|| "repository unresolved".to_owned());
-    let status = match links.status {
-        FetchStatus::Complete => "complete",
-        FetchStatus::Partial => "partial",
-        FetchStatus::Failed => "failed",
-    };
+    let (status, empty_message) = fetch_presentation(links.status);
     let mut lines = vec![format!("GitHub associations ({repository}; {status}):")];
 
     if let Some(reason) = &links.reason {
         lines.push(format!("  note: {}", escape::subject(reason)));
     }
     if links.pull_requests.is_empty() {
-        let message = match links.status {
-            FetchStatus::Complete => "  no pull requests were associated",
-            FetchStatus::Partial => "  no pull-request links were returned",
-            FetchStatus::Failed => "  pull-request associations are unavailable",
-        };
-        lines.push(message.to_owned());
+        lines.push(empty_message.to_owned());
     } else {
         for pull_request in &links.pull_requests {
             lines.push(format!(
@@ -38,24 +29,14 @@ pub(super) fn format(links: &LinksReport) -> String {
     }
 
     for association in &links.commit_associations {
-        let status = match association.status {
-            CommitStatus::Complete => "complete",
-            CommitStatus::Partial => "partial",
-            CommitStatus::Failed => "failed",
-            CommitStatus::NotQueried => "not queried",
-        };
+        let (status, empty_message) = commit_presentation(association.status);
         let urls = association
             .pull_request_urls
             .iter()
             .map(|url| escape::subject(url))
             .collect::<Vec<_>>();
         let related = if urls.is_empty() {
-            match association.status {
-                CommitStatus::Complete => "none associated".to_owned(),
-                CommitStatus::Partial => "association incomplete".to_owned(),
-                CommitStatus::Failed => "association unavailable".to_owned(),
-                CommitStatus::NotQueried => "not queried".to_owned(),
-            }
+            empty_message.to_owned()
         } else {
             urls.join(", ")
         };
@@ -70,4 +51,21 @@ pub(super) fn format(links: &LinksReport) -> String {
     };
     lines.push(format!("  issues: {issue_status}"));
     lines.join("\n")
+}
+
+fn fetch_presentation(status: FetchStatus) -> (&'static str, &'static str) {
+    match status {
+        FetchStatus::Complete => ("complete", "  no pull requests were associated"),
+        FetchStatus::Partial => ("partial", "  no pull-request links were returned"),
+        FetchStatus::Failed => ("failed", "  pull-request associations are unavailable"),
+    }
+}
+
+fn commit_presentation(status: CommitStatus) -> (&'static str, &'static str) {
+    match status {
+        CommitStatus::Complete => ("complete", "none associated"),
+        CommitStatus::Partial => ("partial", "association incomplete"),
+        CommitStatus::Failed => ("failed", "association unavailable"),
+        CommitStatus::NotQueried => ("not queried", "not queried"),
+    }
 }

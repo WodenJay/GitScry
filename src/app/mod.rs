@@ -60,7 +60,7 @@ pub(crate) fn execute(
     command: Command,
     report: &mut dyn FnMut(Progress),
 ) -> Result<Outcome, AppError> {
-    let mut github_repository = None;
+    let mut github_link_request = None;
     let (request, limit, patch, scope) = match command {
         Command::Index => return index::run(&mut |stage| report(Progress::Index(stage))),
         Command::Update => return update::run(&mut |stage| report(Progress::Update(stage))),
@@ -88,7 +88,7 @@ pub(crate) fn execute(
                 },
                 _ => unreachable!("clap enforces exactly one search mode"),
             };
-            github_repository = github_links.then_some(github_repo);
+            github_link_request = github_links.then_some(github_repo);
             (request, limit, patch, scope.into())
         }
         Command::Examples {
@@ -237,7 +237,7 @@ pub(crate) fn execute(
             scope,
         },
     )?;
-    let github_links = github_repository.map(|explicit_repo| {
+    let github_links = github_link_request.map(|explicit_repo| {
         let query::QueryReport::Analysis(report) = &result.report else {
             unreachable!("GitHub links are enabled only for text search");
         };

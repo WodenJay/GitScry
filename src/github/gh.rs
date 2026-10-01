@@ -8,7 +8,10 @@ use std::{
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::links::{Page, PullRequest};
+use super::{
+    links::{Page, PullRequest},
+    remote::GitHubRepository,
+};
 
 const QUERY: &str = "query($owner: String!, $name: String!, $oid: GitObjectID!) { repository(owner: $owner, name: $name) { object(oid: $oid) { ... on Commit { associatedPullRequests(first: 50) { nodes { number title url repository { nameWithOwner } } pageInfo { hasNextPage } } } } } }";
 
@@ -20,7 +23,7 @@ pub(super) enum FetchError {
 }
 
 pub(super) fn fetch(
-    repository: &str,
+    repository: &GitHubRepository,
     commit_oid: &str,
     deadline: Instant,
 ) -> Result<Page, FetchError> {
@@ -28,16 +31,13 @@ pub(super) fn fetch(
         return Err(FetchError::TimedOut);
     }
 
-    let (owner, name) = repository
-        .split_once('/')
-        .ok_or(FetchError::RequestFailed)?;
     let output = Command::new("gh")
         .args(["api", "graphql", "-f"])
         .arg(format!("query={QUERY}"))
         .args(["-F"])
-        .arg(format!("owner={owner}"))
+        .arg(format!("owner={}", repository.owner))
         .args(["-F"])
-        .arg(format!("name={name}"))
+        .arg(format!("name={}", repository.name))
         .args(["-F"])
         .arg(format!("oid={commit_oid}"))
         .stdout(Stdio::piped())
