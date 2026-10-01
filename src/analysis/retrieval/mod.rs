@@ -39,7 +39,6 @@ pub(in crate::analysis) struct Scored {
     pub(in crate::analysis) commit_time: i64,
     pub(in crate::analysis) subject: String,
     pub(in crate::analysis) paths: Vec<Vec<u8>>,
-    pub(in crate::analysis) path_keys: Vec<String>,
     pub(in crate::analysis) signals: Signals,
 }
 
@@ -138,7 +137,6 @@ fn score_candidates(
             oid: candidate.oid,
             commit_time: candidate.commit_time,
             subject: candidate.subject,
-            path_keys: candidate.path_keys,
             paths: candidate.paths,
         })
         .collect()
@@ -159,7 +157,6 @@ pub(in crate::analysis) fn test_scored_candidate(
         subject: subject.to_owned(),
         body: String::new(),
         paths: Vec::new(),
-        path_keys: Vec::new(),
         bm25: 0.0,
     };
     score_candidates(&intent, vec![candidate])
@@ -192,9 +189,9 @@ pub(in crate::analysis) fn corrective_follow_up(
     session: &QuerySession,
     scope: Option<&SearchFilter>,
     revert_oid: &str,
-    path_keys: &[String],
+    path_ids: &[Vec<u8>],
 ) -> Result<Option<(String, String, String)>, AppError> {
-    for commit in session.follow_ups(revert_oid, path_keys, scope)? {
+    for commit in session.follow_ups(revert_oid, path_ids, scope)? {
         let (subject, body) = message_parts(&commit.message);
         if super::provenance::is_corrective_subject(&subject) {
             return Ok(Some((commit.oid, subject, body)));
@@ -214,13 +211,8 @@ pub(in crate::analysis) fn link<'a>(
     if let Some(revert) = reverts.of(&candidate.oid) {
         return Ok(Some(revert));
     }
-    for revert in reverts.undoings(&candidate.oid, &candidate.path_keys, candidate.position) {
-        if !session.touched_between(
-            candidate.position,
-            revert.position,
-            &candidate.path_keys,
-            scope,
-        )? {
+    for revert in reverts.undoings(&candidate.oid, &candidate.paths, candidate.position) {
+        if !session.touched_between(candidate.position, revert.position, &candidate.paths, scope)? {
             return Ok(Some(revert));
         }
     }

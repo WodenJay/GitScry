@@ -27,7 +27,7 @@ fn current_path_is_file(root: &Path, path: &[u8]) -> bool {
 struct RankedCandidate {
     score: f64,
     latest_support_time: i64,
-    key: String,
+    key: Vec<u8>,
     citation_oids: Vec<String>,
     material: Material,
 }
@@ -141,7 +141,7 @@ fn run(
             basis.push("historical support beyond mirrored test name".to_owned());
         }
 
-        let key = candidate.key;
+        let key = candidate.path.clone();
         let material = Material {
             subject: String::new(),
             paths: vec![candidate.path],

@@ -58,7 +58,6 @@ pub(crate) struct SearchCandidate {
     pub(crate) subject: String,
     pub(crate) body: String,
     pub(crate) paths: Vec<Vec<u8>>,
-    pub(crate) path_keys: Vec<String>,
     pub(crate) bm25: f64,
 }
 
@@ -110,17 +109,22 @@ pub(crate) struct RelationSupport {
 
 pub(crate) struct RelationCandidate {
     pub(crate) path: Vec<u8>,
-    pub(crate) key: String,
     pub(crate) total_touches: usize,
     pub(crate) supporting: Vec<RelationSupport>,
     pub(crate) seed_keys: HashSet<String>,
 }
 
 pub(crate) struct RelationHistory {
-    pub(crate) candidates: HashMap<String, RelationCandidate>,
+    pub(crate) candidates: HashMap<Vec<u8>, RelationCandidate>,
     pub(crate) seed_touch_commits: usize,
     pub(crate) eligible_commits: usize,
     pub(crate) mass_changes_filtered: bool,
+}
+
+#[derive(Default)]
+struct SeedMatches {
+    keys: HashSet<String>,
+    paths: HashSet<Vec<u8>>,
 }
 
 pub(crate) struct StoredChange {
@@ -192,8 +196,8 @@ impl QuerySession {
         semantic_materials(&self.connection, commit_ids)
     }
 
-    pub(crate) fn projected_path_keys(&self, oid: &str) -> Result<Vec<String>, AppError> {
-        projected_path_keys(&self.connection, oid)
+    pub(crate) fn projected_paths(&self, oid: &str) -> Result<Vec<Vec<u8>>, AppError> {
+        projected_paths(&self.connection, oid)
     }
 
     pub(crate) fn changes(&self, oid: &str) -> Result<Vec<StoredChange>, AppError> {
@@ -223,14 +227,14 @@ impl QuerySession {
         &self,
         from_position: i64,
         to_position: i64,
-        path_keys: &[String],
+        path_ids: &[Vec<u8>],
         scope: Option<&SearchFilter>,
     ) -> Result<bool, AppError> {
         touch_between(
             &self.connection,
             from_position,
             to_position,
-            path_keys,
+            path_ids,
             scope,
         )
     }
@@ -238,10 +242,10 @@ impl QuerySession {
     pub(crate) fn follow_ups(
         &self,
         revert_oid: &str,
-        path_keys: &[String],
+        path_ids: &[Vec<u8>],
         scope: Option<&SearchFilter>,
     ) -> Result<Vec<StoredCommit>, AppError> {
-        follow_ups(&self.connection, revert_oid, path_keys, scope)
+        follow_ups(&self.connection, revert_oid, path_ids, scope)
     }
 }
 
@@ -271,15 +275,14 @@ fn relation_history(
     })?;
     let eligible_commits = relation_count(connection, limit, scope)?;
     let seed_matches = relation_seed_matches(connection, seed_keys, limit, scope)?;
-    let seed_touch_commits = seed_matches.keys().copied().collect::<HashSet<_>>().len();
+    let seed_touch_commits = seed_matches.len();
     let mass_changes_filtered = relation_has_mass_change(connection, seed_keys, limit, scope)?;
     let mut candidates = HashMap::new();
     let seed_commit_ids = seed_matches.keys().copied().collect::<Vec<_>>();
     for commit_ids in seed_commit_ids.chunks(SQL_PARAMETER_LIMIT) {
         let placeholders = numbered_placeholders(1, commit_ids.len());
         let query = format!(
-            "SELECT cp.commit_id, cp.path_key, cp.path_basename, cp.raw_path,\n\
-             c.oid, c.commit_time\n\
+            "SELECT cp.commit_id, cp.raw_path, c.oid, c.commit_time\n\
              FROM commit_paths AS cp\n\
              JOIN commits AS c ON c.commit_id = cp.commit_id\n\
              WHERE cp.commit_id IN ({placeholders})\n\
@@ -297,42 +300,39 @@ fn relation_history(
             .query_map(params_from_iter(values), |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
-                    row.get::<_, String>(1)?,
+                    row.get::<_, Vec<u8>>(1)?,
                     row.get::<_, String>(2)?,
-                    row.get::<_, Vec<u8>>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, i64>(5)?,
+                    row.get::<_, i64>(3)?,
                 ))
             })
             .map_err(|error| search_error("reading relation support lookup", error))?;
         for row in rows {
-            let (commit_id, key, basename, raw_path, oid, commit_time) =
+            let (commit_id, raw_path, oid, commit_time) =
                 row.map_err(|error| search_error("reading relation support lookup", error))?;
             let Some(touched_seeds) = seed_matches.get(&commit_id) else {
                 continue;
             };
-            if touched_seeds
-                .iter()
-                .any(|seed| seed_matches_path(seed, &key, &basename))
-            {
+            if touched_seeds.paths.contains(&raw_path) {
                 continue;
             }
-            let candidate = candidates
-                .entry(key.clone())
-                .or_insert_with(|| RelationCandidate {
-                    path: raw_path,
-                    key,
-                    total_touches: 0,
-                    supporting: Vec::new(),
-                    seed_keys: HashSet::new(),
-                });
-            candidate.seed_keys.extend(touched_seeds.iter().cloned());
+            let candidate =
+                candidates
+                    .entry(raw_path.clone())
+                    .or_insert_with(|| RelationCandidate {
+                        path: raw_path,
+                        total_touches: 0,
+                        supporting: Vec::new(),
+                        seed_keys: HashSet::new(),
+                    });
+            candidate
+                .seed_keys
+                .extend(touched_seeds.keys.iter().cloned());
             candidate
                 .supporting
                 .push(RelationSupport { oid, commit_time });
         }
     }
-    for keys in candidates
+    for path_ids in candidates
         .keys()
         .cloned()
         .collect::<Vec<_>>()
@@ -341,7 +341,8 @@ fn relation_history(
         let query_bindings = RelationQueryBindings::new(scope, &[], limit);
         let scope_cte = &query_bindings.cte_prefix;
         let limit_parameter = query_bindings.limit_parameter;
-        let placeholders = numbered_placeholders(query_bindings.first_seed_parameter, keys.len());
+        let placeholders =
+            numbered_placeholders(query_bindings.first_seed_parameter, path_ids.len());
         let scope_predicate = query_bindings.scope_predicate;
         let query = format!(
             "{scope_cte}\n\
@@ -356,40 +357,35 @@ fn relation_history(
                    WHERE parents.commit_id = pc.commit_id AND parents.position > 0\n\
                )\n\
              ), ranked AS (\n\
-             SELECT cp.path_key, cp.raw_path,\n\
-                    COUNT(*) OVER (PARTITION BY cp.path_key) AS total_touches,\n\
+             SELECT cp.raw_path,\n\
+                    COUNT(*) OVER (PARTITION BY cp.raw_path) AS total_touches,\n\
                     ROW_NUMBER() OVER (\n\
-                        PARTITION BY cp.path_key\n\
+                        PARTITION BY cp.raw_path\n\
                         ORDER BY c.position, cp.path_order\n\
                     ) AS path_rank\n\
              FROM commit_paths AS cp\n\
              JOIN relation_eligible ON relation_eligible.commit_id = cp.commit_id\n\
              JOIN commits AS c ON c.commit_id = cp.commit_id\n\
-             WHERE cp.path_key IN ({placeholders})\n\
+             WHERE cp.raw_path IN ({placeholders})\n\
              )\n\
-             SELECT path_key, raw_path, total_touches\n\
+             SELECT raw_path, total_touches\n\
              FROM ranked\n\
              WHERE path_rank = 1"
         );
         let mut values = query_bindings.values;
-        values.extend(keys.iter().cloned().map(Value::Text));
+        values.extend(path_ids.iter().cloned().map(Value::Blob));
         let mut statement = connection
             .prepare(&query)
             .map_err(|error| search_error("preparing relation touch lookup", error))?;
         let rows = statement
             .query_map(params_from_iter(values), |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Vec<u8>>(1)?,
-                    row.get::<_, i64>(2)?,
-                ))
+                Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, i64>(1)?))
             })
             .map_err(|error| search_error("reading relation touch lookup", error))?;
         for row in rows {
-            let (key, path, total_touches) =
+            let (path_id, total_touches) =
                 row.map_err(|error| search_error("reading relation touch lookup", error))?;
-            if let Some(candidate) = candidates.get_mut(&key) {
-                candidate.path = path;
+            if let Some(candidate) = candidates.get_mut(&path_id) {
                 candidate.total_touches = usize::try_from(total_touches).map_err(|_| {
                     search_error(
                         "reading relation touch lookup",
@@ -422,6 +418,7 @@ struct RelationQueryBindings {
     limit_parameter: usize,
     first_seed_parameter: usize,
     scope_predicate: &'static str,
+    seed_scope_predicate: &'static str,
     values: Vec<Value>,
 }
 
@@ -437,6 +434,11 @@ impl RelationQueryBindings {
         };
         let scope_predicate = if scope.is_some() {
             "AND pc.commit_id IN (SELECT commit_id FROM eligible)"
+        } else {
+            ""
+        };
+        let seed_scope_predicate = if scope.is_some() {
+            "AND exact.commit_id IN (SELECT commit_id FROM eligible)"
         } else {
             ""
         };
@@ -465,6 +467,7 @@ impl RelationQueryBindings {
             limit_parameter,
             first_seed_parameter,
             scope_predicate,
+            seed_scope_predicate,
             values,
         }
     }
@@ -505,12 +508,13 @@ fn relation_seed_matches(
     seed_keys: &[String],
     limit: i64,
     scope: Option<&SearchFilter>,
-) -> Result<HashMap<i64, HashSet<String>>, AppError> {
+) -> Result<HashMap<i64, SeedMatches>, AppError> {
     let query_bindings = RelationQueryBindings::new(scope, seed_keys, limit);
     let scope_cte = &query_bindings.cte_prefix;
     let limit_parameter = query_bindings.limit_parameter;
     let values_clause = seed_values_clause(seed_keys, query_bindings.first_seed_parameter);
     let scope_predicate = query_bindings.scope_predicate;
+    let seed_scope_predicate = query_bindings.seed_scope_predicate;
     let query = format!(
         "{scope_cte}\n\
          relation_eligible AS (\n\
@@ -523,28 +527,43 @@ fn relation_seed_matches(
                    WHERE parents.commit_id = pc.commit_id AND parents.position > 0\n\
                )\n\
          ), seed_keys(seed_key, is_basename) AS (VALUES {values_clause})\n\
-         SELECT DISTINCT cp.commit_id, seed_keys.seed_key\n\
+         SELECT DISTINCT cp.commit_id, seed_keys.seed_key, cp.raw_path\n\
          FROM commit_paths AS cp\n\
          JOIN relation_eligible ON relation_eligible.commit_id = cp.commit_id\n\
-         JOIN seed_keys\n\
-           ON (seed_keys.is_basename = 1 AND cp.path_basename = seed_keys.seed_key)\n\
-           OR (seed_keys.is_basename = 0 AND cp.path_key = seed_keys.seed_key)\n\
-         ORDER BY cp.commit_id, seed_keys.seed_key"
+         JOIN seed_keys ON (\n\
+             seed_keys.is_basename = 1 AND cp.path_basename = lower(seed_keys.seed_key)\n\
+         ) OR (\n\
+             seed_keys.is_basename = 0 AND (\n\
+                 cp.raw_path = CAST(seed_keys.seed_key AS BLOB)\n\
+                 OR (cp.path_search_key = lower(seed_keys.seed_key)\n\
+                     AND NOT EXISTS (\n\
+                         SELECT 1 FROM commit_paths AS exact\n\
+                         WHERE exact.raw_path = CAST(seed_keys.seed_key AS BLOB)\n\
+                         {seed_scope_predicate}\n\
+                     ))\n\
+             )\n\
+         )\n\
+         ORDER BY cp.commit_id, seed_keys.seed_key, cp.raw_path"
     );
-    let values = query_bindings.values;
     let mut statement = connection
         .prepare(&query)
         .map_err(|error| search_error("preparing relation seed lookup", error))?;
     let rows = statement
-        .query_map(params_from_iter(values), |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        .query_map(params_from_iter(query_bindings.values), |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+            ))
         })
         .map_err(|error| search_error("reading relation seed lookup", error))?;
-    let mut matches = HashMap::<i64, HashSet<String>>::new();
+    let mut matches = HashMap::<i64, SeedMatches>::new();
     for row in rows {
-        let (commit_id, seed_key) =
+        let (commit_id, seed_key, raw_path) =
             row.map_err(|error| search_error("reading relation seed lookup", error))?;
-        matches.entry(commit_id).or_default().insert(seed_key);
+        let seed = matches.entry(commit_id).or_default();
+        seed.keys.insert(seed_key);
+        seed.paths.insert(raw_path);
     }
     Ok(matches)
 }
@@ -560,6 +579,7 @@ fn relation_has_mass_change(
     let limit_parameter = query_bindings.limit_parameter;
     let values_clause = seed_values_clause(seed_keys, query_bindings.first_seed_parameter);
     let scope_predicate = query_bindings.scope_predicate;
+    let seed_scope_predicate = query_bindings.seed_scope_predicate;
     let query = format!(
         "{scope_cte}\n\
          seed_keys(seed_key, is_basename) AS (VALUES {values_clause})\n\
@@ -574,9 +594,19 @@ fn relation_has_mass_change(
                )\n\
                AND EXISTS (\n\
                    SELECT 1 FROM commit_paths AS cp\n\
-                   JOIN seed_keys\n\
-                     ON (seed_keys.is_basename = 1 AND cp.path_basename = seed_keys.seed_key)\n\
-                     OR (seed_keys.is_basename = 0 AND cp.path_key = seed_keys.seed_key)\n\
+                   JOIN seed_keys ON (\n\
+                       seed_keys.is_basename = 1 AND cp.path_basename = lower(seed_keys.seed_key)\n\
+                   ) OR (\n\
+                       seed_keys.is_basename = 0 AND (\n\
+                           cp.raw_path = CAST(seed_keys.seed_key AS BLOB)\n\
+                           OR (cp.path_search_key = lower(seed_keys.seed_key)\n\
+                               AND NOT EXISTS (\n\
+                                   SELECT 1 FROM commit_paths AS exact\n\
+                                   WHERE exact.raw_path = CAST(seed_keys.seed_key AS BLOB)\n\
+                                   {seed_scope_predicate}\n\
+                               ))\n\
+                       )\n\
+                   )\n\
                    WHERE cp.commit_id = pc.commit_id\n\
                )\n\
          )"
@@ -606,14 +636,6 @@ fn numbered_placeholders(first: usize, count: usize) -> String {
         .map(|index| format!("?{index}"))
         .collect::<Vec<_>>()
         .join(", ")
-}
-
-fn seed_matches_path(seed: &str, key: &str, basename: &str) -> bool {
-    if seed.contains('/') {
-        seed == key
-    } else {
-        seed == basename
-    }
 }
 
 fn match_count(
@@ -702,7 +724,6 @@ fn candidates_scoped(
                 subject,
                 body,
                 paths: Vec::new(),
-                path_keys: Vec::new(),
                 bm25: row.get(5)?,
                 position: row.get(6)?,
             })
@@ -750,7 +771,6 @@ fn candidates(
                 subject,
                 body,
                 paths: Vec::new(),
-                path_keys: Vec::new(),
                 bm25: row.get(5)?,
                 position: row.get(6)?,
             })
@@ -773,9 +793,9 @@ fn explicit_path_filter(explicit_paths: &[String], first_parameter: usize) -> St
         .map(|(index, path)| {
             let parameter = format!("?{}", first_parameter + index);
             if path.contains('/') {
-                format!("cp.path_key = {parameter}")
+                format!("cp.path_search_key = lower({parameter})")
             } else {
-                format!("(cp.path_key = {parameter} OR cp.path_basename = {parameter})")
+                format!("(cp.path_search_key = lower({parameter}) OR cp.path_basename = lower({parameter}))")
             }
         })
         .collect::<Vec<_>>()
@@ -983,7 +1003,6 @@ fn semantic_materials(
                     subject,
                     body,
                     paths: Vec::new(),
-                    path_keys: Vec::new(),
                     bm25: 0.0,
                     position: row.get(5)?,
                 })
@@ -1055,43 +1074,18 @@ fn load_candidate_paths(
                 }
             }
         }
-        let placeholders = numbered_placeholders(1, commit_ids.len());
-        let query = format!(
-            "SELECT commit_id, path_key
-             FROM commit_paths
-             WHERE commit_id IN ({placeholders})
-             ORDER BY commit_id, path_order"
-        );
-        let values = commit_ids.iter().copied().map(Value::Integer);
-        let mut statement = connection
-            .prepare(&query)
-            .map_err(|error| search_error("preparing candidate path projection", error))?;
-        let rows = statement
-            .query_map(params_from_iter(values), |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-            })
-            .map_err(|error| search_error("reading candidate path projection", error))?;
-        let mut keys_by_commit = HashMap::<i64, Vec<String>>::new();
-        for row in rows {
-            let (commit_id, key) =
-                row.map_err(|error| search_error("reading candidate path projection", error))?;
-            keys_by_commit.entry(commit_id).or_default().push(key);
-        }
         for candidate in candidates {
             candidate.paths = paths_by_commit
-                .remove(&candidate.commit_id)
-                .unwrap_or_default();
-            candidate.path_keys = keys_by_commit
                 .remove(&candidate.commit_id)
                 .unwrap_or_default();
         }
     }
     Ok(())
 }
-fn projected_path_keys(connection: &Connection, oid: &str) -> Result<Vec<String>, AppError> {
+fn projected_paths(connection: &Connection, oid: &str) -> Result<Vec<Vec<u8>>, AppError> {
     let mut statement = connection
         .prepare(
-            "SELECT cp.path_key
+            "SELECT cp.raw_path
              FROM commit_paths AS cp
              JOIN commits AS c ON c.commit_id = cp.commit_id
              WHERE c.oid = ?1
@@ -1099,7 +1093,7 @@ fn projected_path_keys(connection: &Connection, oid: &str) -> Result<Vec<String>
         )
         .map_err(|error| search_error("preparing path projection", error))?;
     statement
-        .query_map([oid], |row| row.get::<_, String>(0))
+        .query_map([oid], |row| row.get::<_, Vec<u8>>(0))
         .map_err(|error| search_error("reading path projection", error))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| search_error("reading path projection", error))
@@ -1212,7 +1206,7 @@ fn commit_oids(connection: &Connection) -> Result<HashSet<String>, AppError> {
         .map_err(|error| search_error("reading cached object IDs", error))
 }
 
-/// Whether any commit strictly between two positions touched one of `path_keys`.
+/// Whether any commit strictly between two positions touched one of `path_ids`.
 ///
 /// A revert only counts as undoing a candidate when that candidate was the last work on
 /// the path; otherwise the revert belongs to some later, unrelated change.
@@ -1220,15 +1214,15 @@ fn touch_between(
     connection: &Connection,
     from_position: i64,
     to_position: i64,
-    path_keys: &[String],
+    path_ids: &[Vec<u8>],
     scope: Option<&SearchFilter>,
 ) -> Result<bool, AppError> {
-    if path_keys.is_empty() || from_position >= to_position {
+    if path_ids.is_empty() || from_position >= to_position {
         return Ok(false);
     }
     let scoped = scope.is_some();
     let path_chunk_limit = SQL_PARAMETER_LIMIT - if scoped { 6 } else { 2 };
-    for path_chunk in path_keys.chunks(path_chunk_limit) {
+    for path_chunk in path_ids.chunks(path_chunk_limit) {
         let path_placeholders = numbered_placeholders(if scoped { 7 } else { 3 }, path_chunk.len());
         let (query, values) = if let Some(scope) = scope {
             (
@@ -1238,12 +1232,12 @@ fn touch_between(
                      JOIN eligible ON eligible.commit_id = c.commit_id
                      JOIN commit_paths AS cp ON cp.commit_id = c.commit_id
                      WHERE c.position > ?5 AND c.position < ?6
-                       AND cp.path_key IN ({path_placeholders}))"
+                       AND cp.raw_path IN ({path_placeholders}))"
                 ),
                 scope_values(scope)
                     .into_iter()
                     .chain([Value::Integer(from_position), Value::Integer(to_position)])
-                    .chain(path_chunk.iter().cloned().map(Value::Text))
+                    .chain(path_chunk.iter().cloned().map(Value::Blob))
                     .collect::<Vec<_>>(),
             )
         } else {
@@ -1252,11 +1246,11 @@ fn touch_between(
                     "SELECT EXISTS(SELECT 1 FROM commits AS c
                      JOIN commit_paths AS cp ON cp.commit_id = c.commit_id
                      WHERE c.position > ?1 AND c.position < ?2
-                       AND cp.path_key IN ({path_placeholders}))"
+                       AND cp.raw_path IN ({path_placeholders}))"
                 ),
                 [Value::Integer(from_position), Value::Integer(to_position)]
                     .into_iter()
-                    .chain(path_chunk.iter().cloned().map(Value::Text))
+                    .chain(path_chunk.iter().cloned().map(Value::Blob))
                     .collect::<Vec<_>>(),
             )
         };
@@ -1274,17 +1268,17 @@ fn touch_between(
 fn follow_ups(
     connection: &Connection,
     revert_oid: &str,
-    path_keys: &[String],
+    path_ids: &[Vec<u8>],
     scope: Option<&SearchFilter>,
 ) -> Result<Vec<StoredCommit>, AppError> {
-    if path_keys.is_empty() {
+    if path_ids.is_empty() {
         return Ok(Vec::new());
     }
     let scoped = scope.is_some();
     let path_chunk_limit = SQL_PARAMETER_LIMIT - if scoped { 5 } else { 1 };
     let mut candidates = Vec::<(i64, String, Vec<u8>)>::new();
     let mut seen = HashSet::new();
-    for path_chunk in path_keys.chunks(path_chunk_limit) {
+    for path_chunk in path_ids.chunks(path_chunk_limit) {
         let path_placeholders = numbered_placeholders(if scoped { 6 } else { 2 }, path_chunk.len());
         let (query, values) = if let Some(scope) = scope {
             (
@@ -1296,14 +1290,14 @@ fn follow_ups(
                      JOIN commit_paths AS cp ON cp.commit_id = c.commit_id
                      WHERE c.position > (SELECT position FROM commits WHERE oid = ?5)
                        AND c.oid <> ?5
-                       AND cp.path_key IN ({path_placeholders})
+                       AND cp.raw_path IN ({path_placeholders})
                      GROUP BY c.commit_id
                      ORDER BY c.position ASC"
                 ),
                 scope_values(scope)
                     .into_iter()
                     .chain(std::iter::once(Value::Text(revert_oid.to_owned())))
-                    .chain(path_chunk.iter().cloned().map(Value::Text))
+                    .chain(path_chunk.iter().cloned().map(Value::Blob))
                     .collect::<Vec<_>>(),
             )
         } else {
@@ -1314,12 +1308,12 @@ fn follow_ups(
                      JOIN commit_paths AS cp ON cp.commit_id = c.commit_id
                      WHERE c.position > (SELECT position FROM commits WHERE oid = ?1)
                        AND c.oid <> ?1
-                       AND cp.path_key IN ({path_placeholders})
+                       AND cp.raw_path IN ({path_placeholders})
                      GROUP BY c.commit_id
                      ORDER BY c.position ASC"
                 ),
                 std::iter::once(Value::Text(revert_oid.to_owned()))
-                    .chain(path_chunk.iter().cloned().map(Value::Text))
+                    .chain(path_chunk.iter().cloned().map(Value::Blob))
                     .collect::<Vec<_>>(),
             )
         };

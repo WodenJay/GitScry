@@ -93,7 +93,7 @@ pub(crate) fn run(
             reason = revert_reason(&revert.subject, &revert.body);
             retry = stated_retry(&revert.body);
             if let Some((oid, subject, body)) =
-                retrieval::corrective_follow_up(session, scope, &revert.oid, &candidate.path_keys)?
+                retrieval::corrective_follow_up(session, scope, &revert.oid, &candidate.paths)?
             {
                 score += FOLLOW_UP_WEIGHT;
                 basis.push("corrective follow-up".to_owned());

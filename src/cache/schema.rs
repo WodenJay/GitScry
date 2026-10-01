@@ -62,13 +62,13 @@ CREATE TABLE semantic_vectors (
 ) STRICT;
 CREATE TABLE commit_paths (
     commit_id INTEGER NOT NULL REFERENCES commits(commit_id),
-    path_key TEXT NOT NULL,
+    path_search_key TEXT NOT NULL,
     path_basename TEXT NOT NULL CHECK (path_basename <> ''),
     raw_path BLOB NOT NULL,
     path_order INTEGER NOT NULL CHECK (path_order >= 0),
-    PRIMARY KEY (commit_id, path_key)
+    PRIMARY KEY (commit_id, raw_path)
 ) STRICT;
-CREATE INDEX commit_paths_by_key ON commit_paths(path_key, commit_id);
+CREATE INDEX commit_paths_by_search_key ON commit_paths(path_search_key, commit_id);
 CREATE INDEX commit_paths_by_basename ON commit_paths(path_basename, commit_id);
 CREATE INDEX commit_paths_by_commit ON commit_paths(commit_id, path_order);
 CREATE TABLE commit_path_counts (

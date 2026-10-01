@@ -77,8 +77,13 @@ fn normalize_anchors(anchors: impl IntoIterator<Item = String>) -> Result<Vec<St
                 "path must be repository-relative: {anchor}"
             )));
         }
-        let anchor = normalize_path(anchor.as_bytes());
-        if anchor.is_empty() {
+        let anchor = canonical_path(&anchor);
+        let anchor = if anchor.contains('/') {
+            anchor
+        } else {
+            normalize_path(anchor.as_bytes())
+        };
+        if normalize_path(anchor.as_bytes()).is_empty() {
             return Err(AppError::input("path must not be empty"));
         }
         if !normalized.contains(&anchor) {
@@ -86,6 +91,14 @@ fn normalize_anchors(anchors: impl IntoIterator<Item = String>) -> Result<Vec<St
         }
     }
     Ok(normalized)
+}
+
+fn canonical_path(path: &str) -> String {
+    let mut path = path.replace('\\', "/");
+    while let Some(stripped) = path.strip_prefix("./") {
+        path = stripped.to_owned();
+    }
+    path.trim_matches('/').to_owned()
 }
 
 /// Whether a caller-supplied path is relative to the repository root.
