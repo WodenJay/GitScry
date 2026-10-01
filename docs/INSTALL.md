@@ -1,55 +1,39 @@
-# Install GitScry
+# Installing GitScry
 
-Use this guide to install the current GitScry release without administrator access. Choose one method for the environment where GitScry will run.
+## Official release
 
-## Prebuilt release
-
-Use the prebuilt installer when Rust is not already available.
-
-### Linux or macOS
-
-Run the public shell installer:
-
-```sh
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/WodenJay/GitScry/releases/latest/download/gitscry-installer.sh | sh
-```
-
-The installer selects the supported binary for the machine, verifies its SHA-256 checksum, installs it under `~/.gitscry/bin`, and adds that directory to the user's PATH when possible. Open a new shell before verifying the command.
-
-### Windows
-
-Run PowerShell as the current user and execute:
+Official release installers support Windows x86-64, macOS Apple Silicon, and Linux x86-64 with GNU libc (glibc). They verify the release archive's SHA-256 checksum and install the executable together with its pinned ONNX Runtime files.
+Linux x86-64 packages are built and validated on Ubuntu 22.04 (glibc 2.35); compatibility with older glibc releases is not established.
 
 ```powershell
+# Windows x86-64
 powershell -ExecutionPolicy Bypass -c "irm https://github.com/WodenJay/GitScry/releases/latest/download/gitscry-installer.ps1 | iex"
 ```
 
-The installer selects the x86-64 Windows binary, verifies its SHA-256 checksum, installs it under the user's `.gitscry\bin` directory, and updates the user-level PATH. Open a new PowerShell window before verifying the command.
-
-## Cargo
-
-Use Cargo when Rust 1.89 or newer is installed:
-
 ```sh
-cargo install gitscry --locked
+# macOS Apple Silicon or Linux x86-64 (glibc)
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/WodenJay/GitScry/releases/latest/download/gitscry-installer.sh | sh
 ```
 
-This is the standard source-installation path and works independently of the prebuilt target matrix.
+By default, the installers place GitScry in `~/.gitscry/bin` (Windows: `%USERPROFILE%\.gitscry\bin`). The Windows installer adds this location to the user PATH. On Linux and macOS, add `~/.gitscry/bin` to your shell PATH if it is not already there. Set `GITSCRY_INSTALL_DIR` to use another installation directory.
 
-## Verify the installation
+The platform archives are also available on the [GitHub Releases page](https://github.com/WodenJay/GitScry/releases/latest). Extract the complete archive, keeping its `runtime/` directory beside `gitscry` (`gitscry.exe` on Windows); the runtime files and manifest must not be moved independently.
 
-Run:
+## Cargo installation
 
 ```sh
-gitscry --version
+cargo install gitscry
 ```
 
-For the first public release, the output should report `gitscry 0.1.0`. If the command is not found, open a new shell and confirm that the user-level `.gitscry/bin` directory is on PATH. Do not use `sudo` or an administrator shell to work around a PATH problem.
+`cargo install` builds GitScry from source and does not bundle ONNX Runtime. Non-semantic commands work normally, but semantic indexing requires a prepared native runtime.
 
-## Upgrade
+## Building from source with semantic indexing
 
-Run `gitscry update` to install the latest stable release, or use `gitscry upgrade` as its exact alias. The command downloads the official binary for supported Apple Silicon macOS, x86-64 musl Linux, or x86-64 MSVC Windows targets, verifies its published SHA-256 checksum, and replaces the executable that is actually running. A Cargo-built installation becomes the official prebuilt binary after a successful update. Updates do not modify repositories, configuration, or the rebuildable cache, and never request elevation. There is no separate uninstaller.
+From a GitScry checkout, prepare the verified runtime for the current supported native platform, then build or run the application:
 
-## Manual artifact verification
+```sh
+cargo run --manifest-path xtask/Cargo.toml -- prepare-runtime
+cargo build --release
+```
 
-If an archive is downloaded instead of using an installer, download the matching `.sha256` file from the same GitHub Release and verify the archive before unpacking it. On Linux, use `sha256sum -c`; on macOS, use `shasum -a 256 -c`; on Windows, use PowerShell's `Get-FileHash -Algorithm SHA256` and compare the result with the published checksum.
+The preparation command downloads only the pinned ONNX Runtime package for the current platform, verifies its archive and every packaged file, and places the runtime under `runtime/`. It does not download the semantic model; model resources are handled by GitScry separately.

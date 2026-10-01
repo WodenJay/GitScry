@@ -7,18 +7,19 @@ members = ["cargo:."]
 cargo-dist-version = "0.32.0"
 # CI backends to support
 ci = "github"
-# The installers to generate for each app
-installers = ["shell", "powershell"]
+# Built-in installers discard included runtime files; publish the bundled installers below instead.
+installers = []
 # Target platforms to build apps for (Rust target-triple syntax)
-targets = ["aarch64-apple-darwin", "x86_64-unknown-linux-musl", "x86_64-pc-windows-msvc"]
-# Path that installers should place binaries in
-install-path = "~/.gitscry/bin"
+targets = ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
+github-build-setup = "../build-setup.yml"
+include = ["runtime/"]
+
 # Where to host releases
 hosting = "github"
-# Upload assets to a pre-created draft before publishing
-create-release = false
+# Create the GitHub release after all artifacts are built
+create-release = true
 # Whether to install an updater program
 install-updater = false
-# Run crates.io Trusted Publishing after the GitHub release is created.
-post-announce-jobs = ["./dispatch-crates-io-publish"]
-github-custom-job-permissions = { "dispatch-crates-io-publish" = { actions = "write" } }
+[[dist.extra-artifacts]]
+artifacts = ["target/gitscry-installers/gitscry-installer.sh", "target/gitscry-installers/gitscry-installer.ps1"]
+build = ["sh", "scripts/build-installers.sh"]

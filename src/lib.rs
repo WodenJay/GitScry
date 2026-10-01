@@ -5,6 +5,8 @@ mod cli;
 mod git;
 mod github;
 mod render;
+#[doc(hidden)]
+pub mod runtime;
 mod semantic;
 
 pub fn run() -> i32 {

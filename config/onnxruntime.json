@@ -1,0 +1,100 @@
+{
+  "version": "1.23.2",
+  "binding_version": "2.0.0-rc.11",
+  "api_version": 23,
+  "targets": {
+    "x86_64-unknown-linux-gnu": {
+      "archive_url": "https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-linux-x64-1.23.2.tgz",
+      "archive_sha256": "1fa4dcaef22f6f7d5cd81b28c2800414350c10116f5fdd46a2160082551c5f9b",
+      "archive_bytes": 8309231,
+      "archive_format": "tar",
+      "library": "libonnxruntime.so.1.23.2",
+      "files": [
+        {
+          "archive_path": "onnxruntime-linux-x64-1.23.2/lib/libonnxruntime.so.1.23.2",
+          "name": "libonnxruntime.so.1.23.2",
+          "bytes": 22326072,
+          "sha256": "13ab8084954fa4a47c777880180b90810d6020f021441395712b48a75b74c68b"
+        },
+        {
+          "archive_path": "onnxruntime-linux-x64-1.23.2/lib/libonnxruntime_providers_shared.so",
+          "name": "libonnxruntime_providers_shared.so",
+          "bytes": 14632,
+          "sha256": "086ec1d5388f64153d9c63470d126693db9a182c8ce236d3a1119068471b8a0d"
+        },
+        {
+          "archive_path": "onnxruntime-linux-x64-1.23.2/LICENSE",
+          "name": "LICENSE",
+          "bytes": 1073,
+          "sha256": "2f07c72751aed99790b8a4869cf2311df85a860b22ded05fa22803587a48922c"
+        },
+        {
+          "archive_path": "onnxruntime-linux-x64-1.23.2/ThirdPartyNotices.txt",
+          "name": "ThirdPartyNotices.txt",
+          "bytes": 326866,
+          "sha256": "e9e90971a8e75a9a8ac0c6412e29c1202d079998389915aa485f46c816c3b4cc"
+        }
+      ]
+    },
+    "aarch64-apple-darwin": {
+      "archive_url": "https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-osx-arm64-1.23.2.tgz",
+      "archive_sha256": "b4d513ab2b26f088c66891dbbc1408166708773d7cc4163de7bdca0e9bbb7856",
+      "archive_bytes": 9999931,
+      "archive_format": "tar",
+      "library": "libonnxruntime.1.23.2.dylib",
+      "files": [
+        {
+          "archive_path": "onnxruntime-osx-arm64-1.23.2/lib/libonnxruntime.1.23.2.dylib",
+          "name": "libonnxruntime.1.23.2.dylib",
+          "bytes": 35138784,
+          "sha256": "d306d2bc768540766c7ed8a1e0ff05d2870c77a934ebeee4a7bafa1b732ef299"
+        },
+        {
+          "archive_path": "onnxruntime-osx-arm64-1.23.2/LICENSE",
+          "name": "LICENSE",
+          "bytes": 1073,
+          "sha256": "2f07c72751aed99790b8a4869cf2311df85a860b22ded05fa22803587a48922c"
+        },
+        {
+          "archive_path": "onnxruntime-osx-arm64-1.23.2/ThirdPartyNotices.txt",
+          "name": "ThirdPartyNotices.txt",
+          "bytes": 326866,
+          "sha256": "e9e90971a8e75a9a8ac0c6412e29c1202d079998389915aa485f46c816c3b4cc"
+        }
+      ]
+    },
+    "x86_64-pc-windows-msvc": {
+      "archive_url": "https://github.com/microsoft/onnxruntime/releases/download/v1.23.2/onnxruntime-win-x64-1.23.2.zip",
+      "archive_sha256": "0b38df9af21834e41e73d602d90db5cb06dbd1ca618948b8f1d66d607ac9f3cd",
+      "archive_bytes": 78127794,
+      "archive_format": "zip",
+      "library": "onnxruntime.dll",
+      "files": [
+        {
+          "archive_path": "onnxruntime-win-x64-1.23.2/lib/onnxruntime.dll",
+          "name": "onnxruntime.dll",
+          "bytes": 14186016,
+          "sha256": "dec964ab1ee36cc9b0ae247d13b376627992fc57dec0454354017ab8fd84f1ea"
+        },
+        {
+          "archive_path": "onnxruntime-win-x64-1.23.2/lib/onnxruntime_providers_shared.dll",
+          "name": "onnxruntime_providers_shared.dll",
+          "bytes": 22088,
+          "sha256": "a2b3a50956aa75a9879c8472bc7df4f7a8072bcd2db19a1b7d988e7688f293ef"
+        },
+        {
+          "archive_path": "onnxruntime-win-x64-1.23.2/LICENSE",
+          "name": "LICENSE",
+          "bytes": 1094,
+          "sha256": "c250d6278f0b47a6439fb7592b08b58a55eb9f535aa49a1db63211c3f982b674"
+        },
+        {
+          "archive_path": "onnxruntime-win-x64-1.23.2/ThirdPartyNotices.txt",
+          "name": "ThirdPartyNotices.txt",
+          "bytes": 333022,
+          "sha256": "e00f828e0a33de591a355ae6606d2625f5758da7d2c844db7821c9dd3e3647b6"
+        }
+      ]
+    }
+  }
+}
