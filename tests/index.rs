@@ -932,7 +932,7 @@ fn semantic_enablement_survives_cache_rebuild() {
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .unwrap();
-    assert_eq!(state, ("8".to_owned(), "1".to_owned(), "0".to_owned(), 1));
+    assert_eq!(state, ("9".to_owned(), "1".to_owned(), "0".to_owned(), 1));
 }
 
 #[test]
@@ -984,7 +984,7 @@ fn damaged_cache_rebuild_preserves_semantic_enablement() {
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .unwrap();
-    assert_eq!(state, ("8".to_owned(), "1".to_owned(), "0".to_owned(), 1));
+    assert_eq!(state, ("9".to_owned(), "1".to_owned(), "0".to_owned(), 1));
 }
 
 #[test]
@@ -1783,7 +1783,7 @@ fn path_projection_preserves_rename_paths_and_commit_counts() {
     let rename_oid = repo.head();
     let paths: Vec<(String, Vec<u8>)> = cache
         .prepare(
-            "SELECT cp.path_key, cp.raw_path
+            "SELECT cp.path_search_key, cp.raw_path
              FROM commit_paths AS cp
              JOIN commits AS c ON c.commit_id = cp.commit_id
              WHERE c.oid = ?1

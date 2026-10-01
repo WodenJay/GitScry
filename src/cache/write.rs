@@ -159,7 +159,7 @@ fn paths_by_commit(snapshot: &Snapshot) -> HashMap<String, Vec<Vec<u8>>> {
 }
 
 struct ProjectedPath {
-    key: String,
+    search_key: String,
     basename: String,
     raw_path: Vec<u8>,
     order: i64,
@@ -172,13 +172,17 @@ fn projected_paths_by_commit(snapshot: &Snapshot) -> HashMap<String, Vec<Project
             .entry(change.commit_oid.clone())
             .or_default();
         for path in [&change.old_path, &change.new_path].into_iter().flatten() {
-            let key = analysis::normalize_path(path);
-            if key.is_empty() || paths.iter().any(|existing| existing.key == key) {
+            let search_key = analysis::normalize_path(path);
+            if search_key.is_empty()
+                || paths
+                    .iter()
+                    .any(|existing| existing.raw_path.as_slice() == path.as_slice())
+            {
                 continue;
             }
-            let basename = key.rsplit('/').next().unwrap_or_default().to_owned();
+            let basename = search_key.rsplit('/').next().unwrap_or_default().to_owned();
             paths.push(ProjectedPath {
-                key,
+                search_key,
                 basename,
                 raw_path: path.clone(),
                 order: paths.len() as i64,
@@ -358,11 +362,11 @@ fn insert_path_projection(
     for path in paths {
         connection
             .execute(
-                "INSERT INTO commit_paths(commit_id, path_key, path_basename, raw_path, path_order)
+                "INSERT INTO commit_paths(commit_id, path_search_key, path_basename, raw_path, path_order)
                  VALUES (?1, ?2, ?3, ?4, ?5)",
                 params![
                     commit_id,
-                    path.key,
+                    path.search_key,
                     path.basename,
                     path.raw_path,
                     path.order,

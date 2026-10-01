@@ -2,7 +2,7 @@ mod support;
 
 use std::{fs, path::Path, process::Output};
 
-use support::{TestRepo, git, git_command};
+use support::{TestRepo, git, git_command, git_stdout};
 
 impl TestRepo {
     fn commit_files(&self, files: &[(&str, &[u8])], message: &str) {
@@ -89,6 +89,144 @@ fn stdout(output: &Output) -> String {
 
 fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+#[test]
+fn related_keeps_case_distinct_paths_as_distinct_history() {
+    let repo = TestRepo::new();
+    git(repo.dir.path(), ["config", "core.ignorecase", "false"]);
+    repo.commit_files(&[("src/template.rs", b"same\n")], "base");
+    let blob = git_stdout(repo.dir.path(), ["rev-parse", "HEAD:src/template.rs"]);
+    git(
+        repo.dir.path(),
+        ["update-index", "--force-remove", "src/template.rs"],
+    );
+    for path in ["src/Foo.rs", "src/foo.rs"] {
+        let entry = format!("100644,{blob},{path}");
+        git(
+            repo.dir.path(),
+            ["update-index", "--add", "--cacheinfo", entry.as_str()],
+        );
+    }
+    let tree = git_stdout(repo.dir.path(), ["write-tree"]);
+    let parent = repo.head();
+    let commit = git_stdout(
+        repo.dir.path(),
+        [
+            "commit-tree",
+            tree.as_str(),
+            "-p",
+            parent.as_str(),
+            "-m",
+            "add case-distinct paths",
+        ],
+    );
+    git(
+        repo.dir.path(),
+        ["update-ref", "refs/heads/main", commit.as_str()],
+    );
+    fs::write(
+        repo.dir.path().join("different-content"),
+        b"lowercase change\n",
+    )
+    .expect("write distinct blob content");
+    let changed_blob = git_stdout(repo.dir.path(), ["hash-object", "-w", "different-content"]);
+    for path in ["src/foo.rs", "src/Beta.rs"] {
+        let entry = format!("100644,{changed_blob},{path}");
+        git(
+            repo.dir.path(),
+            ["update-index", "--add", "--cacheinfo", entry.as_str()],
+        );
+    }
+    let tree = git_stdout(repo.dir.path(), ["write-tree"]);
+    let follow_up = git_stdout(
+        repo.dir.path(),
+        [
+            "commit-tree",
+            tree.as_str(),
+            "-p",
+            commit.as_str(),
+            "-m",
+            "change lowercase path with Beta",
+        ],
+    );
+    git(
+        repo.dir.path(),
+        ["update-ref", "refs/heads/main", follow_up.as_str()],
+    );
+    repo.index();
+
+    for (seed, candidate) in [("src/Foo.rs", "src/foo.rs"), ("src/foo.rs", "src/Foo.rs")] {
+        let output = repo.run(["related", seed]);
+        assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+        let rendered = stdout(&output);
+        assert!(
+            rendered.contains(&format!("candidate path: {candidate}")),
+            "{seed}: {rendered}"
+        );
+        if seed == "src/Foo.rs" {
+            assert!(
+                !rendered.contains("candidate path: src/Beta.rs"),
+                "case-distinct history leaked into exact path results: {rendered}"
+            );
+        } else {
+            assert!(
+                rendered.contains("candidate path: src/Beta.rs"),
+                "{rendered}"
+            );
+        }
+    }
+}
+
+#[test]
+fn related_does_not_treat_case_distinct_mass_change_as_exact_seed() {
+    let repo = TestRepo::new();
+    git(repo.dir.path(), ["config", "core.ignorecase", "false"]);
+    repo.commit_files(&[("src/foo.rs", b"lowercase\n")], "lowercase history");
+    repo.commit_mass_change("src/foo.rs", "src/Beta.rs");
+
+    let blob = git_stdout(repo.dir.path(), ["rev-parse", "HEAD:src/foo.rs"]);
+    for path in ["src/Foo.rs", "src/Alpha.rs"] {
+        let entry = format!("100644,{blob},{path}");
+        git(
+            repo.dir.path(),
+            ["update-index", "--add", "--cacheinfo", entry.as_str()],
+        );
+    }
+    let tree = git_stdout(repo.dir.path(), ["write-tree"]);
+    let parent = repo.head();
+    let commit = git_stdout(
+        repo.dir.path(),
+        [
+            "commit-tree",
+            tree.as_str(),
+            "-p",
+            parent.as_str(),
+            "-m",
+            "add exact-case relation",
+        ],
+    );
+    git(
+        repo.dir.path(),
+        ["update-ref", "refs/heads/main", commit.as_str()],
+    );
+    repo.index();
+
+    let output = repo.run(["related", "src/Foo.rs"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let rendered = stdout(&output);
+    assert!(
+        rendered.contains("candidate path: src/Alpha.rs"),
+        "{rendered}"
+    );
+    assert!(
+        !rendered.contains("candidate path: src/Beta.rs"),
+        "case-distinct mass change leaked into exact path results: {rendered}"
+    );
+    assert!(
+        !rendered.contains("mass-change commits excluded"),
+        "{rendered}"
+    );
 }
 
 #[test]
