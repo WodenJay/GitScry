@@ -355,6 +355,9 @@ fn json_flag_is_available_only_for_query_commands() {
     assert!(search_help.contains("existing GitHub login"));
     assert!(search_help.contains("PR number, title, URL, repository identity"));
     assert!(search_help.contains("does not audit or claim a minimum permission set"));
+    assert!(search_help.contains("schema_version` is 1 by default, 2 for `--patch` alone, and 3 whenever `--github-links` is enabled"));
+    assert!(search_help.contains("Version 3 may also include the optional `patch` field"));
+    assert!(search_help.contains("inspect optional fields instead of inferring enabled options from the version"));
     assert!(search_help.contains("cannot guarantee every PR containing a commit"));
     assert!(search_help.contains("search does not contact GitHub"));
     assert!(search_help.contains("Examples:"));
