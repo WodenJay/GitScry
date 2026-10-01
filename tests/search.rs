@@ -599,6 +599,31 @@ fn query_without_cache_reports_index_command_without_creating_artifacts() {
 }
 
 #[test]
+fn nested_unindexed_repository_does_not_use_parent_cache() {
+    let outer = TestRepo::new();
+    outer.commit(
+        "history.txt",
+        b"outer-only-sentinel\n",
+        "outer-only-sentinel",
+    );
+    outer.index();
+
+    let inner = outer.dir.path().join("vendor/inner");
+    fs::create_dir_all(&inner).expect("create nested repository");
+    git(&inner, ["init", "--initial-branch=main"]);
+
+    let output = TestRepo::run_at(&inner, ["search", "outer-only-sentinel"]);
+
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("no published cache found; run `gitscry index` first"));
+    assert!(
+        !String::from_utf8_lossy(&output.stdout).contains("outer-only-sentinel"),
+        "query must not return material from the parent repository"
+    );
+}
+
+#[test]
 fn query_rejects_a_damaged_published_cache_without_repairing_it() {
     let repo = TestRepo::new();
     repo.commit("history.txt", b"history\n", "History");

@@ -167,13 +167,14 @@ fn missing_warning(has_missing_objects: bool) -> Option<String> {
     )
 }
 
-pub(crate) fn open_query() -> Result<QuerySession, AppError> {
-    let cwd = std::env::current_dir()
-        .map_err(|error| query_error(format!("reading current directory: {error}")))?;
-    let root = find_query_root(&cwd)
-        .ok_or_else(|| query_error("no published cache found; run `gitscry index` first"))?;
+pub(crate) fn open_query(root: &Path) -> Result<QuerySession, AppError> {
+    if !root.join(".gitscry/cache.sqlite").is_file() {
+        return Err(query_error(
+            "no published cache found; run `gitscry index` first",
+        ));
+    }
     let mut progress = Vec::new();
-    let lock = acquire_query_shared(&root, &mut progress)?;
+    let lock = acquire_query_shared(root, &mut progress)?;
     let connection = Connection::open_with_flags(
         root.join(".gitscry/cache.sqlite"),
         OpenFlags::SQLITE_OPEN_READ_ONLY,
@@ -182,24 +183,12 @@ pub(crate) fn open_query() -> Result<QuerySession, AppError> {
     validate_query_metadata(&connection)?;
     let warnings = query_warnings(&connection)?;
     Ok(QuerySession {
-        root,
+        root: root.to_owned(),
         connection,
         _lock: lock,
         progress,
         warnings,
     })
-}
-
-fn find_query_root(start: &Path) -> Option<PathBuf> {
-    let mut current = start.to_owned();
-    loop {
-        if current.join(".gitscry/cache.sqlite").is_file() {
-            return Some(current);
-        }
-        if !current.pop() {
-            return None;
-        }
-    }
 }
 
 fn acquire_query_shared(root: &Path, progress: &mut Vec<String>) -> Result<SharedLock, AppError> {

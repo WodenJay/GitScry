@@ -98,7 +98,8 @@ struct Context {
 
 impl Context {
     fn open(options: SearchScopeOptions) -> Result<Self, AppError> {
-        let session = cache::open_query()?;
+        let repository = Repository::discover()?;
+        let session = cache::open_query(&repository.root)?;
         let scope = scope::resolve(&session, options)?;
         Ok(Self { session, scope })
     }
@@ -289,7 +290,7 @@ fn run_regression(
     let repository = Repository::discover()?;
     let target =
         repository.pin_regression_target(&bad, good.as_deref(), &path, symbol.as_deref())?;
-    let session = cache::open_query()?;
+    let session = cache::open_query(&repository.root)?;
     session.require_revision(&target.bad_revision)?;
     if let Some(good_revision) = &target.good_revision {
         session.require_revision(good_revision)?;
@@ -322,7 +323,7 @@ fn run_why(
 ) -> Result<Outcome, AppError> {
     let repository = Repository::discover()?;
     let target = repository.pin_why_target(&revision, &path, anchor)?;
-    let session = cache::open_query()?;
+    let session = cache::open_query(&repository.root)?;
     session.require_revision(&target.revision)?;
     let context = Context::for_target(session, options.scope, &target.revision)?;
     let reachable = context.session.ancestors(&target.revision)?;
@@ -345,12 +346,12 @@ fn run_timeline(
     last: bool,
     options: Options,
 ) -> Result<Outcome, AppError> {
-    let session = cache::open_query()?;
+    let repository = Repository::discover()?;
+    let session = cache::open_query(&repository.root)?;
     let revision = match at {
         Some(revision) => revision,
         None => session.completed_tip()?,
     };
-    let repository = Repository::discover()?;
     let target = repository.pin_timeline_target(&revision, &path)?;
     session.require_revision(&target.revision)?;
     let context = Context::for_target(session, options.scope, &target.revision)?;
@@ -379,7 +380,7 @@ fn run_trace_fix(
 ) -> Result<Outcome, AppError> {
     let repository = Repository::discover()?;
     let target = repository.pin_trace_fix(&revision, &paths)?;
-    let session = cache::open_query()?;
+    let session = cache::open_query(&repository.root)?;
     session.require_revision(&target.revision)?;
     let context = Context::for_target(session, options.scope, &target.revision)?;
     let mut reachable = context.session.ancestors(&target.revision)?;
