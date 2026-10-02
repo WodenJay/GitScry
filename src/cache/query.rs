@@ -1062,7 +1062,7 @@ fn touch_between(
     Ok(false)
 }
 
-/// Later commits touching the abandoned paths, in cache order.
+/// Descendant commits touching the abandoned paths, in cache order.
 fn follow_ups(
     connection: &Connection,
     revert_oid: &str,
@@ -1081,10 +1081,19 @@ fn follow_ups(
         let (query, values) = if let Some(scope) = scope {
             (
                 format!(
-                    "{SEARCH_SCOPE_CTE}
+                    "{SEARCH_SCOPE_CTE}, descendants(commit_id) AS (
+                         SELECT child.commit_id
+                         FROM commit_parents AS child
+                         WHERE child.parent_id = (SELECT commit_id FROM commits WHERE oid = ?5)
+                         UNION
+                         SELECT child.commit_id
+                         FROM commit_parents AS child
+                         JOIN descendants ON child.parent_id = descendants.commit_id
+                     )
                      SELECT c.position, c.oid, c.message, c.message_length
                      FROM commits AS c
                      JOIN eligible ON eligible.commit_id = c.commit_id
+                     JOIN descendants ON descendants.commit_id = c.commit_id
                      JOIN commit_paths AS cp ON cp.commit_id = c.commit_id
                      WHERE c.position > (SELECT position FROM commits WHERE oid = ?5)
                        AND c.oid <> ?5
@@ -1101,8 +1110,18 @@ fn follow_ups(
         } else {
             (
                 format!(
-                    "SELECT c.position, c.oid, c.message, c.message_length
+                    "WITH RECURSIVE descendants(commit_id) AS (
+                         SELECT child.commit_id
+                         FROM commit_parents AS child
+                         WHERE child.parent_id = (SELECT commit_id FROM commits WHERE oid = ?1)
+                         UNION
+                         SELECT child.commit_id
+                         FROM commit_parents AS child
+                         JOIN descendants ON child.parent_id = descendants.commit_id
+                     )
+                     SELECT c.position, c.oid, c.message, c.message_length
                      FROM commits AS c
+                     JOIN descendants ON descendants.commit_id = c.commit_id
                      JOIN commit_paths AS cp ON cp.commit_id = c.commit_id
                      WHERE c.position > (SELECT position FROM commits WHERE oid = ?1)
                        AND c.oid <> ?1
