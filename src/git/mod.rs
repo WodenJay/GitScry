@@ -168,11 +168,11 @@ impl Repository {
             "for-each-ref",
             "--format=%(refname)%00%(symref)",
             "refs/remotes",
-            "refs/heads/main",
-            "refs/heads/master",
+            "refs/heads",
         ])?;
         let mut remote_heads = Vec::new();
         let mut local_defaults = Vec::new();
+        let mut local_branches = Vec::new();
         let mut origin_head = None;
 
         for line in refs.lines() {
@@ -186,8 +186,11 @@ impl Repository {
                 && !target.is_empty()
             {
                 remote_heads.push(target.to_owned());
-            } else if matches!(name, "refs/heads/main" | "refs/heads/master") {
-                local_defaults.push(name.to_owned());
+            } else if name.starts_with("refs/heads/") {
+                local_branches.push(name.to_owned());
+                if matches!(name, "refs/heads/main" | "refs/heads/master") {
+                    local_defaults.push(name.to_owned());
+                }
             }
         }
 
@@ -208,12 +211,18 @@ impl Repository {
         if local_defaults.len() > 1 {
             return Err(default_branch_error("both main and master exist"));
         }
+        if local_branches.len() == 1 {
+            return Ok(Some(local_branches.remove(0)));
+        }
+        if local_branches.len() > 1 {
+            return Err(default_branch_error("multiple local branches"));
+        }
         Ok(None)
     }
 }
 
 fn default_branch_error(reason: &str) -> AppError {
     AppError::operational(format!(
-        "error: resolving default branch: {reason}; configure origin/HEAD or keep exactly one local main/master branch"
+        "error: resolving default branch: {reason}; configure origin/HEAD or keep exactly one local branch"
     ))
 }

@@ -369,16 +369,24 @@ fn origin_head_wins_over_ambiguous_local_defaults() {
 }
 
 #[test]
-fn current_branch_is_not_used_as_default() {
+fn sole_local_branch_is_used_as_default() {
     let repo = TestRepo::new();
     repo.commit("file.txt", b"content\n", "initial");
     git(repo.dir.path(), ["branch", "-m", "topic"]);
 
     let output = repo.run(["index"]);
 
-    assert_eq!(output.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("no default branch"));
-    assert!(!repo.dir.path().join(".gitscry/cache.sqlite").exists());
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "Indexed 1 commit.\n"
+    );
+    assert!(repo.dir.path().join(".gitscry/cache.sqlite").exists());
 }
 
 #[test]
