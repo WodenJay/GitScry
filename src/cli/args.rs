@@ -94,6 +94,16 @@ Examples:
         json: bool,
     },
     #[command(
+        about = "Rank current files by repeated historical touches",
+        long_about = "Rank tracked files present at the published cache tip by distinct non-merge touching commits. Default limit: 20. Reachable branch commits and root introductions count; merge-only conflict resolutions do not. Detected renames preserve identity, copies do not; deletion/recreation starts a new incarnation. Binary, permission and pure rename changes count. No generated/vendor/lockfile or large-commit exclusions. Last changed is the maximum eligible committer time in UTC. History and rename continuity are bounded by published cache coverage and available local objects. Read-only: does not index or fetch.\n\nExamples:\n  gitscry hotspots\n  gitscry hotspots --json --limit 10"
+    )]
+    Hotspots {
+        #[arg(long, default_value = "20", value_parser = parse_limit)]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    #[command(
         about = "Discover historical changes, abandonments, paths and tests",
         long_about = r#"Select traceable changed-code and path-association material for the current change.
 
@@ -541,6 +551,7 @@ impl Command {
             | Self::TraceFix { json, .. }
             | Self::Followups { json, .. }
             | Self::TraceRemoval { json, .. }
+            | Self::Hotspots { json, .. }
             | Self::Timeline { json, .. } => *json,
             Self::Update | Self::Index { .. } => false,
         }

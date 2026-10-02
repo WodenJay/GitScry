@@ -114,6 +114,12 @@ pub(crate) fn execute(
             });
         }
         Command::Update => return update::run(&mut |stage| report(Progress::Update(stage))),
+        Command::Hotspots { limit, .. } => (
+            Request::Hotspots,
+            limit,
+            false,
+            SearchScopeOptions::default(),
+        ),
         Command::Search {
             query,
             code,
@@ -331,6 +337,7 @@ pub(crate) fn execute(
             unreachable!("trace-removal has no GitHub link option")
         }
         query::QueryReport::Patterns(_) => unreachable!("patterns has no GitHub link option"),
+        query::QueryReport::Hotspots(_) => unreachable!("hotspots has no GitHub link option"),
         query::QueryReport::Analysis(report) => github::fetch(report, explicit_repo.as_deref()),
         query::QueryReport::Timeline(report) => {
             github::fetch_timeline(report, explicit_repo.as_deref())

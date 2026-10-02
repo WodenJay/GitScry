@@ -4,6 +4,8 @@
 pub(crate) mod followups;
 mod generation;
 mod history;
+mod hotspots;
+pub(crate) use hotspots::FileTouches;
 mod payload;
 mod query;
 mod schema;

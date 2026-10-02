@@ -26,6 +26,7 @@ pub(crate) enum Request {
         days: usize,
         max_commits: usize,
     },
+    Hotspots,
     Context {
         staged: bool,
         hybrid: bool,
@@ -94,6 +95,7 @@ pub(crate) enum QueryReport {
     Analysis(Report),
     Timeline(TimelineReport),
     TraceRemoval(super::TraceRemovalReport),
+    Hotspots(super::HotspotsReport),
 }
 
 impl QueryReport {
@@ -103,8 +105,7 @@ impl QueryReport {
             Self::Patterns(_) => &[],
             Self::Context(report) => &report.warnings,
             Self::Analysis(report) => &report.warnings,
-            Self::Timeline(_) => &[],
-            Self::TraceRemoval(_) => &[],
+            Self::Timeline(_) | Self::Hotspots(_) | Self::TraceRemoval(_) => &[],
         }
     }
 
@@ -114,8 +115,7 @@ impl QueryReport {
             Self::Patterns(_) => &[],
             Self::Context(_) => &[],
             Self::Analysis(report) => &report.notices,
-            Self::Timeline(_) => &[],
-            Self::TraceRemoval(_) => &[],
+            Self::Timeline(_) | Self::Hotspots(_) | Self::TraceRemoval(_) => &[],
         }
     }
 }
@@ -177,6 +177,7 @@ impl Context {
             QueryReport::Analysis(report) => report.scope = scope,
             QueryReport::Timeline(report) => report.scope = scope,
             QueryReport::TraceRemoval(report) => report.scope = scope,
+            QueryReport::Hotspots(_) => {}
         }
         Outcome {
             progress: self.session.progress().to_vec(),
@@ -199,6 +200,7 @@ pub(crate) fn execute(request: Request, options: Options) -> Result<Outcome, App
             max_commits,
         } => followups::run(revision, paths, to_rev, days, max_commits, options),
         Request::Context { staged, hybrid } => run_context(staged, hybrid, options),
+        Request::Hotspots => run_hotspots(options.limit),
         Request::Search { words, hybrid } => {
             if hybrid {
                 run_hybrid_search(words, options)
@@ -530,4 +532,19 @@ fn run_trace_fix(
         patch::attach_trace_fix_patch_excerpts(&context.session, &mut report)?;
     }
     Ok(context.finish(QueryReport::Analysis(report)))
+}
+
+fn run_hotspots(limit: usize) -> Result<Outcome, AppError> {
+    let repository = Repository::discover()?;
+    let session = cache::open_query(&repository.root)?;
+    let target = session.completed_tip()?;
+    session.require_revision(&target)?;
+    let paths = repository.tracked_files(&target)?;
+    let touches = session.hotspot_touches(&target, paths)?;
+    let report = super::HotspotsReport::aggregate(target, touches, limit);
+    Ok(Outcome {
+        progress: session.progress().to_vec(),
+        warnings: session.warnings().to_vec(),
+        report: QueryReport::Hotspots(report),
+    })
 }

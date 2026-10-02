@@ -10,6 +10,7 @@ mod github_links;
 mod json;
 mod material;
 
+mod hotspots;
 mod patterns;
 mod timeline;
 mod trace_removal;
@@ -27,6 +28,7 @@ fn format_report(
     match report {
         QueryReport::Followups(report) => followups::format_report(report),
         QueryReport::Patterns(report) => patterns::format_report(report),
+        QueryReport::Hotspots(report) => hotspots::format_report(report),
         QueryReport::Context(report) => context::format_report(report),
         QueryReport::TraceRemoval(report) => trace_removal::format_report(report),
         QueryReport::Analysis(report) => {
@@ -58,6 +60,7 @@ fn format_json_report(
             followups::format_json_report(report, additional_warnings)
         }
         QueryReport::Patterns(report) => patterns::format_json_report(report, additional_warnings),
+        QueryReport::Hotspots(report) => hotspots::format_json_report(report, additional_warnings),
         QueryReport::Context(report) => context::format_json_report(report, additional_warnings),
         QueryReport::TraceRemoval(report) => {
             trace_removal::format_json_report(report, additional_warnings)
