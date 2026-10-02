@@ -384,6 +384,7 @@ fn json_flag_is_available_only_for_query_commands() {
     assert!(search_help.contains("existing GitHub login"));
     assert!(search_help.contains("Coverage comes first"));
     assert!(search_help.contains("continuation pages"));
+    assert!(search_help.contains("conservative starting values, not empirically optimized"));
     assert!(search_help.contains("15-second timeout, 20-request, 50-results-per-page"));
     assert!(search_help.contains("complete, partial, not queried, or failed"));
     assert!(search_help.contains(
@@ -532,6 +533,7 @@ fn material_commands_share_github_link_options_and_caveats() {
         "regression",
         "why",
         "trace-fix",
+        "timeline",
     ] {
         let output = repo.run([name, "--help"]);
         assert_eq!(output.status.code(), Some(0), "{name}");
@@ -549,6 +551,7 @@ fn material_commands_share_github_link_options_and_caveats() {
             "20 API requests",
             "50 results per page",
             "200 deduplicated PR+issue objects",
+            "conservative starting values, not empirically optimized",
             "complete, partial, not queried, or failed",
             "stop link fetching only",
             "No automatic retries",
