@@ -1,3 +1,53 @@
+## [0.5.0] - 2026-10-02
+
+### 🚀 Features
+
+- *(search)* Link associated GitHub PRs
+- *(index)* Add optional semantic index
+- *(index)* Merge optional semantic indexing
+- *(search)* Add hybrid semantic retrieval
+- *(search)* Merge hybrid semantic retrieval
+- *(search)* Chunk long hybrid queries
+- *(runtime)* Bundle verified CPU runtime
+
+### 🐛 Bug Fixes
+
+- *(cli)* Remove timeline help callout
+- *(search)* Reject code-only flags in text mode
+- *(index)* Preserve opt-in and scope help
+- *(query)* Scope cache to repository root
+- *(semantic)* Reuse vectors across rebuilds
+- *(search)* Reject overlong hybrid queries
+- *(cache)* Rebuild after history deepening
+- *(retrieval)* Filter explicit paths
+- *(cache)* Order scans by history position
+- *(cache)* Preserve case-sensitive path identity
+- *(tests)* Qualify Unix support path
+- *(xtask)* Normalize tar member paths
+- *(semantic)* Fetch model from repository root
+- *(update)* Gate Windows-only io import
+- *(ci)* Align native tests with runtime layout
+- *(semantic)* Align offline model path
+
+### 🚜 Refactor
+
+- *(github)* Model repository identity
+- *(ci)* Simplify package smoke
+- *(cache)* Colocate historical scope SQL
+- *(cache)* Own semantic vector lifecycle
+- *(update)* Unify package staging policy
+
+### 📚 Documentation
+
+- Update Coding agent integration
+- Update --add-assignee '@me'
+- *(semantic)* Prefer bundled CPU runtime
+- *(semantic)* Decouple ORT from vector identity
+- *(search)* Clarify GitHub JSON versions
+- Keep GitHub notes out of README
+- Define current change
+- Distinguish historical detail from material
+- Set read-only local web scope
 ## [0.4.1] - 2026-09-30
 
 ### 🐛 Bug Fixes
