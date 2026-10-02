@@ -4,6 +4,7 @@
 //! in [`super::retrieval`]; wording lives in `render`.
 
 mod code_search;
+pub(crate) mod context;
 mod examples;
 mod failures;
 mod hybrid;

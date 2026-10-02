@@ -3,6 +3,7 @@
 //! One reason to change: user-visible output formats. Process progress and warnings stay on
 //! stderr; query reports go to stdout as either human-readable English or schema-versioned JSON.
 
+mod context;
 mod escape;
 mod github_links;
 mod json;
@@ -21,6 +22,7 @@ fn format_report(
     github_links: Option<&crate::github::LinksReport>,
 ) -> String {
     match report {
+        QueryReport::Context(report) => context::format_report(report),
         QueryReport::Analysis(report) => {
             let mut output = material::format_report(report);
             if let Some(github_links) = github_links {
@@ -46,6 +48,7 @@ fn format_json_report(
     github_links: Option<&crate::github::LinksReport>,
 ) -> Result<String, serde_json::Error> {
     match report {
+        QueryReport::Context(report) => context::format_json_report(report, additional_warnings),
         QueryReport::Analysis(report) => {
             json::format_json_report(report, additional_warnings, github_links)
         }

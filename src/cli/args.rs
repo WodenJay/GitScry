@@ -50,6 +50,40 @@ pub(crate) struct GithubLinkArgs {
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
     #[command(
+        about = "Discover co-changing paths and tests for current changes",
+        long_about = r#"Select traceable path-association material for the current change.
+
+Default input is the net HEAD-to-worktree path/status difference plus Git-unignored untracked paths. Staged/unstaged cancellations disappear. --staged selects HEAD-to-index only, excluding untracked paths and unstaged edits. Run inside a worktree; paths are root-relative. Unresolved conflicts fail. Detected rename sides are retained and excluded from suggestions; detection is not exhaustive.
+
+Only path associations are supplied in this slice, not similar code changes, recorded abandonment, mandatory edits, coverage verdicts, or required test execution. No file contents, external symlink targets, or recursive submodule contents are analyzed. No semantic resources or external LLM are used.
+
+History comes from one published cache session, not necessarily current HEAD. Nonempty input needs a usable cache: run `gitscry index` explicitly; context never builds or updates it. No-change input succeeds without opening cache. Cache and coverage limitations are reported.
+
+--from-rev excludes that cached commit and its ancestors; --to-rev includes that cached commit and its ancestors (default cache tip when scoped). The lower revision must be an ancestor of the upper revision. --since and --until filter committer time using inclusive UTC dates (YYYY-MM-DD) or RFC 3339 instants with Z or an explicit offset; timezone-free timestamps fail. Bounds combine and never change the current-change baseline. Without scope flags, all available cached history is eligible.
+
+Suggestions exclude every selected current path. Test-shaped candidates must exist as safe regular files in this worktree and appear once as tests, merging co-change and test-path bases. Merge commits and commits changing over 50 paths are excluded. Weak associations are not filled to meet a quota; zero results is valid. Historical matching uses exact path bytes, without basename or case-fold fallback. At most 256 byte-sorted input paths are queried; all input paths retain exclusion identity and omitted retrieval is reported. Each result includes at most three historical citations with its full support count and citation truncation flag.
+
+Default total ceiling is eight, with at most three entries per category. Positive --limit changes only the total ceiling. Association strength orders the unified list; tests precede co-changing files on equal strength, then latest supporting committer time and byte-sorted path break ties. --json expresses the same material, input, scope, limitations and truncation as text.
+
+Examples:
+  gitscry context
+  gitscry context --staged --json --limit 4
+  gitscry context --from-rev v1.0 --until 2025-01-31"#
+    )]
+    Context {
+        /// Select HEAD-to-index paths/status only.
+        #[arg(long)]
+        staged: bool,
+        /// Total ceiling; the three-per-category ceiling remains fixed.
+        #[arg(long, default_value = "8", value_parser = parse_limit)]
+        limit: usize,
+        /// Return typed structured material instead of terminal text.
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        scope: HistoricalScopeArgs,
+    },
+    #[command(
         about = "Update GitScry to the latest stable release",
         long_about = "Update GitScry to the latest stable release.\n\nUse `gitscry update` to check GitHub for a newer release, verify its SHA-256 checksum, and replace this executable. The update is refused when the release is older than the running version.\n\nExamples:\n\n  gitscry update\n\n  gitscry upgrade",
         alias = "upgrade"
@@ -417,7 +451,8 @@ pub(crate) enum CodeChange {
 impl Command {
     pub(crate) fn uses_json(&self) -> bool {
         match self {
-            Self::Search { json, .. }
+            Self::Context { json, .. }
+            | Self::Search { json, .. }
             | Self::Examples { json, .. }
             | Self::Failures { json, .. }
             | Self::Related { json, .. }
