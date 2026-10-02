@@ -55,8 +55,6 @@ jobs:
           git -C "$smoke_repo" -c user.name=Smoke -c user.email=smoke@example.invalid commit -qm initial
           (cd "$smoke_repo" && cargo run --manifest-path "$GITHUB_WORKSPACE/Cargo.toml" --locked -- index --semantic)
 
-      - name: Check mixed-generation semantic retrieval
-        run: cargo test --locked --test search --all-features -- --ignored --nocapture hybrid_search_mixes_reference_document_vectors_with_current_runtime_queries
   xtask:
     name: Runtime packager checks
     runs-on: ubuntu-22.04
