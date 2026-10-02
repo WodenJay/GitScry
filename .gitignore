@@ -1,3 +1,5 @@
 .worktrees
 /target
+/xtask/target
+/runtime
 .pi

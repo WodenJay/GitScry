@@ -3,7 +3,7 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: ['**']
 
 permissions:
   contents: read
@@ -23,9 +23,53 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Run Clippy
-        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --all-targets --all-features --jobs 1 -- -D warnings
       - name: Run tests
-        run: cargo test --locked --all-targets --all-features
+        run: cargo test --locked --all-targets --all-features --jobs 1
+      - name: Check installer shell syntax
+        run: sh -n scripts/gitscry-installer.sh && sh -n scripts/build-installers.sh && sh -n scripts/test-package-unix.sh
+      - name: Prepare pinned ONNX Runtime for semantic smoke
+        run: cargo run --manifest-path xtask/Cargo.toml --locked -- prepare-runtime
+      - name: Resolve semantic model revision
+        id: semantic-model
+        shell: bash
+        run: |
+          revision="$(grep '^pub(crate) const REVISION:' src/semantic/resources.rs | cut -d '"' -f 2)"
+          test -n "$revision"
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v5
+        with:
+          path: ~/.cache/GitScry/semantic/${{ steps.semantic-model.outputs.revision }}
+          key: gitscry-semantic-model-linux-${{ steps.semantic-model.outputs.revision }}
+      - name: Check fixed semantic embedding parity
+        run: cargo test --locked --lib --all-features --jobs 1 -- --ignored --nocapture matches_fixed_reference_embeddings
+      - name: Smoke real semantic inference
+        shell: bash
+        run: |
+          set -euo pipefail
+          smoke_repo="$(mktemp -d)"
+          trap 'rm -rf "$smoke_repo"' EXIT
+          git -C "$smoke_repo" init -q -b main
+          printf 'semantic smoke\n' > "$smoke_repo/fixture.txt"
+          git -C "$smoke_repo" add fixture.txt
+          git -C "$smoke_repo" -c user.name=Smoke -c user.email=smoke@example.invalid commit -qm initial
+          (cd "$smoke_repo" && cargo run --manifest-path "$GITHUB_WORKSPACE/Cargo.toml" --locked -- index --semantic)
+
+  xtask:
+    name: Runtime packager checks
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Check formatting
+        run: cargo fmt --manifest-path xtask/Cargo.toml -- --check
+      - name: Run Clippy
+        run: cargo clippy --manifest-path xtask/Cargo.toml --locked --all-targets --all-features --jobs 1 -- -D warnings
 
   msrv:
     name: Minimum Rust version
@@ -37,35 +81,4 @@ jobs:
       - name: Install Rust 1.89
         uses: dtolnay/rust-toolchain@1.89.0
       - name: Run tests on the declared MSRV
-        run: cargo test --locked --all-targets --all-features
-
-  release-targets:
-    name: Test ${{ matrix.name }}
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: Linux x86-64 musl
-            os: ubuntu-22.04
-            target: x86_64-unknown-linux-musl
-          - name: Windows x86-64 MSVC
-            os: windows-latest
-            target: x86_64-pc-windows-msvc
-          - name: macOS Apple Silicon
-            os: macos-14
-            target: aarch64-apple-darwin
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          persist-credentials: false
-      - name: Install musl linker
-        if: matrix.target == 'x86_64-unknown-linux-musl'
-        run: sudo apt-get update && sudo apt-get install --yes musl-tools
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          target: ${{ matrix.target }}
-      - name: Run target tests
-        run: cargo test --locked --all-targets --all-features --target ${{ matrix.target }}
+        run: cargo test --locked --all-targets --all-features --jobs 1

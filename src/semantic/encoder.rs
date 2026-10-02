@@ -1,9 +1,4 @@
-use std::{
-    env,
-    fs::File,
-    io::{self, Read},
-    path::PathBuf,
-};
+use std::path::PathBuf;
 
 use ort::{session::Session, value::Tensor};
 use sha2::{Digest, Sha256};
@@ -62,7 +57,13 @@ impl InputPreprocessor {
         Self::from_tokenizer(tokenizer)
     }
 
-    pub(crate) fn from_tokenizer(tokenizer: Tokenizer) -> Result<Self, AppError> {
+    pub(crate) fn from_tokenizer(mut tokenizer: Tokenizer) -> Result<Self, AppError> {
+        tokenizer.with_truncation(None).map_err(|error| {
+            AppError::operational(format!(
+                "error: configuring semantic tokenizer truncation: {error}"
+            ))
+        })?;
+        tokenizer.with_padding(None);
         if tokenizer.token_to_id("[PAD]").is_none() {
             return Err(AppError::operational(
                 "error: the pinned semantic tokenizer has no [PAD] token",
@@ -100,28 +101,27 @@ pub(crate) struct Encoder {
 }
 impl Encoder {
     pub(crate) fn load(preprocessor: Option<InputPreprocessor>) -> Result<Self, AppError> {
-        let runtime_hash = load_pinned_runtime()?;
+        let runtime = load_pinned_runtime()?;
         let assets = resources::ensure()?;
-        Self::with_assets(assets, runtime_hash, CPU_THREADS, preprocessor)
+        Self::with_assets(assets, runtime, CPU_THREADS, preprocessor)
     }
 
     pub(crate) fn load_for_query(query: &str) -> Result<(Self, Vec<PreparedInput>), AppError> {
         let assets = resources::existing()?;
         let mut preprocessor = InputPreprocessor::from_file(assets.tokenizer.clone())?;
         let inputs = preprocessor.prepare_query(query)?;
-        let runtime_hash = load_pinned_runtime().map_err(|error| {
+        let runtime = load_pinned_runtime().map_err(|error| {
             AppError::operational(format!(
-                "{error}; repair or reinstall GitScry using the official installer. For controlled semantic-index testing, set ORT_DYLIB_PATH to the verified platform library."
+                "{error}; repair or reinstall GitScry using the official installer."
             ))
         })?;
-        let encoder =
-            Self::with_assets(assets, runtime_hash, QUERY_CPU_THREADS, Some(preprocessor))?;
+        let encoder = Self::with_assets(assets, runtime, QUERY_CPU_THREADS, Some(preprocessor))?;
         Ok((encoder, inputs))
     }
 
     fn with_assets(
         assets: resources::Assets,
-        runtime_hash: String,
+        runtime: crate::runtime::RuntimeArtifact,
         thread_limit: usize,
         preprocessor: Option<InputPreprocessor>,
     ) -> Result<Self, AppError> {
@@ -144,8 +144,11 @@ impl Encoder {
                 ))
             })?;
         let runtime_provenance = format!(
-            "ort=2.0.0-rc.11;onnxruntime=1.23.2;api={};sha256={runtime_hash}",
-            ort::MINOR_VERSION
+            "ort={};onnxruntime={};api={};sha256={}",
+            runtime.binding_version,
+            runtime.runtime_version,
+            runtime.api_version,
+            runtime.library_sha256
         );
         Ok(Self {
             preprocessor: match preprocessor {
@@ -453,50 +456,53 @@ fn encode(
     })
 }
 
-fn load_pinned_runtime() -> Result<String, AppError> {
-    let path = env::var_os("ORT_DYLIB_PATH")
-        .map(PathBuf::from)
-        .ok_or_else(|| {
-            AppError::operational(
-                "error: ONNX Runtime 1.23.2 is not installed; for controlled semantic-index testing, set ORT_DYLIB_PATH to the verified platform library. Runtime packaging is handled separately.",
-            )
-        })?;
-    if !path.is_file() {
-        return Err(AppError::operational(format!(
-            "error: ORT_DYLIB_PATH does not name an ONNX Runtime library: `{}`",
-            path.display()
-        )));
-    }
-    let expected = expected_runtime_hash()?;
-    let path = path.canonicalize().map_err(|error| {
+fn load_pinned_runtime() -> Result<crate::runtime::RuntimeArtifact, AppError> {
+    let executable = std::env::current_exe().map_err(|error| {
+        AppError::operational(format!("error: locating the GitScry executable: {error}"))
+    })?;
+    let install_dir = executable.parent().ok_or_else(|| {
+        AppError::operational("error: the GitScry executable has no installation directory")
+    })?;
+    let target = match (
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        cfg!(target_env = "gnu"),
+    ) {
+        ("windows", "x86_64", _) => "x86_64-pc-windows-msvc",
+        ("linux", "x86_64", true) => "x86_64-unknown-linux-gnu",
+        ("macos", "aarch64", _) => "aarch64-apple-darwin",
+        _ => {
+            return Err(AppError::operational(format!(
+                "error: semantic indexing has no pinned ONNX Runtime package for {}-{}",
+                std::env::consts::OS,
+                std::env::consts::ARCH
+            )));
+        }
+    };
+    let pins = crate::runtime::RuntimePins::pinned().map_err(AppError::operational)?;
+    let runtime = crate::runtime::resolve_installation(
+        install_dir,
+        env!("CARGO_PKG_VERSION"),
+        target,
+        &pins,
+    )
+    .map_err(|error| {
         AppError::operational(format!(
-            "error: resolving ONNX Runtime library `{}`: {error}",
-            path.display()
+            "error: semantic runtime package is unavailable: {error}; reinstall GitScry from an official release (cargo install does not bundle ONNX Runtime)"
         ))
     })?;
-    let actual = hash_file(&path).map_err(|error| {
-        AppError::operational(format!(
-            "error: verifying ONNX Runtime library `{}`: {error}",
-            path.display()
-        ))
-    })?;
-    if actual != expected {
+    if ort::MINOR_VERSION != runtime.api_version {
         return Err(AppError::operational(format!(
-            "error: ONNX Runtime library `{}` has SHA-256 {actual}; expected pinned 1.23.2 library {expected}",
-            path.display()
-        )));
-    }
-    if ort::MINOR_VERSION != 23 {
-        return Err(AppError::operational(format!(
-            "error: ort binding requires ONNX Runtime C API v23, got v{}",
+            "error: ort binding requires ONNX Runtime C API v{}, got v{}",
+            runtime.api_version,
             ort::MINOR_VERSION
         )));
     }
-    let loaded = ort::init_from(&path)
+    let loaded = ort::init_from(&runtime.library_path)
         .map_err(|error| {
             AppError::operational(format!(
-                "error: loading pinned ONNX Runtime library `{}`: {error}",
-                path.display()
+                "error: loading packaged ONNX Runtime library `{}`: {error}",
+                runtime.library_path.display()
             ))
         })?
         .commit();
@@ -505,40 +511,169 @@ fn load_pinned_runtime() -> Result<String, AppError> {
             "error: another ONNX Runtime environment is already active in this process",
         ));
     }
-    Ok(actual)
+    Ok(runtime)
 }
 
-fn expected_runtime_hash() -> Result<&'static str, AppError> {
-    match (env::consts::OS, env::consts::ARCH, cfg!(target_env = "gnu")) {
-        ("windows", "x86_64", _) => {
-            Ok("dec964ab1ee36cc9b0ae247d13b376627992fc57dec0454354017ab8fd84f1ea")
-        }
-        ("linux", "x86_64", true) => {
-            Ok("13ab8084954fa4a47c777880180b90810d6020f021441395712b48a75b74c68b")
-        }
-        ("macos", "aarch64", _) => {
-            Ok("d306d2bc768540766c7ed8a1e0ff05d2870c77a934ebeee4a7bafa1b732ef299")
-        }
-        _ => Err(AppError::operational(format!(
-            "error: semantic indexing has no pinned ONNX Runtime 1.23.2 artifact for {}-{}",
-            env::consts::OS,
-            env::consts::ARCH
-        ))),
-    }
-}
+#[cfg(test)]
+mod reference_parity_tests {
+    use serde::Deserialize;
 
-fn hash_file(path: &std::path::Path) -> io::Result<String> {
-    let mut file = File::open(path)?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 16 * 1024];
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
+    use super::{CommitDocument, Encoder, resources};
+
+    const REFERENCE_FIXTURE: &str =
+        include_str!("../../tests/fixtures/minilm-document-embeddings.json");
+
+    #[derive(Deserialize)]
+    struct ReferenceFixture {
+        model_revision: String,
+        model_sha256: String,
+        tokenizer_sha256: String,
+        cases: Vec<ReferenceCase>,
     }
-    Ok(format!("{:x}", hasher.finalize()))
+
+    #[derive(Deserialize)]
+    struct ReferenceCase {
+        name: String,
+        title: String,
+        body: String,
+        paths: Vec<String>,
+        expected_input_ids: Vec<Vec<u32>>,
+        reference_vectors: Vec<Vec<f32>>,
+    }
+
+    #[derive(Default)]
+    struct MaximumErrors {
+        component: f64,
+        cosine: f64,
+        norm: f64,
+    }
+
+    #[test]
+    #[ignore = "requires the pinned ONNX Runtime and MiniLM model assets"]
+    fn matches_fixed_reference_embeddings() {
+        let fixture: ReferenceFixture = serde_json::from_str(REFERENCE_FIXTURE).unwrap();
+        assert_eq!(fixture.model_revision, resources::REVISION);
+        assert_eq!(fixture.model_sha256, resources::MODEL_SHA256);
+        assert_eq!(fixture.tokenizer_sha256, resources::TOKENIZER_SHA256);
+        assert_eq!(fixture.cases.len(), 3);
+
+        let mut encoder = Encoder::load(None).unwrap();
+        let inputs = fixture
+            .cases
+            .iter()
+            .map(|case| {
+                assert_eq!(case.expected_input_ids.len(), 1, "{}", case.name);
+                assert_eq!(case.reference_vectors.len(), 1, "{}", case.name);
+                let input = encoder
+                    .prepare(&CommitDocument {
+                        title: case.title.clone(),
+                        body: case.body.clone(),
+                        paths: case.paths.clone(),
+                    })
+                    .unwrap();
+                assert_eq!(input.tokens, case.expected_input_ids[0], "{}", case.name);
+                input
+            })
+            .collect::<Vec<_>>();
+
+        let batch = inputs.iter().collect::<Vec<_>>();
+        let embeddings = encoder.embed(&batch).unwrap();
+        assert_eq!(embeddings.len(), fixture.cases.len());
+
+        let mut errors = MaximumErrors::default();
+        for (case, actual) in fixture.cases.iter().zip(&embeddings) {
+            assert_vector_matches(case, actual, &mut errors);
+        }
+
+        let reversed_batch = inputs.iter().rev().collect::<Vec<_>>();
+        let reversed_embeddings = encoder.embed(&reversed_batch).unwrap();
+        for (case, actual) in fixture.cases.iter().rev().zip(&reversed_embeddings) {
+            assert_vector_matches(case, actual, &mut errors);
+        }
+
+        eprintln!(
+            "reference parity passed: target={}-{} model={} model_sha256={} {} max_component_error={:.8e} max_cosine_distance={:.8e} max_norm_error={:.8e}",
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            fixture.model_revision,
+            fixture.model_sha256,
+            encoder.runtime_provenance(),
+            errors.component,
+            errors.cosine,
+            errors.norm,
+        );
+    }
+
+    fn assert_vector_matches(case: &ReferenceCase, actual: &[f32], errors: &mut MaximumErrors) {
+        let expected = &case.reference_vectors[0];
+        assert_eq!(actual.len(), 384, "{} embedding dimension", case.name);
+        assert_eq!(expected.len(), 384, "{} reference dimension", case.name);
+        assert!(
+            actual.iter().all(|value| value.is_finite()),
+            "{} non-finite output",
+            case.name
+        );
+
+        assert!(
+            expected.iter().all(|value| value.is_finite()),
+            "{} non-finite reference value",
+            case.name
+        );
+
+        let actual_norm = actual
+            .iter()
+            .map(|value| f64::from(*value).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        let expected_norm = expected
+            .iter()
+            .map(|value| f64::from(*value).powi(2))
+            .sum::<f64>()
+            .sqrt();
+
+        assert!(
+            actual_norm.is_finite() && actual_norm > 0.0,
+            "{} invalid output norm",
+            case.name
+        );
+        assert!(
+            expected_norm.is_finite() && expected_norm > 0.0,
+            "{} invalid reference norm",
+            case.name
+        );
+        assert!(
+            (expected_norm - 1.0).abs() <= 1e-5,
+            "{} reference is not L2 normalized",
+            case.name
+        );
+        let dot = actual
+            .iter()
+            .zip(expected)
+            .map(|(actual, expected)| f64::from(*actual) * f64::from(*expected))
+            .sum::<f64>();
+        let component_error = actual
+            .iter()
+            .zip(expected)
+            .map(|(actual, expected)| (f64::from(*actual) - f64::from(*expected)).abs())
+            .fold(0.0_f64, f64::max);
+        let cosine_distance = (1.0 - dot / (actual_norm * expected_norm)).abs();
+        let norm_error = (actual_norm - 1.0).abs();
+
+        assert!(
+            component_error <= 3e-5,
+            "{} component error {component_error}",
+            case.name
+        );
+        assert!(
+            cosine_distance <= 1e-6,
+            "{} cosine distance {cosine_distance}",
+            case.name
+        );
+        assert!(norm_error <= 1e-5, "{} norm error {norm_error}", case.name);
+        errors.component = errors.component.max(component_error);
+        errors.cosine = errors.cosine.max(cosine_distance);
+        errors.norm = errors.norm.max(norm_error);
+    }
 }
 
 #[cfg(test)]

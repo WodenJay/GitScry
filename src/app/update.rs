@@ -1,4 +1,5 @@
 use super::{AppError, Outcome, UpdateStage};
+use crate::runtime::install_verified_package;
 use semver::Version;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -91,7 +92,8 @@ fn run_with<S: ReleaseSource>(
     verify_checksum(&archive, &checksum, archive_name).map_err(update_error)?;
 
     report(UpdateStage::Installing);
-    let warnings = install_archive(&archive, target, &executable).map_err(update_error)?;
+    let warnings = install_archive(&archive, target, &executable, &latest.to_string())
+        .map_err(update_error)?;
     Ok(Outcome {
         progress: Vec::new(),
         message: format!("Updated GitScry {current} → {latest}."),
@@ -234,7 +236,7 @@ enum ArchiveFormat {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Target {
     Aarch64AppleDarwin,
-    X86_64UnknownLinuxMusl,
+    X86_64UnknownLinuxGnu,
     X86_64PcWindowsMsvc,
 }
 
@@ -242,33 +244,27 @@ impl Target {
     fn current() -> Result<Self, String> {
         #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
         {
-            Ok(Self::Aarch64AppleDarwin)
+            return Ok(Self::Aarch64AppleDarwin);
         }
-        #[cfg(all(target_arch = "x86_64", target_os = "linux", target_env = "musl"))]
+        #[cfg(all(target_arch = "x86_64", target_os = "linux", target_env = "gnu"))]
         {
-            Ok(Self::X86_64UnknownLinuxMusl)
+            return Ok(Self::X86_64UnknownLinuxGnu);
         }
         #[cfg(all(target_arch = "x86_64", target_os = "windows", target_env = "msvc"))]
         {
-            Ok(Self::X86_64PcWindowsMsvc)
+            return Ok(Self::X86_64PcWindowsMsvc);
         }
-        #[cfg(not(any(
-            all(target_arch = "aarch64", target_os = "macos"),
-            all(target_arch = "x86_64", target_os = "linux", target_env = "musl"),
-            all(target_arch = "x86_64", target_os = "windows", target_env = "msvc"),
-        )))]
-        {
-            Err(format!(
-                "GitScry updates are not supported for target `{}`",
-                runtime_target()
-            ))
-        }
+        #[allow(unreachable_code)]
+        Err(format!(
+            "GitScry updates are not supported for target `{}`",
+            runtime_target()
+        ))
     }
 
     fn archive_name(self) -> &'static str {
         match self {
             Self::Aarch64AppleDarwin => "gitscry-aarch64-apple-darwin.tar.xz",
-            Self::X86_64UnknownLinuxMusl => "gitscry-x86_64-unknown-linux-musl.tar.xz",
+            Self::X86_64UnknownLinuxGnu => "gitscry-x86_64-unknown-linux-gnu.tar.xz",
             Self::X86_64PcWindowsMsvc => "gitscry-x86_64-pc-windows-msvc.zip",
         }
     }
@@ -276,13 +272,21 @@ impl Target {
     fn executable_name(self) -> &'static str {
         match self {
             Self::X86_64PcWindowsMsvc => "gitscry.exe",
-            Self::Aarch64AppleDarwin | Self::X86_64UnknownLinuxMusl => "gitscry",
+            Self::Aarch64AppleDarwin | Self::X86_64UnknownLinuxGnu => "gitscry",
+        }
+    }
+
+    fn triple(self) -> &'static str {
+        match self {
+            Self::Aarch64AppleDarwin => "aarch64-apple-darwin",
+            Self::X86_64UnknownLinuxGnu => "x86_64-unknown-linux-gnu",
+            Self::X86_64PcWindowsMsvc => "x86_64-pc-windows-msvc",
         }
     }
 
     fn archive_format(self) -> ArchiveFormat {
         match self {
-            Self::Aarch64AppleDarwin | Self::X86_64UnknownLinuxMusl => ArchiveFormat::TarXz,
+            Self::Aarch64AppleDarwin | Self::X86_64UnknownLinuxGnu => ArchiveFormat::TarXz,
             Self::X86_64PcWindowsMsvc => ArchiveFormat::Zip,
         }
     }
@@ -320,6 +324,17 @@ fn install_archive(
     archive: &[u8],
     target: Target,
     executable: &Path,
+    app_version: &str,
+) -> Result<Vec<String>, String> {
+    install_archive_with_publish(archive, target, executable, app_version, replace_executable)
+}
+
+fn install_archive_with_publish(
+    archive: &[u8],
+    target: Target,
+    executable: &Path,
+    app_version: &str,
+    publish_executable: impl FnOnce(&Path, &Path) -> Result<(), String>,
 ) -> Result<Vec<String>, String> {
     let parent = executable
         .parent()
@@ -331,11 +346,17 @@ fn install_archive(
     let staged = temporary.path().join(target.executable_name());
 
     match target.archive_format() {
-        ArchiveFormat::TarXz => extract_tar_xz(archive, target.executable_name(), &staged)?,
-        ArchiveFormat::Zip => extract_zip(archive, target.executable_name(), &staged)?,
+        ArchiveFormat::TarXz => extract_tar_xz(archive, target, temporary.path())?,
+        ArchiveFormat::Zip => extract_zip(archive, target, temporary.path())?,
     }
     copy_executable_permissions(executable, &staged)?;
-    replace_executable(&staged, executable)?;
+    // Versioned manifests and content-addressed runtime IDs keep the old executable usable until it is replaced.
+    install_verified_package(temporary.path(), parent, app_version, target.triple())
+        .map_err(|error| format!("verifying and installing ONNX Runtime: {error}"))?;
+    #[cfg(windows)]
+    fs::remove_dir_all(temporary.path().join("runtime"))
+        .map_err(|error| format!("removing the staged ONNX Runtime package: {error}"))?;
+    publish_executable(&staged, executable)?;
 
     if !fs::metadata(executable)
         .map_err(|error| format!("checking the installed executable: {error}"))?
@@ -388,14 +409,21 @@ impl Write for LimitedVec {
         Ok(())
     }
 }
-fn extract_tar_xz(archive: &[u8], expected: &str, staged: &Path) -> Result<(), String> {
+#[derive(Debug)]
+enum PackageFile {
+    Executable,
+    Runtime(PathBuf),
+}
+
+fn extract_tar_xz(archive: &[u8], target: Target, staging_dir: &Path) -> Result<(), String> {
     let mut compressed = Cursor::new(archive);
     let mut decompressed = LimitedVec::new(MAX_ARCHIVE_BYTES);
     lzma_rs::xz_decompress(&mut compressed, &mut decompressed)
         .map_err(|error| format!("decompressing the tar.xz archive: {error}"))?;
     let decompressed = decompressed.into_inner();
 
-    let mut found = false;
+    let mut found_executable = false;
+    let mut total_runtime_bytes = 0_u64;
     let mut archive = tar::Archive::new(Cursor::new(decompressed));
     let entries = archive
         .entries()
@@ -406,39 +434,60 @@ fn extract_tar_xz(archive: &[u8], expected: &str, staged: &Path) -> Result<(), S
             .path()
             .map_err(|error| format!("reading a tar entry path: {error}"))?
             .into_owned();
-        validate_archive_path(&path)?;
         let entry_type = entry.header().entry_type();
         if entry_type.is_symlink() || entry_type.is_hard_link() {
             return Err("archive contains an unsafe link entry".to_owned());
         }
-        if path.file_name() == Some(OsStr::new(expected)) {
-            if found {
-                return Err(format!(
-                    "archive contains multiple `{expected}` executables"
-                ));
+        let is_file = entry_type.is_file();
+        let Some(file) = package_file(&path, target.executable_name(), is_file)? else {
+            continue;
+        };
+        let size = entry.size();
+        match file {
+            PackageFile::Executable => {
+                if !is_file {
+                    return Err(format!(
+                        "archive entry `{}` is not a regular file",
+                        target.executable_name()
+                    ));
+                }
+                if found_executable {
+                    return Err(format!(
+                        "archive contains multiple `{}` executables",
+                        target.executable_name()
+                    ));
+                }
+                write_entry(
+                    &mut entry,
+                    size,
+                    &staging_dir.join(target.executable_name()),
+                    MAX_EXECUTABLE_BYTES,
+                    "executable",
+                )?;
+                found_executable = true;
             }
-            if !entry_type.is_file() {
-                return Err(format!("archive entry `{expected}` is not a regular file"));
+            PackageFile::Runtime(relative) => {
+                if is_file {
+                    total_runtime_bytes = write_runtime_entry(
+                        &mut entry,
+                        size,
+                        &staging_dir.join(relative),
+                        total_runtime_bytes,
+                    )?;
+                } else if !entry_type.is_dir() {
+                    return Err("archive contains a non-regular ONNX Runtime entry".to_owned());
+                }
             }
-            let size = entry.size();
-            write_entry(&mut entry, size, staged)?;
-            found = true;
         }
     }
-
-    if found {
-        Ok(())
-    } else {
-        Err(format!(
-            "archive does not contain the `{expected}` executable"
-        ))
-    }
+    require_executable(found_executable, target)
 }
 
-fn extract_zip(archive: &[u8], expected: &str, staged: &Path) -> Result<(), String> {
+fn extract_zip(archive: &[u8], target: Target, staging_dir: &Path) -> Result<(), String> {
     let mut archive = zip::ZipArchive::new(Cursor::new(archive))
         .map_err(|error| format!("reading the zip archive: {error}"))?;
-    let mut found = false;
+    let mut found_executable = false;
+    let mut total_runtime_bytes = 0_u64;
     for index in 0..archive.len() {
         let mut entry = archive
             .by_index(index)
@@ -453,30 +502,124 @@ fn extract_zip(archive: &[u8], expected: &str, staged: &Path) -> Result<(), Stri
         if entry.is_symlink() {
             return Err("archive contains an unsafe link entry".to_owned());
         }
-        if path.file_name() == Some(OsStr::new(expected)) {
-            if found {
-                return Err(format!(
-                    "archive contains multiple `{expected}` executables"
-                ));
+        let is_file = entry.is_file();
+        let Some(file) = package_file(&path, target.executable_name(), is_file)? else {
+            continue;
+        };
+        let size = entry.size();
+        match file {
+            PackageFile::Executable => {
+                if !is_file {
+                    return Err(format!(
+                        "archive entry `{}` is not a regular file",
+                        target.executable_name()
+                    ));
+                }
+                if found_executable {
+                    return Err(format!(
+                        "archive contains multiple `{}` executables",
+                        target.executable_name()
+                    ));
+                }
+                write_entry(
+                    &mut entry,
+                    size,
+                    &staging_dir.join(target.executable_name()),
+                    MAX_EXECUTABLE_BYTES,
+                    "executable",
+                )?;
+                found_executable = true;
             }
-            if !entry.is_file() {
-                return Err(format!("archive entry `{expected}` is not a regular file"));
+            PackageFile::Runtime(relative) => {
+                if is_file {
+                    total_runtime_bytes = write_runtime_entry(
+                        &mut entry,
+                        size,
+                        &staging_dir.join(relative),
+                        total_runtime_bytes,
+                    )?;
+                } else if !entry.is_dir() {
+                    return Err("archive contains a non-regular ONNX Runtime entry".to_owned());
+                }
             }
-            let size = entry.size();
-            write_entry(&mut entry, size, staged)?;
-            found = true;
         }
     }
+    require_executable(found_executable, target)
+}
 
+fn package_file(
+    path: &Path,
+    executable: &str,
+    is_file: bool,
+) -> Result<Option<PackageFile>, String> {
+    validate_archive_path(path)?;
+    let components = path.components().collect::<Vec<_>>();
+    let runtime_positions = components
+        .iter()
+        .enumerate()
+        .filter(|(_, component)| component.as_os_str() == OsStr::new("runtime"))
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    if !runtime_positions.is_empty() {
+        if runtime_positions.len() != 1 || runtime_positions[0] > 1 {
+            return Err("archive contains an invalid ONNX Runtime path".to_owned());
+        }
+        let suffix = &components[runtime_positions[0]..];
+        if (is_file && suffix.len() != 3) || (!is_file && suffix.len() > 2) {
+            return Err("archive contains an invalid ONNX Runtime package layout".to_owned());
+        }
+        let mut relative = PathBuf::from("runtime");
+        for component in suffix.iter().skip(1) {
+            relative.push(component.as_os_str());
+        }
+        return Ok(Some(PackageFile::Runtime(relative)));
+    }
+
+    if path.file_name() == Some(OsStr::new(executable)) {
+        if components.len() > 2 {
+            return Err("archive contains an invalid executable path".to_owned());
+        }
+        return Ok(Some(PackageFile::Executable));
+    }
+    Ok(None)
+}
+
+fn require_executable(found: bool, target: Target) -> Result<(), String> {
     if found {
         Ok(())
     } else {
         Err(format!(
-            "archive does not contain the `{expected}` executable"
+            "archive does not contain the `{}` executable",
+            target.executable_name()
         ))
     }
 }
 
+fn write_runtime_entry<R: Read>(
+    entry: &mut R,
+    size: u64,
+    destination: &Path,
+    total_runtime_bytes: u64,
+) -> Result<u64, String> {
+    let new_total = total_runtime_bytes
+        .checked_add(size)
+        .ok_or_else(|| "ONNX Runtime payload is too large".to_owned())?;
+    if new_total > MAX_ARCHIVE_BYTES as u64 {
+        return Err("ONNX Runtime payload exceeds the extraction limit".to_owned());
+    }
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("creating ONNX Runtime staging directory: {error}"))?;
+    }
+    write_entry(
+        entry,
+        size,
+        destination,
+        MAX_ARCHIVE_BYTES as u64,
+        "runtime file",
+    )?;
+    Ok(new_total)
+}
 fn validate_archive_path(path: &Path) -> Result<(), String> {
     if path.as_os_str().is_empty() || path.to_string_lossy().contains('\\') {
         return Err("archive contains an unsafe path".to_owned());
@@ -484,7 +627,7 @@ fn validate_archive_path(path: &Path) -> Result<(), String> {
     if path.components().any(|component| {
         matches!(
             component,
-            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            Component::CurDir | Component::ParentDir | Component::RootDir | Component::Prefix(_)
         )
     }) {
         return Err(format!(
@@ -495,27 +638,38 @@ fn validate_archive_path(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn write_entry<R: Read>(entry: &mut R, size: u64, staged: &Path) -> Result<(), String> {
-    if size > MAX_EXECUTABLE_BYTES {
+fn write_entry<R: Read>(
+    entry: &mut R,
+    size: u64,
+    staged: &Path,
+    max_bytes: u64,
+    description: &str,
+) -> Result<(), String> {
+    if size > max_bytes {
         return Err(format!(
-            "executable in archive is larger than {MAX_EXECUTABLE_BYTES} bytes"
+            "{description} in archive exceeds the {max_bytes}-byte extraction limit"
         ));
     }
     let mut output = OpenOptions::new()
         .create_new(true)
         .write(true)
         .open(staged)
-        .map_err(|error| format!("creating the staged executable: {error}"))?;
-    let copied = io::copy(entry, &mut output)
-        .map_err(|error| format!("extracting the executable: {error}"))?;
+        .map_err(|error| format!("creating the staged {description}: {error}"))?;
+    let copied = io::copy(&mut entry.take(max_bytes + 1), &mut output)
+        .map_err(|error| format!("extracting the {description}: {error}"))?;
+    if copied > max_bytes {
+        return Err(format!(
+            "{description} in archive exceeds the {max_bytes}-byte extraction limit"
+        ));
+    }
     if copied != size {
         return Err(format!(
-            "extracted executable size {copied} does not match archive size {size}"
+            "extracted {description} size {copied} does not match archive size {size}"
         ));
     }
     output
         .sync_all()
-        .map_err(|error| format!("flushing the staged executable: {error}"))?;
+        .map_err(|error| format!("flushing the staged {description}: {error}"))?;
     Ok(())
 }
 
@@ -637,7 +791,6 @@ exit 1
 
 struct UpdateLock {
     file: File,
-    path: PathBuf,
 }
 
 impl UpdateLock {
@@ -658,7 +811,7 @@ impl UpdateLock {
             .open(&path)
             .map_err(|error| format!("opening the update lock: {error}"))?;
         match file.try_lock() {
-            Ok(()) => Ok(Self { file, path }),
+            Ok(()) => Ok(Self { file }),
             Err(std::fs::TryLockError::WouldBlock) => {
                 Err("another GitScry update is already in progress; retry".to_owned())
             }
@@ -671,8 +824,8 @@ impl UpdateLock {
 
 impl Drop for UpdateLock {
     fn drop(&mut self) {
+        // Keep this inode: unlinking can split concurrent processes across lock files.
         let _ = self.file.unlock();
-        let _ = fs::remove_file(&self.path);
     }
 }
 
@@ -740,7 +893,11 @@ struct GithubAsset {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{collections::HashMap, fs};
+    use crate::runtime::{PinnedFile, RuntimeManifest, RuntimePins, RuntimeTargetPins};
+    use std::{
+        collections::{BTreeMap, HashMap},
+        fs,
+    };
     use tempfile::TempDir;
 
     struct FixtureSource {
@@ -814,6 +971,165 @@ mod tests {
         compressed
     }
 
+    fn fixture_pins(target: Target) -> RuntimePins {
+        fixture_pins_for(target, "1.23.2", b"fixture runtime")
+    }
+
+    fn fixture_pins_for(
+        target: Target,
+        runtime_version: &str,
+        runtime_bytes: &[u8],
+    ) -> RuntimePins {
+        let library = match target {
+            Target::Aarch64AppleDarwin => format!("libonnxruntime.{runtime_version}.dylib"),
+            Target::X86_64UnknownLinuxGnu => "libonnxruntime.so".into(),
+            Target::X86_64PcWindowsMsvc => "onnxruntime.dll".into(),
+        };
+        let archive = format!("fixture archive {runtime_version}");
+        RuntimePins {
+            version: runtime_version.into(),
+            binding_version: "2.0.0-rc.11".into(),
+            api_version: 23,
+            targets: BTreeMap::from([(
+                target.triple().into(),
+                RuntimeTargetPins {
+                    archive_url: "https://example.invalid/onnxruntime".into(),
+                    archive_sha256: hex_digest(&Sha256::digest(archive.as_bytes())),
+                    archive_bytes: archive.len() as u64,
+                    archive_format: match target {
+                        Target::X86_64PcWindowsMsvc => "zip",
+                        _ => "tar",
+                    }
+                    .into(),
+                    library: library.clone(),
+                    files: vec![PinnedFile {
+                        archive_path: format!("onnxruntime/lib/{library}"),
+                        name: library,
+                        bytes: runtime_bytes.len() as u64,
+                        sha256: hex_digest(&Sha256::digest(runtime_bytes)),
+                    }],
+                },
+            )]),
+        }
+    }
+
+    fn fixture_manifest(target: Target, app_version: &str) -> RuntimeManifest {
+        RuntimeManifest::from_pins(app_version, target.triple(), &fixture_pins(target)).unwrap()
+    }
+
+    fn tar_xz_package(target: Target, app_version: &str, executable: &[u8]) -> Vec<u8> {
+        tar_xz_package_with_runtime(target, app_version, executable, b"fixture runtime")
+    }
+
+    fn tar_xz_package_with_runtime(
+        target: Target,
+        app_version: &str,
+        executable: &[u8],
+        runtime_bytes: &[u8],
+    ) -> Vec<u8> {
+        let manifest = fixture_manifest(target, app_version);
+        tar_xz_package_with_manifest(target, app_version, executable, &manifest, runtime_bytes)
+    }
+
+    fn tar_xz_package_with_pins(
+        target: Target,
+        app_version: &str,
+        executable: &[u8],
+        pins: &RuntimePins,
+        runtime_bytes: &[u8],
+    ) -> Vec<u8> {
+        let manifest = RuntimeManifest::from_pins(app_version, target.triple(), pins).unwrap();
+        tar_xz_package_with_manifest(target, app_version, executable, &manifest, runtime_bytes)
+    }
+
+    fn tar_xz_package_with_manifest(
+        target: Target,
+        app_version: &str,
+        executable: &[u8],
+        manifest: &RuntimeManifest,
+        runtime_bytes: &[u8],
+    ) -> Vec<u8> {
+        let prefix = format!("gitscry-{}", target.triple());
+        let mut tar_bytes = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut tar_bytes);
+            append_tar_file(
+                &mut builder,
+                &format!("{prefix}/{}", target.executable_name()),
+                executable,
+                0o755,
+            );
+            append_tar_file(
+                &mut builder,
+                &format!("{prefix}/runtime/manifests/{app_version}.json"),
+                &serde_json::to_vec(manifest).unwrap(),
+                0o644,
+            );
+            for file in &manifest.files {
+                append_tar_file(
+                    &mut builder,
+                    &format!("{prefix}/runtime/{}/{}", manifest.runtime_id, file.name),
+                    runtime_bytes,
+                    0o644,
+                );
+            }
+            builder.finish().unwrap();
+        }
+        let mut compressed = Vec::new();
+        lzma_rs::xz_compress(&mut Cursor::new(tar_bytes), &mut compressed).unwrap();
+        compressed
+    }
+
+    fn append_tar_file<W: Write>(
+        builder: &mut tar::Builder<W>,
+        path: &str,
+        contents: &[u8],
+        mode: u32,
+    ) {
+        let mut header = tar::Header::new_gnu();
+        header.set_path(path).unwrap();
+        header.set_size(contents.len() as u64);
+        header.set_mode(mode);
+        header.set_cksum();
+        builder.append(&header, contents).unwrap();
+    }
+
+    #[cfg(windows)]
+    fn zip_package(target: Target, app_version: &str, executable: &[u8]) -> Vec<u8> {
+        use zip::write::SimpleFileOptions;
+
+        let manifest = fixture_manifest(target, app_version);
+        let runtime_bytes = b"fixture runtime";
+        let prefix = format!("gitscry-{}", target.triple());
+        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        writer
+            .start_file(
+                format!("{prefix}/{}", target.executable_name()),
+                SimpleFileOptions::default(),
+            )
+            .unwrap();
+        writer.write_all(executable).unwrap();
+        writer
+            .start_file(
+                format!("{prefix}/runtime/manifests/{app_version}.json"),
+                SimpleFileOptions::default(),
+            )
+            .unwrap();
+        writer
+            .write_all(&serde_json::to_vec(&manifest).unwrap())
+            .unwrap();
+        for file in &manifest.files {
+            writer
+                .start_file(
+                    format!("{prefix}/runtime/{}/{}", manifest.runtime_id, file.name),
+                    SimpleFileOptions::default(),
+                )
+                .unwrap();
+            writer.write_all(runtime_bytes).unwrap();
+        }
+        writer.finish().unwrap().into_inner()
+    }
+
     fn executable() -> (TempDir, PathBuf) {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("gitscry");
@@ -827,11 +1143,12 @@ mod tests {
         executable: &Path,
     ) -> Result<(Outcome, Vec<UpdateStage>), AppError> {
         let mut stages = Vec::new();
+        let target = Target::X86_64UnknownLinuxGnu;
         let outcome = run_with(
             source,
             &Version::parse(current).unwrap(),
             executable,
-            Target::X86_64UnknownLinuxMusl,
+            target,
             &mut |stage| stages.push(stage),
         )?;
         Ok((outcome, stages))
@@ -839,17 +1156,26 @@ mod tests {
 
     #[test]
     fn updates_verified_tarball_and_reports_stages() {
-        let archive_name = Target::X86_64UnknownLinuxMusl.archive_name();
-        let archive = tar_xz(
-            "gitscry-x86_64-unknown-linux-musl/gitscry",
-            b"new executable",
-        );
+        let archive_name = Target::X86_64UnknownLinuxGnu.archive_name();
+        let archive = tar_xz_package(Target::X86_64UnknownLinuxGnu, "0.2.0", b"new executable");
         let mut source = fixture_source("v0.2.0", archive, archive_name);
-        let (_directory, executable) = executable();
+        let (directory, executable) = executable();
 
         let (outcome, stages) = run_fixture(&mut source, "0.1.0", &executable).unwrap();
 
         assert_eq!(fs::read(&executable).unwrap(), b"new executable");
+        let manifest = fixture_manifest(Target::X86_64UnknownLinuxGnu, "0.2.0");
+        assert_eq!(
+            fs::read(
+                directory
+                    .path()
+                    .join("runtime")
+                    .join(manifest.runtime_id)
+                    .join(manifest.library)
+            )
+            .unwrap(),
+            b"fixture runtime"
+        );
         assert_eq!(outcome.message, "Updated GitScry 0.1.0 → 0.2.0.");
         assert_eq!(
             stages,
@@ -870,6 +1196,118 @@ mod tests {
         );
     }
 
+    #[test]
+    fn updater_accepts_runtime_pins_from_the_new_release() {
+        let target = Target::X86_64UnknownLinuxGnu;
+        let runtime_bytes = b"updated runtime";
+        let pins = fixture_pins_for(target, "1.24.0", runtime_bytes);
+        let archive =
+            tar_xz_package_with_pins(target, "0.2.0", b"new executable", &pins, runtime_bytes);
+        let mut source = fixture_source("v0.2.0", archive, target.archive_name());
+        let (directory, executable) = executable();
+
+        run_fixture(&mut source, "0.1.0", &executable).unwrap();
+
+        let manifest = RuntimeManifest::from_pins("0.2.0", target.triple(), &pins).unwrap();
+        assert_eq!(
+            fs::read(
+                directory
+                    .path()
+                    .join("runtime")
+                    .join(manifest.runtime_id)
+                    .join(manifest.library)
+            )
+            .unwrap(),
+            runtime_bytes
+        );
+    }
+
+    #[test]
+    fn missing_runtime_package_preserves_the_old_executable() {
+        let target = Target::X86_64UnknownLinuxGnu;
+        let archive_name = target.archive_name();
+        let archive = tar_xz(
+            "gitscry-x86_64-unknown-linux-gnu/gitscry",
+            b"new executable",
+        );
+        let mut source = fixture_source("v0.2.0", archive, archive_name);
+        let (_directory, executable) = executable();
+
+        let error = match run_fixture(&mut source, "0.1.0", &executable) {
+            Err(error) => error,
+            Ok(_) => panic!("missing runtime package must be rejected"),
+        };
+
+        assert!(error.to_string().contains("ONNX Runtime"));
+        assert_eq!(fs::read(&executable).unwrap(), b"old executable");
+    }
+
+    #[test]
+    fn invalid_runtime_package_preserves_the_old_executable() {
+        let target = Target::X86_64UnknownLinuxGnu;
+        let archive_name = target.archive_name();
+        let archive =
+            tar_xz_package_with_runtime(target, "0.2.0", b"new executable", b"tampered runtime");
+        let mut source = fixture_source("v0.2.0", archive, archive_name);
+        let (directory, executable) = executable();
+
+        let error = match run_fixture(&mut source, "0.1.0", &executable) {
+            Err(error) => error,
+            Ok(_) => panic!("invalid runtime package must be rejected"),
+        };
+
+        assert!(error.to_string().contains("failed verification"));
+        assert_eq!(fs::read(&executable).unwrap(), b"old executable");
+        assert!(!directory.path().join("runtime").exists());
+    }
+
+    #[test]
+    fn failed_executable_replacement_preserves_old_runtime() {
+        let target = Target::X86_64UnknownLinuxGnu;
+        let old_pins = fixture_pins(target);
+        let old_manifest = RuntimeManifest::from_pins("0.1.0", target.triple(), &old_pins).unwrap();
+        let (directory, executable) = executable();
+        let runtime_root = directory.path().join("runtime");
+        let old_runtime = runtime_root.join(&old_manifest.runtime_id);
+        let old_manifests = runtime_root.join("manifests");
+        fs::create_dir_all(&old_runtime).unwrap();
+        fs::create_dir_all(&old_manifests).unwrap();
+        fs::write(old_runtime.join(&old_manifest.library), b"fixture runtime").unwrap();
+        fs::write(
+            old_manifests.join("0.1.0.json"),
+            serde_json::to_vec(&old_manifest).unwrap(),
+        )
+        .unwrap();
+
+        let new_runtime = b"updated runtime";
+        let new_pins = fixture_pins_for(target, "1.24.0", new_runtime);
+        let new_manifest = RuntimeManifest::from_pins("0.2.0", target.triple(), &new_pins).unwrap();
+        let archive =
+            tar_xz_package_with_pins(target, "0.2.0", b"new executable", &new_pins, new_runtime);
+        let error = install_archive_with_publish(&archive, target, &executable, "0.2.0", |_, _| {
+            Err("injected executable replacement failure".to_owned())
+        })
+        .unwrap_err();
+
+        assert!(error.contains("injected executable replacement failure"));
+        assert_eq!(fs::read(&executable).unwrap(), b"old executable");
+        assert!(runtime_root.join("manifests/0.2.0.json").is_file());
+        let old_runtime = crate::runtime::resolve_installation(
+            directory.path(),
+            "0.1.0",
+            target.triple(),
+            &old_pins,
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(old_runtime.library_path).unwrap(),
+            b"fixture runtime"
+        );
+        let new_runtime_path = runtime_root
+            .join(new_manifest.runtime_id)
+            .join(new_manifest.library);
+        assert_eq!(fs::read(new_runtime_path).unwrap(), new_runtime);
+    }
     #[test]
     fn current_version_skips_download() {
         let (_directory, executable) = executable();
@@ -917,7 +1355,7 @@ mod tests {
 
     #[test]
     fn checksum_failure_preserves_old_executable() {
-        let archive_name = Target::X86_64UnknownLinuxMusl.archive_name();
+        let archive_name = Target::X86_64UnknownLinuxGnu.archive_name();
         let archive = tar_xz("gitscry/gitscry", b"new executable");
         let mut source = fixture_source("v0.2.0", archive, archive_name);
         source.downloads.insert(
@@ -936,7 +1374,7 @@ mod tests {
 
     #[test]
     fn traversal_archive_is_rejected_before_replacement() {
-        let archive_name = Target::X86_64UnknownLinuxMusl.archive_name();
+        let archive_name = Target::X86_64UnknownLinuxGnu.archive_name();
         let archive = tar_xz("../gitscry", b"malicious");
         let mut source = fixture_source("v0.2.0", archive, archive_name);
         let (_directory, executable) = executable();
@@ -951,7 +1389,7 @@ mod tests {
 
     #[test]
     fn missing_checksum_asset_preserves_old_executable() {
-        let archive_name = Target::X86_64UnknownLinuxMusl.archive_name();
+        let archive_name = Target::X86_64UnknownLinuxGnu.archive_name();
         let archive = tar_xz("gitscry/gitscry", b"new executable");
         let mut source = fixture_source("v0.2.0", archive, archive_name);
         let checksum_name = format!("{archive_name}.sha256");
@@ -973,7 +1411,7 @@ mod tests {
 
     #[test]
     fn archive_without_expected_executable_preserves_old_executable() {
-        let archive_name = Target::X86_64UnknownLinuxMusl.archive_name();
+        let archive_name = Target::X86_64UnknownLinuxGnu.archive_name();
         let archive = tar_xz("gitscry/not-gitscry", b"not executable");
         let mut source = fixture_source("v0.2.0", archive, archive_name);
         let (_directory, executable) = executable();
@@ -988,7 +1426,7 @@ mod tests {
 
     #[test]
     fn invalid_archive_preserves_old_executable() {
-        let archive_name = Target::X86_64UnknownLinuxMusl.archive_name();
+        let archive_name = Target::X86_64UnknownLinuxGnu.archive_name();
         let archive = b"not a tar.xz archive".to_vec();
         let mut source = fixture_source("v0.2.0", archive.clone(), archive_name);
         source.downloads.insert(
@@ -1014,9 +1452,14 @@ mod tests {
     }
 
     #[test]
-    fn update_lock_rejects_a_second_holder() {
+    fn update_lock_rejects_a_second_holder_and_keeps_its_file() {
         let (_directory, executable) = executable();
+        let lock_path = executable.parent().unwrap().join(format!(
+            ".{}.gitscry-update.lock",
+            executable.file_name().unwrap().to_string_lossy()
+        ));
         let first = UpdateLock::acquire(&executable).unwrap();
+        assert!(lock_path.is_file());
 
         let error = match UpdateLock::acquire(&executable) {
             Ok(_) => panic!("a second update lock holder was allowed"),
@@ -1025,15 +1468,18 @@ mod tests {
         assert!(error.contains("already in progress"));
 
         drop(first);
-        assert!(UpdateLock::acquire(&executable).is_ok());
+        assert!(lock_path.is_file());
+        let second = UpdateLock::acquire(&executable).unwrap();
+        drop(second);
+        assert!(lock_path.is_file());
     }
     #[cfg(unix)]
     #[test]
     fn symlink_target_is_replaced_without_replacing_link() {
         use std::os::unix::fs::symlink;
 
-        let archive_name = Target::X86_64UnknownLinuxMusl.archive_name();
-        let archive = tar_xz("gitscry/gitscry", b"new executable");
+        let archive_name = Target::X86_64UnknownLinuxGnu.archive_name();
+        let archive = tar_xz_package(Target::X86_64UnknownLinuxGnu, "0.2.0", b"new executable");
         let mut source = fixture_source("v0.2.0", archive, archive_name);
         let directory = tempfile::tempdir().unwrap();
         let target = directory.path().join("real-gitscry");
@@ -1057,18 +1503,12 @@ mod tests {
     fn self_update_succeeds_and_cleans_up_after_exit() {
         use std::process::Command;
         use std::time::{Duration, Instant};
-        use zip::write::SimpleFileOptions;
 
         const CHILD: &str = "GITSCRY_SELF_UPDATE_TEST_CHILD";
         if std::env::var_os(CHILD).is_some() {
             let executable = std::env::current_exe().unwrap();
             let target = Target::X86_64PcWindowsMsvc;
-            let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
-            writer
-                .start_file("gitscry.exe", SimpleFileOptions::default())
-                .unwrap();
-            writer.write_all(b"new executable").unwrap();
-            let archive = writer.finish().unwrap().into_inner();
+            let archive = zip_package(target, "0.2.0", b"new executable");
             let mut source = fixture_source("v0.2.0", archive, target.archive_name());
             let outcome = run_with(
                 &mut source,
@@ -1125,19 +1565,9 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn updates_verified_zip_on_windows() {
-        use std::io::Write;
-        use zip::write::SimpleFileOptions;
-
-        let archive_name = Target::X86_64PcWindowsMsvc.archive_name();
-        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
-        writer
-            .start_file(
-                "gitscry-x86_64-pc-windows-msvc/gitscry.exe",
-                SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored),
-            )
-            .unwrap();
-        writer.write_all(b"new executable").unwrap();
-        let archive = writer.finish().unwrap().into_inner();
+        let target = Target::X86_64PcWindowsMsvc;
+        let archive_name = target.archive_name();
+        let archive = zip_package(target, "0.2.0", b"new executable");
         let mut source = fixture_source("v0.2.0", archive, archive_name);
         let directory = tempfile::tempdir().unwrap();
         let executable = directory.path().join("gitscry.exe");
@@ -1148,7 +1578,7 @@ mod tests {
             &mut source,
             &Version::parse("0.1.0").unwrap(),
             &executable,
-            Target::X86_64PcWindowsMsvc,
+            target,
             &mut |stage| stages.push(stage),
         )
         .unwrap();

@@ -12,6 +12,7 @@ exclude = [
     "docs/assets/*.gif",
     "docs/assets/thumbnail_*.png",
     "docs/assets/trace-fix_example.png",
+    "xtask/**",
 ]
 homepage = "https://github.com/WodenJay/GitScry"
 

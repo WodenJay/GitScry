@@ -13,17 +13,21 @@ use tempfile::NamedTempFile;
 use crate::app::AppError;
 
 const REPOSITORY: &str = "Qdrant/all-MiniLM-L6-v2-onnx";
+pub(crate) const MODEL_SHA256: &str =
+    "bbd7b466f6d58e646fdc2bd5fd67b2f5e93c0b687011bd4548c420f7bd46f0c5";
+pub(crate) const TOKENIZER_SHA256: &str =
+    "59f410da6d9dad2025f0e53b6c45554a3b3a0a5c574927f201e99d0217c1a26b";
 pub(crate) const REVISION: &str = "8f518e882455312b086101e60691f5e6e2f05c3c";
 const RESOURCES: [Resource; 5] = [
     Resource {
-        path: "onnx/model.onnx",
+        path: "model.onnx",
         bytes: 90_387_630,
-        sha256: "bbd7b466f6d58e646fdc2bd5fd67b2f5e93c0b687011bd4548c420f7bd46f0c5",
+        sha256: MODEL_SHA256,
     },
     Resource {
         path: "tokenizer.json",
         bytes: 711_661,
-        sha256: "59f410da6d9dad2025f0e53b6c45554a3b3a0a5c574927f201e99d0217c1a26b",
+        sha256: TOKENIZER_SHA256,
     },
     Resource {
         path: "tokenizer_config.json",
@@ -68,7 +72,7 @@ pub(crate) fn ensure() -> Result<Assets, AppError> {
     }
 
     Ok(Assets {
-        model: directory.join("onnx/model.onnx"),
+        model: directory.join("model.onnx"),
         tokenizer: directory.join("tokenizer.json"),
     })
 }

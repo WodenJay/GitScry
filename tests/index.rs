@@ -4,10 +4,12 @@ mod support;
 use std::{
     env,
     fs::{self, OpenOptions},
+    path::{Path, PathBuf},
     process::Command,
     thread,
     time::Duration,
 };
+use tempfile::TempDir;
 
 use support::{TestRepo, git, git_command, git_stdout};
 
@@ -19,6 +21,36 @@ impl TestRepo {
         fs::write(self.dir.path().join(path), contents).expect("write tracked file");
         git(self.dir.path(), ["add", path]);
         git(self.dir.path(), ["commit", "-m", message]);
+    }
+}
+
+struct IsolatedExecutable {
+    _install: TempDir,
+    path: PathBuf,
+}
+
+impl IsolatedExecutable {
+    fn new() -> Self {
+        let install = tempfile::tempdir().expect("create isolated installation");
+        let source = PathBuf::from(env!("CARGO_BIN_EXE_gitscry"));
+        let path = install
+            .path()
+            .join(source.file_name().expect("binary filename"));
+        fs::copy(source, &path).expect("copy executable without runtime");
+        Self {
+            _install: install,
+            path,
+        }
+    }
+
+    fn run(&self, cwd: &Path, args: &[&str]) -> std::process::Output {
+        Command::new(&self.path)
+            .args(args)
+            .current_dir(cwd)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", cwd.join("global-config"))
+            .output()
+            .expect("run isolated gitscry")
     }
 }
 
@@ -409,19 +441,9 @@ fn semantic_index_options_are_exposed_and_mutually_exclusive() {
 fn semantic_index_failure_preserves_history_until_explicitly_disabled() {
     let repo = TestRepo::new();
     repo.commit("hello.txt", b"hello\n", "initial commit");
-    let run_with_missing_runtime = |args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_gitscry"))
-            .args(args)
-            .current_dir(repo.dir.path())
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", repo.dir.path().join("global-config"))
-            .env(
-                "ORT_DYLIB_PATH",
-                repo.dir.path().join("missing-onnxruntime"),
-            )
-            .output()
-            .unwrap()
-    };
+    let missing_runtime_executable = IsolatedExecutable::new();
+    let run_with_missing_runtime =
+        |args: &[&str]| missing_runtime_executable.run(repo.dir.path(), args);
 
     let initial = repo.run(["index"]);
     assert!(
@@ -432,7 +454,10 @@ fn semantic_index_failure_preserves_history_until_explicitly_disabled() {
     let failed = run_with_missing_runtime(&["index", "--semantic"]);
     assert_eq!(failed.status.code(), Some(1));
     let error = String::from_utf8_lossy(&failed.stderr);
-    assert!(error.contains("ORT_DYLIB_PATH"), "{error}");
+    assert!(
+        error.contains("semantic runtime package is unavailable"),
+        "{error}"
+    );
     assert!(
         error.contains("ordinary history cache is usable"),
         "{error}"
@@ -602,10 +627,6 @@ fn semantic_vectors_survive_rebuild_by_commit_identity() {
         .current_dir(repo.dir.path())
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", repo.dir.path().join("global-config"))
-        .env(
-            "ORT_DYLIB_PATH",
-            repo.dir.path().join("missing-onnxruntime"),
-        )
         .output()
         .unwrap();
     assert_eq!(
@@ -675,10 +696,6 @@ fn semantic_vectors_survive_rebuild_by_commit_identity() {
         .current_dir(repo.dir.path())
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", repo.dir.path().join("global-config"))
-        .env(
-            "ORT_DYLIB_PATH",
-            repo.dir.path().join("missing-onnxruntime"),
-        )
         .output()
         .unwrap();
     assert_eq!(
@@ -739,10 +756,6 @@ fn semantic_vectors_survive_rebuild_by_commit_identity() {
         .current_dir(repo.dir.path())
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", repo.dir.path().join("global-config"))
-        .env(
-            "ORT_DYLIB_PATH",
-            repo.dir.path().join("missing-onnxruntime"),
-        )
         .output()
         .unwrap();
     assert_eq!(
@@ -788,14 +801,9 @@ fn semantic_vectors_survive_rebuild_by_commit_identity() {
         .current_dir(repo.dir.path())
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", repo.dir.path().join("global-config"))
-        .env(
-            "ORT_DYLIB_PATH",
-            repo.dir.path().join("missing-onnxruntime"),
-        )
         .output()
         .unwrap();
     assert_eq!(damaged.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&damaged.stderr).contains("ORT_DYLIB_PATH"));
     let cache = Connection::open(cache_path).unwrap();
     let (ready, count): (String, i64) = cache
         .query_row(
@@ -886,20 +894,9 @@ fn expected_source_fingerprint(cache: &Connection, commit_id: i64) -> String {
 fn semantic_enablement_survives_cache_rebuild() {
     let repo = TestRepo::new();
     repo.commit("hello.txt", b"hello\n", "initial commit");
-    let run_with_missing_runtime = |args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_gitscry"))
-            .args(args)
-            .current_dir(repo.dir.path())
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", repo.dir.path().join("global-config"))
-            .env(
-                "ORT_DYLIB_PATH",
-                repo.dir.path().join("missing-onnxruntime"),
-            )
-            .output()
-            .unwrap()
-    };
-
+    let missing_runtime_executable = IsolatedExecutable::new();
+    let run_with_missing_runtime =
+        |args: &[&str]| missing_runtime_executable.run(repo.dir.path(), args);
     assert_eq!(
         run_with_missing_runtime(&["index", "--semantic"])
             .status
@@ -939,19 +936,9 @@ fn semantic_enablement_survives_cache_rebuild() {
 fn damaged_cache_rebuild_preserves_semantic_enablement() {
     let repo = TestRepo::new();
     repo.commit("hello.txt", b"hello\n", "initial commit");
-    let run_with_missing_runtime = |args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_gitscry"))
-            .args(args)
-            .current_dir(repo.dir.path())
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", repo.dir.path().join("global-config"))
-            .env(
-                "ORT_DYLIB_PATH",
-                repo.dir.path().join("missing-onnxruntime"),
-            )
-            .output()
-            .unwrap()
-    };
+    let missing_runtime_executable = IsolatedExecutable::new();
+    let run_with_missing_runtime =
+        |args: &[&str]| missing_runtime_executable.run(repo.dir.path(), args);
 
     assert_eq!(
         run_with_missing_runtime(&["index", "--semantic"])
@@ -1655,10 +1642,6 @@ fn plain_index_requires_explicit_semantic_encoder_migration() {
             .current_dir(repo.dir.path())
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_GLOBAL", repo.dir.path().join("global-config"))
-            .env(
-                "ORT_DYLIB_PATH",
-                repo.dir.path().join("missing-onnxruntime"),
-            )
             .output()
             .unwrap()
     };
@@ -1674,7 +1657,11 @@ fn plain_index_requires_explicit_semantic_encoder_migration() {
 
     let explicit = run(&["index", "--semantic"]);
     assert_eq!(explicit.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&explicit.stderr).contains("ORT_DYLIB_PATH"));
+    let error = String::from_utf8_lossy(&explicit.stderr);
+    assert!(
+        error.contains("reinstall GitScry from an official release"),
+        "{error}"
+    );
     let cache = Connection::open(cache_path).unwrap();
     let (enabled, ready, count): (String, String, i64) = cache
         .query_row(

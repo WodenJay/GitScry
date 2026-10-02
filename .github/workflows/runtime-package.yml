@@ -1,0 +1,141 @@
+name: Runtime package validation
+
+on:
+  pull_request:
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.gitignore'
+      - 'LICENSE'
+      - 'dist-workspace.toml'
+      - 'config/**'
+      - 'docs/INSTALL.md'
+      - 'docs/adr/0001-bundle-precompiled-cpu-runtime.md'
+      - '.github/build-setup.yml'
+      - '.github/workflows/ci.yml'
+      - '.github/workflows/release.yml'
+      - '.github/workflows/runtime-package.yml'
+      - 'scripts/**'
+      - 'src/app/index.rs'
+      - 'src/app/update.rs'
+      - 'src/cache/semantic.rs'
+      - 'src/lib.rs'
+      - 'src/runtime/**'
+      - 'src/semantic/**'
+      - 'tests/index.rs'
+      - 'tests/github_links.rs'
+      - 'tests/fixtures/**'
+      - 'xtask/**'
+  push:
+    branches: ['**']
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.gitignore'
+      - 'LICENSE'
+      - 'dist-workspace.toml'
+      - 'config/**'
+      - 'docs/INSTALL.md'
+      - 'docs/adr/0001-bundle-precompiled-cpu-runtime.md'
+      - '.github/build-setup.yml'
+      - '.github/workflows/ci.yml'
+      - '.github/workflows/release.yml'
+      - '.github/workflows/runtime-package.yml'
+      - 'scripts/**'
+      - 'src/app/index.rs'
+      - 'src/app/update.rs'
+      - 'src/cache/semantic.rs'
+      - 'src/lib.rs'
+      - 'src/runtime/**'
+      - 'src/semantic/**'
+      - 'tests/index.rs'
+      - 'tests/github_links.rs'
+      - 'tests/fixtures/**'
+      - 'xtask/**'
+
+permissions:
+  contents: read
+
+jobs:
+  runtime-package:
+    name: ${{ matrix.name }} package smoke
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x86-64 glibc
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - name: Windows x86-64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - name: macOS Apple Silicon
+            os: macos-14
+            target: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          target: ${{ matrix.target }}
+      - name: Prepare pinned ONNX Runtime
+        run: cargo run --manifest-path xtask/Cargo.toml --locked -- prepare-runtime
+      - name: Resolve semantic model revision
+        id: semantic-model
+        shell: bash
+        run: |
+          revision="$(grep '^pub(crate) const REVISION:' src/semantic/resources.rs | cut -d '"' -f 2)"
+          test -n "$revision"
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+      - name: Run native tests
+        run: cargo test --locked --all-targets --all-features --jobs 1 --target ${{ matrix.target }}
+      - name: Validate PowerShell installer syntax
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          foreach ($relativePath in @('scripts/gitscry-installer.ps1', 'scripts/test-package-windows.ps1')) {
+            $tokens = $null
+            $errors = $null
+            $path = Join-Path $env:GITHUB_WORKSPACE $relativePath
+            [System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Error $_ }; exit 1 }
+          }
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cache/GitScry/semantic/${{ steps.semantic-model.outputs.revision }}
+            ~/Library/Caches/GitScry/semantic/${{ steps.semantic-model.outputs.revision }}
+            ~\AppData\Local\GitScry\semantic\${{ steps.semantic-model.outputs.revision }}
+          key: gitscry-semantic-model-${{ runner.os }}-${{ steps.semantic-model.outputs.revision }}
+      - name: Check fixed semantic embedding parity
+        run: cargo test --locked --lib --all-features --jobs 1 -- --ignored --nocapture matches_fixed_reference_embeddings
+      - name: Install cargo-dist on Unix
+        if: runner.os != 'Windows'
+        shell: bash
+        run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.32.0/cargo-dist-installer.sh | sh
+      - name: Install cargo-dist on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Invoke-RestMethod -Uri 'https://github.com/axodotdev/cargo-dist/releases/download/v0.32.0/cargo-dist-installer.ps1' | Invoke-Expression
+      - name: Build native distribution archive
+        run: dist build --target ${{ matrix.target }} --artifacts=local
+        env:
+          CARGO_BUILD_JOBS: 1
+      - name: Validate and install the Windows package
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          ./scripts/test-package-windows.ps1 `
+            -ArchivePath "target/distrib/gitscry-${{ matrix.target }}.zip" `
+            -ChecksumPath "target/distrib/gitscry-${{ matrix.target }}.zip.sha256"
+      - name: Validate and install the Unix package
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          sh scripts/test-package-unix.sh \
+            '${{ matrix.target }}' \
+            'target/distrib/gitscry-${{ matrix.target }}.tar.xz' \
+            'target/distrib/gitscry-${{ matrix.target }}.tar.xz.sha256'
