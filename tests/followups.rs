@@ -497,6 +497,10 @@ fn followups_prioritizes_explicit_revert_references_and_keeps_bases_separate() {
     );
     assert_eq!(report["matched_in_inspected_scope"], 5);
     assert_eq!(report["display_truncated"], true);
+    assert_eq!(
+        report["scope"]["order"],
+        "explicit_revert_reference_then_same_file_then_forward_topological"
+    );
     let entries = report["entries"].as_array().unwrap();
     assert_eq!(entries.len(), 3);
     assert_eq!(entries[0]["commit_id"], explicit_other_path);
@@ -664,4 +668,26 @@ fn followups_revert_references_obey_endpoint_time_and_traversal_bounds() {
     assert_eq!(budget_report["inspected_count"], 1);
     assert_eq!(budget_report["traversal_truncated"], true);
     assert!(budget_report["entries"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn followups_resolves_unique_abbreviated_revert_reference() {
+    let repo = TestRepo::new();
+    let seed = commit(&repo, "a", "seed\n", "Seed", "2020-01-01T00:00:00Z");
+    let abbreviated_seed = &seed[..12];
+    let reference = commit(
+        &repo,
+        "other",
+        "unselected path\n",
+        &format!("Revert note\n\nThis reverts commit {abbreviated_seed}."),
+        "2020-01-02T00:00:00Z",
+    );
+    repo.index();
+
+    let report = json(&repo, &["followups", &seed, "--path", "a", "--json"]);
+    let entries = report["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["commit_id"], reference);
+    assert_eq!(entries[0]["revert_reference"]["target_commit_id"], seed);
+    assert_eq!(entries[0]["paths"], serde_json::json!([]));
 }

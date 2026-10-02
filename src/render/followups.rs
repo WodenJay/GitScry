@@ -1,7 +1,7 @@
 use serde_json::json;
 
 use super::{escape, json::json_path};
-use crate::analysis::query::followups::Report;
+use crate::analysis::query::followups::{Entry, Report};
 
 pub(super) fn format_report(report: &Report) -> String {
     let scope = &report.scope;
@@ -50,13 +50,7 @@ pub(super) fn format_report(report: &Report) -> String {
             entry.commit_id,
             escape::subject(&entry.subject)
         ));
-        let mut association_bases = Vec::new();
-        if entry.revert_reference.is_some() {
-            association_bases.push("explicit_revert_reference".to_string());
-        }
-        if entry.same_file_association {
-            association_bases.push("same_file".to_string());
-        }
+        let association_bases = association_bases(entry).collect::<Vec<_>>();
         lines.push(format!(
             "    association bases: {}; elapsed {} seconds; {}",
             association_bases.join(", "),
@@ -83,6 +77,18 @@ pub(super) fn format_report(report: &Report) -> String {
     lines.join("\n")
 }
 
+fn association_bases(entry: &Entry) -> impl Iterator<Item = &'static str> {
+    [
+        entry
+            .revert_reference
+            .as_ref()
+            .map(|_| "explicit_revert_reference"),
+        entry.same_file_association.then_some("same_file"),
+    ]
+    .into_iter()
+    .flatten()
+}
+
 pub(super) fn format_json_report(
     report: &Report,
     warnings: &[String],
@@ -92,18 +98,11 @@ pub(super) fn format_json_report(
         .entries
         .iter()
         .map(|entry| {
-            let basis = if entry.revert_reference.is_some() {
-                "explicit_revert_reference"
-            } else {
-                "same_file"
-            };
-            let mut association_bases = Vec::new();
-            if entry.revert_reference.is_some() {
-                association_bases.push("explicit_revert_reference");
-            }
-            if entry.same_file_association {
-                association_bases.push("same_file");
-            }
+            let association_bases = association_bases(entry).collect::<Vec<_>>();
+            let basis = association_bases
+                .first()
+                .copied()
+                .expect("follow-up entries always have an association basis");
             let mut material = json!({
                 "commit_id": entry.commit_id,
                 "subject": entry.subject,
@@ -138,7 +137,7 @@ pub(super) fn format_json_report(
             "seed_time": scope.seed_time, "time_ceiling": scope.time_ceiling,
             "days": scope.days, "max_commits": scope.max_commits, "limit": scope.limit,
             "selected_paths": scope.selected_paths.iter().map(|p| json_path(p)).collect::<Vec<_>>(),
-            "order": "forward_topological",
+            "order": "explicit_revert_reference_then_same_file_then_forward_topological",
             "coverage": "endpoint_reachable_published_cache",
             "association": "explicit_revert_reference_or_same_file",
         },

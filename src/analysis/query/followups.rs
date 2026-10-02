@@ -162,6 +162,14 @@ pub(super) fn run(
         .iter()
         .filter(|node| descendants.contains(&node.oid))
         .collect();
+    let all_cached_oids = if candidates
+        .iter()
+        .any(|node| node.commit_time <= time_ceiling)
+    {
+        session.commit_oids()?
+    } else {
+        HashSet::new()
+    };
     let mut explicit_reference_entries = Vec::new();
     let mut same_file_entries = Vec::new();
     for (index, node) in candidates.iter().enumerate() {
@@ -192,9 +200,9 @@ pub(super) fn run(
             report.lineage_inspected_count += 1;
         }
         let has_revert_reference = if eligible {
-            session
-                .commit_message(&node.oid)?
-                .is_some_and(|message| explicitly_references_seed(&message, &seed))
+            session.commit_message(&node.oid)?.is_some_and(|message| {
+                explicitly_references_seed(&message, &seed, &all_cached_oids)
+            })
         } else {
             false
         };
@@ -324,15 +332,25 @@ pub(super) fn run(
     })
 }
 
-fn explicitly_references_seed(message: &[u8], seed: &str) -> bool {
+fn explicitly_references_seed(
+    message: &[u8],
+    seed: &str,
+    all_cached_oids: &HashSet<String>,
+) -> bool {
     String::from_utf8_lossy(message).lines().any(|line| {
         let Some(reference) = line.trim().strip_prefix("This reverts commit ") else {
             return false;
         };
         let reference = reference.strip_suffix('.').unwrap_or(reference);
-        reference.len() == seed.len()
-            && reference.bytes().all(|byte| byte.is_ascii_hexdigit())
-            && reference.eq_ignore_ascii_case(seed)
+        if !reference.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return false;
+        }
+        crate::analysis::retrieval::resolve_oid_prefix(
+            all_cached_oids,
+            &reference.to_ascii_lowercase(),
+        )
+        .as_deref()
+            == Some(seed)
     })
 }
 
