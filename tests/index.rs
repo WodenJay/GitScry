@@ -939,7 +939,7 @@ fn semantic_enablement_survives_cache_rebuild() {
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .unwrap();
-    assert_eq!(state, ("9".to_owned(), "1".to_owned(), "0".to_owned(), 1));
+    assert_eq!(state, ("10".to_owned(), "1".to_owned(), "0".to_owned(), 1));
 }
 
 #[test]
@@ -981,7 +981,7 @@ fn damaged_cache_rebuild_preserves_semantic_enablement() {
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .unwrap();
-    assert_eq!(state, ("9".to_owned(), "1".to_owned(), "0".to_owned(), 1));
+    assert_eq!(state, ("10".to_owned(), "1".to_owned(), "0".to_owned(), 1));
 }
 
 #[test]

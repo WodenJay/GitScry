@@ -24,7 +24,7 @@ use std::{
     thread,
     time::Duration,
 };
-const SCHEMA_VERSION: &str = "9";
+const SCHEMA_VERSION: &str = "10";
 const WAITING_MESSAGE: &str = "Waiting for another GitScry process...";
 
 struct SharedLock {
