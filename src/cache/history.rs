@@ -93,7 +93,45 @@ pub(crate) struct CodeHunk {
     pub(crate) text: Vec<u8>,
 }
 
+/// Cached locators and detected change for one historical old path.
+pub(crate) struct RemovalChange {
+    pub(crate) commit_time: i64,
+    pub(crate) message: Vec<u8>,
+    pub(crate) first_parent_id: Option<String>,
+    pub(crate) status: String,
+    pub(crate) new_path: Option<Vec<u8>>,
+}
+
 impl QuerySession {
+    pub(crate) fn removal_change(
+        &self,
+        oid: &str,
+        old_path: &[u8],
+    ) -> Result<RemovalChange, AppError> {
+        self.connection
+            .query_row(
+                "SELECT c.commit_time, c.message, c.message_length,
+                    COALESCE(parent.oid, p.external_oid), ch.status, ch.new_path
+             FROM commits c
+             JOIN changes ch ON ch.commit_id = c.commit_id
+             LEFT JOIN commit_parents p ON p.commit_id = c.commit_id AND p.position = 0
+             LEFT JOIN commits parent ON parent.commit_id = p.parent_id
+             WHERE c.oid = ?1 AND ch.old_path = ?2
+             ORDER BY ch.ordinal LIMIT 1",
+                params![oid, old_path],
+                |row| {
+                    Ok(RemovalChange {
+                        commit_time: row.get(0)?,
+                        message: super::decode_message_row(row, 1, 2)?,
+                        first_parent_id: row.get(3)?,
+                        status: row.get(4)?,
+                        new_path: row.get(5)?,
+                    })
+                },
+            )
+            .map_err(|error| search_error("reading deletion event locators", error))
+    }
+
     pub(crate) fn path_history(
         &self,
         path: &[u8],
