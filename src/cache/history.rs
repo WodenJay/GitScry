@@ -217,6 +217,18 @@ impl QuerySession {
     ) -> Result<(), AppError> {
         scan_code_hunks_scoped(&self.connection, scope, visit)
     }
+    pub(crate) fn scan_code_hunks_bounded(
+        &self,
+        scope: Option<&SearchFilter>,
+        visit: impl FnMut(CodeHunk) -> Result<(), AppError>,
+    ) -> Result<(bool, usize), AppError> {
+        scan_code_hunks_inner(
+            &self.connection,
+            scope,
+            Some((20_000, 64 * 1024 * 1024, 256 * 1024)),
+            visit,
+        )
+    }
 
     pub(crate) fn has_missing_objects(&self, commits: &[HistoryCommit]) -> Result<bool, AppError> {
         has_missing_objects(&self.connection, commits)
@@ -519,7 +531,7 @@ fn scan_code_hunks(
     connection: &Connection,
     visit: impl FnMut(CodeHunk) -> Result<(), AppError>,
 ) -> Result<(), AppError> {
-    scan_code_hunks_inner(connection, None, visit)
+    scan_code_hunks_inner(connection, None, None, visit).map(|_| ())
 }
 
 fn scan_code_hunks_scoped(
@@ -527,7 +539,7 @@ fn scan_code_hunks_scoped(
     scope: &SearchFilter,
     visit: impl FnMut(CodeHunk) -> Result<(), AppError>,
 ) -> Result<(), AppError> {
-    scan_code_hunks_inner(connection, Some(scope), visit)
+    scan_code_hunks_inner(connection, Some(scope), None, visit).map(|_| ())
 }
 
 type StoredCodeHunk = (
@@ -561,8 +573,9 @@ fn code_hunk_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredCodeHunk> {
 fn scan_code_hunks_inner(
     connection: &Connection,
     scope: Option<&SearchFilter>,
+    limits: Option<(usize, usize, usize)>,
     mut visit: impl FnMut(CodeHunk) -> Result<(), AppError>,
-) -> Result<(), AppError> {
+) -> Result<(bool, usize), AppError> {
     let mut reader = HunkReader::new(connection)?;
     let query = match scope {
         Some(_) => format!(
@@ -603,7 +616,12 @@ fn scan_code_hunks_inner(
     }
     .map_err(|error| search_error("reading code-search hunks", error))?;
     let mut active_token_block = None;
-    for row in rows {
+    let mut bytes = 0;
+    let mut oversized = 0;
+    for (count, row) in rows.enumerate() {
+        if limits.is_some_and(|(hunks, total, _)| count >= hunks || bytes >= total) {
+            return Ok((true, oversized));
+        }
         let (
             oid,
             commit_time,
@@ -621,7 +639,18 @@ fn scan_code_hunks_inner(
             active_token_block = Some(token_block_id);
         }
         let material = format!("{oid}/change {change_ordinal}/hunk {hunk_ordinal}");
-        let text = reader.decode_payload(payload_id, &material)?;
+        let text = if let Some((_, total, per_hunk)) = limits {
+            let budget = per_hunk.min(total - bytes);
+            let decoded = reader.decode_payload_limited(payload_id, &material, budget)?;
+            bytes += decoded.as_ref().map_or(budget, Vec::len);
+            let Some(text) = decoded else {
+                oversized += 1;
+                continue;
+            };
+            text
+        } else {
+            reader.decode_payload(payload_id, &material)?
+        };
         visit(CodeHunk {
             oid,
             commit_time,
@@ -634,7 +663,7 @@ fn scan_code_hunks_inner(
             text,
         })?;
     }
-    Ok(())
+    Ok((false, oversized))
 }
 
 fn has_missing_objects(

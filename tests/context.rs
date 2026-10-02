@@ -4,6 +4,329 @@ use serde_json::Value;
 use std::{fs, process::Output};
 use support::{TestRepo, git};
 
+#[test]
+fn generic_descriptions_return_verified_local_historical_matches() {
+    let repo = TestRepo::new();
+    commit(
+        &repo,
+        &[(
+            "old.rs",
+            "fn route() { refreshSessionCache(\"session-expired\"); }\n",
+        )],
+        "update",
+    );
+    let historical = repo.head();
+    commit(&repo, &[("old.rs", "fn route() {}\n")], "update");
+    let removal = repo.head();
+    repo.index();
+    fs::write(
+        repo.dir.path().join("new.rs"),
+        "fn route() { refreshSessionCache(\"session-expired\"); }\n",
+    )
+    .unwrap();
+    let report = json(repo.run(["context", "--json"]));
+    let changes = report["suggestions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|s| s["category"] == "historical_change")
+        .collect::<Vec<_>>();
+    assert_eq!(changes.len(), 2);
+    for (oid, direction) in [(historical, "added"), (removal, "removed")] {
+        let change = changes
+            .iter()
+            .find(|s| s["citations"][0]["oid"] == oid)
+            .unwrap();
+        assert_eq!(
+            change["associated_current_paths"],
+            serde_json::json!(["new.rs"])
+        );
+        let matched = &change["content_matches"][0];
+        assert_eq!(matched["historical_path"], "old.rs");
+        assert_eq!(matched["historical_direction"], direction);
+        assert_eq!(matched["historical_line"], 1);
+        assert_eq!(matched["current_direction"], "added");
+        assert_eq!(matched["current_new_start"], 1);
+        assert_eq!(
+            matched["excerpt"],
+            "fn route() { refreshSessionCache(\"session-expired\"); }"
+        );
+    }
+    let text = repo.run(["context"]);
+    assert!(text.status.success());
+    let text = String::from_utf8_lossy(&text.stdout);
+    assert!(
+        text.contains("historical_change")
+            && text.contains("session-expired")
+            && text.contains("removed")
+    );
+}
+#[test]
+fn staged_content_uses_index_and_history_scope_only_narrows_material() {
+    let repo = TestRepo::new();
+    let alpha = "fn route() { refreshSessionCache(\"session-expired\"); }\n";
+    let beta = "fn route() { rebuildInvoiceLedger(\"invoice-overdue\"); }\n";
+    commit(&repo, &[("history.rs", alpha)], "update");
+    let alpha_oid = repo.head();
+    commit(&repo, &[("history.rs", beta)], "update");
+    let beta_oid = repo.head();
+    commit(
+        &repo,
+        &[
+            ("history.rs", "fn route() {}\n"),
+            ("current.rs", "fn local() {}\n"),
+        ],
+        "update",
+    );
+    repo.index();
+    fs::write(repo.dir.path().join("current.rs"), alpha).unwrap();
+    git(repo.dir.path(), ["add", "current.rs"]);
+    fs::write(repo.dir.path().join("current.rs"), beta).unwrap();
+    let staged = json(repo.run(["context", "--staged", "--to-rev", &alpha_oid, "--json"]));
+    let changes = historical(&staged);
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0]["citations"][0]["oid"], alpha_oid);
+    assert_eq!(changes[0]["content_matches"][0]["excerpt"], alpha.trim());
+    let worktree = json(repo.run(["context", "--to-rev", &alpha_oid, "--json"]));
+    assert!(historical(&worktree).is_empty());
+    let worktree = json(repo.run(["context", "--json"]));
+    assert!(
+        historical(&worktree)
+            .iter()
+            .any(|s| s["citations"][0]["oid"] == beta_oid)
+    );
+    assert_eq!(staged["input"]["changes"], worktree["input"]["changes"]);
+}
+
+#[test]
+fn local_bases_do_not_combine_generic_or_unrelated_current_changes() {
+    let repo = TestRepo::new();
+    commit(
+        &repo,
+        &[
+            (
+                "mixed.rs",
+                "fn route() { refreshSessionCache(); rebuildInvoiceLedger(); }\n",
+            ),
+            ("same.rs", "fn value() { let status = \"success\"; }\n"),
+        ],
+        "update",
+    );
+    let mixed = repo.head();
+    commit(
+        &repo,
+        &[("same.rs", "fn value() { let status = \"error\"; }\n")],
+        "update",
+    );
+    repo.index();
+    fs::write(
+        repo.dir.path().join("a.rs"),
+        "fn a() { refreshSessionCache(\"session-expired\"); }\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.dir.path().join("b.rs"),
+        "fn b() { rebuildInvoiceLedger(\"invoice-overdue\"); }\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.dir.path().join("same.rs"),
+        "fn value() { let status = \"success\"; }\n",
+    )
+    .unwrap();
+    let report = json(repo.run(["context", "--json"]));
+    assert!(
+        historical(&report).is_empty(),
+        "must not combine one identity from each unrelated file into a match: {mixed}"
+    );
+    commit(
+        &repo,
+        &[(
+            "actual.rs",
+            "fn route() { refreshSessionCache(\"session-expired\"); rebuildInvoiceLedger(\"invoice-overdue\"); }\n",
+        )],
+        "update",
+    );
+    let actual = repo.head();
+    commit(
+        &repo,
+        &[("a.rs", "fn a() {}\n"), ("b.rs", "fn b() {}\n")],
+        "update",
+    );
+    repo.index();
+    fs::write(
+        repo.dir.path().join("a.rs"),
+        "fn a() { refreshSessionCache(\"session-expired\"); }\nextra\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.dir.path().join("b.rs"),
+        "fn b() { rebuildInvoiceLedger(\"invoice-overdue\"); }\nextra\n",
+    )
+    .unwrap();
+    let report = json(repo.run(["context", "--json"]));
+    let actual = historical(&report)
+        .into_iter()
+        .filter(|s| s["citations"][0]["oid"] == actual)
+        .collect::<Vec<_>>();
+    assert_eq!(actual.len(), 1);
+    assert_eq!(
+        actual[0]["associated_current_paths"],
+        serde_json::json!(["a.rs", "b.rs"])
+    );
+    for current in ["a.rs", "b.rs"] {
+        assert!(
+            actual[0]["content_matches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|s| s["historical_path"] == "actual.rs" && s["current_path"] == current)
+        );
+    }
+}
+
+#[test]
+fn historical_changes_precede_equally_supported_paths_and_content_omissions_are_distinct() {
+    let repo = TestRepo::new();
+    commit(
+        &repo,
+        &[
+            ("source.rs", "fn source() {}\n"),
+            ("tests/source.rs", "test\n"),
+            ("companion.rs", "other\n"),
+        ],
+        "update",
+    );
+    commit(
+        &repo,
+        &[
+            (
+                "source.rs",
+                "fn source() { refreshSessionCache(\"session-expired\"); }\n",
+            ),
+            ("tests/source.rs", "test changed\n"),
+            ("companion.rs", "other changed\n"),
+        ],
+        "update",
+    );
+    let historical_oid = repo.head();
+    repo.index();
+    fs::write(repo.dir.path().join("source.rs"), "fn source() {}\n").unwrap();
+    fs::write(
+        repo.dir.path().join("large.lock"),
+        vec![b'x'; 256 * 1024 + 1],
+    )
+    .unwrap();
+    fs::write(
+        repo.dir.path().join("binary.bin"),
+        b"\0refreshSessionCache(\"session-expired\")",
+    )
+    .unwrap();
+    let report = json(repo.run(["context", "--json"]));
+    assert_eq!(report["suggestions"][0]["category"], "historical_change");
+    assert_eq!(
+        report["suggestions"][0]["citations"][0]["oid"],
+        historical_oid
+    );
+    assert_eq!(report["suggestions"][1]["category"], "test");
+    assert_eq!(report["suggestions"][2]["category"], "co_changing_file");
+    let omitted = report["content_omissions"].as_array().unwrap();
+    assert!(
+        omitted
+            .iter()
+            .any(|s| s["path"] == "large.lock" && s["reason"] == "oversized_content")
+    );
+    assert!(
+        omitted
+            .iter()
+            .any(|s| s["path"] == "binary.bin" && s["reason"] == "binary_content")
+    );
+    assert_eq!(report["historical_content_truncated"], false);
+    assert_eq!(report["truncated"], false);
+    assert_eq!(
+        json(repo.run(["context", "--limit", "1", "--json"]))["suggestions"][0],
+        report["suggestions"][0]
+    );
+}
+
+fn historical(report: &Value) -> Vec<&Value> {
+    report["suggestions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|s| s["category"] == "historical_change")
+        .collect()
+}
+#[test]
+fn content_budget_stops_per_path_git_probes() {
+    let repo = TestRepo::new();
+    commit(&repo, &[("base.rs", "base\n")], "update");
+    repo.index();
+    for index in 0..129 {
+        fs::write(repo.dir.path().join(format!("f{index:03}.rs")), "changed\n").unwrap();
+    }
+    let traces = tempfile::tempdir().unwrap();
+    let trace_path = traces.path().join("git-trace.log");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_gitscry"))
+        .args(["context", "--json"])
+        .current_dir(repo.dir.path())
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", repo.dir.path().join("global-config"))
+        .env("GIT_TRACE", &trace_path)
+        .output()
+        .unwrap();
+    let trace = fs::read_to_string(trace_path).unwrap();
+    assert!(trace.contains("ls-tree -z HEAD -- f127.rs"));
+    assert!(
+        !trace.contains("ls-tree -z HEAD -- f128.rs"),
+        "content budget must stop mode probes"
+    );
+    assert!(!trace.contains("ls-files --stage -z -- f128.rs"));
+    let report = json(output);
+    assert!(
+        report["content_omissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["path"] == "f128.rs" && item["reason"] == "current_content_budget")
+    );
+}
+
+#[test]
+fn non_utf8_literals_are_not_lossily_equal() {
+    let repo = TestRepo::new();
+    fs::write(
+        repo.dir.path().join("historical.rs"),
+        b"fn route() { refreshSessionCache(\"session-\xffexpired\"); }\n",
+    )
+    .unwrap();
+    git(repo.dir.path(), ["add", "historical.rs"]);
+    git(repo.dir.path(), ["commit", "-m", "update"]);
+    repo.index();
+    fs::write(
+        repo.dir.path().join("current.rs"),
+        b"fn route() { refreshSessionCache(\"session-\xfeexpired\"); }\n",
+    )
+    .unwrap();
+    let report = json(repo.run(["context", "--json"]));
+    assert!(
+        historical(&report).is_empty(),
+        "different bytes must not match through replacement characters"
+    );
+    assert!(
+        report["content_omissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["path"] == "current.rs" && item["reason"] == "non_utf8_content")
+    );
+    fs::write(
+        repo.dir.path().join("current.rs"),
+        "fn route() { refreshSessionCache(\"session-�expired\"); }\n",
+    )
+    .unwrap();
+    assert!(historical(&json(repo.run(["context", "--json"]))).is_empty());
+}
 fn commit(repo: &TestRepo, files: &[(&str, &str)], message: &str) {
     for (path, content) in files {
         let path = repo.dir.path().join(path);

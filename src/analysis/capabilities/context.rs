@@ -1,6 +1,6 @@
 //! Select path-association material; no content-similarity or review conclusions.
 use super::super::{Citation, SearchScopeInfo, retrieval};
-use super::relations::{is_test_path, relation_score};
+use super::relations::is_test_path;
 use crate::{
     app::AppError,
     cache::{QuerySession, SearchFilter},
@@ -20,12 +20,17 @@ pub(crate) struct Report {
     pub(crate) matched_count: usize,
     pub(crate) truncated: bool,
     pub(crate) omitted_input_paths: usize,
+    pub(crate) omitted_content_bases: usize,
+    pub(crate) omitted_content_signals: usize,
+    pub(crate) historical_content_truncated: bool,
+    pub(crate) omitted_historical_hunks: usize,
     pub(crate) limitations: Vec<String>,
     pub(crate) warnings: Vec<String>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Category {
+    HistoricalChange,
     Test,
     CoChangingFile,
 }
@@ -34,6 +39,7 @@ impl Category {
         match self {
             Self::Test => "test",
             Self::CoChangingFile => "co_changing_file",
+            Self::HistoricalChange => "historical_change",
         }
     }
 }
@@ -47,16 +53,34 @@ pub(crate) struct Suggestion {
     pub(crate) citations: Vec<Citation>,
     pub(crate) supporting_count: usize,
     pub(crate) citations_truncated: bool,
+    pub(crate) content_matches: Vec<ContentMatch>,
+    pub(crate) content_matches_truncated: bool,
 }
 
+pub(crate) struct ContentMatch {
+    pub(crate) current_path: Vec<u8>,
+    pub(crate) current_added: bool,
+    pub(crate) current_old_start: usize,
+    pub(crate) current_new_start: usize,
+    pub(crate) historical_path: Vec<u8>,
+    pub(crate) historical_added: bool,
+    pub(crate) historical_line: usize,
+    pub(crate) historical_old_start: i64,
+    pub(crate) historical_new_start: i64,
+    pub(crate) signals: Vec<String>,
+    pub(crate) excerpt: Vec<u8>,
+    pub(crate) excerpt_truncated: bool,
+}
 impl Report {
     pub(crate) fn empty(input: CurrentChange) -> Self {
         Self {
             input, cache_tip: None, scope: None, suggestions: Vec::new(), matched_count: 0,
             truncated: false, omitted_input_paths: 0, warnings: Vec::new(),
+            omitted_content_bases: 0, omitted_content_signals: 0,
+            historical_content_truncated: false, omitted_historical_hunks: 0,
             limitations: vec![
-                "Path associations only: no content similarity, mandatory edits, coverage verdicts, or required test execution.".to_owned(),
-                "No file contents are analyzed; symlink targets and submodule contents are not read. Rename detection is not exhaustive.".to_owned(),
+                "Exact changed-code identity and path associations are context material, not a same-kind change conclusion, mandatory edits, coverage verdicts, or required test execution.".to_owned(),
+                "Content is bounded to 512 local hunk sides, 24 signals per side, 20,000 historical hunks, 64 MiB decoded payloads, 256 KiB per historical hunk, 128 verified commits, and 16 excerpts per commit (240 bytes each). Symlink targets and submodule contents are not read. Rename detection is not exhaustive.".to_owned(),
                 "No results does not prove absence of related history outside the analyzed scope.".to_owned(),
             ],
         }
@@ -82,7 +106,7 @@ pub(crate) fn run(
         report.warnings.push("warning: current HEAD is outside the published cache; associations use available cached history only".to_owned());
     }
     report.omitted_input_paths = paths.len().saturating_sub(INPUT_PATH_LIMIT);
-    report.limitations.push("Only available published cache history is queried, not all repository or branch history. Merge and mass-change commits (over 50 paths) are excluded.".to_owned());
+    report.limitations.push("Only available published cache history is queried, not all repository or branch history. Path associations exclude merge and mass-change commits (over 50 paths); changed-code matching inspects bounded cached hunks independently.".to_owned());
     if report.omitted_input_paths > 0 {
         report.limitations.push(format!("Historical retrieval uses the first {INPUT_PATH_LIMIT} byte-sorted current paths; {} remaining paths retain input/exclusion identity but are not queried.", report.omitted_input_paths));
     }
@@ -116,14 +140,8 @@ pub(crate) fn run(
         } else {
             Category::CoChangingFile
         };
-        let ubiquity = candidate.total_touches as f64 / history.eligible_commits as f64;
-        let score = relation_score(
-            count,
-            proportion,
-            ubiquity,
-            candidate.seed_keys.len(),
-            selected_paths.len(),
-        );
+        // Cross-route strength is distinct current-path support, not raw scores.
+        let score = candidate.seed_keys.len();
         let mut supporting = candidate.supporting;
         supporting.sort_by(|a, b| {
             b.commit_time
@@ -163,6 +181,8 @@ pub(crate) fn run(
                 citations: Vec::new(),
                 supporting_count: count,
                 citations_truncated: count > CITATION_LIMIT,
+                content_matches: Vec::new(),
+                content_matches_truncated: false,
             },
             supporting,
         ));
@@ -170,20 +190,26 @@ pub(crate) fn run(
     if omitted_tests {
         report.warnings.push("warning: historical test paths absent as safe regular files in the current worktree were omitted; renames are not resolved".to_owned());
     }
+    for (strength, time, suggestion) in
+        super::context_content::discover(session, &mut report, scope)?
+    {
+        ranked.push((strength, time, suggestion, Vec::new()));
+    }
     ranked.sort_by(|a, b| {
-        b.0.total_cmp(&a.0)
-            .then_with(|| (a.2.category != Category::Test).cmp(&(b.2.category != Category::Test)))
+        b.0.cmp(&a.0)
+            .then_with(|| a.2.category.cmp(&b.2.category))
             .then_with(|| b.1.cmp(&a.1))
             .then_with(|| a.2.path.cmp(&b.2.path))
     });
     report.matched_count = ranked.len();
     let mut tests = 0;
     let mut files = 0;
+    let mut changes = 0;
     for (_, _, mut suggestion, supporting) in ranked {
-        let category_count = if suggestion.category == Category::Test {
-            &mut tests
-        } else {
-            &mut files
+        let category_count = match suggestion.category {
+            Category::Test => &mut tests,
+            Category::CoChangingFile => &mut files,
+            Category::HistoricalChange => &mut changes,
         };
         if report.suggestions.len() >= limit || *category_count >= CATEGORY_LIMIT {
             continue;
