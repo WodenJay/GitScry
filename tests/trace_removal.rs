@@ -596,3 +596,61 @@ fn keeps_event_matches_when_cached_patch_text_exceeds_the_budget() {
     assert!(human.contains("Text hunk unavailable."));
     assert!(human.contains("patch excerpt truncated by safety limits."));
 }
+
+#[test]
+fn excerpt_headers_track_both_sides_after_omitted_rows() {
+    let repo = TestRepo::new();
+    let prefix = "prefix_1\nprefix_2\nprefix_3\nprefix_4\n";
+    let addition_first_before = format!("{prefix}anchor\nold()\ntail\n");
+    let addition_first_after = format!("{prefix}added_1\nadded_2\nadded_3\nanchor\ntail\n");
+    let deletion_first_before = format!("{prefix}remove_1\nremove_2\nremove_3\nold()\ntail\n");
+    let deletion_first_after = format!("{prefix}added\ntail\n");
+    commit(
+        &repo,
+        &[
+            ("addition_first.rs", &addition_first_before),
+            ("deletion_first.rs", &deletion_first_before),
+        ],
+        "Introduce old lines",
+        "2000-01-01T00:00:00Z",
+    );
+    commit(
+        &repo,
+        &[
+            ("addition_first.rs", &addition_first_after),
+            ("deletion_first.rs", &deletion_first_after),
+        ],
+        "Remove old lines",
+        "2000-01-02T00:00:00Z",
+    );
+    repo.index();
+
+    let report = query(&repo, &[]);
+    let events = report["events"].as_array().unwrap();
+    assert_eq!(events.len(), 2);
+    let addition_first = events
+        .iter()
+        .find(|event| event["old_path"] == "addition_first.rs")
+        .unwrap();
+    let addition_hunk = &addition_first["patch"]["hunks"][0];
+    assert_eq!(addition_hunk["old_start"], 5);
+    assert_eq!(addition_hunk["old_lines"], 3);
+    assert_eq!(addition_hunk["new_start"], 6);
+    assert_eq!(addition_hunk["new_lines"], 4);
+    let addition_text = addition_hunk["text"].as_str().unwrap();
+    assert_eq!(addition_text.lines().next(), Some("@@ -5,3 +6,4 @@"));
+    assert!(addition_text.lines().nth(1).unwrap().starts_with('+'));
+
+    let deletion_first = events
+        .iter()
+        .find(|event| event["old_path"] == "deletion_first.rs")
+        .unwrap();
+    let deletion_hunk = &deletion_first["patch"]["hunks"][0];
+    assert_eq!(deletion_hunk["old_start"], 5);
+    assert_eq!(deletion_hunk["old_lines"], 5);
+    assert_eq!(deletion_hunk["new_start"], 5);
+    assert_eq!(deletion_hunk["new_lines"], 2);
+    let deletion_text = deletion_hunk["text"].as_str().unwrap();
+    assert_eq!(deletion_text.lines().next(), Some("@@ -5,5 +5,2 @@"));
+    assert!(deletion_text.lines().nth(1).unwrap().starts_with('-'));
+}

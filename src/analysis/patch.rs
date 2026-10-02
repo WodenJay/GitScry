@@ -476,16 +476,6 @@ fn trace_fragment_metadata(
     end: usize,
 ) -> (i64, i64, i64, i64) {
     let first = &rows[start];
-    let old_start = if first.consumes_old {
-        first.old_before
-    } else {
-        first.old_before.saturating_sub(1)
-    };
-    let new_start = if first.consumes_new {
-        first.new_before
-    } else {
-        first.new_before.saturating_sub(1)
-    };
     let old_lines = rows[start..=end]
         .iter()
         .filter(|row| row.consumes_old)
@@ -494,6 +484,16 @@ fn trace_fragment_metadata(
         .iter()
         .filter(|row| row.consumes_new)
         .count() as i64;
+    let old_start = if old_lines == 0 {
+        first.old_before.saturating_sub(1)
+    } else {
+        first.old_before
+    };
+    let new_start = if new_lines == 0 {
+        first.new_before.saturating_sub(1)
+    } else {
+        first.new_before
+    };
     (old_start, old_lines, new_start, new_lines)
 }
 
