@@ -81,7 +81,10 @@ printf 'first packaged inference\n' > "$smoke_repo/fixture.txt"
 git -C "$smoke_repo" add fixture.txt
 git -C "$smoke_repo" -c user.name=Smoke -c user.email=smoke@example.invalid commit -qm initial
 (cd "$smoke_repo" && "$install_dir/gitscry" index --semantic)
+(cd "$smoke_repo" && HTTP_PROXY=http://127.0.0.1:9 HTTPS_PROXY=http://127.0.0.1:9 ALL_PROXY=http://127.0.0.1:9 http_proxy=http://127.0.0.1:9 https_proxy=http://127.0.0.1:9 all_proxy=http://127.0.0.1:9 "$install_dir/gitscry" index --semantic)
 printf 'second offline inference\n' >> "$smoke_repo/fixture.txt"
 git -C "$smoke_repo" add fixture.txt
 git -C "$smoke_repo" -c user.name=Smoke -c user.email=smoke@example.invalid commit -qm second
 (cd "$smoke_repo" && HTTP_PROXY=http://127.0.0.1:9 HTTPS_PROXY=http://127.0.0.1:9 ALL_PROXY=http://127.0.0.1:9 http_proxy=http://127.0.0.1:9 https_proxy=http://127.0.0.1:9 all_proxy=http://127.0.0.1:9 "$install_dir/gitscry" index --semantic)
+search_output=$(cd "$smoke_repo" && HTTP_PROXY=http://127.0.0.1:9 HTTPS_PROXY=http://127.0.0.1:9 ALL_PROXY=http://127.0.0.1:9 http_proxy=http://127.0.0.1:9 https_proxy=http://127.0.0.1:9 all_proxy=http://127.0.0.1:9 "$install_dir/gitscry" search 'second offline inference' --hybrid --limit 2)
+printf '%s\n' "$search_output" | grep -F 'second'
