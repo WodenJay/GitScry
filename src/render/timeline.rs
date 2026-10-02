@@ -59,6 +59,7 @@ pub(super) fn format_report(report: &Report) -> String {
 pub(super) fn format_json_report(
     report: &Report,
     additional_warnings: &[String],
+    github_links: Option<&crate::github::LinksReport>,
 ) -> Result<String, serde_json::Error> {
     let entries = report
         .entries
@@ -66,7 +67,13 @@ pub(super) fn format_json_report(
         .map(JsonEntry::from)
         .collect::<Vec<_>>();
     let output = JsonReport {
-        schema_version: if report.patch_mode { 2 } else { 1 },
+        schema_version: if github_links.is_some() {
+            3
+        } else if report.patch_mode {
+            2
+        } else {
+            1
+        },
         kind: "timeline",
         target_revision: &report.target_revision,
         path: json::json_path(&report.path),
@@ -79,6 +86,7 @@ pub(super) fn format_json_report(
         entries,
         warnings: additional_warnings.iter().collect(),
         notices: Vec::new(),
+        github_links,
         scope: report.scope.as_ref().map(json::json_scope),
     };
     serde_json::to_string(&output)
@@ -101,6 +109,8 @@ struct JsonReport<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     scope: Option<JsonSearchScope<'a>>,
     notices: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    github_links: Option<&'a crate::github::LinksReport>,
 }
 
 #[derive(Serialize)]

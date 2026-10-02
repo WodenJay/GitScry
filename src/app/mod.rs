@@ -220,23 +220,28 @@ pub(crate) fn execute(
             offset,
             last,
             patch,
+            github_links,
+            github_repo,
             ..
-        } => (
-            Request::Timeline {
-                path,
-                at,
-                offset: offset.unwrap_or(0),
-                last,
-            },
-            limit,
-            patch,
-            SearchScopeOptions {
-                from_rev,
-                to_rev,
-                since,
-                until,
-            },
-        ),
+        } => {
+            github_link_request = github_links.then_some(github_repo);
+            (
+                Request::Timeline {
+                    path,
+                    at,
+                    offset: offset.unwrap_or(0),
+                    last,
+                },
+                limit,
+                patch,
+                SearchScopeOptions {
+                    from_rev,
+                    to_rev,
+                    since,
+                    until,
+                },
+            )
+        }
     };
     let result = query::execute(
         request,
@@ -246,11 +251,11 @@ pub(crate) fn execute(
             scope,
         },
     )?;
-    let github_links = github_link_request.map(|explicit_repo| {
-        let query::QueryReport::Analysis(report) = &result.report else {
-            unreachable!("GitHub links are enabled only for text search");
-        };
-        github::fetch(report, explicit_repo.as_deref())
+    let github_links = github_link_request.map(|explicit_repo| match &result.report {
+        query::QueryReport::Analysis(report) => github::fetch(report, explicit_repo.as_deref()),
+        query::QueryReport::Timeline(report) => {
+            github::fetch_timeline(report, explicit_repo.as_deref())
+        }
     });
     Ok(Outcome {
         progress: result.progress,
