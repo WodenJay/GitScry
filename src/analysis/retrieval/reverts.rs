@@ -37,7 +37,7 @@ impl RevertIndex {
         self.by_target.get(oid).map(|index| &self.reverts[*index])
     }
 
-    /// Later reverts that undid every path this commit changed, earliest first.
+    /// Later reverts that cover every path this commit changed, earliest first.
     ///
     /// An undo touches everything the undone change touched, so requiring the revert to
     /// cover all of the candidate's paths rejects a revert that merely shares a file with

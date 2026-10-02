@@ -505,6 +505,96 @@ fn failures_reports_the_stated_reason_and_the_corrective_follow_up() {
 }
 
 #[test]
+fn failures_does_not_link_parallel_branch_corrective_commit() {
+    let repo = TestRepo::new();
+    let base = repo.commit_at("src/x.rs", b"base\n", "base", "2001-01-01T00:00:00+0000");
+    git(repo.dir.path(), ["switch", "-c", "candidate"]);
+    let candidate = repo.commit_at(
+        "src/x.rs",
+        b"candidate approach\n",
+        "Try candidate approach",
+        "2001-01-02T00:00:00+0000",
+    );
+    let revert_output = git_command(repo.dir.path())
+        .args(["revert", "--no-edit", candidate.as_str()])
+        .env("GIT_AUTHOR_DATE", "2001-01-03T00:00:00+0000")
+        .env("GIT_COMMITTER_DATE", "2001-01-03T00:00:00+0000")
+        .output()
+        .expect("revert candidate");
+    assert!(revert_output.status.success(), "{}", stderr(&revert_output));
+    let revert = repo.head();
+
+    git(
+        repo.dir.path(),
+        ["switch", "-c", "parallel-fix", base.as_str()],
+    );
+    let follow_up = repo.commit_at(
+        "src/x.rs",
+        b"candidate approach fixed\n",
+        "fix: candidate approach",
+        "2001-01-04T00:00:00+0000",
+    );
+    let is_descendant = git_command(repo.dir.path())
+        .args([
+            "merge-base",
+            "--is-ancestor",
+            revert.as_str(),
+            follow_up.as_str(),
+        ])
+        .status()
+        .expect("check follow-up ancestry")
+        .success();
+    assert!(
+        !is_descendant,
+        "fixture follow-up must be on a parallel branch"
+    );
+
+    git(repo.dir.path(), ["switch", "main"]);
+    git(repo.dir.path(), ["merge", "--ff-only", "candidate"]);
+    git(
+        repo.dir.path(),
+        [
+            "merge",
+            "--no-ff",
+            "-s",
+            "ours",
+            "parallel-fix",
+            "-m",
+            "merge parallel fix",
+        ],
+    );
+    repo.index();
+
+    let cache = rusqlite::Connection::open(repo.dir.path().join(".gitscry/cache.sqlite"))
+        .expect("open test cache");
+    let position = |oid: &str| {
+        cache
+            .query_row(
+                "SELECT position FROM commits WHERE oid = ?1",
+                [oid],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("read cache position")
+    };
+    let revert_position = position(&revert);
+    let follow_up_position = position(&follow_up);
+    assert!(
+        revert_position < follow_up_position,
+        "fixture requires later-position parallel follow-up: revert={revert_position}, follow-up={follow_up_position}"
+    );
+
+    let output = repo.run(["failures", "candidate", "approach"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    let entry = block(&text, &candidate[..12]);
+    assert!(entry.contains(&revert[..12]), "{entry}");
+    assert!(
+        !entry.contains(&follow_up[..12]) && !entry.contains("(follow-up)"),
+        "parallel-branch corrective commit incorrectly linked:\n{entry}"
+    );
+}
+
+#[test]
 fn failures_excludes_candidates_from_unmatched_paths() {
     let repo = TestRepo::new();
     let matching = repo.commit_at(

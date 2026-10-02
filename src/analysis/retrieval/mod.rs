@@ -217,9 +217,8 @@ pub(in crate::analysis) fn corrective_follow_up(
     }
     Ok(None)
 }
-
-/// The revert history associates with a candidate: the trailer it names first, then the
-/// earliest later revert of the same paths that no intervening commit also touched.
+/// The revert history associates a candidate by its named trailer first, then by the earliest
+/// later descendant revert of the same paths with no intervening path touch.
 pub(in crate::analysis) fn link<'a>(
     session: &QuerySession,
     reverts: &'a RevertIndex,
@@ -230,7 +229,10 @@ pub(in crate::analysis) fn link<'a>(
         return Ok(Some(revert));
     }
     for revert in reverts.undoings(&candidate.oid, &candidate.paths, candidate.position) {
-        if !session.touched_between(candidate.position, revert.position, &candidate.paths, scope)? {
+        if session.touched_between(candidate.position, revert.position, &candidate.paths, scope)? {
+            continue;
+        }
+        if session.ancestors(&revert.oid)?.contains(&candidate.oid) {
             return Ok(Some(revert));
         }
     }
