@@ -27,6 +27,10 @@ impl SameCommitFileStatus {
             Self::Unavailable => "unavailable",
         }
     }
+
+    pub(crate) fn is_complete(self) -> bool {
+        matches!(self, Self::Complete)
+    }
 }
 
 pub(crate) struct SameCommitFiles {

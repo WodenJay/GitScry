@@ -1,5 +1,6 @@
 mod support;
 
+use rusqlite::Connection;
 use serde_json::Value;
 use std::fs;
 use support::{TestRepo, git, git_command};
@@ -534,6 +535,12 @@ fn same_commit_navigation_distinguishes_empty_and_truncated_summaries() {
         serde_json::json!([])
     );
 
+    let human = empty_repo.run(["trace-removal", "--code", "old()"]);
+    assert!(human.status.success());
+    let text = String::from_utf8_lossy(&human.stdout);
+    assert!(text.contains("Same-commit file navigation: complete"));
+    assert!(text.contains("No other files changed."));
+
     let repo = TestRepo::new();
     commit(
         &repo,
@@ -569,4 +576,63 @@ fn same_commit_navigation_distinguishes_empty_and_truncated_summaries() {
     assert_eq!(summary["files"][0]["new_path"], "other-00.txt");
     assert_eq!(summary["files"][11]["new_path"], "other-11.txt");
     assert_eq!(report["truncated"], false);
+    let human = repo.run(["trace-removal", "--code", "old()"]);
+    assert!(human.status.success());
+    assert!(
+        String::from_utf8_lossy(&human.stdout).contains("Same-commit file navigation: truncated")
+    );
+}
+
+#[test]
+fn supplemental_lookup_failure_preserves_the_event_and_reports_unavailable() {
+    let repo = TestRepo::new();
+    let root = commit(
+        &repo,
+        &[("gone.rs", "old()\n")],
+        "Root",
+        "2000-01-01T00:00:00Z",
+    );
+    fs::remove_file(repo.dir.path().join("gone.rs")).unwrap();
+    let removal = commit(
+        &repo,
+        &[("added.txt", "")],
+        "Remove with an empty co-change",
+        "2000-01-02T00:00:00Z",
+    );
+    repo.index();
+
+    // Make only the supplemental row's status unreadable; event discovery still works.
+    let connection = Connection::open(repo.dir.path().join(".gitscry/cache.sqlite")).unwrap();
+    connection
+        .execute_batch(
+            "ALTER TABLE changes RENAME TO cached_changes;
+             CREATE VIEW changes AS
+             SELECT change_id, commit_id, ordinal,
+                    CASE WHEN old_path IS NULL THEN 1 ELSE status END AS status,
+                    old_path, new_path, old_blob, new_blob, old_mode, new_mode
+             FROM cached_changes;",
+        )
+        .unwrap();
+    drop(connection);
+
+    let report = query(&repo, &[]);
+    assert_eq!(report["events"].as_array().unwrap().len(), 1);
+    let event = &report["events"][0];
+    assert_eq!(event["commit_id"], removal);
+    assert_eq!(event["first_parent_id"], root);
+    assert_eq!(event["old_path"], "gone.rs");
+    assert_eq!(event["same_commit_files"]["status"], "unavailable");
+    assert_eq!(
+        event["matches"],
+        serde_json::json!([{"line_number": 1, "line": "old()"}])
+    );
+    assert_eq!(event["same_commit_files"]["files"], serde_json::json!([]));
+    assert_eq!(report["truncated"], false);
+
+    let human = repo.run(["trace-removal", "--code", "old()"]);
+    assert!(human.status.success());
+    let text = String::from_utf8_lossy(&human.stdout);
+    assert!(text.contains(&removal));
+    assert!(text.contains(&format!("Preceding file locator: {root}:gone.rs")));
+    assert!(text.contains("Same-commit file navigation: unavailable"));
 }

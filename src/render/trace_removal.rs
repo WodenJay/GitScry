@@ -65,7 +65,7 @@ pub(super) fn format_report(report: &Report) -> String {
             ));
             lines.push(format!("      {SAME_COMMIT_NAVIGATION_NOTICE}"));
             if event.same_commit_files.files.is_empty()
-                && event.same_commit_files.status.as_str() == "complete"
+                && event.same_commit_files.status.is_complete()
             {
                 lines.push("      No other files changed.".to_owned());
             }
