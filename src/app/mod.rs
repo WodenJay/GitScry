@@ -118,6 +118,18 @@ pub(crate) fn execute(
             };
             (request, limit, patch, scope.into())
         }
+        Command::TraceRemoval {
+            code,
+            path,
+            limit,
+            scope,
+            ..
+        } => (
+            Request::TraceRemoval { query: code, path },
+            limit,
+            false,
+            scope.into(),
+        ),
         Command::Examples {
             query: words,
             paths,
@@ -272,6 +284,9 @@ pub(crate) fn execute(
     )?;
     let github_links = github_link_request.map(|explicit_repo| match &result.report {
         query::QueryReport::Context(_) => unreachable!("context has no GitHub link option"),
+        query::QueryReport::TraceRemoval(_) => {
+            unreachable!("trace-removal has no GitHub link option")
+        }
         query::QueryReport::Analysis(report) => github::fetch(report, explicit_repo.as_deref()),
         query::QueryReport::Timeline(report) => {
             github::fetch_timeline(report, explicit_repo.as_deref())

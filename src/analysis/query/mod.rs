@@ -30,6 +30,10 @@ pub(crate) enum Request {
         path: Option<String>,
         direction: Option<CodeDirection>,
     },
+    TraceRemoval {
+        query: String,
+        path: Option<String>,
+    },
     Examples {
         words: Vec<String>,
         paths: Vec<String>,
@@ -74,6 +78,7 @@ pub(crate) enum QueryReport {
     Context(super::ContextReport),
     Analysis(Report),
     Timeline(TimelineReport),
+    TraceRemoval(super::TraceRemovalReport),
 }
 
 impl QueryReport {
@@ -82,6 +87,7 @@ impl QueryReport {
             Self::Context(report) => &report.warnings,
             Self::Analysis(report) => &report.warnings,
             Self::Timeline(_) => &[],
+            Self::TraceRemoval(_) => &[],
         }
     }
 
@@ -90,6 +96,7 @@ impl QueryReport {
             Self::Context(_) => &[],
             Self::Analysis(report) => &report.notices,
             Self::Timeline(_) => &[],
+            Self::TraceRemoval(_) => &[],
         }
     }
 }
@@ -148,6 +155,7 @@ impl Context {
             QueryReport::Context(report) => report.scope = scope,
             QueryReport::Analysis(report) => report.scope = scope,
             QueryReport::Timeline(report) => report.scope = scope,
+            QueryReport::TraceRemoval(report) => report.scope = scope,
         }
         Outcome {
             progress: self.session.progress().to_vec(),
@@ -175,6 +183,17 @@ pub(crate) fn execute(request: Request, options: Options) -> Result<Outcome, App
             path,
             direction,
         } => run_code_search(query, path, direction, options),
+        Request::TraceRemoval { query, path } => {
+            let context = Context::open(options.scope)?;
+            let report = capabilities::trace_removal::run(
+                &context.session,
+                &query,
+                path.as_deref(),
+                options.limit,
+                context.filter(),
+            )?;
+            Ok(context.finish(QueryReport::TraceRemoval(report)))
+        }
         Request::Examples { words, paths } => {
             run_text(words, paths, options, capabilities::examples)
         }

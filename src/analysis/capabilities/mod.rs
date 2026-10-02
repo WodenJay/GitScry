@@ -14,6 +14,7 @@ mod relations;
 mod search;
 pub(super) mod timeline;
 mod trace_fix;
+pub(super) mod trace_removal;
 mod why;
 
 pub(crate) use code_search::run as code_search;

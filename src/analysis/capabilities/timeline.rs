@@ -145,7 +145,7 @@ fn change_type(status: &str) -> &'static str {
     }
 }
 
-fn format_timestamp(timestamp: i64) -> String {
+pub(super) fn format_timestamp(timestamp: i64) -> String {
     let days = timestamp.div_euclid(86_400);
     let seconds = timestamp.rem_euclid(86_400);
     let (year, month, day) = civil_date(days);

@@ -93,6 +93,26 @@ Examples:
     Update,
 
     #[command(
+        about = "Discover literal text deletion events in cached history",
+        long_about = "Find case-sensitive literal substrings in deleted lines within the published cache. --code is required, non-empty single-line text, not a resolved symbol. Additions and unchanged context are not searched.\n\nEvents group matching lines by removal commit and exact historical old path. Diffs compare with the first parent; root commits produce no deletion events. Events remain even if text survives elsewhere or later returns; no retirement, replacement or cross-file identity is inferred. Newest committer time comes first, with commit-ID/path ties and ordered matching positions. --limit defaults to 10 events, not lines.\n\n--path filters the exact historical old path without following aliases. --from-rev excludes that cached revision and its ancestors; --to-rev includes that cached revision and its ancestors (default cache tip). The lower revision must be an ancestor of the upper. --since/--until are inclusive committer-time UTC dates or RFC 3339 instants with offsets. Filters apply before grouping and limits.\n\nDiscovery uses only the published cache, never uncached history, automatic fetch or rebuild. Run `gitscry index` explicitly to refresh. Incomplete/shallow coverage remains visible. No matches succeeds with an empty report. Events include full commit messages, first-parent locators, detected file changes and all matching positions. JSON schema version 1 exposes the same material.\n\nExamples:\n  gitscry trace-removal --code 'legacy()'\n  gitscry trace-removal --code 'old.key = ' --path config.rs --to-rev v1.0 --json"
+    )]
+    TraceRemoval {
+        /// Non-empty, single-line, case-sensitive literal substring in deleted lines.
+        #[arg(long, value_name = "TEXT", value_parser = parse_code_query)]
+        code: String,
+        /// Exact historical old path; does not follow aliases.
+        #[arg(long, value_name = "PATH")]
+        path: Option<String>,
+        #[command(flatten)]
+        scope: HistoricalScopeArgs,
+        /// Maximum deletion events, not matching lines.
+        #[arg(long, default_value = "10", value_parser = parse_limit)]
+        limit: usize,
+        /// Output a stable versioned JSON report.
+        #[arg(long)]
+        json: bool,
+    },
+    #[command(
         about = "Build or refresh the local history cache",
         long_about = "Build the local cache from the default branch history.\n\nUse `gitscry index` when you want to construct or refresh the local cache explicitly. The cache is a rebuildable local representation of the repository's Git history; Git remains the source of truth, and rerunning `index` rebuilds the cache from the current default branch tip.\n\nSemantic indexing is off by default; ordinary indexing without saved opt-in does not load or download a model. `--semantic` enables it and persists that choice; later `gitscry index` runs maintain the semantic index. `--no-semantic` disables it and removes semantic vectors. These options conflict. Enabling semantic indexing may download about 90 MB of pinned, hash-verified model resources shared across repositories. Subsequent indexing works offline when compatible resources and the verified ONNX Runtime 1.23.2 library are available. Missing or corrupt semantic resources or a missing/incompatible runtime return nonzero; the ordinary history cache remains usable.\n\nRequired input: none.\n\nExamples:\n\n  gitscry index\n\n  gitscry index --semantic\n\n  gitscry index --no-semantic"
     )]
@@ -462,6 +482,7 @@ impl Command {
             | Self::Regression { json, .. }
             | Self::Why { json, .. }
             | Self::TraceFix { json, .. }
+            | Self::TraceRemoval { json, .. }
             | Self::Timeline { json, .. } => *json,
             Self::Update | Self::Index { .. } => false,
         }

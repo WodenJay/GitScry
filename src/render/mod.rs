@@ -10,6 +10,7 @@ mod json;
 mod material;
 
 mod timeline;
+mod trace_removal;
 use crate::{
     analysis::query::QueryReport,
     app::{self, AppError, IndexStage, Outcome, Progress, UpdateStage},
@@ -23,6 +24,7 @@ fn format_report(
 ) -> String {
     match report {
         QueryReport::Context(report) => context::format_report(report),
+        QueryReport::TraceRemoval(report) => trace_removal::format_report(report),
         QueryReport::Analysis(report) => {
             let mut output = material::format_report(report);
             if let Some(github_links) = github_links {
@@ -49,6 +51,9 @@ fn format_json_report(
 ) -> Result<String, serde_json::Error> {
     match report {
         QueryReport::Context(report) => context::format_json_report(report, additional_warnings),
+        QueryReport::TraceRemoval(report) => {
+            trace_removal::format_json_report(report, additional_warnings)
+        }
         QueryReport::Analysis(report) => {
             json::format_json_report(report, additional_warnings, github_links)
         }
