@@ -55,45 +55,15 @@ struct CodeSearch<'a> {
 
 impl CodeSearch<'_> {
     fn scan_hunk(&mut self, hunk: CodeHunk) -> Result<(), AppError> {
-        let mut old_line = usize::try_from(hunk.old_start)
-            .map_err(|_| AppError::operational("error: cache contains an invalid old hunk line"))?;
-        let mut new_line = usize::try_from(hunk.new_start)
-            .map_err(|_| AppError::operational("error: cache contains an invalid new hunk line"))?;
-
-        for (line_order, raw_line) in hunk.text.split_inclusive(|byte| *byte == b'\n').enumerate() {
-            let line = raw_line.strip_suffix(b"\n").unwrap_or(raw_line);
-            match line.first() {
-                Some(b' ') => {
-                    advance_line(&mut old_line)?;
-                    advance_line(&mut new_line)?;
-                }
-                Some(b'+') => {
-                    let line_number = new_line;
-                    advance_line(&mut new_line)?;
-                    self.record_match(
-                        &hunk,
-                        CodeDirection::Added,
-                        line_number,
-                        line_order,
-                        &line[1..],
-                    )?;
-                }
-                Some(b'-') => {
-                    let line_number = old_line;
-                    advance_line(&mut old_line)?;
-                    self.record_match(
-                        &hunk,
-                        CodeDirection::Removed,
-                        line_number,
-                        line_order,
-                        &line[1..],
-                    )?;
-                }
-                // Hunk headers, metadata, and the no-newline marker aren't source lines.
-                _ => {}
-            }
-        }
-        Ok(())
+        visit_hunk_matches(
+            &hunk,
+            self.query,
+            self.path_filter,
+            self.direction_filter,
+            |direction, line_number, line_order, line| {
+                self.record_match(&hunk, direction, line_number, line_order, line)
+            },
+        )
     }
 
     fn record_match(
@@ -104,26 +74,11 @@ impl CodeSearch<'_> {
         line_order: usize,
         line: &[u8],
     ) -> Result<(), AppError> {
-        if self
-            .direction_filter
-            .is_some_and(|filter| filter != direction)
-            || !line
-                .windows(self.query.len())
-                .any(|window| window == self.query)
-        {
-            return Ok(());
-        }
         let path = match direction {
             CodeDirection::Added => hunk.new_path.as_deref(),
             CodeDirection::Removed => hunk.old_path.as_deref(),
-        };
-        let Some(path) = path else {
-            return Ok(());
-        };
-        if self.path_filter.is_some_and(|filter| filter != path) {
-            return Ok(());
         }
-
+        .expect("matching source line has a path");
         self.matched_count = self
             .matched_count
             .checked_add(1)
@@ -180,15 +135,7 @@ fn run_with_scope(
     limit: usize,
     scope: Option<&SearchFilter>,
 ) -> Result<Report, AppError> {
-    if query.is_empty()
-        || query
-            .chars()
-            .any(|character| matches!(character, '\n' | '\r'))
-    {
-        return Err(AppError::input(
-            "code query must be a non-empty single line",
-        ));
-    }
+    validate_query(query)?;
 
     let mut search = CodeSearch {
         query: query.as_bytes(),
@@ -220,6 +167,90 @@ fn run_with_scope(
         scope: None,
         symbol_summary: None,
     })
+}
+
+// Stream borrowed matches so discovery can select events without retaining source text.
+pub(crate) fn visit_matches(
+    session: &QuerySession,
+    query: &str,
+    path: Option<&str>,
+    direction: CodeDirection,
+    scope: Option<&SearchFilter>,
+    mut visit: impl FnMut(&CodeHunk, usize, &[u8]) -> Result<(), AppError>,
+) -> Result<(), AppError> {
+    validate_query(query)?;
+    let scan = |hunk: CodeHunk| {
+        visit_hunk_matches(
+            &hunk,
+            query.as_bytes(),
+            path.map(str::as_bytes),
+            Some(direction),
+            |_, number, _, line| visit(&hunk, number, line),
+        )
+    };
+    match scope {
+        Some(scope) => session.scan_code_hunks_scoped(scope, scan),
+        None => session.scan_code_hunks(scan),
+    }
+}
+
+fn visit_hunk_matches(
+    hunk: &CodeHunk,
+    query: &[u8],
+    path_filter: Option<&[u8]>,
+    direction_filter: Option<CodeDirection>,
+    mut visit: impl FnMut(CodeDirection, usize, usize, &[u8]) -> Result<(), AppError>,
+) -> Result<(), AppError> {
+    let mut old_line = usize::try_from(hunk.old_start)
+        .map_err(|_| AppError::operational("error: cache contains an invalid old hunk line"))?;
+    let mut new_line = usize::try_from(hunk.new_start)
+        .map_err(|_| AppError::operational("error: cache contains an invalid new hunk line"))?;
+    for (order, raw) in hunk.text.split_inclusive(|byte| *byte == b'\n').enumerate() {
+        let line = raw.strip_suffix(b"\n").unwrap_or(raw);
+        let (direction, number, path) = match line.first() {
+            Some(b' ') => {
+                advance_line(&mut old_line)?;
+                advance_line(&mut new_line)?;
+                continue;
+            }
+            Some(b'+') => {
+                let number = new_line;
+                advance_line(&mut new_line)?;
+                (CodeDirection::Added, number, hunk.new_path.as_deref())
+            }
+            Some(b'-') => {
+                let number = old_line;
+                advance_line(&mut old_line)?;
+                (CodeDirection::Removed, number, hunk.old_path.as_deref())
+            }
+            // Headers, metadata, and no-newline markers aren't source lines.
+            _ => continue,
+        };
+        let Some(path) = path else {
+            continue;
+        };
+        if direction_filter.is_some_and(|filter| filter != direction)
+            || path_filter.is_some_and(|filter| filter != path)
+            || !line[1..].windows(query.len()).any(|window| window == query)
+        {
+            continue;
+        }
+        visit(direction, number, order, &line[1..])?;
+    }
+    Ok(())
+}
+
+fn validate_query(query: &str) -> Result<(), AppError> {
+    if query.is_empty()
+        || query
+            .chars()
+            .any(|character| matches!(character, '\n' | '\r'))
+    {
+        return Err(AppError::input(
+            "code query must be a non-empty single line",
+        ));
+    }
+    Ok(())
 }
 
 fn advance_line(line: &mut usize) -> Result<(), AppError> {

@@ -1,5 +1,8 @@
 //! Text-matched deletion events, not inferred code lifecycles.
-use std::collections::BTreeMap;
+use std::{
+    cmp::Reverse,
+    collections::{BTreeMap, BTreeSet},
+};
 
 use crate::{
     analysis::{CodeDirection, CodeMatch, SearchScopeInfo},
@@ -29,6 +32,33 @@ pub(crate) struct Event {
     pub(crate) matches: Vec<CodeMatch>,
 }
 
+// Only event identities are retained during discovery, never omitted source lines.
+struct EventSelection {
+    limit: usize,
+    seen: BTreeSet<(String, Vec<u8>)>,
+    selected: BTreeSet<(Reverse<i64>, String, Vec<u8>)>,
+}
+
+impl EventSelection {
+    fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            seen: BTreeSet::new(),
+            selected: BTreeSet::new(),
+        }
+    }
+
+    fn record(&mut self, time: i64, oid: &str, path: &[u8]) {
+        if self.seen.insert((oid.to_owned(), path.to_vec())) {
+            self.selected
+                .insert((Reverse(time), oid.to_owned(), path.to_vec()));
+            if self.selected.len() > self.limit {
+                self.selected.pop_last();
+            }
+        }
+    }
+}
+
 pub(crate) fn run(
     session: &QuerySession,
     query: &str,
@@ -36,30 +66,62 @@ pub(crate) fn run(
     limit: usize,
     scope: Option<&SearchFilter>,
 ) -> Result<Report, AppError> {
-    // The line-search limit must never cut an event's matching positions.
-    let lines = match scope {
-        Some(scope) => super::code_search::run_scoped(
+    let mut selection = EventSelection::new(limit);
+    super::code_search::visit_matches(
+        session,
+        query,
+        path,
+        CodeDirection::Removed,
+        scope,
+        |hunk, _, _| {
+            let old_path = hunk
+                .old_path
+                .as_deref()
+                .expect("removed line has an old path");
+            let key = (hunk.oid.clone(), old_path.to_vec());
+            if !selection.seen.contains(&key)
+                && session
+                    .removal_change(&hunk.oid, old_path)?
+                    .first_parent_id
+                    .is_some()
+            {
+                selection.record(hunk.commit_time, &hunk.oid, old_path);
+            }
+            Ok(())
+        },
+    )?;
+    let matched_count = selection.seen.len();
+    let mut groups: BTreeMap<_, Vec<CodeMatch>> = selection
+        .selected
+        .iter()
+        .map(|(_, oid, path)| ((oid.clone(), path.clone()), Vec::new()))
+        .collect();
+    drop(selection);
+    // A second pass retains complete line evidence only for the selected events.
+    if !groups.is_empty() {
+        super::code_search::visit_matches(
             session,
             query,
             path,
-            Some(CodeDirection::Removed),
-            usize::MAX,
+            CodeDirection::Removed,
             scope,
-        )?,
-        None => super::code_search::run(
-            session,
-            query,
-            path,
-            Some(CodeDirection::Removed),
-            usize::MAX,
-        )?,
-    };
-    let mut groups: BTreeMap<(String, Vec<u8>), Vec<CodeMatch>> = BTreeMap::new();
-    for line in lines.code_matches {
-        groups
-            .entry((line.commit_id.clone(), line.path.clone()))
-            .or_default()
-            .push(line);
+            |hunk, line_number, line| {
+                let old_path = hunk
+                    .old_path
+                    .as_deref()
+                    .expect("removed line has an old path");
+                if let Some(matches) = groups.get_mut(&(hunk.oid.clone(), old_path.to_vec())) {
+                    matches.push(CodeMatch {
+                        commit_id: hunk.oid.clone(),
+                        path: old_path.to_vec(),
+                        direction: CodeDirection::Removed,
+                        line_number,
+                        line: line.to_vec(),
+                    });
+                }
+                Ok(())
+            },
+        )?;
     }
     let mut events = Vec::new();
     for ((commit_id, old_path), mut matches) in groups {
@@ -93,7 +155,6 @@ pub(crate) fn run(
             .then_with(|| a.commit_id.cmp(&b.commit_id))
             .then_with(|| a.old_path.cmp(&b.old_path))
     });
-    let matched_count = events.len();
     Ok(Report {
         query: query.to_owned(),
         path: path.map(|path| path.as_bytes().to_vec()),
@@ -102,10 +163,29 @@ pub(crate) fn run(
         limit,
         matched_count,
         truncated: matched_count > limit,
-        events: events
-            .into_iter()
-            .take(limit)
-            .map(|(_, event)| event)
-            .collect(),
+        events: events.into_iter().map(|(_, event)| event).collect(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EventSelection;
+
+    #[test]
+    fn selection_counts_all_events_but_retains_only_the_limit_and_no_line_payloads() {
+        let mut selection = EventSelection::new(2);
+        for time in 0..100 {
+            for _ in 0..50 {
+                selection.record(time, &time.to_string(), b"a.rs");
+            }
+            assert!(selection.selected.len() <= 2);
+        }
+        assert_eq!(selection.seen.len(), 100);
+        let ids: Vec<_> = selection
+            .selected
+            .iter()
+            .map(|(_, oid, _)| oid.as_str())
+            .collect();
+        assert_eq!(ids, ["99", "98"]);
+    }
 }
