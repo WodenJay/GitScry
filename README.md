@@ -3,7 +3,7 @@
 <img src="docs/assets/GitScry_logo.png" width="33%" />
 
 # GitScry
-
+<!-- This file can only be edited by humans. Agents do NOT change this file -->
 **Give developers and coding agents a memory of how a codebase evolved.**
 
 Find how similar changes were implemented before, why code looks the way it does, which tests tend to move with a file, what approaches failed, and which change may have introduced a bug — directly from local Git history.
