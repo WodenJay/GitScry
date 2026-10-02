@@ -51,6 +51,36 @@ impl TimeBound {
     }
 }
 
+pub(super) fn validate_time_bounds(options: &SearchScopeOptions) -> Result<(), AppError> {
+    time_bounds(options).map(|_| ())
+}
+
+fn time_bounds(
+    options: &SearchScopeOptions,
+) -> Result<(Option<TimeBound>, Option<TimeBound>), AppError> {
+    let since = options
+        .since
+        .as_deref()
+        .map(|value| parse_time_bound(value, "since", false))
+        .transpose()?;
+    let until = options
+        .until
+        .as_deref()
+        .map(|value| parse_time_bound(value, "until", true))
+        .transpose()?;
+    if let (Some(since), Some(until)) = (&since, &until) {
+        let reversed = if until.date_end_exclusive {
+            since.compares_at_or_after(until)
+        } else {
+            since.compares_after(until)
+        };
+        if reversed {
+            return Err(AppError::input("--since must not be later than --until"));
+        }
+    }
+    Ok((since, until))
+}
+
 pub(super) fn resolve(
     session: &QuerySession,
     options: SearchScopeOptions,
@@ -75,27 +105,7 @@ fn resolve_with_target(
         return Ok(None);
     }
 
-    let since = options
-        .since
-        .as_deref()
-        .map(|value| parse_time_bound(value, "since", false))
-        .transpose()?;
-    let until = options
-        .until
-        .as_deref()
-        .map(|value| parse_time_bound(value, "until", true))
-        .transpose()?;
-    if let (Some(since), Some(until)) = (&since, &until) {
-        let reversed = if until.date_end_exclusive {
-            since.compares_at_or_after(until)
-        } else {
-            since.compares_after(until)
-        };
-        if reversed {
-            return Err(AppError::input("--since must not be later than --until"));
-        }
-    }
-
+    let (since, until) = time_bounds(&options)?;
     let cache_tip = session.completed_tip()?;
     let repository = Repository::discover()?;
     let to_rev = match options.to_rev.as_deref() {

@@ -18,6 +18,9 @@ use crate::{
 pub(crate) use scope::SearchScopeOptions;
 
 pub(crate) enum Request {
+    Context {
+        staged: bool,
+    },
     Search {
         words: Vec<String>,
         hybrid: bool,
@@ -68,6 +71,7 @@ pub(crate) struct Options {
 }
 
 pub(crate) enum QueryReport {
+    Context(super::ContextReport),
     Analysis(Report),
     Timeline(TimelineReport),
 }
@@ -75,6 +79,7 @@ pub(crate) enum QueryReport {
 impl QueryReport {
     pub(crate) fn warnings(&self) -> &[String] {
         match self {
+            Self::Context(report) => &report.warnings,
             Self::Analysis(report) => &report.warnings,
             Self::Timeline(_) => &[],
         }
@@ -82,6 +87,7 @@ impl QueryReport {
 
     pub(crate) fn notices(&self) -> &[String] {
         match self {
+            Self::Context(_) => &[],
             Self::Analysis(report) => &report.notices,
             Self::Timeline(_) => &[],
         }
@@ -139,6 +145,7 @@ impl Context {
     fn finish(self, mut report: QueryReport) -> Outcome {
         let scope = self.scope.map(|scope| scope.report);
         match &mut report {
+            QueryReport::Context(report) => report.scope = scope,
             QueryReport::Analysis(report) => report.scope = scope,
             QueryReport::Timeline(report) => report.scope = scope,
         }
@@ -155,6 +162,7 @@ pub(crate) fn execute(request: Request, options: Options) -> Result<Outcome, App
         return Err(AppError::input("limit must be greater than zero"));
     }
     match request {
+        Request::Context { staged } => run_context(staged, options),
         Request::Search { words, hybrid } => {
             if hybrid {
                 run_hybrid_search(words, options)
@@ -197,6 +205,27 @@ pub(crate) fn execute(request: Request, options: Options) -> Result<Outcome, App
     }
 }
 
+fn run_context(staged: bool, options: Options) -> Result<Outcome, AppError> {
+    let repository = Repository::discover()?;
+    let input = repository.current_change(staged)?;
+    if input.changes.is_empty() {
+        scope::validate_time_bounds(&options.scope)?;
+        return Ok(Outcome {
+            progress: Vec::new(),
+            warnings: Vec::new(),
+            report: QueryReport::Context(super::ContextReport::empty(input)),
+        });
+    }
+    let context = Context::open(options.scope)?;
+    let report = capabilities::context::run(
+        &context.session,
+        input,
+        &repository.root,
+        options.limit,
+        context.filter(),
+    )?;
+    Ok(context.finish(QueryReport::Context(report)))
+}
 fn run_text(
     words: Vec<String>,
     paths: Vec<String>,

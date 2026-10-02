@@ -1,3 +1,5 @@
+mod current;
+pub(crate) use current::{CurrentChange, current_regular_file};
 mod history;
 mod process;
 mod symbol;

@@ -37,7 +37,7 @@ pub(crate) struct RelationCandidate {
     pub(crate) path: Vec<u8>,
     pub(crate) total_touches: usize,
     pub(crate) supporting: Vec<RelationSupport>,
-    pub(crate) seed_keys: HashSet<String>,
+    pub(crate) seed_keys: HashSet<Vec<u8>>,
 }
 
 pub(crate) struct RelationHistory {
@@ -49,7 +49,7 @@ pub(crate) struct RelationHistory {
 
 #[derive(Default)]
 struct SeedMatches {
-    keys: HashSet<String>,
+    keys: HashSet<Vec<u8>>,
     paths: HashSet<Vec<u8>>,
 }
 
@@ -65,7 +65,26 @@ impl QuerySession {
         mass_change_path_limit: usize,
         scope: Option<&SearchFilter>,
     ) -> Result<RelationHistory, AppError> {
-        relation_history(&self.connection, seed_keys, mass_change_path_limit, scope)
+        let seeds = seed_keys
+            .iter()
+            .map(|key| key.as_bytes().to_vec())
+            .collect::<Vec<_>>();
+        relation_history(
+            &self.connection,
+            &seeds,
+            mass_change_path_limit,
+            scope,
+            false,
+        )
+    }
+
+    pub(crate) fn exact_relation_history(
+        &self,
+        paths: &[Vec<u8>],
+        mass_change_path_limit: usize,
+        scope: Option<&SearchFilter>,
+    ) -> Result<RelationHistory, AppError> {
+        relation_history(&self.connection, paths, mass_change_path_limit, scope, true)
     }
 
     pub(crate) fn match_count(
@@ -181,9 +200,10 @@ fn search_error(operation: &str, error: impl std::fmt::Display) -> AppError {
 
 fn relation_history(
     connection: &Connection,
-    seed_keys: &[String],
+    seed_keys: &[Vec<u8>],
     mass_change_path_limit: usize,
     scope: Option<&SearchFilter>,
+    exact: bool,
 ) -> Result<RelationHistory, AppError> {
     if seed_keys.is_empty() {
         return Ok(RelationHistory {
@@ -200,9 +220,10 @@ fn relation_history(
         )
     })?;
     let eligible_commits = relation_count(connection, limit, scope)?;
-    let seed_matches = relation_seed_matches(connection, seed_keys, limit, scope)?;
+    let seed_matches = relation_seed_matches(connection, seed_keys, limit, scope, exact)?;
     let seed_touch_commits = seed_matches.len();
-    let mass_changes_filtered = relation_has_mass_change(connection, seed_keys, limit, scope)?;
+    let mass_changes_filtered =
+        relation_has_mass_change(connection, seed_keys, limit, scope, exact)?;
     let mut candidates = HashMap::new();
     let seed_commit_ids = seed_matches.keys().copied().collect::<Vec<_>>();
     for commit_ids in seed_commit_ids.chunks(SQL_PARAMETER_LIMIT) {
@@ -264,7 +285,7 @@ fn relation_history(
         .collect::<Vec<_>>()
         .chunks(SQL_PARAMETER_LIMIT)
     {
-        let query_bindings = RelationQueryBindings::new(scope, &[], limit);
+        let query_bindings = RelationQueryBindings::new(scope, &[], limit, false);
         let scope_cte = &query_bindings.cte_prefix;
         let limit_parameter = query_bindings.limit_parameter;
         let placeholders =
@@ -349,7 +370,7 @@ struct RelationQueryBindings {
 }
 
 impl RelationQueryBindings {
-    fn new(scope: Option<&SearchFilter>, seed_keys: &[String], limit: i64) -> Self {
+    fn new(scope: Option<&SearchFilter>, seed_keys: &[Vec<u8>], limit: i64, exact: bool) -> Self {
         let scope_parameter_count = relation_scope_parameter_count(scope);
         let limit_parameter = scope_parameter_count + 1;
         let first_seed_parameter = limit_parameter + 1;
@@ -384,8 +405,16 @@ impl RelationQueryBindings {
         }
         values.push(Value::Integer(limit));
         for seed in seed_keys {
-            values.push(Value::Text(seed.clone()));
-            values.push(Value::Integer((!seed.contains('/')) as i64));
+            values.push(if exact {
+                Value::Blob(seed.clone())
+            } else {
+                Value::Text(String::from_utf8_lossy(seed).into_owned())
+            });
+            values.push(Value::Integer(if exact {
+                2
+            } else {
+                (!seed.contains(&b'/')) as i64
+            }));
         }
 
         Self {
@@ -404,7 +433,7 @@ fn relation_count(
     limit: i64,
     scope: Option<&SearchFilter>,
 ) -> Result<i64, AppError> {
-    let query_bindings = RelationQueryBindings::new(scope, &[], limit);
+    let query_bindings = RelationQueryBindings::new(scope, &[], limit, false);
     let scope_cte = &query_bindings.cte_prefix;
     let limit_parameter = query_bindings.limit_parameter;
     let scope_predicate = query_bindings.scope_predicate;
@@ -431,11 +460,12 @@ fn relation_count(
 
 fn relation_seed_matches(
     connection: &Connection,
-    seed_keys: &[String],
+    seed_keys: &[Vec<u8>],
     limit: i64,
     scope: Option<&SearchFilter>,
+    exact: bool,
 ) -> Result<HashMap<i64, SeedMatches>, AppError> {
-    let query_bindings = RelationQueryBindings::new(scope, seed_keys, limit);
+    let query_bindings = RelationQueryBindings::new(scope, seed_keys, limit, exact);
     let scope_cte = &query_bindings.cte_prefix;
     let limit_parameter = query_bindings.limit_parameter;
     let values_clause = seed_values_clause(seed_keys, query_bindings.first_seed_parameter);
@@ -453,10 +483,12 @@ fn relation_seed_matches(
                    WHERE parents.commit_id = pc.commit_id AND parents.position > 0\n\
                )\n\
          ), seed_keys(seed_key, is_basename) AS (VALUES {values_clause})\n\
-         SELECT DISTINCT cp.commit_id, seed_keys.seed_key, cp.raw_path\n\
+         SELECT DISTINCT cp.commit_id, CAST(seed_keys.seed_key AS BLOB), cp.raw_path\n\
          FROM commit_paths AS cp\n\
          JOIN relation_eligible ON relation_eligible.commit_id = cp.commit_id\n\
          JOIN seed_keys ON (\n\
+             seed_keys.is_basename = 2 AND cp.raw_path = seed_keys.seed_key\n\
+         ) OR (\n\
              seed_keys.is_basename = 1 AND cp.path_basename = lower(seed_keys.seed_key)\n\
          ) OR (\n\
              seed_keys.is_basename = 0 AND (\n\
@@ -478,7 +510,7 @@ fn relation_seed_matches(
         .query_map(params_from_iter(query_bindings.values), |row| {
             Ok((
                 row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
+                row.get::<_, Vec<u8>>(1)?,
                 row.get::<_, Vec<u8>>(2)?,
             ))
         })
@@ -496,11 +528,12 @@ fn relation_seed_matches(
 
 fn relation_has_mass_change(
     connection: &Connection,
-    seed_keys: &[String],
+    seed_keys: &[Vec<u8>],
     limit: i64,
     scope: Option<&SearchFilter>,
+    exact: bool,
 ) -> Result<bool, AppError> {
-    let query_bindings = RelationQueryBindings::new(scope, seed_keys, limit);
+    let query_bindings = RelationQueryBindings::new(scope, seed_keys, limit, exact);
     let scope_cte = &query_bindings.cte_prefix;
     let limit_parameter = query_bindings.limit_parameter;
     let values_clause = seed_values_clause(seed_keys, query_bindings.first_seed_parameter);
@@ -521,6 +554,8 @@ fn relation_has_mass_change(
                AND EXISTS (\n\
                    SELECT 1 FROM commit_paths AS cp\n\
                    JOIN seed_keys ON (\n\
+                       seed_keys.is_basename = 2 AND cp.raw_path = seed_keys.seed_key\n\
+                   ) OR (\n\
                        seed_keys.is_basename = 1 AND cp.path_basename = lower(seed_keys.seed_key)\n\
                    ) OR (\n\
                        seed_keys.is_basename = 0 AND (\n\
@@ -545,7 +580,7 @@ fn relation_has_mass_change(
     Ok(found != 0)
 }
 
-fn seed_values_clause(seed_keys: &[String], first_parameter: usize) -> String {
+fn seed_values_clause(seed_keys: &[Vec<u8>], first_parameter: usize) -> String {
     seed_keys
         .iter()
         .enumerate()

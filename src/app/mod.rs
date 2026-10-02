@@ -143,6 +143,12 @@ pub(crate) fn execute(
             false,
             scope.into(),
         ),
+        Command::Context {
+            staged,
+            limit,
+            scope,
+            ..
+        } => (Request::Context { staged }, limit, false, scope.into()),
         Command::Related {
             paths,
             limit,
@@ -265,6 +271,7 @@ pub(crate) fn execute(
         },
     )?;
     let github_links = github_link_request.map(|explicit_repo| match &result.report {
+        query::QueryReport::Context(_) => unreachable!("context has no GitHub link option"),
         query::QueryReport::Analysis(report) => github::fetch(report, explicit_repo.as_deref()),
         query::QueryReport::Timeline(report) => {
             github::fetch_timeline(report, explicit_repo.as_deref())

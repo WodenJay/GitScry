@@ -10,13 +10,20 @@ use crate::app::AppError;
 #[derive(Clone)]
 pub(super) struct Git {
     root: PathBuf,
+    index: Option<PathBuf>,
 }
 
 impl Git {
     pub(super) fn new(root: PathBuf) -> Self {
-        Self { root }
+        Self { root, index: None }
     }
 
+    pub(super) fn with_index(&self, index: PathBuf) -> Self {
+        Self {
+            root: self.root.clone(),
+            index: Some(index),
+        }
+    }
     pub(super) fn text<I, S>(&self, args: I) -> Result<String, AppError>
     where
         I: IntoIterator<Item = S>,
@@ -219,6 +226,9 @@ impl Git {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        if let Some(index) = &self.index {
+            command.env("GIT_INDEX_FILE", index);
+        }
         command.spawn().map_err(|error| {
             AppError::operational(format!(
                 "error: starting Git: {error}; ensure Git is installed"

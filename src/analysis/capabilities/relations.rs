@@ -213,7 +213,7 @@ fn run(
     Ok(report)
 }
 
-fn relation_score(
+pub(super) fn relation_score(
     support_count: usize,
     proportion: f64,
     ubiquity: f64,
@@ -238,7 +238,7 @@ fn confidence(support_count: usize, proportion: f64) -> Confidence {
     }
 }
 
-fn is_test_path(path: &[u8]) -> bool {
+pub(super) fn is_test_path(path: &[u8]) -> bool {
     let path = retrieval::normalize_path(path);
     let mut parts = path.rsplit('/');
     let name = parts.next().unwrap_or_default();
