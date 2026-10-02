@@ -239,6 +239,53 @@ fn why_symbol_separates_introduction_anchor_and_modifications() {
                     && material["subject"] != "Create calculation"
             })
     );
+    let time_scoped = json(
+        &repo,
+        &[
+            "why",
+            "src/lib.rs",
+            "--symbol",
+            "calculate",
+            "--at",
+            declaration.as_str(),
+            "--since",
+            "9999-01-01",
+            "--json",
+        ],
+    );
+    assert_eq!(time_scoped["matched_count"], 0);
+    assert_eq!(
+        time_scoped["target_related_modifications"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        time_scoped["symbol_summary"]["introduction"]["status"],
+        "unknown"
+    );
+    assert_eq!(
+        time_scoped["symbol_summary"]["anchor_line_attribution"]["status"],
+        "unknown"
+    );
+    assert!(
+        time_scoped["symbol_summary"]["introduction"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("query scope")
+    );
+    assert_eq!(
+        time_scoped["why"]["attribution"]["state"],
+        "outside_historical_scope"
+    );
+    assert!(
+        time_scoped["symbol_summary"]["introduction"]
+            .get("commit_oid")
+            .is_none()
+    );
+    assert!(
+        time_scoped["symbol_summary"]["anchor_line_attribution"]
+            .get("commit_oid")
+            .is_none()
+    );
 }
 
 #[test]
