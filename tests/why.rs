@@ -150,6 +150,30 @@ fn why_symbol_separates_introduction_anchor_and_modifications() {
     assert_eq!(materials.len(), 1);
     assert_eq!(materials[0]["subject"], "Update calculation behavior");
 
+    let complete = json(
+        &repo,
+        &[
+            "why",
+            "src/lib.rs",
+            "--symbol",
+            "calculate",
+            "--limit",
+            "10",
+            "--json",
+        ],
+    );
+    let subjects = complete["materials"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|material| material["subject"].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(complete["matched_count"], 2);
+    assert_eq!(subjects.len(), 2);
+    assert!(subjects.contains(&"Update calculation behavior"));
+    assert!(subjects.contains(&"Change calculation declaration"));
+    assert!(!subjects.contains(&"Tune unrelated helper"));
+
     let pinned = json(
         &repo,
         &[
@@ -180,6 +204,89 @@ fn why_symbol_separates_introduction_anchor_and_modifications() {
                     && material["subject"] != "Create calculation"
             })
     );
+}
+
+#[test]
+fn why_symbol_introduction_ignores_an_unrelated_deletion() {
+    let repo = TestRepo::new();
+    repo.commit(
+        "src/obsolete.rs",
+        b"fn obsolete_helper() {}\n",
+        "Create helper",
+        None,
+    );
+    fs::write(
+        repo.dir.path().join("src/lib.rs"),
+        b"fn calculate() { let result = 1; }\n",
+    )
+    .expect("create calculation file");
+    fs::remove_file(repo.dir.path().join("src/obsolete.rs")).expect("remove helper file");
+    git(repo.dir.path(), ["add", "-A"]);
+    git(
+        repo.dir.path(),
+        ["commit", "-m", "Create calculation and remove helper"],
+    );
+    let introduction = repo.head();
+    repo.commit(
+        "src/lib.rs",
+        b"fn calculate() { let result = 2; }\n",
+        "Update calculation body",
+        None,
+    );
+    repo.index();
+
+    let report = json(
+        &repo,
+        &["why", "src/lib.rs", "--symbol", "calculate", "--json"],
+    );
+    assert_eq!(report["symbol_summary"]["introduction"]["status"], "known");
+    assert_eq!(
+        report["symbol_summary"]["introduction"]["commit_oid"],
+        introduction
+    );
+}
+
+#[test]
+fn why_symbol_keeps_oldest_range_change_when_introduction_is_unknown() {
+    let repo = TestRepo::new();
+    repo.commit(
+        "src/lib.rs",
+        b"fn calculate() { let result = 1; }\n",
+        "Create calculation",
+        None,
+    );
+    repo.commit(
+        "src/lib.rs",
+        b"fn calculate() { let result = 2; }\n",
+        "Update calculation body",
+        None,
+    );
+    let body_change = repo.head();
+    repo.index();
+    fs::write(
+        repo.dir.path().join(".git/shallow"),
+        format!("{body_change}\n"),
+    )
+    .expect("mark body change as shallow boundary");
+
+    let report = json(
+        &repo,
+        &[
+            "why",
+            "src/lib.rs",
+            "--symbol",
+            "calculate",
+            "--at",
+            body_change.as_str(),
+            "--json",
+        ],
+    );
+    assert_eq!(
+        report["symbol_summary"]["introduction"]["status"],
+        "unknown"
+    );
+    assert_eq!(report["matched_count"], 1);
+    assert_eq!(report["materials"][0]["subject"], "Update calculation body");
 }
 
 #[test]

@@ -541,7 +541,7 @@ pub(super) fn verify_symbol_introduction(
         {
             return Ok(false);
         }
-        if has_removed_lines(git, parent, revision)? {
+        if has_removed_symbol_declaration(git, parent, revision, name)? {
             return Ok(false);
         }
     }
@@ -561,7 +561,12 @@ fn read_blob_at(git: &Git, revision: &str, path: &str) -> Result<Option<Vec<u8>>
         .map(Some)
 }
 
-fn has_removed_lines(git: &Git, parent: &str, revision: &str) -> Result<bool, AppError> {
+fn has_removed_symbol_declaration(
+    git: &Git,
+    parent: &str,
+    revision: &str,
+    name: &str,
+) -> Result<bool, AppError> {
     let patch = git.output(
         [
             "diff",
@@ -580,7 +585,10 @@ fn has_removed_lines(git: &Git, parent: &str, revision: &str) -> Result<bool, Ap
             in_hunk = false;
         } else if line.starts_with(b"@@ ") {
             in_hunk = true;
-        } else if in_hunk && line.starts_with(b"-") {
+        } else if in_hunk
+            && line.starts_with(b"-")
+            && !symbol::declaration_lines(&line[1..], name).is_empty()
+        {
             return Ok(true);
         }
     }

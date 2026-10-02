@@ -295,7 +295,7 @@ fn run_symbol(
         .warnings
         .iter()
         .any(|warning| warning.contains("local history is shallow"));
-    let oldest_event = revisions.last().map(String::as_str);
+    let verified_introduction = introduction.as_ref().ok().cloned();
 
     let introduction = match introduction {
         Err(reason) => SymbolFact::Unknown { reason },
@@ -369,7 +369,7 @@ fn run_symbol(
 
     let mut entries = Vec::new();
     for oid in &revisions {
-        if Some(oid.as_str()) == oldest_event || !reachable.contains(oid) {
+        if verified_introduction.as_deref() == Some(oid.as_str()) || !reachable.contains(oid) {
             continue;
         }
         if !eligible_revisions.is_none_or(|eligible| eligible.contains(oid)) {
