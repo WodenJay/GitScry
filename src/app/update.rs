@@ -5,10 +5,11 @@ use crate::runtime::install_verified_package;
 use semver::Version;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+#[cfg(windows)]
+use std::io;
 use std::{
     ffi::OsStr,
     fs::{self, File, OpenOptions},
-    io,
     path::{Path, PathBuf},
 };
 use tempfile::Builder;
