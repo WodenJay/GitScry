@@ -8,6 +8,9 @@ GitScry gives development agents access to relevant Git history while they work 
 A rebuildable local representation derived from Git history and queried by an Agent. Git remains the source of truth.
 _Avoid_: index, database, repository memory
 
+**current change**:
+The selected uncommitted additions, modifications, removals, and detected renames for which an Agent seeks historical material. It is distinct from the historical query scope.
+
 **historical query scope**:
 The subset of cache-reachable commits eligible to contribute material to a historical query. It may be narrowed by revision reachability and commit time without changing the query's target revision or implying coverage beyond the cache.
 
