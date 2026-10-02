@@ -167,7 +167,7 @@ fn attach_patch_excerpts_using(
     Ok(())
 }
 
-fn selected_patch_excerpt(
+pub(crate) fn selected_patch_excerpt(
     session: &QuerySession,
     oid: &str,
     mut priority_for: impl FnMut(&PatchHistoryHunk) -> Option<usize>,

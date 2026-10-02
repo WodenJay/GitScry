@@ -1,6 +1,7 @@
 //! Published query sessions and shared cache infrastructure.
 //! Generation planning/publication lives in `generation`; row writes in `write`.
 
+pub(crate) mod followups;
 mod generation;
 mod history;
 mod payload;

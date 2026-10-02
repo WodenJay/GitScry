@@ -50,6 +50,50 @@ pub(crate) struct GithubLinkArgs {
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
     #[command(
+        about = "Inspect bounded later same-file changes",
+        long_about = r#"Inspect factual same-file associations after a cached seed commit.
+
+REV and --to-rev must resolve in the published cache; the seed must be an ancestor of the endpoint (default cache tip). Equal endpoints succeed with no material. Only strict seed descendants reachable from that endpoint are inspected, not parallel work or all refs. This is read-only: no fetch, index or implicit cache expansion. Shallow and missing-history coverage is reported.
+
+Repeat --path with exact repository-relative original changed paths, without glob or hunk selection. Either old or new side of a seed rename selects that change; omission selects all original changes. Unmatched selections are errors.
+
+--days (default 90), --max-commits (default 2000), and --limit (default 20) require positive, representable integers. The inclusive committer-time ceiling is seed time plus --days; there is no lower timestamp bound. Timestamp-inverted descendants keep signed negative elapsed times and warnings. Deterministic forward topological inspection prioritizes early history; nonmatching eligible commits count against --max-commits. --limit separately bounds displayed matches. Out-of-window lineage inspection has an additional --max-commits budget; exhausted or unavailable correspondence is disclosed. Inspected extent and traversal/display truncation are separate.
+
+This first slice supplies same-file-only material, not changed-region overlap, explicit-revert analysis, fix/test labels, causality or stability judgments. Deletion ends an incarnation (a seed-deleted file has none); later recreation and copies are not continuations. Subsequent renames stop tracking with a warning: rename continuity is not yet supported. Branch correspondence is conservative; ambiguous merges stop affected tracking. Merge diffs are relative to the first parent, not proof of fresh corrections. Empty success means only no associations in the inspected scope.
+
+No full diff by default. --patch includes bounded supporting cached hunks (64 scanned, 16 displayed, 8 KiB per hunk, 32 KiB per result) and discloses unavailable/truncated content. --json exposes equivalent material, effective scope and coverage.
+
+Examples:
+  gitscry followups <REV>
+  gitscry followups <REV> --path src/a.rs --path src/b.rs --to-rev release --json
+  gitscry followups <REV> --days 180 --max-commits 4000 --limit 40 --patch"#
+    )]
+    Followups {
+        /// Original cached commit to inspect.
+        revision: String,
+        /// Repeatable exact repository-relative original changed path.
+        #[arg(long = "path")]
+        paths: Vec<String>,
+        /// Cached endpoint; defaults to cache tip.
+        #[arg(long, value_name = "REV")]
+        to_rev: Option<String>,
+        /// Inclusive observation ceiling in days; positive integer.
+        #[arg(long, default_value = "90", value_parser = parse_limit)]
+        days: usize,
+        /// Eligible candidate inspection budget; positive integer.
+        #[arg(long, default_value = "2000", value_parser = parse_limit)]
+        max_commits: usize,
+        /// Displayed associated commit limit; positive integer.
+        #[arg(long, default_value = "20", value_parser = parse_limit)]
+        limit: usize,
+        /// Include bounded supporting cached patches.
+        #[arg(long)]
+        patch: bool,
+        /// Return equivalent structured material.
+        #[arg(long)]
+        json: bool,
+    },
+    #[command(
         about = "Discover historical changes, co-changing paths and tests",
         long_about = r#"Select traceable changed-code and path-association material for the current change.
 
@@ -462,6 +506,7 @@ impl Command {
             | Self::Regression { json, .. }
             | Self::Why { json, .. }
             | Self::TraceFix { json, .. }
+            | Self::Followups { json, .. }
             | Self::Timeline { json, .. } => *json,
             Self::Update | Self::Index { .. } => false,
         }

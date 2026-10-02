@@ -84,6 +84,27 @@ pub(crate) fn execute(
         _ => None,
     };
     let (request, limit, patch, scope) = match command {
+        Command::Followups {
+            revision,
+            paths,
+            to_rev,
+            days,
+            max_commits,
+            limit,
+            patch,
+            ..
+        } => (
+            Request::Followups {
+                revision,
+                paths,
+                to_rev,
+                days,
+                max_commits,
+            },
+            limit,
+            patch,
+            SearchScopeOptions::default(),
+        ),
         Command::Index {
             semantic,
             no_semantic,
@@ -271,7 +292,9 @@ pub(crate) fn execute(
         },
     )?;
     let github_links = github_link_request.map(|explicit_repo| match &result.report {
-        query::QueryReport::Context(_) => unreachable!("context has no GitHub link option"),
+        query::QueryReport::Context(_) | query::QueryReport::Followups(_) => {
+            unreachable!("context has no GitHub link option")
+        }
         query::QueryReport::Analysis(report) => github::fetch(report, explicit_repo.as_deref()),
         query::QueryReport::Timeline(report) => {
             github::fetch_timeline(report, explicit_repo.as_deref())
