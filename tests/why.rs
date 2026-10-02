@@ -287,6 +287,103 @@ fn why_symbol_separates_introduction_anchor_and_modifications() {
             .is_none()
     );
 }
+#[test]
+fn why_symbol_recreation_starts_a_new_incarnation() {
+    let repo = TestRepo::new();
+    repo.commit(
+        "src/lib.rs",
+        b"fn calculate() { let result = 1; }\n",
+        "Old creation",
+        None,
+    );
+    let old = repo.head();
+    repo.commit(
+        "src/lib.rs",
+        b"fn calculate() { let result = 2; }\n",
+        "Old modification",
+        None,
+    );
+    repo.commit(
+        "src/lib.rs",
+        b"fn helper() {}\n",
+        "Delete calculation",
+        None,
+    );
+    repo.commit(
+        "src/lib.rs",
+        b"fn helper() {}\nfn calculate() { let result = 3; }\n",
+        "Recreate calculation",
+        None,
+    );
+    let recreation = repo.head();
+    repo.index();
+    let report = json(
+        &repo,
+        &["why", "src/lib.rs", "--symbol", "calculate", "--json"],
+    );
+    assert_eq!(
+        report["symbol_summary"]["introduction"]["commit_oid"],
+        recreation
+    );
+    assert_eq!(report["matched_count"], 0);
+    assert!(!report.to_string().contains(&old));
+}
+
+#[test]
+fn why_symbol_name_change_preserves_earlier_material() {
+    let repo = TestRepo::new();
+    repo.commit(
+        "src/lib.rs",
+        b"fn original() {\n    let result = 1;\n}\n",
+        "Create original",
+        None,
+    );
+    let introduction = repo.head();
+    repo.commit(
+        "src/lib.rs",
+        b"fn original() {\n    let result = 2;\n}\n",
+        "Change original body",
+        Some("Because callers need the corrected result."),
+    );
+    let modification = repo.head();
+    repo.commit(
+        "src/lib.rs",
+        b"fn calculate() {\n    let result = 2;\n}\n",
+        "Rename calculation",
+        None,
+    );
+    let rename = repo.head();
+    repo.index();
+    let report = json(
+        &repo,
+        &[
+            "why",
+            "src/lib.rs",
+            "--symbol",
+            "calculate",
+            "--patch",
+            "--json",
+        ],
+    );
+    assert_eq!(
+        report["symbol_summary"]["introduction"]["commit_oid"],
+        introduction
+    );
+    assert_eq!(
+        report["symbol_summary"]["anchor_line_attribution"]["commit_oid"],
+        rename
+    );
+    assert_eq!(report["matched_count"], 1);
+    assert_eq!(
+        report["target_related_modifications"][0]["oid"],
+        modification
+    );
+    assert!(
+        report["target_related_modifications"][0]["patch"]
+            .to_string()
+            .contains("result = 2")
+    );
+}
 
 #[test]
 fn why_symbol_introduction_ignores_an_unrelated_deletion() {

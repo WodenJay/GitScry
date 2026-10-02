@@ -1,6 +1,7 @@
 mod history;
 mod process;
 mod symbol;
+mod symbol_history;
 mod target;
 
 use std::path::PathBuf;
@@ -14,7 +15,15 @@ pub(crate) use target::{DeletedLine, RegressionTarget, TraceFixTarget, WhyAnchor
 
 pub(crate) struct SymbolTrace {
     pub(crate) revisions: Vec<String>,
+    pub(crate) modifications: Vec<SymbolChange>,
     pub(crate) introduction: Result<String, String>,
+}
+
+pub(crate) struct SymbolChange {
+    pub(crate) oid: String,
+    pub(crate) path: Vec<u8>,
+    pub(crate) start: usize,
+    pub(crate) end: usize,
 }
 pub(crate) struct Repository {
     pub(crate) root: PathBuf,
@@ -54,51 +63,7 @@ impl Repository {
     }
 
     pub(crate) fn trace_why_symbol(&self, target: &WhyTarget) -> SymbolTrace {
-        let WhyAnchor::Symbol { name, number } = &target.anchor else {
-            return SymbolTrace {
-                revisions: Vec::new(),
-                introduction: Err("target is not a symbol".to_owned()),
-            };
-        };
-        let path = match std::str::from_utf8(&target.path) {
-            Ok(path) => path,
-            Err(error) => {
-                return SymbolTrace {
-                    revisions: Vec::new(),
-                    introduction: Err(format!("symbol path is not UTF-8: {error}")),
-                };
-            }
-        };
-        let end = target.symbol_end.unwrap_or(*number);
-        let revisions = match history::trace_symbol(&self.git, &target.revision, path, *number, end)
-        {
-            Ok(revisions) => revisions,
-            Err(error) => {
-                return SymbolTrace {
-                    revisions: Vec::new(),
-                    introduction: Err(error.to_string()),
-                };
-            }
-        };
-        let Some(candidate) = revisions.last() else {
-            return SymbolTrace {
-                revisions,
-                introduction: Err("Git returned no history for the symbol range".to_owned()),
-            };
-        };
-        let introduction =
-            match target::verify_symbol_introduction(&self.git, candidate, path, name) {
-                Ok(true) => Ok(candidate.clone()),
-                Ok(false) => Err(
-                    "the oldest symbol-range change is not a verified declaration introduction"
-                        .to_owned(),
-                ),
-                Err(error) => Err(error.to_string()),
-            };
-        SymbolTrace {
-            revisions,
-            introduction,
-        }
+        symbol_history::trace(&self.git, target)
     }
 
     pub(crate) fn pin_timeline_target(

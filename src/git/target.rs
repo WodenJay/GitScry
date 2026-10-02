@@ -594,7 +594,11 @@ pub(super) fn verify_symbol_introduction(
     Ok(true)
 }
 
-fn read_blob_at(git: &Git, revision: &str, path: &str) -> Result<Option<Vec<u8>>, AppError> {
+pub(super) fn read_blob_at(
+    git: &Git,
+    revision: &str,
+    path: &str,
+) -> Result<Option<Vec<u8>>, AppError> {
     let entry = match read_tree_entry(git, revision, path) {
         Ok(entry) => entry,
         Err(error) if error.exit_code() == 2 => return Ok(None),
