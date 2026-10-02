@@ -5,6 +5,89 @@ use std::{fs, process::Output};
 use support::{TestRepo, git};
 
 #[test]
+fn related_abandonment_merges_routes_and_cites_recorded_provenance() {
+    let repo = TestRepo::new();
+    commit(&repo, &[("old.rs", "fn route() {}\n")], "base");
+    commit(
+        &repo,
+        &[(
+            "old.rs",
+            "fn route() { refreshSessionCache(\"session-expired\"); }\n",
+        )],
+        "update",
+    );
+    let original = repo.head();
+    git(repo.dir.path(), ["revert", "--no-edit", &original]);
+    git(
+        repo.dir.path(),
+        [
+            "commit",
+            "--amend",
+            "-m",
+            &format!(
+                "Revert update\n\nThis reverts commit {original}.\n\nReason: session cache caused a regression for legacy callers."
+            ),
+        ],
+    );
+    let revert = repo.head();
+    commit(
+        &repo,
+        &[("old.rs", "fn route() { restoreLegacyCache(); }\n")],
+        "fix: restore legacy cache",
+    );
+    let follow_up = repo.head();
+    repo.index();
+    for path in ["a.rs", "b.rs"] {
+        fs::write(
+            repo.dir.path().join(path),
+            "fn route() { refreshSessionCache(\"session-expired\"); }\n",
+        )
+        .unwrap();
+    }
+    let report = json(repo.run(["context", "--json"]));
+    let entries = report["suggestions"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    let entry = &entries[0];
+    assert_eq!(entry["category"], "recorded_abandonment");
+    assert_eq!(
+        entry["associated_current_paths"],
+        serde_json::json!(["a.rs", "b.rs"])
+    );
+    assert_eq!(entry["citations"][0]["oid"], original);
+    assert_eq!(entry["citations"][1]["oid"], revert);
+    assert_eq!(entry["citations"][1]["note"], "reverts this change");
+    assert_eq!(entry["citations"][2]["oid"], follow_up);
+    assert_eq!(entry["citations"][2]["note"], "follow-up");
+    assert!(
+        entry["abandonment"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("regression")
+    );
+    assert!(entry["abandonment"]["retry"].is_null());
+    for oid in [&original, &revert] {
+        assert!(
+            entry["content_matches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m["historical_oid"] == *oid)
+        );
+    }
+    let text = repo.run(["context"]);
+    let text = String::from_utf8_lossy(&text.stdout);
+    for value in [
+        "recorded_abandonment",
+        "regression",
+        &original,
+        &revert,
+        &follow_up,
+    ] {
+        assert!(text.contains(value));
+    }
+}
+
+#[test]
 fn generic_descriptions_return_verified_local_historical_matches() {
     let repo = TestRepo::new();
     commit(

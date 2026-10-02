@@ -225,14 +225,33 @@ pub(in crate::analysis) fn link<'a>(
     scope: Option<&SearchFilter>,
     candidate: &Scored,
 ) -> Result<Option<&'a Revert>, AppError> {
-    if let Some(revert) = reverts.of(&candidate.oid) {
+    link_change(
+        session,
+        reverts,
+        scope,
+        &candidate.oid,
+        &candidate.paths,
+        candidate.position,
+    )
+}
+
+/// Link an already verified change without requiring lexical retrieval signals.
+pub(in crate::analysis) fn link_change<'a>(
+    session: &QuerySession,
+    reverts: &'a RevertIndex,
+    scope: Option<&SearchFilter>,
+    oid: &str,
+    paths: &[Vec<u8>],
+    position: i64,
+) -> Result<Option<&'a Revert>, AppError> {
+    if let Some(revert) = reverts.of(oid) {
         return Ok(Some(revert));
     }
-    for revert in reverts.undoings(&candidate.oid, &candidate.paths, candidate.position) {
-        if session.touched_between(candidate.position, revert.position, &candidate.paths, scope)? {
+    for revert in reverts.undoings(oid, paths, position) {
+        if session.touched_between(position, revert.position, paths, scope)? {
             continue;
         }
-        if session.ancestors(&revert.oid)?.contains(&candidate.oid) {
+        if session.ancestors(&revert.oid)?.contains(oid) {
             return Ok(Some(revert));
         }
     }

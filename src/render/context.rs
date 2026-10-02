@@ -83,11 +83,32 @@ pub(super) fn format_report(report: &ContextReport) -> String {
                 citation.oid,
                 escape::subject(&citation.subject)
             ));
+            if let Some(note) = citation.note {
+                lines.push(format!("    Role: {note}"));
+            }
+        }
+        if let Some(abandonment) = &suggestion.abandonment {
+            lines.push(format!(
+                "  Reason: {}",
+                abandonment
+                    .reason
+                    .as_deref()
+                    .map(escape::subject)
+                    .unwrap_or_else(|| "unknown".to_owned())
+            ));
+            lines.push(format!(
+                "  Recorded retry condition: {}",
+                abandonment
+                    .retry
+                    .as_deref()
+                    .map(escape::subject)
+                    .unwrap_or_else(|| "unknown".to_owned())
+            ));
         }
         for item in &suggestion.content_matches {
-            lines.push(format!("  Content: current {} {} (old {}, new {}) -> historical {} {} line {} (old {}, new {}); signals: {}",
+            lines.push(format!("  Content: current {} {} (old {}, new {}) -> historical {} {} {} line {} (old {}, new {}); signals: {}",
                 escape::path(&item.current_path), if item.current_added { "added" } else { "removed" },
-                item.current_old_start, item.current_new_start, escape::path(&item.historical_path),
+                item.current_old_start, item.current_new_start, item.historical_oid, escape::path(&item.historical_path),
                 if item.historical_added { "added" } else { "removed" }, item.historical_line,
                 item.historical_old_start, item.historical_new_start, item.signals.iter().map(|s| escape::subject(s)).collect::<Vec<_>>().join(", ")));
             lines.push(format!(
@@ -224,6 +245,12 @@ struct JsonSuggestion<'a> {
     citations_truncated: bool,
     content_matches: Vec<JsonContentMatch<'a>>,
     content_matches_truncated: bool,
+    abandonment: Option<JsonAbandonment<'a>>,
+}
+#[derive(Serialize)]
+struct JsonAbandonment<'a> {
+    reason: Option<&'a str>,
+    retry: Option<&'a str>,
 }
 #[derive(Serialize)]
 struct JsonContentMatch<'a> {
@@ -231,6 +258,7 @@ struct JsonContentMatch<'a> {
     current_direction: &'static str,
     current_old_start: usize,
     current_new_start: usize,
+    historical_oid: &'a str,
     historical_path: JsonPath<'a>,
     historical_direction: &'static str,
     historical_line: usize,
@@ -244,11 +272,19 @@ struct JsonContentMatch<'a> {
 struct JsonCitation<'a> {
     oid: &'a str,
     subject: &'a str,
+    note: Option<&'a str>,
 }
 impl<'a> From<&'a ContextSuggestion> for JsonSuggestion<'a> {
     fn from(suggestion: &'a ContextSuggestion) -> Self {
         Self {
             category: suggestion.category.as_str(),
+            abandonment: suggestion
+                .abandonment
+                .as_ref()
+                .map(|detail| JsonAbandonment {
+                    reason: detail.reason.as_deref(),
+                    retry: detail.retry.as_deref(),
+                }),
             path: json::json_path(&suggestion.path),
             associated_current_paths: suggestion
                 .associated_current_paths
@@ -263,6 +299,7 @@ impl<'a> From<&'a ContextSuggestion> for JsonSuggestion<'a> {
                 .map(|citation| JsonCitation {
                     oid: &citation.oid,
                     subject: &citation.subject,
+                    note: citation.note,
                 })
                 .collect(),
             supporting_count: suggestion.supporting_count,
@@ -281,6 +318,7 @@ impl<'a> From<&'a ContextSuggestion> for JsonSuggestion<'a> {
                     current_old_start: item.current_old_start,
                     current_new_start: item.current_new_start,
                     historical_path: json::json_path(&item.historical_path),
+                    historical_oid: &item.historical_oid,
                     historical_direction: if item.historical_added {
                         "added"
                     } else {

@@ -129,7 +129,7 @@ pub(super) fn discover(
                     category: Category::HistoricalChange, path: path.clone(),
                     associated_current_paths: Vec::new(), basis: vec!["Exact distinctive identities verified in historical changed-code lines; direction is material, not a same-kind or review conclusion.".to_owned()],
                     selection_routes: vec!["changed_code"], citations: Vec::new(), supporting_count: 1,
-                    citations_truncated: false, content_matches: Vec::new(), content_matches_truncated: false,
+                    abandonment: None, citations_truncated: false, content_matches: Vec::new(), content_matches_truncated: false,
                 }, BTreeSet::new()));
                 bases.insert(index);
                 if !suggestion.associated_current_paths.contains(&local.path) {
@@ -142,6 +142,7 @@ pub(super) fn discover(
                 suggestion.content_matches.push(ContentMatch {
                     current_path: local.path.clone(), current_added: local.added,
                     current_old_start: local.old_start, current_new_start: local.new_start,
+                    historical_oid: hunk.oid.clone(),
                     historical_path: path.clone(), historical_added: added,
                     historical_line: line_number, historical_old_start: hunk.old_start,
                     historical_new_start: hunk.new_start, signals: shared,
