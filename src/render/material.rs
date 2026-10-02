@@ -1,6 +1,6 @@
 use crate::analysis::{
     Detail, Failure, Material, PatchExcerpt, PatchStatus, Relation, Report, ReportKind,
-    SearchScopeInfo, Step,
+    SearchScopeInfo, Step, WhyAttribution,
 };
 
 /// Printed when history does not state why an approach failed.
@@ -24,7 +24,7 @@ fn empty_message(kind: ReportKind) -> &'static str {
         ReportKind::Failures => "No failed approaches found.",
         ReportKind::Related => "No historical relations found.",
         ReportKind::Tests => "No historically related tests found.",
-        ReportKind::Why => "No explanatory history found.",
+        ReportKind::Why => unreachable!("why reports use the dedicated renderer"),
         ReportKind::Regression => "No supported regression suspects found.",
         ReportKind::TraceFix => "No introducing change could be traced.",
     }
@@ -49,6 +49,131 @@ pub(super) fn scope_summary(scope: &SearchScopeInfo) -> String {
         criteria.join("; "),
         scope.cache_tip,
     )
+}
+fn format_why_report(report: &Report) -> String {
+    let Some(why) = report.why.as_ref() else {
+        return "Why summary unavailable.".to_owned();
+    };
+    let mut lines = Vec::new();
+    if let Some(scope) = &report.scope {
+        lines.push(scope_summary(scope));
+    }
+    lines.push(format!(
+        "Why at {} at revision {}:",
+        escape::subject(&why.anchor),
+        escape::subject(&why.revision)
+    ));
+    let attribution_scope = match why.attribution_scope {
+        "target_line" => "target line",
+        "symbol_starting_line_only" => "symbol starting line only",
+        _ => why.attribution_scope,
+    };
+    lines.push(format!("Attribution scope: {attribution_scope}."));
+    let attribution_count = usize::from(matches!(&why.attribution, WhyAttribution::Available(_)));
+    lines.push(format!("Attribution count: {attribution_count}"));
+    match &why.attribution {
+        WhyAttribution::Available(attribution) => {
+            lines.push(format!(
+                "Attribution: {} {}",
+                short_oid(&attribution.oid),
+                escape::subject(&attribution.subject)
+            ));
+            lines.push(format!("  basis: {}", attribution.basis.join(", ")));
+            if attribution.shallow_boundary {
+                lines.push("  attribution reaches a shallow-history boundary.".to_owned());
+            }
+            if attribution.consolidated_target_modification {
+                lines.push(
+                    "  this commit is also a target-related modification and is shown once here."
+                        .to_owned(),
+                );
+            }
+            render_patch(&mut lines, attribution.patch.as_ref(), "  ");
+        }
+        WhyAttribution::OutsideHistoricalScope => lines.push(
+            "Attribution: outside the requested historical scope; no out-of-scope commit is shown."
+                .to_owned(),
+        ),
+        WhyAttribution::Unavailable { reason } => lines.push(format!(
+            "Attribution unavailable: {}",
+            escape::subject(reason)
+        )),
+    }
+
+    lines.push(format!(
+        "Standalone target-related modifications ({}):",
+        why.standalone_target_related_modification_count
+    ));
+    if why.target_related_modifications.is_empty() {
+        lines
+            .push("  No standalone target-related modifications in the selected scope.".to_owned());
+    }
+    for modification in &why.target_related_modifications {
+        lines.push(format!(
+            "- {} {}",
+            short_oid(&modification.oid),
+            escape::subject(&modification.subject)
+        ));
+        if !modification.paths.is_empty() {
+            lines.push(format!(
+                "  paths: {}",
+                modification
+                    .paths
+                    .iter()
+                    .map(|path| escape::path(path))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        lines.push(format!("  basis: {}", modification.basis.join(", ")));
+        render_patch(&mut lines, modification.patch.as_ref(), "  ");
+    }
+    lines.push(format!(
+        "Other file history: {}",
+        why.other_file_history_count
+    ));
+    lines.push(format!("File history in scope: {}", why.file_history_count));
+    if why.omitted_target_related_modifications > 0 {
+        lines.push(format!(
+            "Omitted {} target-related modification{} due to --limit.",
+            why.omitted_target_related_modifications,
+            if why.omitted_target_related_modifications == 1 {
+                ""
+            } else {
+                "s"
+            }
+        ));
+    }
+    if let Some(args) = &why.timeline_follow_up_args {
+        let command = args
+            .iter()
+            .map(|argument| shell_argument(argument))
+            .collect::<Vec<_>>()
+            .join(" ");
+        lines.push(format!("Timeline follow-up: `gitscry {command}`"));
+    }
+    lines.push("Limitations:".to_owned());
+    lines.extend(
+        why.limitations
+            .iter()
+            .map(|limitation| format!("- {}", escape::subject(limitation))),
+    );
+    lines.join("\n")
+}
+
+fn short_oid(oid: &str) -> String {
+    oid.chars().take(12).collect()
+}
+
+fn shell_argument(argument: &str) -> String {
+    if argument
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || b"_./:-".contains(&byte))
+    {
+        argument.to_owned()
+    } else {
+        format!("'{}'", argument.replace('\'', "'\\''"))
+    }
 }
 
 fn format_code_report(report: &Report) -> String {
@@ -82,6 +207,9 @@ fn format_code_report(report: &Report) -> String {
 }
 
 pub(crate) fn format_report(report: &Report) -> String {
+    if report.kind == ReportKind::Why {
+        return format_why_report(report);
+    }
     if report.kind == ReportKind::CodeSearch {
         return format_code_report(report);
     }
@@ -96,7 +224,7 @@ pub(crate) fn format_report(report: &Report) -> String {
             let noun = match report.kind {
                 ReportKind::CodeSearch => "matching lines",
                 ReportKind::Related | ReportKind::Tests => "matching paths",
-                ReportKind::Why => "matching commits",
+                ReportKind::Why => unreachable!("why reports use the dedicated renderer"),
                 ReportKind::Search
                 | ReportKind::Examples
                 | ReportKind::Failures
@@ -125,7 +253,7 @@ fn header(report: &Report) -> String {
         ReportKind::Failures => "Failed approaches",
         ReportKind::Related => "Related paths",
         ReportKind::Tests => "Historical test candidates",
-        ReportKind::Why => "Why history",
+        ReportKind::Why => unreachable!("why reports use the dedicated renderer"),
         ReportKind::Regression => "Regression suspects",
         ReportKind::TraceFix => "Fix lineage",
     };
@@ -276,14 +404,6 @@ fn render_detail(lines: &mut Vec<String>, detail: &Option<Detail>) {
             }
         }
         Some(Detail::Relation(_)) => {}
-        Some(Detail::Why(why)) => {
-            lines.push(format!(
-                "  target: {} at {} (line {})",
-                escape::subject(&why.anchor),
-                escape::subject(&why.revision),
-                why.line
-            ));
-        }
         Some(Detail::TraceFix(trace)) => {
             lines.push(format!(
                 "  trace: {} at fix {}",

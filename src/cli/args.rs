@@ -269,8 +269,8 @@ Examples:
             .args(["line", "symbol"]),
     ))]
     #[command(
-        about = "Explain the local history behind one line or symbol",
-        long_about = "Explain the local history behind one line or symbol.\n\nUse `gitscry why` when a line or symbol raises a question and you want the commits whose material explains why it looks the way it does at the target revision.\n\nRequired inputs: a repository-relative PATH and exactly one anchor, `--line` (a one-based line number) or `--symbol` (a symbol name). `--at` pins the local revision containing the target and defaults to HEAD.\n\nHistorical scope: `--from-rev REV` excludes REV and its ancestors; `--to-rev REV` includes REV and its ancestors, intersected with the target revision selected by `--at`. Without `--to-rev`, the target revision is the upper bound. `--since` and `--until` filter by committer time and accept UTC dates or RFC 3339 timestamps with offsets. Scope flags combine, and revisions must be in the published cache.\n\nExamples:\n\n  gitscry why src/lib.rs --line 12\n\n  gitscry why src/lib.rs --symbol provider --at HEAD~1 --from-rev HEAD~5 --to-rev HEAD~1\n\n  gitscry why src/lib.rs --line 12 --since 2025-01-01 --until 2025-01-31"
+        about = "Show Git blame attribution and target changes for a line or symbol",
+        long_about = "Show Git blame attribution and target-related modifications for a line or symbol.\n\nUse `gitscry why` when you need factual target attribution and modification history. The report separates target-line attribution (for a symbol, the starting line only), standalone target-related modifications supported by actual changed target lines (the full symbol range is tracked), and a count of other file history. This is not a root-cause explanation; commit messages and co-changed paths do not establish target relevance. Attribution and a modification from the same commit are shown once. `--limit` caps only standalone target-related modifications. Out-of-scope commits may be traversed to track line positions but are not returned as eligible modifications. Line tracking follows first-parent history across merges; changes reachable only from other parents are not classified.\n\nRequired inputs: a repository-relative PATH and exactly one anchor, `--line` (a one-based line number) or `--symbol` (a symbol name). `--at` pins the local revision containing the target and defaults to HEAD.\n\nHistorical scope: `--from-rev REV` excludes REV and its ancestors; `--to-rev REV` includes REV and its ancestors, intersected with the target revision selected by `--at`. Without `--to-rev`, the target revision is the upper bound. `--since` and `--until` filter by committer time and accept UTC dates or RFC 3339 timestamps with offsets. Scope flags combine, and revisions must be in the published cache.\n\nExamples:\n\n  gitscry why src/lib.rs --line 12\n\n  gitscry why src/lib.rs --symbol provider --at HEAD~1 --from-rev HEAD~5 --to-rev HEAD~1\n\n  gitscry why src/lib.rs --line 12 --since 2025-01-01 --until 2025-01-31"
     )]
     Why {
         /// Repository-relative path at the target revision.
@@ -296,7 +296,7 @@ Examples:
         /// Include commits through this UTC date or RFC 3339 timestamp.
         #[arg(long, value_name = "DATE_OR_TIMESTAMP")]
         until: Option<String>,
-        /// Maximum number of matches to return.
+        /// Maximum standalone target-related modifications to return; attribution is independent.
         #[arg(long, default_value = "10", value_parser = parse_limit)]
         limit: usize,
         /// Include bounded cached hunks tied to the target line or symbol.

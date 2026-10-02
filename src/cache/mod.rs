@@ -13,7 +13,7 @@ mod write;
 use crate::app::AppError;
 pub(crate) use generation::prepare;
 pub(crate) use history::HunkId;
-pub(crate) use history::{CodeHunk, HistoryCommit, HistoryHunk, PatchHistory, PatchHistoryHunk};
+pub(crate) use history::{CodeHunk, HistoryCommit, HistoryHunk, PatchHistoryHunk};
 use payload::HunkReader;
 pub(crate) use query::{RelationHistory, SearchCandidate, SearchMaterial};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};

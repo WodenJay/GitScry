@@ -3,7 +3,7 @@ use serde::Serialize;
 
 use crate::analysis::{
     Citation, CodeMatch, Confidence, Detail, Failure, Material, PatchExcerpt, PatchHunk, Relation,
-    Report, ReportKind, SearchScopeInfo, Step,
+    Report, ReportKind, SearchScopeInfo, Step, WhyAttribution, WhyModification, WhySummary,
 };
 
 const SCHEMA_VERSION: u8 = 1;
@@ -15,7 +15,9 @@ pub(crate) fn format_json_report(
 ) -> Result<String, serde_json::Error> {
     let warnings = additional_warnings.iter().chain(&report.warnings).collect();
     serde_json::to_string(&JsonReport {
-        schema_version: if github_links.is_some() {
+        schema_version: if report.kind == ReportKind::Why {
+            4
+        } else if github_links.is_some() {
             3
         } else if report.patch_mode {
             2
@@ -25,7 +27,15 @@ pub(crate) fn format_json_report(
         kind: report_kind(report.kind),
         matched_count: report.matched_count,
         truncated: report.truncated,
-        materials: report.materials.iter().map(json_material).collect(),
+        materials: (report.kind != ReportKind::Why)
+            .then(|| report.materials.iter().map(json_material).collect()),
+        target_related_modifications: report.why.as_ref().map(|why| {
+            why.target_related_modifications
+                .iter()
+                .map(json_why_modification)
+                .collect()
+        }),
+        why: report.why.as_ref().map(|why| json_why(why)),
         code_matches: (report.kind == ReportKind::CodeSearch)
             .then(|| report.code_matches.iter().map(json_code_match).collect()),
         warnings,
@@ -41,7 +51,12 @@ struct JsonReport<'a> {
     kind: &'static str,
     matched_count: usize,
     truncated: bool,
-    materials: Vec<JsonMaterial<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    materials: Option<Vec<JsonMaterial<'a>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_related_modifications: Option<Vec<JsonWhyModification<'a>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    why: Option<JsonWhy<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     code_matches: Option<Vec<JsonCodeMatch<'a>>>,
     warnings: Vec<&'a String>,
@@ -50,6 +65,69 @@ struct JsonReport<'a> {
     github_links: Option<&'a crate::github::LinksReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     scope: Option<JsonSearchScope<'a>>,
+}
+
+#[derive(Serialize)]
+struct JsonWhy<'a> {
+    anchor: JsonWhyAnchor<'a>,
+    attribution_scope: &'a str,
+    revision: &'a str,
+    attribution: JsonWhyAttribution<'a>,
+    counts: JsonWhyCounts,
+    omitted_target_related_modifications: usize,
+    timeline_follow_up: Option<JsonWhyTimelineFollowUp<'a>>,
+    limitations: &'a [String],
+}
+
+#[derive(Serialize)]
+struct JsonWhyAnchor<'a> {
+    kind: &'static str,
+    label: &'a str,
+    line: Option<usize>,
+    end_line: Option<usize>,
+}
+
+#[derive(Serialize)]
+struct JsonWhyAttribution<'a> {
+    state: &'static str,
+    scope: &'a str,
+    reason: Option<&'a str>,
+    commit: Option<JsonWhyAttributionCommit<'a>>,
+}
+
+#[derive(Serialize)]
+struct JsonWhyAttributionCommit<'a> {
+    oid: &'a str,
+    subject: &'a str,
+    shallow_boundary: bool,
+    consolidated_target_modification: bool,
+    basis: &'a [String],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    patch: Option<JsonPatch<'a>>,
+}
+
+#[derive(Serialize)]
+struct JsonWhyCounts {
+    attribution: usize,
+    standalone_target_related_modifications: usize,
+    other_file_history: usize,
+    file_history: usize,
+}
+
+#[derive(Serialize)]
+struct JsonWhyTimelineFollowUp<'a> {
+    program: &'static str,
+    args: &'a [String],
+}
+
+#[derive(Serialize)]
+struct JsonWhyModification<'a> {
+    oid: &'a str,
+    subject: &'a str,
+    paths: Vec<JsonPath<'a>>,
+    basis: &'a [String],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    patch: Option<JsonPatch<'a>>,
 }
 
 #[derive(Serialize)]
@@ -71,6 +149,74 @@ pub(super) fn json_scope(scope: &SearchScopeInfo) -> JsonSearchScope<'_> {
         since: scope.since.as_deref(),
         until: scope.until.as_deref(),
         cache_tip: &scope.cache_tip,
+    }
+}
+
+fn json_why(why: &WhySummary) -> JsonWhy<'_> {
+    let (state, reason, commit) = match &why.attribution {
+        WhyAttribution::Available(attribution) => (
+            "available",
+            None,
+            Some(JsonWhyAttributionCommit {
+                oid: &attribution.oid,
+                subject: &attribution.subject,
+                shallow_boundary: attribution.shallow_boundary,
+                consolidated_target_modification: attribution.consolidated_target_modification,
+                basis: &attribution.basis,
+                patch: attribution.patch.as_ref().map(json_patch),
+            }),
+        ),
+        WhyAttribution::OutsideHistoricalScope => (
+            "outside_historical_scope",
+            Some("Target-line blame is outside the requested historical scope."),
+            None,
+        ),
+        WhyAttribution::Unavailable { reason } => ("unavailable", Some(reason.as_str()), None),
+    };
+    JsonWhy {
+        anchor: JsonWhyAnchor {
+            kind: why.anchor_kind,
+            label: &why.anchor,
+            line: why.anchor_line,
+            end_line: why.symbol_end,
+        },
+        attribution_scope: why.attribution_scope,
+        revision: &why.revision,
+        attribution: JsonWhyAttribution {
+            state,
+            scope: why.attribution_scope,
+            reason,
+            commit,
+        },
+        counts: JsonWhyCounts {
+            attribution: usize::from(matches!(&why.attribution, WhyAttribution::Available(_))),
+            standalone_target_related_modifications: why
+                .standalone_target_related_modification_count,
+            other_file_history: why.other_file_history_count,
+            file_history: why.file_history_count,
+        },
+        omitted_target_related_modifications: why.omitted_target_related_modifications,
+        timeline_follow_up: why.timeline_follow_up_args.as_deref().map(|args| {
+            JsonWhyTimelineFollowUp {
+                program: "gitscry",
+                args,
+            }
+        }),
+        limitations: &why.limitations,
+    }
+}
+
+fn json_why_modification(modification: &WhyModification) -> JsonWhyModification<'_> {
+    JsonWhyModification {
+        oid: &modification.oid,
+        subject: &modification.subject,
+        paths: modification
+            .paths
+            .iter()
+            .map(|path| json_path(path))
+            .collect(),
+        basis: &modification.basis,
+        patch: modification.patch.as_ref().map(json_patch),
     }
 }
 
@@ -144,11 +290,6 @@ enum JsonDetail<'a> {
         co_change_count: usize,
         proportion: f64,
         supporting_count: usize,
-    },
-    Why {
-        anchor: &'a str,
-        revision: &'a str,
-        line: usize,
     },
     TraceFix {
         role: &'a str,
@@ -266,11 +407,6 @@ fn json_detail(detail: &Detail) -> JsonDetail<'_> {
             co_change_count: *co_change_count,
             proportion: *proportion,
             supporting_count: *supporting_count,
-        },
-        Detail::Why(why) => JsonDetail::Why {
-            anchor: &why.anchor,
-            revision: &why.revision,
-            line: why.line,
         },
         Detail::TraceFix(trace) => JsonDetail::TraceFix {
             role: trace.role,

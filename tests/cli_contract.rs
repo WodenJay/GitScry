@@ -175,7 +175,8 @@ fn ordinary_commands_have_a_byte_exact_cli_contract() {
                     String::from_utf8_lossy(&output.stdout)
                 )
             });
-        assert_eq!(value["schema_version"], 1, "{name}");
+        let expected_schema = if name == "why" { 4 } else { 1 };
+        assert_eq!(value["schema_version"], expected_schema, "{name}");
         assert_eq!(value["kind"], expected_kind, "{name}");
         assert!(value["warnings"].is_array(), "{name}");
         assert!(value["notices"].is_array(), "{name}");
@@ -206,38 +207,52 @@ fn ordinary_commands_have_a_byte_exact_cli_contract() {
         } else {
             assert!(value["matched_count"].as_u64().is_some(), "{name}");
             assert!(value["truncated"].is_boolean(), "{name}");
-            assert!(value["materials"].is_array(), "{name}");
-            let materials = value["materials"].as_array().unwrap();
-            assert!(
-                !materials.is_empty(),
-                "{name} should have matching materials"
-            );
-            for material in materials {
-                assert!(material["subject"].is_string(), "{name}");
-                assert!(material["paths"].is_array(), "{name}");
-                assert!(material["confidence"].is_string(), "{name}");
-                assert!(material["basis"].is_array(), "{name}");
-                let citations = material["citations"].as_array().unwrap();
-                for citation in citations {
-                    assert_eq!(citation["oid"].as_str().unwrap().len(), 40, "{name}");
-                    assert!(citation["abbreviation"].is_string(), "{name}");
-                    assert!(citation["subject"].is_string(), "{name}");
+            if name == "why" {
+                assert!(value["why"].is_object(), "why summary");
+                assert!(value["why"]["attribution"]["state"].is_string());
+                assert!(value["why"]["counts"].is_object());
+                assert!(value["target_related_modifications"].is_array());
+                assert!(value.get("materials").is_none());
+                assert!(value.get("confidence").is_none());
+                for modification in value["target_related_modifications"].as_array().unwrap() {
+                    assert!(modification["oid"].is_string());
+                    assert!(modification["basis"].is_array());
+                    assert!(modification["paths"].is_array());
+                    assert!(modification.get("confidence").is_none());
                 }
-            }
-            let expected_detail = match name {
-                "examples" => Some("steps"),
-                "failures" => Some("failure"),
-                "related" | "tests" => Some("relation"),
-                "why" => Some("why"),
-                "trace-fix" => Some("trace_fix"),
-                _ => None,
-            };
-            if let Some(expected_detail) = expected_detail {
-                assert_eq!(
-                    materials[0]["detail"]["type"].as_str(),
-                    Some(expected_detail),
-                    "{name}"
+            } else {
+                assert!(value["materials"].is_array(), "{name}");
+                let materials = value["materials"].as_array().unwrap();
+                assert!(
+                    !materials.is_empty(),
+                    "{name} should have matching materials"
                 );
+                for material in materials {
+                    assert!(material["subject"].is_string(), "{name}");
+                    assert!(material["paths"].is_array(), "{name}");
+                    assert!(material["confidence"].is_string(), "{name}");
+                    assert!(material["basis"].is_array(), "{name}");
+                    let citations = material["citations"].as_array().unwrap();
+                    for citation in citations {
+                        assert_eq!(citation["oid"].as_str().unwrap().len(), 40, "{name}");
+                        assert!(citation["abbreviation"].is_string(), "{name}");
+                        assert!(citation["subject"].is_string(), "{name}");
+                    }
+                }
+                let expected_detail = match name {
+                    "examples" => Some("steps"),
+                    "failures" => Some("failure"),
+                    "related" | "tests" => Some("relation"),
+                    "trace-fix" => Some("trace_fix"),
+                    _ => None,
+                };
+                if let Some(expected_detail) = expected_detail {
+                    assert_eq!(
+                        materials[0]["detail"]["type"].as_str(),
+                        Some(expected_detail),
+                        "{name}"
+                    );
+                }
             }
         }
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -338,6 +353,20 @@ fn json_flag_is_available_only_for_query_commands() {
         assert!(why_help.contains(flag), "why help should document {flag}");
     }
     let search_help = repo.run(["search", "--help"]);
+
+    let why_help_lowercase = why_help.to_ascii_lowercase();
+    for phrase in [
+        "target-line attribution",
+        "starting line only",
+        "standalone target-related modifications",
+        "attribution is independent",
+        "not a root-cause explanation",
+    ] {
+        assert!(
+            why_help_lowercase.contains(phrase),
+            "why help should describe {phrase}"
+        );
+    }
     assert_eq!(search_help.status.code(), Some(0));
     let search_help = String::from_utf8_lossy(&search_help.stdout)
         .split_whitespace()
