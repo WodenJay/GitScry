@@ -1,4 +1,13 @@
+//! Vector maintenance, migration and retrieval for the fixed semantic encoder.
+mod migration;
+mod retrieval;
+mod vectors;
+
+pub(super) use migration::copy_semantic_vectors;
+pub(crate) use retrieval::SemanticCandidate;
+pub(super) use retrieval::semantic_top_k;
 use std::{collections::HashMap, path::Path};
+use vectors::{valid_embedding, valid_fingerprint};
 
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 use sha2::{Digest, Sha256};
@@ -6,15 +15,13 @@ use sha2::{Digest, Sha256};
 use crate::{
     app::{AppError, IndexStage},
     semantic::{
-        self, CommitDocument, EMBEDDING_BATCH_SIZE, EMBEDDING_DIMENSION, Encoder,
-        InputPreprocessor, PreparedInput,
+        self, CommitDocument, EMBEDDING_BATCH_SIZE, Encoder, InputPreprocessor, PreparedInput,
     },
 };
 
 use super::cache_error;
 
 const PAGE_SIZE: usize = 256;
-const EMBEDDING_BYTES: usize = EMBEDDING_DIMENSION * std::mem::size_of::<f32>();
 
 #[derive(Clone, Copy)]
 pub(crate) enum SemanticPreference {
@@ -273,33 +280,6 @@ fn has_incompatible_encoder(
     Ok(incompatible_vectors || (stale_metadata && incomplete))
 }
 
-fn valid_fingerprint(value: Option<&str>) -> bool {
-    value.is_some_and(|value| {
-        value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
-    })
-}
-
-fn valid_embedding(embedding: Option<&[u8]>) -> bool {
-    let Some(embedding) = embedding else {
-        return false;
-    };
-    if embedding.len() != EMBEDDING_BYTES {
-        return false;
-    }
-    let mut norm_squared = 0.0_f64;
-    let (chunks, remainder) = embedding.as_chunks::<{ std::mem::size_of::<f32>() }>();
-    if !remainder.is_empty() {
-        return false;
-    }
-    for chunk in chunks {
-        let value = f32::from_le_bytes(*chunk);
-        if !value.is_finite() {
-            return false;
-        }
-        norm_squared += f64::from(value).powi(2);
-    }
-    (norm_squared.sqrt() - 1.0).abs() <= 1.0e-3
-}
 fn report_semantic_index(report: &mut dyn FnMut(IndexStage), reported: &mut bool) {
     if !*reported {
         report(IndexStage::BuildingSemanticIndex);
@@ -530,20 +510,7 @@ fn flush_batch(
         .transaction()
         .map_err(|error| cache_error("starting semantic vector transaction", error))?;
     for (pending, vector) in batch.iter().zip(vectors) {
-        if vector.len() != 384 || vector.iter().any(|value| !value.is_finite()) {
-            return Err(AppError::operational(
-                "error: semantic encoder returned an invalid 384-dimensional vector",
-            ));
-        }
-        let mut embedding = Vec::with_capacity(EMBEDDING_BYTES);
-        for value in vector {
-            embedding.extend_from_slice(&value.to_le_bytes());
-        }
-        if !valid_embedding(Some(&embedding)) {
-            return Err(AppError::operational(
-                "error: semantic encoder returned an invalid normalized vector",
-            ));
-        }
+        let embedding = vectors::encode(&vector)?;
         transaction
             .execute(
                 "INSERT INTO semantic_vectors(
@@ -707,7 +674,7 @@ mod tests {
                 "CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
                  CREATE TABLE commits (
                     commit_id INTEGER PRIMARY KEY, position INTEGER, oid TEXT,
-                    message BLOB, message_length INTEGER
+                    message BLOB, message_length INTEGER, commit_time INTEGER DEFAULT 1
                  );
                  CREATE TABLE semantic_vectors (
                     commit_id INTEGER PRIMARY KEY, commit_oid TEXT, embedding BLOB,
@@ -724,7 +691,7 @@ mod tests {
         let paths = vec![b"src/lib.rs".to_vec()];
         connection
             .execute(
-                "INSERT INTO commits VALUES (1, 0, 'oid', ?1, ?2)",
+                "INSERT INTO commits VALUES (1, 0, 'oid', ?1, ?2, 1)",
                 params![compressed, message.len() as i64],
             )
             .unwrap();
@@ -832,6 +799,44 @@ mod tests {
             )
             .unwrap();
         assert_eq!(vector_runtime_provenance, "previous-runtime");
+
+        // A rebuilt generation changes row IDs, but compatible vectors remain
+        // reusable and queryable without loading a runtime or re-encoding.
+        let staging = directory.path().join("staging.sqlite");
+        connection
+            .execute("VACUUM INTO ?1", [staging.to_str().unwrap()])
+            .unwrap();
+        let mut rebuilt = Connection::open(&staging).unwrap();
+        rebuilt
+            .execute_batch(
+                "DELETE FROM semantic_vectors;
+             UPDATE commits SET commit_id = 2;
+             UPDATE commit_paths SET commit_id = 2;
+             UPDATE metadata SET value = '0' WHERE key = 'semantic_ready';",
+            )
+            .unwrap();
+        copy_semantic_vectors(&cache_directory.join("cache.sqlite"), &staging);
+        assert!(require_ready_for_query(&rebuilt).is_err());
+        assert!(
+            maintain_vectors(
+                &mut rebuilt,
+                &encoder_fingerprint,
+                &mut |_| {},
+                &mut preprocessor
+            )
+            .unwrap()
+            .is_none()
+        );
+        set_metadata(&rebuilt, &[("semantic_ready", "1")]).unwrap();
+        assert!(is_ready(&rebuilt, "tip", 1, &encoder_fingerprint, &mut preprocessor).unwrap());
+        require_ready_for_query(&rebuilt).unwrap();
+        let mut query = vec![0.0; crate::semantic::EMBEDDING_DIMENSION];
+        query[0] = 1.0;
+        let hits = semantic_top_k(&rebuilt, &[query], 1, None).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].commit_id, 2);
+        assert_eq!(hits[0].oid, "oid");
+        assert_eq!(hits[0].cosine, 1.0);
         connection
             .execute(
                 "UPDATE semantic_vectors SET input_fingerprint = ?1",
