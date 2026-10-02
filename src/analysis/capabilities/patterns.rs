@@ -7,6 +7,12 @@ use crate::{
 };
 use std::collections::{BTreeSet, HashSet};
 
+// Exact totals require visiting every closed combination; --limit cannot bound this.
+// Fail explicitly rather than emitting partial counts on exponential histories.
+const MAX_CLOSURES: usize = 4096;
+const MAX_SUPPORT_CHECKS: usize = 1_000_000;
+const BUDGET_ERROR: &str =
+    "pattern discovery budget exceeded; narrow history scope or raise --min-support";
 pub(crate) struct Report {
     pub(crate) target_revision: String,
     pub(crate) scope: Option<SearchScopeInfo>,
@@ -91,10 +97,15 @@ pub(crate) fn run(
     let mut seen = HashSet::from([initial.clone()]);
     let mut pending = vec![(initial, supports)];
     let mut ranked = Vec::new();
+    let mut support_checks = 0usize;
     // Traverse support-set closures, not every subset of each commit. Every frequent
     // closed combination is reachable by adding an item and closing its extent.
     while let Some((paths, supports)) = pending.pop() {
         for path in universe.difference(&paths) {
+            support_checks = support_checks.saturating_add(supports.len());
+            if support_checks > MAX_SUPPORT_CHECKS {
+                return Err(AppError::input(BUDGET_ERROR));
+            }
             let next = supports
                 .iter()
                 .copied()
@@ -105,6 +116,9 @@ pub(crate) fn run(
             }
             let common = closure(&next);
             if seen.insert(common.clone()) {
+                if seen.len() > MAX_CLOSURES {
+                    return Err(AppError::input(BUDGET_ERROR));
+                }
                 pending.push((common, next));
             }
         }

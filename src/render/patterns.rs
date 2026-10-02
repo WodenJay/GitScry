@@ -12,7 +12,13 @@ pub(super) fn format_report(report: &Report) -> String {
     ];
     if let Some(scope) = &report.scope {
         lines.push(scope_summary(scope));
+    } else {
+        lines.push("History: all available published-cache commits".to_owned());
     }
+    lines.push(
+        "Coverage: available published-cache commits only; uncached history is not searched."
+            .to_owned(),
+    );
     lines.push("Historical co-change material, not a checklist of required edits. Rename continuity is not inferred.".to_owned());
     if report.patterns.is_empty() {
         lines.push("No recurring combinations meet the minimum support.".to_owned());
@@ -68,6 +74,7 @@ pub(super) fn format_json_report(
     serde_json::to_string_pretty(&serde_json::json!({
         "schema_version": 1, "kind": "patterns", "target_revision": report.target_revision,
         "scope": report.scope.as_ref().map(json_scope), "eligible_seed_commits": report.eligible_seed_commits,
+        "history_coverage": "available published-cache commits only",
         "excluded_merges": report.excluded_merges, "excluded_mass_changes": report.excluded_mass_changes,
         "matched_count": report.matched_count, "returned_count": patterns.len(), "patterns": patterns,
         "warnings": warnings, "notices": ["Historical co-change material, not a checklist of required edits. Rename continuity is not inferred."],

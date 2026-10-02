@@ -1061,3 +1061,73 @@ fn patterns_do_not_fabricate_joint_support_or_fold_case_or_use_worktree_existenc
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["patterns"][0]["members"][2]["exists_at_target"], true);
 }
+
+#[test]
+fn patterns_reject_exponential_discovery_without_partial_results() {
+    let repo = TestRepo::new();
+    // Each observation omits a different item: intersections grow exponentially.
+    for omitted in 0..13 {
+        let marker = format!("{omitted}");
+        let mut files = vec![("A".to_owned(), marker.as_bytes().to_vec())];
+        for item in 0..13 {
+            if item != omitted {
+                files.push((format!("item/{item}"), marker.as_bytes().to_vec()));
+            }
+        }
+        let borrowed = files
+            .iter()
+            .map(|(path, bytes)| (path.as_str(), bytes.as_slice()))
+            .collect::<Vec<_>>();
+        repo.commit_files(&borrowed, "omit one");
+    }
+    repo.index();
+    let output = repo.run(["related", "A", "--patterns", "--limit", "1", "--json"]);
+    assert!(!output.status.success());
+    assert!(stderr(&output).contains("pattern discovery budget exceeded"));
+    assert!(
+        output.stdout.is_empty(),
+        "must not publish incomplete counts"
+    );
+}
+
+#[test]
+fn patterns_disclose_unscoped_history_and_order_count_recency_then_paths() {
+    let repo = TestRepo::new();
+    for (path, day) in [("old", "01"), ("z", "02"), ("b", "02")] {
+        for index in 0..3 {
+            let marker = format!("{path}{index}");
+            let date = format!("2024-01-{day}T00:00:00Z");
+            repo.commit_files_at(
+                &[
+                    ("A", marker.as_bytes()),
+                    ("common", marker.as_bytes()),
+                    (path, marker.as_bytes()),
+                ],
+                "group",
+                &date,
+                &date,
+            );
+        }
+    }
+    repo.index();
+    let human = repo.run(["related", "A", "--patterns"]);
+    assert!(stdout(&human).contains("History: all available published-cache commits"));
+    let output = repo.run(["related", "A", "--patterns", "--json"]);
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        value["history_coverage"],
+        "available published-cache commits only"
+    );
+    let patterns = value["patterns"].as_array().unwrap();
+    assert_eq!(patterns.len(), 3);
+    for (pattern, path) in patterns.iter().zip(["b", "z", "old"]) {
+        assert_eq!(pattern["support_count"], 3);
+        assert!(
+            pattern["members"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|member| member["path"] == path)
+        );
+    }
+}
