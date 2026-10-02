@@ -26,10 +26,14 @@ pub(super) fn read(
             .as_ref()
             .or(change.old_path.as_ref())
             .expect("selected path");
-        let mut reason = None;
         if ordinal >= FILE_LIMIT || total >= TOTAL_LIMIT {
-            reason = Some("current_content_budget");
+            omissions.push(ContentOmission {
+                path: path.clone(),
+                reason: "current_content_budget",
+            });
+            continue;
         }
+        let mut reason = None;
         // Inspect repository-visible modes, never symlink targets or gitlink contents.
         for side in change.old_path.iter().chain(&change.new_path) {
             let arg = worktree_path(Path::new(""), side).into_os_string();
@@ -138,6 +142,13 @@ pub(super) fn read(
             omissions.push(ContentOmission {
                 path: path.clone(),
                 reason: "binary_content",
+            });
+            continue;
+        }
+        if std::str::from_utf8(&bytes).is_err() {
+            omissions.push(ContentOmission {
+                path: path.clone(),
+                reason: "non_utf8_content",
             });
             continue;
         }

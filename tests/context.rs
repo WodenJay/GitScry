@@ -257,6 +257,76 @@ fn historical(report: &Value) -> Vec<&Value> {
         .filter(|s| s["category"] == "historical_change")
         .collect()
 }
+#[test]
+fn content_budget_stops_per_path_git_probes() {
+    let repo = TestRepo::new();
+    commit(&repo, &[("base.rs", "base\n")], "update");
+    repo.index();
+    for index in 0..129 {
+        fs::write(repo.dir.path().join(format!("f{index:03}.rs")), "changed\n").unwrap();
+    }
+    let traces = tempfile::tempdir().unwrap();
+    let trace_path = traces.path().join("git-trace.log");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_gitscry"))
+        .args(["context", "--json"])
+        .current_dir(repo.dir.path())
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", repo.dir.path().join("global-config"))
+        .env("GIT_TRACE", &trace_path)
+        .output()
+        .unwrap();
+    let trace = fs::read_to_string(trace_path).unwrap();
+    assert!(trace.contains("ls-tree -z HEAD -- f127.rs"));
+    assert!(
+        !trace.contains("ls-tree -z HEAD -- f128.rs"),
+        "content budget must stop mode probes"
+    );
+    assert!(!trace.contains("ls-files --stage -z -- f128.rs"));
+    let report = json(output);
+    assert!(
+        report["content_omissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["path"] == "f128.rs" && item["reason"] == "current_content_budget")
+    );
+}
+
+#[test]
+fn non_utf8_literals_are_not_lossily_equal() {
+    let repo = TestRepo::new();
+    fs::write(
+        repo.dir.path().join("historical.rs"),
+        b"fn route() { refreshSessionCache(\"session-\xffexpired\"); }\n",
+    )
+    .unwrap();
+    git(repo.dir.path(), ["add", "historical.rs"]);
+    git(repo.dir.path(), ["commit", "-m", "update"]);
+    repo.index();
+    fs::write(
+        repo.dir.path().join("current.rs"),
+        b"fn route() { refreshSessionCache(\"session-\xfeexpired\"); }\n",
+    )
+    .unwrap();
+    let report = json(repo.run(["context", "--json"]));
+    assert!(
+        historical(&report).is_empty(),
+        "different bytes must not match through replacement characters"
+    );
+    assert!(
+        report["content_omissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["path"] == "current.rs" && item["reason"] == "non_utf8_content")
+    );
+    fs::write(
+        repo.dir.path().join("current.rs"),
+        "fn route() { refreshSessionCache(\"session-�expired\"); }\n",
+    )
+    .unwrap();
+    assert!(historical(&json(repo.run(["context", "--json"]))).is_empty());
+}
 fn commit(repo: &TestRepo, files: &[(&str, &str)], message: &str) {
     for (path, content) in files {
         let path = repo.dir.path().join(path);

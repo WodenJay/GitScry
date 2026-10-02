@@ -17,7 +17,9 @@ const EXCERPT_LIMIT: usize = 240;
 // Identity is kept whole and case-sensitive. Normalized pieces only decide whether
 // an identifier is distinctive; they never establish the historical match.
 fn signals(text: &[u8]) -> BTreeSet<String> {
-    let text = String::from_utf8_lossy(text);
+    let Ok(text) = std::str::from_utf8(text) else {
+        return BTreeSet::new();
+    };
     let mut signals = BTreeSet::new();
     for identity in text.split(|c: char| !c.is_alphanumeric() && c != '_') {
         let normalized = retrieval::tokenize(identity);
