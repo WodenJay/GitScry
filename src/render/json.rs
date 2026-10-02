@@ -3,7 +3,8 @@ use serde::Serialize;
 
 use crate::analysis::{
     Citation, CodeMatch, Confidence, Detail, Failure, Material, PatchExcerpt, PatchHunk, Relation,
-    Report, ReportKind, SearchScopeInfo, Step, WhyAttribution, WhyModification, WhySummary,
+    Report, ReportKind, SearchScopeInfo, Step, SymbolFact, SymbolSummary, WhyAttribution,
+    WhyModification, WhySummary,
 };
 
 const SCHEMA_VERSION: u8 = 1;
@@ -42,6 +43,7 @@ pub(crate) fn format_json_report(
         notices: &report.notices,
         github_links,
         scope: report.scope.as_ref().map(json_scope),
+        symbol_summary: report.symbol_summary.as_ref().map(json_symbol_summary),
     })
 }
 
@@ -65,6 +67,48 @@ struct JsonReport<'a> {
     github_links: Option<&'a crate::github::LinksReport>,
     #[serde(skip_serializing_if = "Option::is_none")]
     scope: Option<JsonSearchScope<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    symbol_summary: Option<JsonSymbolSummary<'a>>,
+}
+
+#[derive(Serialize)]
+struct JsonSymbolSummary<'a> {
+    introduction: JsonSymbolFact<'a>,
+    target: &'a str,
+    anchor_line_attribution: JsonSymbolFact<'a>,
+}
+
+#[derive(Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum JsonSymbolFact<'a> {
+    Known {
+        commit_oid: &'a str,
+        subject: &'a str,
+    },
+    Unknown {
+        reason: &'a str,
+    },
+}
+
+fn json_symbol_summary(summary: &SymbolSummary) -> JsonSymbolSummary<'_> {
+    JsonSymbolSummary {
+        target: &summary.target,
+        introduction: json_symbol_fact(&summary.introduction),
+        anchor_line_attribution: json_symbol_fact(&summary.anchor_line_attribution),
+    }
+}
+
+fn json_symbol_fact(fact: &SymbolFact) -> JsonSymbolFact<'_> {
+    match fact {
+        SymbolFact::Known {
+            commit_oid,
+            subject,
+        } => JsonSymbolFact::Known {
+            commit_oid,
+            subject,
+        },
+        SymbolFact::Unknown { reason } => JsonSymbolFact::Unknown { reason },
+    }
 }
 
 #[derive(Serialize)]

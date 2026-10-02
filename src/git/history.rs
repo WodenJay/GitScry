@@ -694,6 +694,41 @@ fn find_byte(bytes: &[u8], start: usize, needle: u8) -> Option<usize> {
         .map(|position| start + position)
 }
 
+pub(super) fn trace_symbol(
+    git: &Git,
+    revision: &str,
+    path: &str,
+    start: usize,
+    end: usize,
+) -> Result<Vec<String>, AppError> {
+    let range = format!("{start},{end}:{path}");
+    let output = git.output(
+        [
+            "log",
+            "--no-color",
+            "--no-patch",
+            "--format=%H",
+            "-L",
+            &range,
+            revision,
+        ],
+        &[],
+    )?;
+    let text = std::str::from_utf8(&output)
+        .map_err(|error| parse_error(format!("symbol range history is not UTF-8: {error}")))?;
+    text.lines()
+        .map(|oid| {
+            if is_oid(oid.as_bytes()) {
+                Ok(oid.to_owned())
+            } else {
+                Err(parse_error(
+                    "symbol range history contained an invalid object ID",
+                ))
+            }
+        })
+        .collect()
+}
+
 fn parse_error(message: impl std::fmt::Display) -> AppError {
     AppError::operational(format!("error: parsing Git history: {message}"))
 }

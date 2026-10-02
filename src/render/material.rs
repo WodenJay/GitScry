@@ -1,6 +1,6 @@
 use crate::analysis::{
     Detail, Failure, Material, PatchExcerpt, PatchStatus, Relation, Report, ReportKind,
-    SearchScopeInfo, Step, WhyAttribution,
+    SearchScopeInfo, Step, SymbolFact, SymbolSummary, WhyAttribution,
 };
 
 /// Printed when history does not state why an approach failed.
@@ -84,6 +84,9 @@ fn format_why_report(report: &Report) -> String {
     let mut lines = Vec::new();
     if let Some(scope) = &report.scope {
         lines.push(scope_summary(scope));
+    }
+    if let Some(summary) = &report.symbol_summary {
+        lines.extend(format_symbol_summary(summary));
     }
     lines.push(format!(
         "Why at {} at revision {}:",
@@ -188,6 +191,31 @@ fn format_why_report(report: &Report) -> String {
     lines.join("\n")
 }
 
+fn format_symbol_summary(summary: &SymbolSummary) -> Vec<String> {
+    let mut lines = vec!["Symbol summary:".to_owned()];
+    lines.push(format!("target: {}", escape::subject(&summary.target)));
+    for (label, fact) in [
+        ("introduction", &summary.introduction),
+        ("anchor-line attribution", &summary.anchor_line_attribution),
+    ] {
+        let line = match fact {
+            SymbolFact::Known {
+                commit_oid,
+                subject,
+            } => format!(
+                "  {label}: known {} — {}",
+                short_oid(commit_oid),
+                escape::subject(subject.trim()),
+            ),
+            SymbolFact::Unknown { reason } => {
+                format!("  {label}: unknown — {}", escape::subject(reason.trim()))
+            }
+        };
+        lines.push(line);
+    }
+    lines
+}
+
 fn short_oid(oid: &str) -> String {
     oid.chars().take(12).collect()
 }
@@ -265,6 +293,9 @@ pub(crate) fn format_report(report: &Report) -> String {
         }
         lines
     };
+    if let Some(summary) = &report.symbol_summary {
+        lines.splice(0..0, format_symbol_summary(summary));
+    }
     if let Some(scope) = &report.scope {
         lines.insert(0, scope_summary(scope));
     }

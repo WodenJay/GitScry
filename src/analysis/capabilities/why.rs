@@ -3,18 +3,31 @@ use std::collections::{HashMap, HashSet};
 use crate::{
     app::AppError,
     cache::{HunkId, QuerySession},
-    git::{WhyAnchor, WhyTarget},
+    git::{SymbolTrace, WhyAnchor, WhyTarget},
 };
 
 use super::super::patch::{self, HunkPriorities};
 use super::super::retrieval;
 use super::super::{
-    Report, ReportKind, SearchScopeInfo, WhyAttribution, WhyAttributionCommit, WhyModification,
-    WhySummary,
+    Report, ReportKind, SearchScopeInfo, SymbolFact, SymbolSummary, WhyAttribution,
+    WhyAttributionCommit, WhyModification, WhySummary,
 };
 
 const REMOTE_CONTEXT_NOTICE: &str = "Remote context unavailable from local history.";
 
+const EXPLANATION_MARKERS: &[&str] = &[
+    "because",
+    "so that",
+    "to avoid",
+    "prevents",
+    "otherwise",
+    "regression",
+    "incident",
+    "stale",
+    "issue #",
+    "fixes",
+    "caused",
+];
 pub(crate) fn run(
     session: &QuerySession,
     target: &WhyTarget,
@@ -25,6 +38,13 @@ pub(crate) fn run(
     with_patch: bool,
 ) -> Result<Report, AppError> {
     let anchor_info = AnchorInfo::from_target(target);
+    let unavailable_trace = SymbolTrace {
+        revisions: Vec::new(),
+        introduction: Err("Git symbol-range history is unavailable".to_owned()),
+    };
+    let symbol_trace = anchor_info
+        .is_symbol()
+        .then(|| target.symbol_trace.as_ref().unwrap_or(&unavailable_trace));
     if !target.anchor_valid {
         let mut report = super::super::empty_report(ReportKind::Why);
         report.patch_mode = with_patch;
@@ -33,6 +53,19 @@ pub(crate) fn run(
         let mut summary = empty_summary(target, &anchor_info, scope);
         summary.limitations = limitations(target, &anchor_info, &[], false, with_patch);
         report.why = Some(Box::new(summary));
+        if let Some(trace) = symbol_trace {
+            let commits = session.path_history(&target.path, reachable)?;
+            let missing_objects = session.has_missing_objects(&commits)?;
+            report.symbol_summary = Some(summarize_symbol(
+                target,
+                &anchor_info,
+                &commits,
+                reachable,
+                eligible_revisions,
+                missing_objects,
+                trace,
+            ));
+        }
         return Ok(report);
     }
 
@@ -40,9 +73,31 @@ pub(crate) fn run(
 
     let first_parent_history = session.first_parent_ancestors(&target.revision)?;
     let missing_objects = session.has_missing_objects(&commits)?;
+    let trace_revisions = symbol_trace
+        .as_ref()
+        .map(|trace| trace.revisions.iter().cloned().collect::<HashSet<_>>());
+    let symbol_summary = symbol_trace.map(|trace| {
+        summarize_symbol(
+            target,
+            &anchor_info,
+            &commits,
+            reachable,
+            eligible_revisions,
+            missing_objects,
+            trace,
+        )
+    });
+    let confirmed_introduction =
+        symbol_summary
+            .as_ref()
+            .and_then(|summary| match &summary.introduction {
+                SymbolFact::Known { commit_oid, .. } => Some(commit_oid.as_str()),
+                SymbolFact::Unknown { .. } => None,
+            });
     let mut start_line = anchor_info.line as i64;
     let mut end_line = anchor_info.symbol_end.unwrap_or(anchor_info.line) as i64;
     let mut target_modifications = HashMap::<String, (i64, WhyModification)>::new();
+    let mut symbol_scores = HashMap::<String, usize>::new();
     let mut priorities = HunkPriorities::new();
 
     for commit in &commits {
@@ -79,12 +134,36 @@ pub(crate) fn run(
             }
         }
         let eligible = eligible_revisions.is_none_or(|revisions| revisions.contains(&commit.oid));
-        if related_hunks.is_empty() || !eligible || target_modifications.contains_key(&commit.oid) {
+        let is_symbol_change = trace_revisions
+            .as_ref()
+            .is_some_and(|revisions| revisions.contains(&commit.oid));
+        let introduction = confirmed_introduction == Some(commit.oid.as_str());
+        let relevant_change = if anchor_info.is_symbol() {
+            is_symbol_change && !introduction
+        } else {
+            !related_hunks.is_empty()
+        };
+        if !relevant_change || !eligible || target_modifications.contains_key(&commit.oid) {
             continue;
         }
 
-        let paths = paths_for_hunks(commit, &related_hunks);
+        let paths = if related_hunks.is_empty() {
+            vec![target.path.clone()]
+        } else {
+            paths_for_hunks(commit, &related_hunks)
+        };
         let mut basis = vec![anchor_info.modification_basis()];
+        let explanation = if anchor_info.is_symbol() {
+            explanation_strength(&commit.body)
+        } else {
+            0
+        };
+        if explanation > 0 {
+            basis.push("explanatory commit body".to_owned());
+        }
+        if anchor_info.is_symbol() {
+            basis.push("Git range tracing identifies a change to this symbol".to_owned());
+        }
         if commit.parent_count > 1 {
             basis.push("merge comparison uses the first parent".to_owned());
         }
@@ -104,6 +183,9 @@ pub(crate) fn run(
                 },
             ),
         );
+        if anchor_info.is_symbol() {
+            symbol_scores.insert(commit.oid.clone(), explanation);
+        }
     }
 
     let attribution = attribution_for(
@@ -123,17 +205,30 @@ pub(crate) fn run(
         WhyAttribution::Available(commit) => Some(commit.oid.as_str()),
         _ => None,
     };
+    let attribution_is_modification =
+        attribution_oid.is_some_and(|oid| target_modifications.contains_key(oid));
     let target_related_modification_count = target_modifications.len();
     let mut standalone = target_modifications
         .into_iter()
         .filter(|(oid, _)| Some(oid.as_str()) != consolidated_oid)
         .map(|(_, value)| value)
         .collect::<Vec<_>>();
-    standalone.sort_by(|(left_time, left), (right_time, right)| {
-        right_time
-            .cmp(left_time)
-            .then_with(|| left.oid.cmp(&right.oid))
-    });
+    if anchor_info.is_symbol() {
+        standalone.sort_by(|(left_time, left), (right_time, right)| {
+            let left_score = symbol_scores.get(&left.oid).copied().unwrap_or_default();
+            let right_score = symbol_scores.get(&right.oid).copied().unwrap_or_default();
+            right_score
+                .cmp(&left_score)
+                .then_with(|| right_time.cmp(left_time))
+                .then_with(|| left.oid.cmp(&right.oid))
+        });
+    } else {
+        standalone.sort_by(|(left_time, left), (right_time, right)| {
+            right_time
+                .cmp(left_time)
+                .then_with(|| left.oid.cmp(&right.oid))
+        });
+    }
     let standalone_count = standalone.len();
     let target_related_modifications = standalone
         .into_iter()
@@ -151,10 +246,11 @@ pub(crate) fn run(
                 commit.oid == oid
                     && eligible_revisions.is_none_or(|revisions| revisions.contains(&commit.oid))
             })
-        }) && matches!(
-            &attribution,
-            WhyAttribution::Available(commit) if !commit.consolidated_target_modification
-        ),
+        }) && !attribution_is_modification
+            && matches!(
+                &attribution,
+                WhyAttribution::Available(commit) if !commit.consolidated_target_modification
+            ),
     );
     let other_file_history_count =
         file_history_count.saturating_sub(target_related_in_history + attribution_only_in_history);
@@ -179,10 +275,111 @@ pub(crate) fn run(
     summary.omitted_target_related_modifications = omitted_target_related_modifications;
     summary.limitations = limitations(target, &anchor_info, &commits, missing_objects, with_patch);
     report.why = Some(Box::new(summary));
+    report.symbol_summary = symbol_summary;
     if with_patch {
         patch::attach_why_patch_excerpts(session, &mut report, &priorities)?;
     }
     Ok(report)
+}
+
+fn summarize_symbol(
+    target: &WhyTarget,
+    anchor: &AnchorInfo<'_>,
+    commits: &[crate::cache::HistoryCommit],
+    reachable: &HashSet<String>,
+    eligible_revisions: Option<&HashSet<String>>,
+    missing_objects: bool,
+    trace: &SymbolTrace,
+) -> SymbolSummary {
+    let commits_by_oid = commits
+        .iter()
+        .map(|commit| (commit.oid.as_str(), commit))
+        .collect::<HashMap<_, _>>();
+    let cache_gap = trace
+        .revisions
+        .iter()
+        .any(|oid| !reachable.contains(oid) || !commits_by_oid.contains_key(oid.as_str()));
+    let uncertain_lineage = trace
+        .revisions
+        .iter()
+        .filter_map(|oid| commits_by_oid.get(oid.as_str()))
+        .any(|commit| {
+            commit.parent_count > 1
+                || commit.shallow_boundary
+                || commit.changes.iter().any(|change| {
+                    commit.anchored_ordinals.contains(&change.ordinal)
+                        && (change.status.starts_with('R') || change.status.starts_with('C'))
+                })
+        });
+    let shallow_history = target
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("local history is shallow"));
+    let introduction = match &trace.introduction {
+        Err(reason) => SymbolFact::Unknown {
+            reason: reason.clone(),
+        },
+        Ok(_) if cache_gap => SymbolFact::Unknown {
+            reason: "symbol history extends beyond published cache coverage".to_owned(),
+        },
+        Ok(_) if missing_objects => SymbolFact::Unknown {
+            reason: "local Git objects needed to confirm the introduction are missing".to_owned(),
+        },
+        Ok(_) if shallow_history || uncertain_lineage => SymbolFact::Unknown {
+            reason: "shallow, merge, or path-move history makes symbol lineage uncertain"
+                .to_owned(),
+        },
+        Ok(oid) if !eligible_revisions.is_none_or(|eligible| eligible.contains(oid)) => {
+            SymbolFact::Unknown {
+                reason: "symbol introduction is outside the current query scope".to_owned(),
+            }
+        }
+        Ok(oid) => match commits_by_oid.get(oid.as_str()) {
+            Some(commit) => SymbolFact::Known {
+                commit_oid: oid.clone(),
+                subject: commit.subject.clone(),
+            },
+            None => SymbolFact::Unknown {
+                reason: "symbol introduction is not present in cached path history".to_owned(),
+            },
+        },
+    };
+    let anchor_line_attribution = match &target.blame {
+        None => SymbolFact::Unknown {
+            reason: "Git could not attribute the symbol anchor line".to_owned(),
+        },
+        Some(blame) if !reachable.contains(&blame.oid) => SymbolFact::Unknown {
+            reason: "Git blame's line owner is not reachable from the pinned target revision."
+                .to_owned(),
+        },
+        Some(blame) if !eligible_revisions.is_none_or(|eligible| eligible.contains(&blame.oid)) => {
+            SymbolFact::Unknown {
+                reason: "anchor-line attribution is outside the current query scope".to_owned(),
+            }
+        }
+        Some(blame) => SymbolFact::Known {
+            commit_oid: blame.oid.clone(),
+            subject: blame.subject.clone(),
+        },
+    };
+    SymbolSummary {
+        target: anchor.label.clone(),
+        introduction,
+        anchor_line_attribution,
+    }
+}
+
+fn explanation_strength(body: &str) -> usize {
+    let body = body.trim();
+    if body.is_empty() {
+        return 0;
+    }
+    let lowered = body.to_ascii_lowercase();
+    let markers = EXPLANATION_MARKERS
+        .iter()
+        .filter(|marker| lowered.contains(**marker))
+        .count();
+    usize::from(body.chars().count() >= 24) + markers.min(2)
 }
 
 fn attribution_for(
@@ -216,7 +413,8 @@ fn attribution_for(
             blame.subject.clone()
         },
         shallow_boundary: blame.boundary,
-        consolidated_target_modification: target_modifications.contains_key(&blame.oid),
+        consolidated_target_modification: !anchor.is_symbol()
+            && target_modifications.contains_key(&blame.oid),
         basis: vec![attribution_basis],
         patch: None,
     })

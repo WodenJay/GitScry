@@ -86,6 +86,273 @@ fn why_resolves_symbols_and_pins_an_explicit_revision() {
     assert!(stdout.contains("Initial symbol"));
     assert!(stdout.contains("Attribution scope: symbol starting line only."));
     assert!(!stdout.contains("Later symbol change"));
+    assert!(stdout.contains("Symbol summary:"));
+    assert!(stdout.contains("introduction: known"));
+    assert!(stdout.contains("anchor-line attribution: known"));
+    assert!(stdout.contains("No standalone target-related modifications in the selected scope."));
+
+    let report = json(
+        &repo,
+        &[
+            "why",
+            "src/lib.rs",
+            "--symbol",
+            "explain",
+            "--at",
+            initial.as_str(),
+            "--json",
+        ],
+    );
+    assert_eq!(report["matched_count"], 0);
+    assert_eq!(
+        report["target_related_modifications"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+    assert_eq!(report["symbol_summary"]["introduction"]["status"], "known");
+    assert_eq!(
+        report["symbol_summary"]["anchor_line_attribution"]["status"],
+        "known"
+    );
+}
+
+#[test]
+fn why_symbol_separates_introduction_anchor_and_modifications() {
+    let repo = TestRepo::new();
+    let initial = concat!(
+        "fn calculate() {\n",
+        "    let result = 1;\n",
+        "}\n\n",
+        "fn helper() {\n",
+        "    let value = 1;\n",
+        "}\n",
+    );
+    repo.commit("src/lib.rs", initial.as_bytes(), "Create calculation", None);
+    let introduction = repo.head();
+
+    let body_changed = initial.replace("result = 1", "result = 2");
+    repo.commit(
+        "src/lib.rs",
+        body_changed.as_bytes(),
+        "Update calculation behavior",
+        Some("Because this fixes the production calculation regression."),
+    );
+    let body_revision = repo.head();
+
+    let declaration_changed = body_changed.replace("fn calculate()", "fn calculate(input: i32)");
+    repo.commit(
+        "src/lib.rs",
+        declaration_changed.as_bytes(),
+        "Change calculation declaration",
+        None,
+    );
+    let declaration = repo.head();
+
+    let neighbor_changed = declaration_changed.replace("value = 1", "value = 2");
+    repo.commit(
+        "src/lib.rs",
+        neighbor_changed.as_bytes(),
+        "Tune unrelated helper",
+        Some("Because this detailed explanation belongs to another function."),
+    );
+    repo.index();
+
+    let report = json(
+        &repo,
+        &[
+            "why",
+            "src/lib.rs",
+            "--symbol",
+            "calculate",
+            "--limit",
+            "1",
+            "--json",
+        ],
+    );
+    let summary = &report["symbol_summary"];
+    assert_eq!(summary["introduction"]["status"], "known");
+    assert_eq!(summary["introduction"]["commit_oid"], introduction);
+    assert_eq!(summary["anchor_line_attribution"]["status"], "known");
+    assert_eq!(
+        summary["anchor_line_attribution"]["commit_oid"],
+        declaration
+    );
+    assert_eq!(report["matched_count"], 2);
+    assert_eq!(report["truncated"], true);
+    let materials = report["target_related_modifications"].as_array().unwrap();
+    assert_eq!(materials.len(), 1);
+    assert_eq!(materials[0]["subject"], "Update calculation behavior");
+
+    let complete = json(
+        &repo,
+        &[
+            "why",
+            "src/lib.rs",
+            "--symbol",
+            "calculate",
+            "--limit",
+            "10",
+            "--json",
+        ],
+    );
+    let subjects = complete["target_related_modifications"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|material| material["subject"].as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(complete["matched_count"], 2);
+    assert_eq!(subjects.len(), 2);
+    assert!(subjects.contains(&"Update calculation behavior"));
+    assert!(subjects.contains(&"Change calculation declaration"));
+    assert!(!subjects.contains(&"Tune unrelated helper"));
+
+    let pinned = json(
+        &repo,
+        &[
+            "why",
+            "src/lib.rs",
+            "--symbol",
+            "calculate",
+            "--at",
+            body_revision.as_str(),
+            "--limit",
+            "10",
+            "--json",
+        ],
+    );
+    assert_eq!(
+        pinned["symbol_summary"]["anchor_line_attribution"]["commit_oid"],
+        introduction
+    );
+    assert_eq!(pinned["matched_count"], 1);
+    assert!(
+        pinned["target_related_modifications"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|material| {
+                material["subject"] != "Change calculation declaration"
+                    && material["subject"] != "Tune unrelated helper"
+                    && material["subject"] != "Create calculation"
+            })
+    );
+}
+
+#[test]
+fn why_symbol_introduction_ignores_an_unrelated_deletion() {
+    let repo = TestRepo::new();
+    repo.commit(
+        "src/obsolete.rs",
+        b"fn obsolete_helper() {}\n",
+        "Create helper",
+        None,
+    );
+    fs::write(
+        repo.dir.path().join("src/lib.rs"),
+        b"fn calculate() { let result = 1; }\n",
+    )
+    .expect("create calculation file");
+    fs::remove_file(repo.dir.path().join("src/obsolete.rs")).expect("remove helper file");
+    git(repo.dir.path(), ["add", "-A"]);
+    git(
+        repo.dir.path(),
+        ["commit", "-m", "Create calculation and remove helper"],
+    );
+    let introduction = repo.head();
+    repo.commit(
+        "src/lib.rs",
+        b"fn calculate() { let result = 2; }\n",
+        "Update calculation body",
+        None,
+    );
+    repo.index();
+
+    let report = json(
+        &repo,
+        &["why", "src/lib.rs", "--symbol", "calculate", "--json"],
+    );
+    assert_eq!(report["symbol_summary"]["introduction"]["status"], "known");
+    assert_eq!(
+        report["symbol_summary"]["introduction"]["commit_oid"],
+        introduction
+    );
+}
+
+#[test]
+fn why_symbol_keeps_oldest_range_change_when_introduction_is_unknown() {
+    let repo = TestRepo::new();
+    repo.commit(
+        "src/lib.rs",
+        b"fn calculate() { let result = 1; }\n",
+        "Create calculation",
+        None,
+    );
+    repo.commit(
+        "src/lib.rs",
+        b"fn calculate() { let result = 2; }\n",
+        "Update calculation body",
+        None,
+    );
+    let body_change = repo.head();
+    repo.index();
+    fs::write(
+        repo.dir.path().join(".git/shallow"),
+        format!("{body_change}\n"),
+    )
+    .expect("mark body change as shallow boundary");
+
+    let report = json(
+        &repo,
+        &[
+            "why",
+            "src/lib.rs",
+            "--symbol",
+            "calculate",
+            "--at",
+            body_change.as_str(),
+            "--json",
+        ],
+    );
+    assert_eq!(
+        report["symbol_summary"]["introduction"]["status"],
+        "unknown"
+    );
+    assert_eq!(report["matched_count"], 1);
+    assert_eq!(
+        report["target_related_modifications"][0]["subject"],
+        "Update calculation body"
+    );
+}
+
+#[test]
+fn why_symbol_rejects_ambiguous_or_unlocated_declarations() {
+    let repo = TestRepo::new();
+    repo.commit(
+        "src/lib.rs",
+        b"fn duplicate() {}\nfn duplicate() {}\n",
+        "Duplicate declarations",
+        None,
+    );
+    repo.index();
+
+    let ambiguous = repo.run(["why", "src/lib.rs", "--symbol", "duplicate"]);
+    assert_eq!(ambiguous.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&ambiguous.stderr).contains("ambiguous"));
+    assert!(String::from_utf8_lossy(&ambiguous.stderr).contains("1, 2"));
+
+    repo.commit(
+        "src/lib.rs",
+        b"// duplicate() appears in this prose.\nlet value = duplicate();\n",
+        "Mention only",
+        None,
+    );
+    repo.index();
+    let unlocated = repo.run(["why", "src/lib.rs", "--symbol", "duplicate"]);
+    assert_eq!(unlocated.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&unlocated.stderr).contains("declaration"));
 }
 
 #[test]

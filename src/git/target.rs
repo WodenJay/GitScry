@@ -2,7 +2,7 @@ use std::{collections::HashSet, path::Path};
 
 use crate::app::AppError;
 
-use super::{history, process::Git, symbol};
+use super::{SymbolTrace, history, process::Git, symbol};
 
 #[derive(Clone)]
 pub(crate) enum WhyAnchor {
@@ -18,6 +18,7 @@ pub(crate) struct WhyTarget {
     pub(crate) blame: Option<Blame>,
     pub(crate) warnings: Vec<String>,
     pub(crate) anchor_valid: bool,
+    pub(crate) symbol_trace: Option<SymbolTrace>,
 }
 
 pub(crate) struct TimelineTarget {
@@ -300,6 +301,7 @@ pub(super) fn pin(
             symbol_end: None,
             blame: None,
             anchor_valid: false,
+            symbol_trace: None,
             warnings,
         });
     }
@@ -348,6 +350,7 @@ pub(super) fn pin(
         symbol_end,
         blame,
         anchor_valid: true,
+        symbol_trace: None,
         warnings,
     })
 }
@@ -530,6 +533,97 @@ fn read_tree_entry(git: &Git, revision: &str, path: &str) -> Result<TreeEntry, A
     )))
 }
 
+pub(super) fn verify_symbol_introduction(
+    git: &Git,
+    revision: &str,
+    path: &str,
+    name: &str,
+) -> Result<bool, AppError> {
+    if read_shallow_boundaries(git)?
+        .iter()
+        .any(|boundary| boundary == revision)
+    {
+        return Ok(false);
+    }
+
+    let metadata = git.text(["rev-list", "--parents", "-n", "1", revision])?;
+    let mut fields = metadata.split_ascii_whitespace();
+    if fields.next() != Some(revision) {
+        return Err(AppError::operational(
+            "error: Git returned unexpected symbol-introduction metadata",
+        ));
+    }
+    let parent = fields.next();
+    if fields.next().is_some() {
+        return Ok(false);
+    }
+
+    let Some(current) = read_blob_at(git, revision, path)? else {
+        return Ok(false);
+    };
+    if symbol::declaration_lines(&current, name).len() != 1 {
+        return Ok(false);
+    }
+    if let Some(parent) = parent {
+        if read_blob_at(git, parent, path)?
+            .is_some_and(|source| !symbol::declaration_lines(&source, name).is_empty())
+        {
+            return Ok(false);
+        }
+        if has_removed_symbol_declaration(git, parent, revision, name)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn read_blob_at(git: &Git, revision: &str, path: &str) -> Result<Option<Vec<u8>>, AppError> {
+    let entry = match read_tree_entry(git, revision, path) {
+        Ok(entry) => entry,
+        Err(error) if error.exit_code() == 2 => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    if entry.kind != "blob" {
+        return Ok(None);
+    }
+    git.output(["cat-file", "blob", &format!("{revision}:{path}")], &[])
+        .map(Some)
+}
+
+fn has_removed_symbol_declaration(
+    git: &Git,
+    parent: &str,
+    revision: &str,
+    name: &str,
+) -> Result<bool, AppError> {
+    let patch = git.output(
+        [
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--unified=0",
+            parent,
+            revision,
+        ],
+        &[],
+    )?;
+    let mut in_hunk = false;
+    for line in patch.split(|byte| *byte == b'\n') {
+        if line.starts_with(b"diff --git ") {
+            in_hunk = false;
+        } else if line.starts_with(b"@@ ") {
+            in_hunk = true;
+        } else if in_hunk
+            && line.starts_with(b"-")
+            && !symbol::declaration_lines(&line[1..], name).is_empty()
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 fn resolve_anchor(
     anchor: &WhyAnchor,
     content: &[u8],
@@ -555,7 +649,7 @@ fn resolve_anchor(
             Ok((anchor.clone(), *number, None))
         }
         WhyAnchor::Symbol { name, .. } => {
-            let span = symbol::locate(content, name, path)?;
+            let span = symbol::locate_unique(content, name, path)?;
             Ok((
                 WhyAnchor::Symbol {
                     name: name.clone(),

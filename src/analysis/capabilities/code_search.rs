@@ -218,6 +218,7 @@ fn run_with_scope(
         patch_mode: false,
         why: None,
         scope: None,
+        symbol_summary: None,
     })
 }
 

@@ -29,6 +29,7 @@ pub(crate) struct Report {
     pub(crate) notices: Vec<String>,
     pub(crate) why: Option<Box<WhySummary>>,
     pub(crate) scope: Option<SearchScopeInfo>,
+    pub(crate) symbol_summary: Option<SymbolSummary>,
 }
 #[derive(Clone, Debug)]
 pub(crate) struct SearchScopeInfo {
@@ -142,6 +143,17 @@ pub(crate) struct WhyAttributionCommit {
     pub(crate) patch: Option<PatchExcerpt>,
 }
 
+pub(crate) struct SymbolSummary {
+    pub(crate) target: String,
+    pub(crate) introduction: SymbolFact,
+    pub(crate) anchor_line_attribution: SymbolFact,
+}
+
+pub(crate) enum SymbolFact {
+    Known { commit_oid: String, subject: String },
+    Unknown { reason: String },
+}
+
 pub(crate) struct TraceFixPatchAnchor {
     pub(crate) line: usize,
     pub(crate) paths: Vec<Vec<u8>>,
@@ -253,6 +265,7 @@ pub(crate) fn report(
         why: None,
         scope: None,
         patch_mode: false,
+        symbol_summary: None,
     }
 }
 
@@ -268,5 +281,6 @@ pub(crate) fn empty_report(kind: ReportKind) -> Report {
         why: None,
         scope: None,
         patch_mode: false,
+        symbol_summary: None,
     }
 }

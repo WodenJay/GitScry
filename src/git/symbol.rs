@@ -41,6 +41,39 @@ pub(super) fn locate(content: &[u8], name: &str, path: &str) -> Result<Span, App
     })
 }
 
+/// Require one actual declaration; unlike `locate`, never fall back to a mention.
+pub(super) fn locate_unique(content: &[u8], name: &str, path: &str) -> Result<Span, AppError> {
+    if name.trim().is_empty() {
+        return Err(AppError::input("symbol must not be empty"));
+    }
+    let declarations = declaration_lines(content, name);
+    match declarations.as_slice() {
+        [] => Err(AppError::input(format!(
+            "symbol {name} has no supported declaration in {path} at the target revision"
+        ))),
+        [start] => Ok(Span {
+            start: *start,
+            end: symbol_span_end(content, *start, path.ends_with(".rs")),
+        }),
+        _ => Err(AppError::input(format!(
+            "symbol {name} is ambiguous in {path} at the target revision; declarations found at lines {}",
+            declarations
+                .iter()
+                .map(usize::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))),
+    }
+}
+
+pub(super) fn declaration_lines(content: &[u8], name: &str) -> Vec<usize> {
+    content
+        .split(|byte| *byte == b'\n')
+        .enumerate()
+        .filter_map(|(index, line)| is_declaration(line, name.as_bytes()).then_some(index + 1))
+        .collect()
+}
+
 fn contains_symbol(line: &[u8], symbol: &[u8]) -> bool {
     if symbol.is_empty() {
         return false;
@@ -90,7 +123,8 @@ fn is_declaration(line: &[u8], symbol: &[u8]) -> bool {
     let shape = after.starts_with(b"(")
         || after.starts_with(b"{")
         || after.starts_with(b":")
-        || after.starts_with(b"=");
+        || after.starts_with(b"=")
+        || after.starts_with(b"<");
     let tokens = before
         .split(|byte| !is_symbol_byte(*byte))
         .filter(|token| !token.is_empty())
