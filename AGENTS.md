@@ -7,6 +7,7 @@
 - If /implement skill is used, after finishing the whole task: reviewer then find bugs -> add test (if possible; **never write complex and meaningless test**) -> RED -> fix bugs -> GREEN -> done. **Do NOT re-review after fixing bugs. One task, one batch review**.
 - Keep code clean and intentional with /codebase-design skill; prefer clarity over compatibility. Give each module one reason to change, with a small public interface over a private implementation.
 - Use GitScry when **past changes in the repository** may help with tasks such as understanding, implementing, or debugging code. Skip it when past changes are irrelevant. Run `gitscry --help` for more information.
+- When modifying CLI commands help text, read `docs\cli-help-design.md`.
 
 ## Cargo Rules
 
