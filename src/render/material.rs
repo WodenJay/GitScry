@@ -15,18 +15,45 @@ const STEPS_PER_RESULT: usize = 8;
 
 /// Supporting commits shown per related path before the remainder is summarized.
 const RELATION_CITATIONS_PER_RESULT: usize = 5;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GenericReportKind {
+    Search,
+    CodeSearch,
+    Examples,
+    Failures,
+    Related,
+    Tests,
+    Regression,
+    TraceFix,
+}
+
+impl GenericReportKind {
+    fn from_report_kind(kind: ReportKind) -> Option<Self> {
+        match kind {
+            ReportKind::Why => None,
+            ReportKind::Search => Some(Self::Search),
+            ReportKind::CodeSearch => Some(Self::CodeSearch),
+            ReportKind::Examples => Some(Self::Examples),
+            ReportKind::Failures => Some(Self::Failures),
+            ReportKind::Related => Some(Self::Related),
+            ReportKind::Tests => Some(Self::Tests),
+            ReportKind::Regression => Some(Self::Regression),
+            ReportKind::TraceFix => Some(Self::TraceFix),
+        }
+    }
+}
 /// Fixed no-result text, so absence of history is distinguished from a failure.
-fn empty_message(kind: ReportKind) -> &'static str {
+fn empty_message(kind: GenericReportKind) -> &'static str {
     match kind {
-        ReportKind::Search => "No relevant history found.",
-        ReportKind::CodeSearch => "No matching changed lines found.",
-        ReportKind::Examples => "No historical examples found.",
-        ReportKind::Failures => "No failed approaches found.",
-        ReportKind::Related => "No historical relations found.",
-        ReportKind::Tests => "No historically related tests found.",
-        ReportKind::Why => unreachable!("why reports use the dedicated renderer"),
-        ReportKind::Regression => "No supported regression suspects found.",
-        ReportKind::TraceFix => "No introducing change could be traced.",
+        GenericReportKind::Search => "No relevant history found.",
+        GenericReportKind::CodeSearch => "No matching changed lines found.",
+        GenericReportKind::Examples => "No historical examples found.",
+        GenericReportKind::Failures => "No failed approaches found.",
+        GenericReportKind::Related => "No historical relations found.",
+        GenericReportKind::Tests => "No historically related tests found.",
+        GenericReportKind::Regression => "No supported regression suspects found.",
+        GenericReportKind::TraceFix => "No introducing change could be traced.",
     }
 }
 
@@ -182,10 +209,10 @@ fn format_code_report(report: &Report) -> String {
         lines.push(scope_summary(scope));
     }
     if report.code_matches.is_empty() {
-        lines.push(empty_message(report.kind).to_owned());
+        lines.push(empty_message(GenericReportKind::CodeSearch).to_owned());
         return lines.join("\n");
     }
-    lines.push(header(report));
+    lines.push(header(report, GenericReportKind::CodeSearch));
     for matched in &report.code_matches {
         lines.push(format!(
             "- {} {}:{} {}: {}",
@@ -207,29 +234,28 @@ fn format_code_report(report: &Report) -> String {
 }
 
 pub(crate) fn format_report(report: &Report) -> String {
-    if report.kind == ReportKind::Why {
+    let Some(kind) = GenericReportKind::from_report_kind(report.kind) else {
         return format_why_report(report);
-    }
-    if report.kind == ReportKind::CodeSearch {
+    };
+    if kind == GenericReportKind::CodeSearch {
         return format_code_report(report);
     }
     let mut lines = if report.materials.is_empty() {
-        vec![empty_message(report.kind).to_owned()]
+        vec![empty_message(kind).to_owned()]
     } else {
-        let mut lines = vec![header(report)];
+        let mut lines = vec![header(report, kind)];
         for material in &report.materials {
             render_material(&mut lines, material);
         }
         if report.truncated {
-            let noun = match report.kind {
-                ReportKind::CodeSearch => "matching lines",
-                ReportKind::Related | ReportKind::Tests => "matching paths",
-                ReportKind::Why => unreachable!("why reports use the dedicated renderer"),
-                ReportKind::Search
-                | ReportKind::Examples
-                | ReportKind::Failures
-                | ReportKind::TraceFix => "matching commits",
-                ReportKind::Regression => "matching suspects",
+            let noun = match kind {
+                GenericReportKind::CodeSearch => "matching lines",
+                GenericReportKind::Related | GenericReportKind::Tests => "matching paths",
+                GenericReportKind::Search
+                | GenericReportKind::Examples
+                | GenericReportKind::Failures
+                | GenericReportKind::TraceFix => "matching commits",
+                GenericReportKind::Regression => "matching suspects",
             };
             lines.push(format!(
                 "Showing {} of {} {noun}; results truncated.",
@@ -245,17 +271,16 @@ pub(crate) fn format_report(report: &Report) -> String {
     lines.join("\n")
 }
 
-fn header(report: &Report) -> String {
-    let noun = match report.kind {
-        ReportKind::Search => "Relevant history",
-        ReportKind::CodeSearch => "Code search",
-        ReportKind::Examples => "Historical examples",
-        ReportKind::Failures => "Failed approaches",
-        ReportKind::Related => "Related paths",
-        ReportKind::Tests => "Historical test candidates",
-        ReportKind::Why => unreachable!("why reports use the dedicated renderer"),
-        ReportKind::Regression => "Regression suspects",
-        ReportKind::TraceFix => "Fix lineage",
+fn header(report: &Report, kind: GenericReportKind) -> String {
+    let noun = match kind {
+        GenericReportKind::Search => "Relevant history",
+        GenericReportKind::CodeSearch => "Code search",
+        GenericReportKind::Examples => "Historical examples",
+        GenericReportKind::Failures => "Failed approaches",
+        GenericReportKind::Related => "Related paths",
+        GenericReportKind::Tests => "Historical test candidates",
+        GenericReportKind::Regression => "Regression suspects",
+        GenericReportKind::TraceFix => "Fix lineage",
     };
     format!(
         "{noun} ({} match{}):",
