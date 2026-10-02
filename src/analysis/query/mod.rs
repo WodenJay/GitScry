@@ -3,6 +3,7 @@
 //! Target pinning, scope semantics, material assembly and optional excerpts stay
 //! behind this interface. Display formats never participate in query execution.
 
+pub(crate) mod followups;
 mod scope;
 
 use std::collections::HashSet;
@@ -18,6 +19,13 @@ use crate::{
 pub(crate) use scope::SearchScopeOptions;
 
 pub(crate) enum Request {
+    Followups {
+        revision: String,
+        paths: Vec<String>,
+        to_rev: Option<String>,
+        days: usize,
+        max_commits: usize,
+    },
     Context {
         staged: bool,
     },
@@ -71,6 +79,7 @@ pub(crate) struct Options {
 }
 
 pub(crate) enum QueryReport {
+    Followups(followups::Report),
     Context(super::ContextReport),
     Analysis(Report),
     Timeline(TimelineReport),
@@ -79,6 +88,7 @@ pub(crate) enum QueryReport {
 impl QueryReport {
     pub(crate) fn warnings(&self) -> &[String] {
         match self {
+            Self::Followups(report) => &report.warnings,
             Self::Context(report) => &report.warnings,
             Self::Analysis(report) => &report.warnings,
             Self::Timeline(_) => &[],
@@ -87,6 +97,7 @@ impl QueryReport {
 
     pub(crate) fn notices(&self) -> &[String] {
         match self {
+            Self::Followups(_) => &[],
             Self::Context(_) => &[],
             Self::Analysis(report) => &report.notices,
             Self::Timeline(_) => &[],
@@ -145,6 +156,7 @@ impl Context {
     fn finish(self, mut report: QueryReport) -> Outcome {
         let scope = self.scope.map(|scope| scope.report);
         match &mut report {
+            QueryReport::Followups(_) => {}
             QueryReport::Context(report) => report.scope = scope,
             QueryReport::Analysis(report) => report.scope = scope,
             QueryReport::Timeline(report) => report.scope = scope,
@@ -162,6 +174,13 @@ pub(crate) fn execute(request: Request, options: Options) -> Result<Outcome, App
         return Err(AppError::input("limit must be greater than zero"));
     }
     match request {
+        Request::Followups {
+            revision,
+            paths,
+            to_rev,
+            days,
+            max_commits,
+        } => followups::run(revision, paths, to_rev, days, max_commits, options),
         Request::Context { staged } => run_context(staged, options),
         Request::Search { words, hybrid } => {
             if hybrid {
