@@ -695,30 +695,294 @@ fn why_symbol_reports_unknown_introduction_at_a_real_shallow_boundary() {
         .expect("clone shallow repository");
     assert!(cloned.status.success());
     let boundaries = git_stdout(&clone, ["rev-parse", "--git-path", "shallow"]);
-    assert!(fs::read_to_string(clone.join(boundaries))
-        .expect("read shallow boundary")
-        .lines()
-        .count()
-        > 0);
+    assert!(
+        fs::read_to_string(clone.join(boundaries))
+            .expect("read shallow boundary")
+            .lines()
+            .count()
+            > 0
+    );
 
     let indexed = TestRepo::run_at(&clone, ["index"]);
-    assert!(indexed.status.success(), "{}", String::from_utf8_lossy(&indexed.stderr));
+    assert!(
+        indexed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&indexed.stderr)
+    );
     let output = TestRepo::run_at(
         &clone,
         ["why", "src/lib.rs", "--symbol", "calculate", "--json"],
     );
     assert_eq!(output.status.code(), Some(0));
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(report["symbol_summary"]["introduction"]["status"], "unknown");
-    assert!(report["symbol_summary"]["introduction"]["reason"]
-        .as_str()
-        .unwrap()
-        .contains("shallow"));
-    assert!(report["target_related_modifications"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|change| change["subject"] == "Update calculation again"));
+    assert_eq!(
+        report["symbol_summary"]["introduction"]["status"],
+        "unknown"
+    );
+    assert!(
+        report["symbol_summary"]["introduction"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("shallow")
+    );
+    assert!(
+        report["target_related_modifications"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|change| change["subject"] == "Update calculation again")
+    );
+}
+
+#[test]
+fn why_symbol_reports_missing_objects_without_unrelated_fallback() {
+    let repo = TestRepo::new();
+    repo.commit(
+        "src/lib.rs",
+        b"fn calculate() { let result = 1; }\nfn helper() { let result = 1; }\n",
+        "Create symbols",
+        None,
+    );
+    let introduction = repo.head();
+    repo.commit(
+        "src/lib.rs",
+        b"fn calculate() { let result = 2; }\nfn helper() { let result = 1; }\n",
+        "Update calculation body",
+        None,
+    );
+    repo.commit(
+        "src/lib.rs",
+        b"fn calculate() { let result = 2; }\nfn helper() { let result = 2; }\n",
+        "Unrelated helper change",
+        Some("This change is explanatory because it avoids a stale result."),
+    );
+    repo.index();
+
+    let spec = format!("{introduction}:src/lib.rs");
+    let blob = git_stdout(repo.dir.path(), ["rev-parse", spec.as_str()]);
+    let object = repo
+        .dir
+        .path()
+        .join(".git/objects")
+        .join(&blob[..2])
+        .join(&blob[2..]);
+    fs::remove_file(object).expect("remove required historical blob");
+
+    let output = repo.run(["why", "src/lib.rs", "--symbol", "calculate", "--json"]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["matched_count"], 0);
+    let introduction = &report["symbol_summary"]["introduction"];
+    assert_eq!(introduction["status"], "unknown");
+    let reason = introduction["reason"].as_str().unwrap();
+    assert!(
+        ["missing", "unavailable", "incomplete"]
+            .iter()
+            .any(|word| reason.contains(word)),
+        "unexpected uncertainty reason: {reason}"
+    );
+    assert!(
+        report["target_related_modifications"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|change| change["subject"] != "Unrelated helper change")
+    );
+    let text_output = repo.run(["why", "src/lib.rs", "--symbol", "calculate"]);
+    assert_eq!(text_output.status.code(), Some(0));
+    let text = String::from_utf8_lossy(&text_output.stdout);
+    assert!(text.contains("introduction: unknown"));
+    assert!(text.contains(reason));
+}
+
+#[test]
+fn why_symbol_follows_first_parent_through_safe_merges_only() {
+    let report = |repo: &TestRepo| {
+        repo.index();
+        let output = repo.run(["why", "src/lib.rs", "--symbol", "calculate", "--json"]);
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    };
+
+    let supported = TestRepo::new();
+    supported.commit(
+        "src/lib.rs",
+        b"fn calculate() { let result = 1; }\n\nfn helper() {}\n",
+        "Create calculation",
+        None,
+    );
+    let introduction = supported.head();
+    git(supported.dir.path(), ["switch", "-c", "side"]);
+    supported.commit(
+        "src/lib.rs",
+        b"fn calculate() { let result = 1; }\n\nfn helper() {}\nfn side_helper() {}\n",
+        "Add helper on side branch",
+        None,
+    );
+    git(supported.dir.path(), ["switch", "main"]);
+    supported.commit(
+        "src/lib.rs",
+        b"fn calculate() { let result = 2; }\n\nfn helper() {}\n",
+        "Update calculation",
+        None,
+    );
+    let merge = git_command(supported.dir.path())
+        .args(["merge", "--no-ff", "side", "-m", "Merge side helper"])
+        .output()
+        .expect("merge side helper");
+    assert!(
+        merge.status.success(),
+        "{}",
+        String::from_utf8_lossy(&merge.stdout)
+    );
+
+    let supported_report = report(&supported);
+    assert_eq!(
+        supported_report["symbol_summary"]["introduction"]["status"],
+        "known"
+    );
+    assert_eq!(
+        supported_report["symbol_summary"]["introduction"]["commit_oid"],
+        introduction
+    );
+    assert!(
+        supported_report["target_related_modifications"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|change| change["subject"] == "Update calculation")
+    );
+
+    let uncertain = TestRepo::new();
+    uncertain.commit(
+        "src/lib.rs",
+        b"fn helper() { let result = 1; }\n\nfn anchor() {}\n",
+        "Create helper",
+        None,
+    );
+    git(uncertain.dir.path(), ["switch", "-c", "side"]);
+    uncertain.commit(
+        "src/lib.rs",
+        b"fn helper() { let result = 1; }\n\nfn anchor() {}\nfn calculate() { let result = 2; }\n",
+        "Add calculation on side branch",
+        None,
+    );
+    git(uncertain.dir.path(), ["switch", "main"]);
+    uncertain.commit(
+        "src/lib.rs",
+        b"fn helper() { let result = 2; }\n\nfn anchor() {}\n",
+        "Update helper on first parent",
+        None,
+    );
+    git(
+        uncertain.dir.path(),
+        ["merge", "--no-ff", "side", "-m", "Merge side calculation"],
+    );
+
+    let uncertain_report = report(&uncertain);
+    assert_eq!(
+        uncertain_report["symbol_summary"]["introduction"]["status"],
+        "unknown"
+    );
+    assert!(
+        uncertain_report["symbol_summary"]["introduction"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("merge history")
+    );
+}
+
+#[test]
+fn why_symbol_preserves_first_parent_edits_when_merge_lineage_is_unknown() {
+    let repo = TestRepo::new();
+    repo.commit(
+        "src/lib.rs",
+        b"fn calculate() {\n    let result = 1;\n    let middle_a = 1;\n    let middle_b = 1;\n    let middle_c = 1;\n    let middle_d = 1;\n    let middle_e = 1;\n    let middle_f = 1;\n    let middle_g = 1;\n    let middle_h = 1;\n    let side = 1;\n}\n",
+        "Create calculation",
+        None,
+    );
+    git(repo.dir.path(), ["switch", "-c", "side"]);
+    repo.commit(
+        "src/lib.rs",
+        b"fn calculate() {\n    let result = 1;\n    let middle_a = 1;\n    let middle_b = 1;\n    let middle_c = 1;\n    let middle_d = 1;\n    let middle_e = 1;\n    let middle_f = 1;\n    let middle_g = 1;\n    let middle_h = 1;\n    let side = 3;\n}\n",
+        "Update calculation on side branch",
+        None,
+    );
+    git(repo.dir.path(), ["switch", "main"]);
+    repo.commit(
+        "src/lib.rs",
+        b"fn calculate() {\n    let result = 2;\n    let middle_a = 1;\n    let middle_b = 1;\n    let middle_c = 1;\n    let middle_d = 1;\n    let middle_e = 1;\n    let middle_f = 1;\n    let middle_g = 1;\n    let middle_h = 1;\n    let side = 1;\n}\n",
+        "Update calculation on first parent",
+        None,
+    );
+    let merge = git_command(repo.dir.path())
+        .args([
+            "merge",
+            "--no-ff",
+            "side",
+            "-m",
+            "Merge calculation changes",
+        ])
+        .output()
+        .expect("merge divergent calculation changes");
+    assert!(
+        merge.status.success(),
+        "{}",
+        String::from_utf8_lossy(&merge.stdout)
+    );
+
+    repo.index();
+    let native_history = git_stdout(
+        repo.dir.path(),
+        ["log", "--format=%s", "-L", "1,12:src/lib.rs", "HEAD"],
+    );
+    assert!(
+        native_history.contains("Update calculation on first parent"),
+        "fixture must have native line-range support for the first-parent edit: {native_history}"
+    );
+    let output = repo.run(["why", "src/lib.rs", "--symbol", "calculate", "--json"]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        report["symbol_summary"]["introduction"]["status"],
+        "unknown"
+    );
+    assert!(
+        report["symbol_summary"]["introduction"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("merge history")
+    );
+    assert!(
+        report["target_related_modifications"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|change| change["subject"] == "Update calculation on first parent"),
+        "a native-supported first-parent edit should survive uncertain merge lineage: {report}"
+    );
+    assert!(
+        report["target_related_modifications"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|change| change["subject"] != "Update calculation on side branch")
+    );
 }
 
 #[test]
