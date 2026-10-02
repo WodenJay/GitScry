@@ -3,7 +3,7 @@ mod support;
 use std::{fs, path::Path, process::Command};
 
 use rusqlite::Connection;
-use support::{TestRepo, git, git_command};
+use support::{TestRepo, git, git_command, git_stdout};
 
 impl TestRepo {
     fn commit(&self, path: &str, contents: &[u8], subject: &str, body: Option<&str>) {
@@ -661,6 +661,64 @@ fn why_symbol_keeps_oldest_range_change_when_introduction_is_unknown() {
         report["target_related_modifications"][0]["subject"],
         "Update calculation body"
     );
+}
+
+#[test]
+fn why_symbol_reports_unknown_introduction_at_a_real_shallow_boundary() {
+    let source = TestRepo::new();
+    source.commit(
+        "src/lib.rs",
+        b"fn calculate() { let result = 1; }\n",
+        "Create calculation",
+        None,
+    );
+    source.commit(
+        "src/lib.rs",
+        b"fn calculate() { let result = 2; }\n",
+        "Update calculation body",
+        None,
+    );
+    source.commit(
+        "src/lib.rs",
+        b"fn calculate() { let result = 3; }\n",
+        "Update calculation again",
+        None,
+    );
+
+    let parent = tempfile::tempdir().expect("create clone parent");
+    let clone = parent.path().join("clone");
+    let cloned = git_command(parent.path())
+        .args(["clone", "--depth", "2", "--no-local"])
+        .arg(source.dir.path())
+        .arg(&clone)
+        .output()
+        .expect("clone shallow repository");
+    assert!(cloned.status.success());
+    let boundaries = git_stdout(&clone, ["rev-parse", "--git-path", "shallow"]);
+    assert!(fs::read_to_string(clone.join(boundaries))
+        .expect("read shallow boundary")
+        .lines()
+        .count()
+        > 0);
+
+    let indexed = TestRepo::run_at(&clone, ["index"]);
+    assert!(indexed.status.success(), "{}", String::from_utf8_lossy(&indexed.stderr));
+    let output = TestRepo::run_at(
+        &clone,
+        ["why", "src/lib.rs", "--symbol", "calculate", "--json"],
+    );
+    assert_eq!(output.status.code(), Some(0));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["symbol_summary"]["introduction"]["status"], "unknown");
+    assert!(report["symbol_summary"]["introduction"]["reason"]
+        .as_str()
+        .unwrap()
+        .contains("shallow"));
+    assert!(report["target_related_modifications"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|change| change["subject"] == "Update calculation again"));
 }
 
 #[test]
