@@ -54,10 +54,30 @@ pub(super) fn format_report(report: &Report) -> String {
             "    basis: same_file; elapsed {} seconds; {}",
             entry.elapsed_seconds,
             entry
-                .paths
+                .file_associations
                 .iter()
-                .zip(&entry.change_types)
-                .map(|(path, status)| format!("{} {}", status, escape::path(path)))
+                .map(|association| {
+                    let seed_old = association
+                        .seed_old_path
+                        .as_deref()
+                        .map(escape::path)
+                        .unwrap_or_else(|| "<created>".into());
+                    let seed_new = association
+                        .seed_new_path
+                        .as_deref()
+                        .map(escape::path)
+                        .unwrap_or_else(|| "<deleted>".into());
+                    let current = association
+                        .current_path
+                        .as_deref()
+                        .map(escape::path)
+                        .unwrap_or_else(|| "<deleted>".into());
+                    format!(
+                        "seed: {seed_old} -> {seed_new}; {} {} -> {current}",
+                        association.change_type,
+                        escape::path(&association.previous_path)
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join(", ")
         ));
@@ -87,6 +107,13 @@ pub(super) fn format_json_report(
                 "basis": "same_file",
                 "paths": entry.paths.iter().map(|p| json_path(p)).collect::<Vec<_>>(),
                 "change_types": entry.change_types,
+                "file_associations": entry.file_associations.iter().map(|association| json!({
+                    "seed_old_path": association.seed_old_path.as_ref().map(|path| json_path(path)),
+                    "seed_new_path": association.seed_new_path.as_ref().map(|path| json_path(path)),
+                    "previous_path": json_path(&association.previous_path),
+                    "current_path": association.current_path.as_ref().map(|path| json_path(path)),
+                    "change_type": association.change_type,
+                })).collect::<Vec<_>>(),
                 "parent_count": entry.parent_count,
                 "diff_comparison": if entry.parent_count > 1 { Some("first_parent") } else { None },
                 "inspect_command": format!("git show {}", entry.commit_id),
@@ -98,7 +125,7 @@ pub(super) fn format_json_report(
         })
         .collect::<Result<_, serde_json::Error>>()?;
     serde_json::to_string(&json!({
-        "schema_version": 1,
+        "schema_version": 2,
         "kind": "followups",
         "scope": {
             "seed": scope.seed, "endpoint": scope.endpoint, "cache_tip": scope.cache_tip,

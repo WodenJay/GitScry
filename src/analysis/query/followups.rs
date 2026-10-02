@@ -1,5 +1,5 @@
 //! Bounded same-file material. Identity is branch-local and never resumes after ending.
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use super::{Options, Outcome, QueryReport};
 use crate::{
@@ -24,7 +24,23 @@ fn descendants(graph: &[ForwardCommit], seed: &str) -> HashSet<String> {
     descendants
 }
 
-type Incarnations = BTreeMap<Vec<u8>, bool>;
+type Incarnations = BTreeMap<i64, FileIncarnation>;
+
+#[derive(Clone)]
+struct FileIncarnation {
+    seed_old_path: Option<Vec<u8>>,
+    seed_new_path: Option<Vec<u8>>,
+    current_path: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) struct FileAssociation {
+    pub(crate) seed_old_path: Option<Vec<u8>>,
+    pub(crate) seed_new_path: Option<Vec<u8>>,
+    pub(crate) previous_path: Vec<u8>,
+    pub(crate) current_path: Option<Vec<u8>>,
+    pub(crate) change_type: String,
+}
 
 pub(crate) struct Report {
     pub(crate) scope: Scope,
@@ -58,6 +74,7 @@ pub(crate) struct Entry {
     pub(crate) elapsed_seconds: i64,
     pub(crate) paths: Vec<Vec<u8>>,
     pub(crate) change_types: Vec<String>,
+    pub(crate) file_associations: Vec<FileAssociation>,
     pub(crate) parent_count: usize,
     pub(crate) patch: Option<crate::analysis::PatchExcerpt>,
 }
@@ -114,10 +131,11 @@ pub(super) fn run(
     let original = session.forward_changes(&seed)?;
     for path in &paths {
         if !original.iter().any(|change| {
-            [&change.old_path, &change.new_path]
-                .into_iter()
-                .flatten()
-                .any(|p| p == path.as_bytes())
+            selection_matches(
+                change.old_path.as_deref(),
+                change.new_path.as_deref(),
+                path.as_bytes(),
+            )
         }) {
             return Err(AppError::input(format!(
                 "path was not changed by seed revision: {path}"
@@ -128,20 +146,31 @@ pub(super) fn run(
     let mut selected_paths = Vec::new();
     for change in &original {
         if !paths.is_empty()
-            && ![&change.old_path, &change.new_path]
-                .into_iter()
-                .flatten()
-                .any(|p| paths.iter().any(|path| p == path.as_bytes()))
+            && !paths.iter().any(|path| {
+                selection_matches(
+                    change.old_path.as_deref(),
+                    change.new_path.as_deref(),
+                    path.as_bytes(),
+                )
+            })
         {
             continue;
         }
-        if let Some(path) = change.new_path.as_ref().or(change.old_path.as_ref()) {
+        for path in [&change.old_path, &change.new_path].into_iter().flatten() {
             selected_paths.push(path.clone());
-            initial.insert(
-                path.clone(),
-                !change.status.starts_with('D') && change.new_path.is_some(),
-            );
         }
+        initial.insert(
+            change.ordinal,
+            FileIncarnation {
+                seed_old_path: change.old_path.clone(),
+                seed_new_path: change.new_path.clone(),
+                current_path: if change.status.starts_with('D') {
+                    None
+                } else {
+                    change.new_path.clone().or_else(|| change.old_path.clone())
+                },
+            },
+        );
     }
     selected_paths.sort();
     selected_paths.dedup();
@@ -151,7 +180,7 @@ pub(super) fn run(
         traversal_truncated: false, display_truncated: false, matched_in_inspected_scope: 0,
         entries: Vec::new(), warnings: vec![
             "Coverage is limited to endpoint-reachable published cache history, not all refs; no fetch or index was performed.".into(),
-            "Same-file associations only: subsequent rename continuity, changed-region overlap and explicit-revert analysis are not supported. No causality or stability judgment is made.".into(),
+            "Same-file associations follow detected subsequent renames. Changed-region overlap and explicit-revert analysis are not supported; copies and same-path recreation are not continuations. No causality or stability judgment is made.".into(),
             "Cached merge diffs are relative to the first parent; branch correspondence is conservative, not proof of fresh corrections.".into(),
         ],
     };
@@ -197,68 +226,101 @@ pub(super) fn run(
             report.warnings.push(format!("{}: first-parent file correspondence to the seed is unavailable; no same-file identity is assumed.", node.oid));
         }
         if node.parents.len() > 1 {
-            for (path, active) in &mut state {
-                if *active
-                    && node
-                        .parents
-                        .iter()
-                        .skip(1)
-                        .any(|parent| states.get(parent).and_then(|s| s.get(path)) != Some(&true))
-                {
-                    *active = false;
-                    report.warnings.push(format!(
-                        "{}: ambiguous merge correspondence; tracking stopped for {}.",
-                        node.oid,
-                        String::from_utf8_lossy(path)
-                    ));
+            let mut identities: BTreeSet<_> = state.keys().copied().collect();
+            for parent in node.parents.iter().skip(1) {
+                if let Some(parent_state) = states.get(parent) {
+                    identities.extend(parent_state.keys().copied());
                 }
+            }
+            for identity in identities {
+                let parent_paths: Vec<_> = node
+                    .parents
+                    .iter()
+                    .map(|parent| {
+                        states
+                            .get(parent)
+                            .and_then(|parent_state| parent_state.get(&identity))
+                            .and_then(|incarnation| incarnation.current_path.clone())
+                    })
+                    .collect();
+                if parent_paths
+                    .iter()
+                    .skip(1)
+                    .all(|path| path == &parent_paths[0])
+                {
+                    continue;
+                }
+                let Some(path) = parent_paths.iter().find_map(|path| path.clone()) else {
+                    continue;
+                };
+                if let Some(incarnation) = state.get_mut(&identity) {
+                    incarnation.current_path = None;
+                }
+                report.warnings.push(format!(
+                    "{}: ambiguous merge correspondence; tracking stopped for {}.",
+                    node.oid,
+                    String::from_utf8_lossy(&path)
+                ));
             }
         }
         let changes = session.forward_changes(&node.oid)?;
         let mut associated = Vec::new();
-        let mut change_types = Vec::new();
+        let mut next_state = state.clone();
         for change in changes {
-            for (path, active) in &mut state {
-                if !*active {
+            if change.status.starts_with('C') {
+                continue;
+            }
+            for (identity, incarnation) in &state {
+                let Some(previous_path) = incarnation.current_path.as_ref() else {
+                    continue;
+                };
+                if change.old_path.as_ref() != Some(previous_path) {
                     continue;
                 }
-                let old_match = change.old_path.as_ref() == Some(path);
-                let new_match = change.new_path.as_ref() == Some(path);
-                if !old_match && !new_match {
-                    continue;
-                }
-                if change.status.starts_with('C') {
-                    continue;
-                }
-                if change.status.starts_with('R') {
-                    *active = false;
-                    report.warnings.push(format!(
-                        "{}: unsupported subsequent rename continuity; tracking stopped for {}.",
-                        node.oid,
-                        String::from_utf8_lossy(path)
-                    ));
-                    if !old_match {
-                        continue;
-                    }
-                } else if change.status.starts_with('A') {
-                    *active = false;
-                    report.warnings.push(format!("{}: addition at a tracked path has no established incarnation continuity; tracking stopped.", node.oid));
-                    continue;
-                } else if change.status.starts_with('D') {
-                    *active = false;
-                }
+                let previous_path = previous_path.clone();
+                let current_path = if change.status.starts_with('D') {
+                    None
+                } else {
+                    change
+                        .new_path
+                        .clone()
+                        .or_else(|| Some(previous_path.clone()))
+                };
                 if eligible {
-                    associated.push(path.clone());
-                    change_types.push(change.status.clone());
+                    associated.push(FileAssociation {
+                        seed_old_path: incarnation.seed_old_path.clone(),
+                        seed_new_path: incarnation.seed_new_path.clone(),
+                        previous_path,
+                        current_path: current_path.clone(),
+                        change_type: change.status.clone(),
+                    });
+                }
+                if let Some(next_incarnation) = next_state.get_mut(identity) {
+                    next_incarnation.current_path = current_path;
                 }
             }
         }
+        state = next_state;
         states.insert(node.oid.clone(), state);
         if !associated.is_empty() {
-            let mut combined: Vec<_> = associated.into_iter().zip(change_types).collect();
-            combined.sort();
-            combined.dedup();
-            let (paths, change_types): (Vec<Vec<u8>>, Vec<String>) = combined.into_iter().unzip();
+            let mut file_associations = associated;
+            file_associations.sort();
+            file_associations.dedup();
+            let mut paths: Vec<_> = file_associations
+                .iter()
+                .flat_map(|association| {
+                    std::iter::once(association.previous_path.clone())
+                        .chain(association.current_path.iter().cloned())
+                })
+                .collect();
+            paths.sort();
+            paths.dedup();
+            let mut change_types: Vec<_> = file_associations
+                .iter()
+                .map(|association| association.change_type.clone())
+                .collect();
+            change_types.sort();
+            change_types.dedup();
             report.matched_in_inspected_scope += 1;
             if report.entries.len() < options.limit {
                 let patch = if options.patch {
@@ -283,6 +345,7 @@ pub(super) fn run(
                     elapsed_seconds: node.commit_time - seed_time,
                     paths,
                     change_types,
+                    file_associations,
                     parent_count: node.parents.len(),
                     patch,
                 });
@@ -296,6 +359,14 @@ pub(super) fn run(
         warnings: session.warnings().to_vec(),
         report: QueryReport::Followups(report),
     })
+}
+
+fn selection_matches(
+    old_path: Option<&[u8]>,
+    new_path: Option<&[u8]>,
+    selected_path: &[u8],
+) -> bool {
+    old_path == Some(selected_path) || new_path == Some(selected_path)
 }
 
 fn validate_path(path: &str) -> Result<(), AppError> {

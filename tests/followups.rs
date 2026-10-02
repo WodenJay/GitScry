@@ -195,7 +195,7 @@ fn followups_window_is_inclusive_without_a_lower_time_bound() {
 }
 
 #[test]
-fn followups_seed_rename_deletion_and_later_rename_stop_identity() {
+fn followups_tracks_multiple_renames_and_keeps_path_context() {
     let repo = TestRepo::new();
     commit(
         &repo,
@@ -206,26 +206,61 @@ fn followups_seed_rename_deletion_and_later_rename_stop_identity() {
     );
     git(repo.dir.path(), ["mv", "old", "new"]);
     let seed = commit_all(&repo, "Seed rename", "2020-01-02T00:00:00Z");
-    let edit = commit(&repo, "new", "edit\n", "Edit", "2020-01-03T00:00:00Z");
-    git(repo.dir.path(), ["mv", "new", "later"]);
-    let rename = commit_all(&repo, "Subsequent rename", "2020-01-04T00:00:00Z");
-    commit(
+    let edited_new = commit(
         &repo,
         "new",
-        "unrelated\n",
-        "Recreate old path",
+        "edit one\n",
+        "Edit new path",
+        "2020-01-03T00:00:00Z",
+    );
+    git(repo.dir.path(), ["mv", "new", "intermediate"]);
+    let first_rename = commit_all(&repo, "First rename", "2020-01-04T00:00:00Z");
+    let edited_intermediate = commit(
+        &repo,
+        "intermediate",
+        "edit two\n",
+        "Edit intermediate path",
         "2020-01-05T00:00:00Z",
     );
-    commit(
+    git(repo.dir.path(), ["mv", "intermediate", "latest"]);
+    let second_rename = commit_all(&repo, "Second rename", "2020-01-06T00:00:00Z");
+    let edited_latest = commit(
         &repo,
-        "later",
-        "next\n",
-        "Unsupported rename continuation",
-        "2020-01-06T00:00:00Z",
+        "latest",
+        "edit three\n",
+        "Edit latest path",
+        "2020-01-07T00:00:00Z",
+    );
+    fs::copy(repo.dir.path().join("latest"), repo.dir.path().join("copy")).unwrap();
+    let copied = commit_all(&repo, "Copy tracked file", "2020-01-08T00:00:00Z");
+    let copied_edit = commit(
+        &repo,
+        "copy",
+        "copy edit\n",
+        "Edit copy",
+        "2020-01-09T00:00:00Z",
+    );
+    fs::remove_file(repo.dir.path().join("latest")).unwrap();
+    let deletion = commit_all(&repo, "Delete current path", "2020-01-10T00:00:00Z");
+    let recreated = commit(
+        &repo,
+        "latest",
+        "recreated\n",
+        "Recreate current path",
+        "2020-01-11T00:00:00Z",
+    );
+    let recreated_edit = commit(
+        &repo,
+        "latest",
+        "recreated edit\n",
+        "Edit recreation",
+        "2020-01-12T00:00:00Z",
     );
     repo.index();
+
     let old = json(&repo, &["followups", &seed, "--path", "old", "--json"]);
-    let new = json(
+    let new = json(&repo, &["followups", &seed, "--path", "new", "--json"]);
+    let both = json(
         &repo,
         &[
             "followups",
@@ -237,27 +272,133 @@ fn followups_seed_rename_deletion_and_later_rename_stop_identity() {
             "--json",
         ],
     );
+    assert_eq!(old["schema_version"], 2);
     assert_eq!(old["entries"], new["entries"]);
-    assert_eq!(old["entries"].as_array().unwrap().len(), 2);
-    assert_eq!(old["entries"][0]["commit_id"], edit);
-    assert_eq!(old["entries"][1]["commit_id"], rename);
-    assert!(old["warnings"].to_string().contains("tracking stopped"));
-    fs::remove_file(repo.dir.path().join("later")).unwrap();
-    let deletion = commit_all(&repo, "Seed deletion", "2020-01-07T00:00:00Z");
-    commit(
+    assert_eq!(old["entries"], both["entries"]);
+    let entries = old["entries"].as_array().unwrap();
+    let ids = entries
+        .iter()
+        .map(|entry| entry["commit_id"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ids,
+        vec![
+            edited_new.as_str(),
+            first_rename.as_str(),
+            edited_intermediate.as_str(),
+            second_rename.as_str(),
+            edited_latest.as_str(),
+            deletion.as_str(),
+        ]
+    );
+    assert_eq!(entries[0]["file_associations"][0]["seed_old_path"], "old");
+    assert_eq!(entries[0]["file_associations"][0]["seed_new_path"], "new");
+    assert_eq!(entries[1]["file_associations"][0]["previous_path"], "new");
+    assert_eq!(
+        entries[1]["file_associations"][0]["current_path"],
+        "intermediate"
+    );
+    assert_eq!(
+        entries[3]["file_associations"][0]["previous_path"],
+        "intermediate"
+    );
+    assert_eq!(entries[3]["file_associations"][0]["current_path"], "latest");
+    assert_eq!(
+        entries[5]["file_associations"][0]["previous_path"],
+        "latest"
+    );
+    assert!(entries[5]["file_associations"][0]["current_path"].is_null());
+    assert!(!ids.contains(&copied.as_str()));
+    assert!(!ids.contains(&copied_edit.as_str()));
+    assert!(!ids.contains(&recreated.as_str()));
+    assert!(!ids.contains(&recreated_edit.as_str()));
+
+    let patched = json(
         &repo,
-        "later",
-        "recreated\n",
-        "Recreate",
-        "2020-01-08T00:00:00Z",
+        &["followups", &seed, "--path", "old", "--patch", "--json"],
+    );
+    let latest_patch = patched["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["commit_id"] == edited_latest)
+        .unwrap();
+    assert_eq!(latest_patch["patch"]["status"], "available");
+
+    let text = repo.run(["followups", &seed, "--path", "old"]);
+    assert!(text.status.success());
+    let text = String::from_utf8(text.stdout).unwrap();
+    assert!(text.contains("seed: old -> new"));
+    assert!(text.contains("new -> intermediate"));
+    assert!(text.contains("latest -> <deleted>"));
+}
+
+#[test]
+fn followups_tracks_two_simultaneous_renames_separately() {
+    let repo = TestRepo::new();
+    fs::write(repo.dir.path().join("a"), "contents for A\n").unwrap();
+    fs::write(repo.dir.path().join("b"), "contents for B\n").unwrap();
+    let seed = commit_all(&repo, "Seed both files", "2020-01-01T00:00:00Z");
+    git(repo.dir.path(), ["mv", "a", "c"]);
+    git(repo.dir.path(), ["mv", "b", "d"]);
+    let renames = commit_all(&repo, "Rename both paths", "2020-01-02T00:00:00Z");
+    let edit_c = commit(
+        &repo,
+        "c",
+        "edited contents for A\n",
+        "Edit path C",
+        "2020-01-03T00:00:00Z",
+    );
+    let edit_d = commit(
+        &repo,
+        "d",
+        "edited contents for B\n",
+        "Edit path D",
+        "2020-01-04T00:00:00Z",
     );
     repo.index();
-    let empty = json(&repo, &["followups", &deletion, "--json"]);
-    assert_eq!(empty["inspected_count"], 1);
-    assert!(empty["entries"].as_array().unwrap().is_empty());
-    // A rename away is an ending association, never a resurrection.
-    let report = json(&repo, &["followups", &edit, "--path", "new", "--json"]);
-    assert_eq!(report["entries"].as_array().unwrap().len(), 1);
+
+    let report = json(&repo, &["followups", &seed, "--json"]);
+    let entries = report["entries"].as_array().unwrap();
+    let association = |commit_id: &str, seed_path: &str| {
+        entries
+            .iter()
+            .find(|entry| entry["commit_id"] == commit_id)
+            .unwrap()["file_associations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|association| association["seed_new_path"] == seed_path)
+            .unwrap()
+    };
+
+    let file_a = association(&renames, "a");
+    assert_eq!(file_a["previous_path"], "a");
+    assert_eq!(file_a["current_path"], "c");
+    let file_b = association(&renames, "b");
+    assert_eq!(file_b["previous_path"], "b");
+    assert_eq!(file_b["current_path"], "d");
+    assert_eq!(association(&edit_c, "a")["current_path"], "c");
+    assert_eq!(association(&edit_d, "b")["current_path"], "d");
+}
+
+#[test]
+fn followups_does_not_resurrect_seed_deleted_incarnation() {
+    let repo = TestRepo::new();
+    commit(&repo, "a", "original\n", "Original", "2020-01-01T00:00:00Z");
+    fs::remove_file(repo.dir.path().join("a")).unwrap();
+    let seed = commit_all(&repo, "Seed deletion", "2020-01-02T00:00:00Z");
+    commit(
+        &repo,
+        "a",
+        "recreated\n",
+        "Recreate",
+        "2020-01-03T00:00:00Z",
+    );
+    repo.index();
+
+    let report = json(&repo, &["followups", &seed, "--json"]);
+    assert!(report["entries"].as_array().unwrap().is_empty());
 }
 
 #[test]
@@ -327,6 +468,83 @@ fn followups_accepts_merge_seed_and_merge_results() {
     assert_eq!(merge_entry["diff_comparison"], "first_parent");
     let report = json(&repo, &["followups", &merge, "--path", "a", "--json"]);
     assert_eq!(report["entries"][0]["commit_id"], edit);
+}
+
+#[test]
+fn followups_warns_when_first_parent_deletes_a_surviving_incarnation() {
+    let repo = TestRepo::new();
+    let seed = commit(&repo, "a", "seed\n", "Seed", "2020-01-01T00:00:00Z");
+    git(repo.dir.path(), ["checkout", "-b", "survivor"]);
+    let survivor_edit = commit(
+        &repo,
+        "a",
+        "survivor version\n",
+        "Survivor edit",
+        "2020-01-02T00:00:00Z",
+    );
+    git(repo.dir.path(), ["checkout", "-b", "deleted", &seed]);
+    fs::remove_file(repo.dir.path().join("a")).unwrap();
+    let deletion = commit_all(&repo, "Delete on first parent", "2020-01-03T00:00:00Z");
+    git(
+        repo.dir.path(),
+        ["checkout", "-b", "merge-branch", &deletion],
+    );
+    let conflict = git_command(repo.dir.path())
+        .args(["merge", "--no-ff", "--no-commit", "survivor"])
+        .output()
+        .unwrap();
+    assert!(!conflict.status.success());
+    git(repo.dir.path(), ["checkout", "--theirs", "--", "a"]);
+    git(repo.dir.path(), ["add", "a"]);
+    let merge_output = git_command(repo.dir.path())
+        .args(["commit", "-m", "Merge surviving file"])
+        .env("GIT_AUTHOR_DATE", "2020-01-04T00:00:00Z")
+        .env("GIT_COMMITTER_DATE", "2020-01-04T00:00:00Z")
+        .output()
+        .unwrap();
+    assert!(
+        merge_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&merge_output.stderr)
+    );
+    let merge = repo.head();
+    let after_merge = commit(
+        &repo,
+        "a",
+        "after merge\n",
+        "After merge edit",
+        "2020-01-05T00:00:00Z",
+    );
+    git(repo.dir.path(), ["branch", "-f", "main", "HEAD"]);
+    repo.index();
+
+    let report = json(
+        &repo,
+        &["followups", &seed, "--to-rev", &after_merge, "--json"],
+    );
+    let entries = report["entries"].as_array().unwrap();
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry["commit_id"] == survivor_edit)
+    );
+    assert!(!entries.iter().any(|entry| entry["commit_id"] == merge));
+    assert!(
+        !entries
+            .iter()
+            .any(|entry| entry["commit_id"] == after_merge)
+    );
+    assert!(
+        report["warnings"]
+            .to_string()
+            .contains("ambiguous merge correspondence")
+    );
+
+    let survivor_report = json(
+        &repo,
+        &["followups", &seed, "--to-rev", &survivor_edit, "--json"],
+    );
+    assert_eq!(survivor_report["entries"][0]["commit_id"], survivor_edit);
 }
 
 #[test]
