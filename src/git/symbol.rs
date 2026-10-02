@@ -82,16 +82,16 @@ pub(super) fn declarations(content: &[u8], path: &str) -> Vec<(String, Span)> {
             .split(|byte| !is_symbol_byte(*byte))
             .filter(|token| !token.is_empty())
         {
-            if is_declaration(line, token) {
-                if let Ok(name) = std::str::from_utf8(token) {
-                    declarations.push((
-                        name.to_owned(),
-                        Span {
-                            start: index + 1,
-                            end: symbol_span_end(content, index + 1, path.ends_with(".rs")),
-                        },
-                    ));
-                }
+            if is_declaration(line, token)
+                && let Ok(name) = std::str::from_utf8(token)
+            {
+                declarations.push((
+                    name.to_owned(),
+                    Span {
+                        start: index + 1,
+                        end: symbol_span_end(content, index + 1, path.ends_with(".rs")),
+                    },
+                ));
             }
         }
     }

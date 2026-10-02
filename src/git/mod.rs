@@ -16,6 +16,7 @@ pub(crate) use target::{DeletedLine, RegressionTarget, TraceFixTarget, WhyAnchor
 pub(crate) struct SymbolTrace {
     pub(crate) revisions: Vec<String>,
     pub(crate) modifications: Vec<SymbolChange>,
+    pub(crate) paths: Vec<Vec<u8>>,
     pub(crate) introduction: Result<String, String>,
 }
 

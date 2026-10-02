@@ -30,6 +30,198 @@ impl TestRepo {
 }
 
 #[test]
+fn why_symbol_relocations_preserve_historical_material() {
+    for whole_file in [true, false] {
+        let repo = TestRepo::new();
+        repo.commit(
+            "src/old.rs",
+            b"fn calculate() {\n    let result = 1;\n}\n",
+            "Create calculation",
+            None,
+        );
+        let introduction = repo.head();
+        repo.commit(
+            "src/old.rs",
+            b"fn calculate() {\n    let result = 2;\n}\n",
+            "Correct calculation",
+            Some("Because callers need the corrected result."),
+        );
+        let modification = repo.head();
+        if whole_file {
+            repo.rename("src/old.rs", "src/new.rs", "Rename file");
+        } else {
+            repo.commit(
+                "src/new.rs",
+                b"fn helper() {}\n",
+                "Create destination",
+                None,
+            );
+            fs::write(repo.dir.path().join("src/old.rs"), b"fn remaining() {}\n").unwrap();
+            repo.commit(
+                "src/new.rs",
+                b"fn helper() {}\nfn calculate() {\n    let result = 2;\n}\n",
+                "Move calculation",
+                None,
+            );
+            git(repo.dir.path(), ["add", "src/old.rs"]);
+            git(repo.dir.path(), ["commit", "--amend", "--no-edit"]);
+        }
+        let relocation = repo.head();
+        repo.index();
+        let report = json(
+            &repo,
+            &[
+                "why",
+                "src/new.rs",
+                "--symbol",
+                "calculate",
+                "--patch",
+                "--json",
+            ],
+        );
+        assert_eq!(
+            report["symbol_summary"]["introduction"]["commit_oid"], introduction,
+            "{report}"
+        );
+        assert_eq!(report["matched_count"], 1);
+        assert_eq!(
+            report["target_related_modifications"][0]["oid"],
+            modification
+        );
+        assert!(
+            report["target_related_modifications"][0]
+                .to_string()
+                .contains("src/old.rs")
+        );
+        assert!(
+            !report["target_related_modifications"]
+                .to_string()
+                .contains(&relocation)
+        );
+        assert!(
+            report["target_related_modifications"][0]["patch"]
+                .to_string()
+                .contains("result = 2")
+        );
+        let scoped = json(
+            &repo,
+            &[
+                "why",
+                "src/new.rs",
+                "--symbol",
+                "calculate",
+                "--from-rev",
+                modification.as_str(),
+                "--patch",
+                "--json",
+            ],
+        );
+        assert_eq!(
+            scoped["symbol_summary"]["introduction"]["status"],
+            "unknown"
+        );
+        assert!(!scoped.to_string().contains(&introduction));
+        assert_eq!(scoped["matched_count"], 0);
+        assert!(
+            !scoped["target_related_modifications"]
+                .to_string()
+                .contains(&modification)
+        );
+        let time_scoped = json(
+            &repo,
+            &[
+                "why",
+                "src/new.rs",
+                "--symbol",
+                "calculate",
+                "--since",
+                "9999-01-01",
+                "--json",
+            ],
+        );
+        assert_eq!(time_scoped["matched_count"], 0);
+        assert!(!time_scoped.to_string().contains(&introduction));
+        assert!(!time_scoped.to_string().contains(&modification));
+        repo.commit(
+            "src/new.rs",
+            b"fn calculate() { let result = 999; }\n",
+            "Later replacement",
+            None,
+        );
+        repo.index();
+        let pinned = json(
+            &repo,
+            &[
+                "why",
+                "src/new.rs",
+                "--symbol",
+                "calculate",
+                "--at",
+                relocation.as_str(),
+                "--json",
+            ],
+        );
+        assert_eq!(
+            pinned["symbol_summary"]["introduction"]["commit_oid"],
+            introduction
+        );
+        assert_eq!(
+            pinned["target_related_modifications"][0]["oid"],
+            modification
+        );
+    }
+}
+
+#[test]
+fn why_symbol_uncertain_moves_do_not_claim_creation() {
+    for ambiguous in [true, false] {
+        let repo = TestRepo::new();
+        repo.commit(
+            "src/old.rs",
+            b"fn calculate() { let result = 1; }\n",
+            "Create source",
+            None,
+        );
+        if ambiguous {
+            repo.commit(
+                "src/other.rs",
+                b"fn calculate() { let result = 1; }\n",
+                "Create second source",
+                None,
+            );
+        }
+        repo.commit(
+            "src/new.rs",
+            b"fn helper() {}\n",
+            "Create destination",
+            None,
+        );
+        fs::write(repo.dir.path().join("src/old.rs"), b"fn remaining() {}\n").unwrap();
+        if ambiguous {
+            fs::write(repo.dir.path().join("src/other.rs"), b"fn another() {}\n").unwrap();
+        }
+        let contents: &[u8] = if ambiguous {
+            b"fn helper() {}\nfn calculate() { let result = 1; }\n"
+        } else {
+            b"fn helper() {}\nfn calculate() { let result = 999; }\n"
+        };
+        repo.commit("src/new.rs", contents, "Uncertain move", None);
+        git(repo.dir.path(), ["add", "-A"]);
+        git(repo.dir.path(), ["commit", "--amend", "--no-edit"]);
+        repo.index();
+        let report = json(
+            &repo,
+            &["why", "src/new.rs", "--symbol", "calculate", "--json"],
+        );
+        assert_eq!(
+            report["symbol_summary"]["introduction"]["status"], "unknown",
+            "{report}"
+        );
+        assert_eq!(report["matched_count"], 0);
+    }
+}
+
+#[test]
 fn why_reports_blame_without_inventing_a_line_explanation() {
     let repo = TestRepo::new();
     repo.commit(

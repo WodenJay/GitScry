@@ -41,6 +41,7 @@ pub(crate) fn run(
     let unavailable_trace = SymbolTrace {
         revisions: Vec::new(),
         modifications: Vec::new(),
+        paths: Vec::new(),
         introduction: Err("Git symbol-range history is unavailable".to_owned()),
     };
     let symbol_trace = anchor_info
@@ -70,7 +71,21 @@ pub(crate) fn run(
         return Ok(report);
     }
 
-    let commits = session.path_history(&target.path, reachable)?;
+    let mut commits = session.path_history(&target.path, reachable)?;
+    if let Some(trace) = symbol_trace {
+        let mut seen = commits
+            .iter()
+            .map(|commit| commit.oid.clone())
+            .collect::<HashSet<_>>();
+        let paths = trace.paths.iter().collect::<HashSet<_>>();
+        for path in paths {
+            for commit in session.path_history(path, reachable)? {
+                if seen.insert(commit.oid.clone()) {
+                    commits.push(commit);
+                }
+            }
+        }
+    }
 
     let first_parent_history = session.first_parent_ancestors(&target.revision)?;
     let missing_objects = session.has_missing_objects(&commits)?;
@@ -317,14 +332,7 @@ fn summarize_symbol(
         .revisions
         .iter()
         .filter_map(|oid| commits_by_oid.get(oid.as_str()))
-        .any(|commit| {
-            commit.parent_count > 1
-                || commit.shallow_boundary
-                || commit.changes.iter().any(|change| {
-                    commit.anchored_ordinals.contains(&change.ordinal)
-                        && (change.status.starts_with('R') || change.status.starts_with('C'))
-                })
-        });
+        .any(|commit| commit.parent_count > 1 || commit.shallow_boundary);
     let shallow_history = target
         .warnings
         .iter()
