@@ -61,7 +61,23 @@ pub(crate) fn execute(
     command: Command,
     report: &mut dyn FnMut(Progress),
 ) -> Result<Outcome, AppError> {
-    let mut github_link_request = None;
+    let github_link_request = match &command {
+        Command::Search {
+            github_links,
+            github_repo,
+            ..
+        } => (*github_links).then(|| github_repo.clone()),
+        Command::Examples { github, .. }
+        | Command::Failures { github, .. }
+        | Command::Related { github, .. }
+        | Command::Tests { github, .. }
+        | Command::Regression { github, .. }
+        | Command::Why { github, .. }
+        | Command::TraceFix { github, .. } => {
+            github.github_links.then(|| github.github_repo.clone())
+        }
+        _ => None,
+    };
     let (request, limit, patch, scope) = match command {
         Command::Index {
             semantic,
@@ -81,8 +97,6 @@ pub(crate) fn execute(
             limit,
             patch,
             scope,
-            github_links,
-            github_repo,
             ..
         } => {
             let request = match (query, code) {
@@ -97,7 +111,6 @@ pub(crate) fn execute(
                 },
                 _ => unreachable!("clap enforces exactly one search mode"),
             };
-            github_link_request = github_links.then_some(github_repo);
             (request, limit, patch, scope.into())
         }
         Command::Examples {
@@ -248,7 +261,7 @@ pub(crate) fn execute(
     )?;
     let github_links = github_link_request.map(|explicit_repo| {
         let query::QueryReport::Analysis(report) = &result.report else {
-            unreachable!("GitHub links are enabled only for text search");
+            unreachable!("GitHub links are enabled only for material queries");
         };
         github::fetch(report, explicit_repo.as_deref())
     });

@@ -1,6 +1,188 @@
 #[path = "support/mod.rs"]
 mod support;
 
+fn commit_material_files(
+    repo: &support::TestRepo,
+    subject: &str,
+    body: &str,
+    files: &[(&str, &str)],
+) {
+    for (path, contents) in files {
+        let path = std::path::Path::new(path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(repo.dir.path().join(parent)).unwrap();
+        }
+        std::fs::write(repo.dir.path().join(path), contents).unwrap();
+    }
+    support::git(repo.dir.path(), ["add", "--all"]);
+    support::git(repo.dir.path(), ["commit", "-m", subject, "-m", body]);
+}
+
+fn indexed_material_repo() -> support::TestRepo {
+    let repo = support::TestRepo::new();
+    commit_material_files(
+        &repo,
+        "Add provider normalization path",
+        "Keep provider values available to callers.",
+        &[
+            (
+                "src/lib.rs",
+                "pub fn provider(value: &str) -> &str { value }\n",
+            ),
+            (
+                "tests/provider.rs",
+                "#[test]\nfn provider_accepts_values() {}\n",
+            ),
+        ],
+    );
+    commit_material_files(
+        &repo,
+        "Retire legacy provider safely",
+        "Normalize provider values so stale input does not leak to callers.",
+        &[
+            (
+                "src/lib.rs",
+                "pub fn provider(value: &str) -> &str { value.trim() }\n",
+            ),
+            (
+                "tests/provider.rs",
+                "#[test]\nfn provider_normalizes_values() {}\n",
+            ),
+        ],
+    );
+    let retired = repo.head();
+    commit_material_files(
+        &repo,
+        "Revert \"Retire legacy provider safely\"",
+        &format!(
+            "This reverts commit {retired}.\n\nReason: provider regression.\nRetry: restore normalization after callers migrate."
+        ),
+        &[
+            (
+                "src/lib.rs",
+                "pub fn provider(value: &str) -> &str { value }\n",
+            ),
+            (
+                "tests/provider.rs",
+                "#[test]\nfn provider_accepts_values() {}\n",
+            ),
+        ],
+    );
+    commit_material_files(
+        &repo,
+        "Fix provider regression after revert",
+        "Restore normalization after callers migrate.",
+        &[
+            (
+                "src/lib.rs",
+                "pub fn provider(value: &str) -> &str { value.trim() }\n",
+            ),
+            (
+                "tests/provider.rs",
+                "#[test]\nfn provider_regression_is_fixed() {}\n",
+            ),
+        ],
+    );
+    repo.index();
+    repo
+}
+
+const MATERIAL_COMMANDS: [(&str, &[&str]); 7] = [
+    (
+        "examples",
+        &[
+            "examples",
+            "retire",
+            "provider",
+            "--path",
+            "src/lib.rs",
+            "--since",
+            "2000-01-01",
+            "--limit",
+            "2",
+            "--patch",
+        ],
+    ),
+    (
+        "failures",
+        &[
+            "failures",
+            "provider",
+            "--path",
+            "src/lib.rs",
+            "--since",
+            "2000-01-01",
+            "--limit",
+            "2",
+        ],
+    ),
+    (
+        "related",
+        &[
+            "related",
+            "src/lib.rs",
+            "--since",
+            "2000-01-01",
+            "--limit",
+            "2",
+        ],
+    ),
+    (
+        "tests",
+        &[
+            "tests",
+            "src/lib.rs",
+            "--since",
+            "2000-01-01",
+            "--limit",
+            "2",
+        ],
+    ),
+    (
+        "why",
+        &[
+            "why",
+            "src/lib.rs",
+            "--line",
+            "1",
+            "--since",
+            "2000-01-01",
+            "--limit",
+            "2",
+            "--patch",
+        ],
+    ),
+    (
+        "regression",
+        &[
+            "regression",
+            "provider",
+            "regression",
+            "--path",
+            "src/lib.rs",
+            "--since",
+            "2000-01-01",
+            "--limit",
+            "2",
+            "--patch",
+        ],
+    ),
+    (
+        "trace-fix",
+        &[
+            "trace-fix",
+            "HEAD",
+            "--path",
+            "src/lib.rs",
+            "--since",
+            "2000-01-01",
+            "--limit",
+            "2",
+            "--patch",
+        ],
+    ),
+];
+
 #[test]
 fn github_options_allow_a_search_with_no_matches() {
     let repo = support::TestRepo::new();
@@ -95,6 +277,60 @@ fn invalid_github_repository_does_not_fail_the_git_search() {
             .unwrap()
             .contains("Invalid GitHub repository")
     );
+}
+
+#[test]
+fn remaining_material_queries_keep_git_output_with_explicit_link_options() {
+    let repo = indexed_material_repo();
+
+    for (name, args) in MATERIAL_COMMANDS {
+        let mut baseline_args = args.to_vec();
+        baseline_args.push("--json");
+        let baseline_output = repo.run(baseline_args.clone());
+        assert_eq!(baseline_output.status.code(), Some(0), "{name}");
+        let baseline: serde_json::Value = serde_json::from_slice(&baseline_output.stdout).unwrap();
+        assert!(
+            !baseline["materials"].as_array().unwrap().is_empty(),
+            "{name}"
+        );
+
+        let mut repository_only_args = args.to_vec();
+        repository_only_args.extend(["--github-repo", "acme/widget", "--json"]);
+        let repository_only = repo.run(repository_only_args);
+        assert_eq!(repository_only.status.code(), Some(0), "{name}");
+        assert_eq!(repository_only.stdout, baseline_output.stdout, "{name}");
+
+        let mut enabled_args = args.to_vec();
+        enabled_args.extend(["--github-links", "--github-repo", "../invalid", "--json"]);
+        let enabled = repo.run(enabled_args);
+        assert_eq!(enabled.status.code(), Some(0), "{name}");
+        let mut value: serde_json::Value = serde_json::from_slice(&enabled.stdout).unwrap();
+        assert_eq!(value["kind"], name, "{name}");
+        assert_eq!(value["schema_version"], 3, "{name}");
+        assert_eq!(value["github_links"]["status"], "failed", "{name}");
+
+        let mut expected = Vec::<String>::new();
+        for material in value["materials"].as_array().unwrap() {
+            for citation in material["citations"].as_array().unwrap() {
+                let sha = citation["oid"].as_str().unwrap();
+                if !expected.iter().any(|seen| seen == sha) {
+                    expected.push(sha.to_owned());
+                }
+            }
+        }
+        let actual = value["github_links"]["commit_associations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|association| association["commit_sha"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected, "{name}: link only returned citations");
+        assert!(actual.iter().all(|sha| sha.len() == 40), "{name}");
+
+        value.as_object_mut().unwrap().remove("github_links");
+        value["schema_version"] = baseline["schema_version"].clone();
+        assert_eq!(value, baseline, "{name}: Git materials stay unchanged");
+    }
 }
 
 #[cfg(unix)]
@@ -585,5 +821,119 @@ mod unix {
         assert!(gh.log().contains("owner=acme"));
         assert!(gh.log().contains("name=widget"));
         assert_eq!(gh.calls(), 1);
+    }
+}
+
+#[cfg(unix)]
+mod remaining_material_links {
+    use super::unix::{FakeGh, successful_response};
+    use super::{MATERIAL_COMMANDS, indexed_material_repo};
+    #[test]
+    fn remaining_material_commands_fetch_links_for_returned_citations_only() {
+        let repo = indexed_material_repo();
+        let gh = FakeGh::new(&successful_response());
+
+        for (name, args) in MATERIAL_COMMANDS {
+            let mut baseline_args = args.to_vec();
+            baseline_args.push("--json");
+            let baseline_output = repo.run(baseline_args.clone());
+            assert_eq!(baseline_output.status.code(), Some(0), "{name}");
+            let baseline: serde_json::Value =
+                serde_json::from_slice(&baseline_output.stdout).unwrap();
+
+            let mut repository_only_args = args.to_vec();
+            repository_only_args.extend(["--github-repo", "acme/widget", "--json"]);
+            let repository_only = gh.run(&repo, &repository_only_args);
+            assert_eq!(repository_only.status.code(), Some(0), "{name}");
+            assert_eq!(repository_only.stdout, baseline_output.stdout, "{name}");
+            assert_eq!(gh.calls(), 0, "{name}: repo selection must not fetch");
+
+            let mut enabled_args = args.to_vec();
+            enabled_args.extend(["--github-links", "--github-repo", "acme/widget", "--json"]);
+            let output = gh.run(&repo, &enabled_args);
+            assert_eq!(output.status.code(), Some(0), "{name}");
+            let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(value["kind"], name, "{name}");
+            assert_eq!(value["schema_version"], 3, "{name}");
+            assert!(!value["materials"].as_array().unwrap().is_empty(), "{name}");
+
+            let links = &value["github_links"];
+            assert_eq!(links["status"], "complete", "{name}");
+            assert_eq!(links["repository"], "acme/widget", "{name}");
+            assert_eq!(
+                links["pull_requests"].as_array().unwrap().len(),
+                1,
+                "{name}"
+            );
+
+            let mut expected = Vec::<String>::new();
+            for material in value["materials"].as_array().unwrap() {
+                for citation in material["citations"].as_array().unwrap() {
+                    let sha = citation["oid"].as_str().unwrap();
+                    if !expected.iter().any(|seen| seen == sha) {
+                        expected.push(sha.to_owned());
+                    }
+                }
+            }
+            let actual = links["commit_associations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|association| association["commit_sha"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                actual, expected,
+                "{name}: preserve ordered unique citations"
+            );
+
+            let mut without_links = value.clone();
+            without_links
+                .as_object_mut()
+                .unwrap()
+                .remove("github_links");
+            without_links["schema_version"] = baseline["schema_version"].clone();
+            assert_eq!(
+                without_links, baseline,
+                "{name}: Git materials stay unchanged"
+            );
+        }
+    }
+
+    #[test]
+    fn github_failures_do_not_change_any_remaining_material_query() {
+        let repo = indexed_material_repo();
+        let secret = "TOKEN_SHOULD_NOT_LEAK";
+        let gh =
+            FakeGh::with_exit_status(&format!(r#"{{"errors":[{{"message":"{secret}"}}]}}"#), 1);
+
+        for (name, args) in MATERIAL_COMMANDS {
+            let mut baseline_args = args.to_vec();
+            baseline_args.push("--json");
+            let baseline_output = repo.run(baseline_args);
+            assert_eq!(baseline_output.status.code(), Some(0), "{name}");
+            let baseline: serde_json::Value =
+                serde_json::from_slice(&baseline_output.stdout).unwrap();
+
+            let calls_before = gh.calls();
+            let mut enabled_args = args.to_vec();
+            enabled_args.extend(["--github-links", "--github-repo", "acme/widget", "--json"]);
+            let output = gh.run(&repo, &enabled_args);
+            assert_eq!(output.status.code(), Some(0), "{name}");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(!stdout.contains(secret), "{name}: do not leak gh output");
+            let mut value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(value["github_links"]["status"], "failed", "{name}");
+            assert!(
+                gh.calls() > calls_before,
+                "{name}: returned citations should query gh"
+            );
+
+            value.as_object_mut().unwrap().remove("github_links");
+            value["schema_version"] = baseline["schema_version"].clone();
+            assert_eq!(
+                value, baseline,
+                "{name}: failed links must leave Git output unchanged"
+            );
+        }
     }
 }

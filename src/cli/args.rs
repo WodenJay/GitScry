@@ -20,6 +20,7 @@ Your Git history is a treasure trove. GitScry uncovers the implementation exampl
 
 Pick one command by intent, then run `gitscry <command> --help` for inputs, options, and examples.\n\nQuery commands support `--json` for structured output.";
 
+const MATERIAL_LINKS_LONG_HELP: &str = "`--github-links` retrieves bounded first-page pull-request associations for complete commits cited by returned material, through the authenticated `gh` CLI. The optional `--github-repo OWNER/REPO` selects a repository but does not itself trigger access; without it, repository inference follows `search` rules. Without `--github-links`, no GitHub lookup occurs. Links add navigation only, do not change Git material, and do not promise command-specific benefits. In particular, test co-change history does not prove assertions exist, regression suspects are not root-cause findings, and participant descriptions do not outweigh changes visible in Git.";
 #[derive(Debug, Args, Default)]
 pub(crate) struct HistoricalScopeArgs {
     /// Exclude this cached commit and its ancestors from the query scope.
@@ -34,6 +35,16 @@ pub(crate) struct HistoricalScopeArgs {
     /// Include commits through this UTC date or RFC 3339 timestamp with an offset.
     #[arg(long, value_name = "DATE_OR_TIMESTAMP")]
     pub(crate) until: Option<String>,
+}
+
+#[derive(Debug, Args, Default)]
+pub(crate) struct GithubLinkArgs {
+    /// Fetch bounded first-page GitHub PR associations for returned material commits; requires an authenticated gh CLI.
+    #[arg(long)]
+    pub(crate) github_links: bool,
+    /// GitHub repository to query; does not enable link fetching by itself.
+    #[arg(long = "github-repo", value_name = "OWNER/REPO")]
+    pub(crate) github_repo: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -117,7 +128,7 @@ Examples:
         /// Include bounded relevant cached text hunks; unavailable history is reported.
         #[arg(long, requires = "query", conflicts_with = "code")]
         patch: bool,
-        /// Fetch bounded first-page GitHub PR associations for returned text-search commits; requires an authenticated gh CLI.
+        /// Fetch bounded first-page GitHub PR associations for returned material commits; requires an authenticated gh CLI.
         #[arg(long, requires = "query", conflicts_with = "code")]
         github_links: bool,
         /// GitHub repository to query; does not enable link fetching by itself.
@@ -141,6 +152,7 @@ Examples:
 
   gitscry examples retire provider --since 2025-01-01 --until 2025-01-31 --path src/lib.rs"#
     )]
+    #[command(after_long_help = MATERIAL_LINKS_LONG_HELP)]
     Examples {
         /// Query words matched against commit subjects, bodies, and touched paths.
         #[arg(required = true, num_args = 1..)]
@@ -159,6 +171,8 @@ Examples:
         patch: bool,
         #[command(flatten)]
         scope: HistoricalScopeArgs,
+        #[command(flatten)]
+        github: GithubLinkArgs,
     },
 
     #[command(
@@ -177,6 +191,7 @@ Examples:
 
   gitscry failures parser migration --since 2025-01-01T09:00:00-05:00"#
     )]
+    #[command(after_long_help = MATERIAL_LINKS_LONG_HELP)]
     Failures {
         /// Query words matched against commit subjects, bodies, and touched paths.
         #[arg(required = true, num_args = 1..)]
@@ -192,18 +207,23 @@ Examples:
         json: bool,
         #[command(flatten)]
         scope: HistoricalScopeArgs,
+        #[command(flatten)]
+        github: GithubLinkArgs,
     },
 
     #[command(
         about = "Find historical paths changed alongside one or more seed paths",
         long_about = "Find historical paths changed alongside one or more seed paths.\n\nUse `gitscry related` when you are changing one or more paths and want to know which other paths historically changed together with them, such as mirrored files or coupled modules.\n\nRequired input: one or more repository-relative seed PATHS.\n\nScope applies only to cached history. `--from-rev REV` excludes that commit and its ancestors; `--to-rev REV` includes that commit and its ancestors and defaults to the published cache tip. Revisions must exist in the published cache, and the lower revision must be an ancestor of the upper revision. `--since` and `--until` filter committer time: `YYYY-MM-DD` means an inclusive UTC calendar day, while RFC 3339 timestamps with `Z` or an explicit offset mean inclusive instants. Timezone-free timestamps are rejected. All bounds intersect. Scope filters co-change counts, scoring denominators, and supporting commits before ranking and `--limit`; scoped output reports resolved bounds and the effective cache tip. Without scope flags, all cached history is used.\n\nExamples:\n\n  gitscry related src/lib.rs --from-rev <base> --to-rev release\n\n  gitscry related src/cli.rs --since 2025-01-01 --until 2025-01-31"
     )]
+    #[command(after_long_help = MATERIAL_LINKS_LONG_HELP)]
     Related {
         /// Repository-relative seed paths matched against history.
         #[arg(required = true, num_args = 1..)]
         paths: Vec<String>,
         #[command(flatten)]
         scope: HistoricalScopeArgs,
+        #[command(flatten)]
+        github: GithubLinkArgs,
         /// Maximum number of matches to return.
         #[arg(long, default_value = "10", value_parser = parse_limit)]
         limit: usize,
@@ -216,12 +236,15 @@ Examples:
         about = "Find current test paths historically changed alongside one or more seed paths",
         long_about = "Find current test paths historically changed alongside one or more seed paths.\n\nUse `gitscry tests` when you changed code and want the test files that historically changed with it: it returns existing test paths ranked by co-change history.\n\nRequired input: one or more repository-relative seed PATHS.\n\nTest candidates remain current test paths in the working tree; scope narrows historical support, not the current test-path target set. `--from-rev REV` excludes that commit and its ancestors; `--to-rev REV` includes that commit and its ancestors and defaults to the published cache tip. Revisions must exist in the published cache, and the lower revision must be an ancestor of the upper revision. `--since` and `--until` filter committer time: `YYYY-MM-DD` means an inclusive UTC calendar day, while RFC 3339 timestamps with `Z` or an explicit offset mean inclusive instants. Timezone-free timestamps are rejected. All bounds intersect. Historical support and scoring are filtered before ranking and `--limit`; scoped output reports resolved bounds and the effective cache tip. Without scope flags, all cached history is used.\n\nExamples:\n\n  gitscry tests src/lib.rs --from-rev <base> --to-rev release\n\n  gitscry tests src/cli.rs --since 2025-01-01 --until 2025-01-31"
     )]
+    #[command(after_long_help = MATERIAL_LINKS_LONG_HELP)]
     Tests {
         /// Repository-relative seed paths matched against history.
         #[arg(required = true, num_args = 1..)]
         paths: Vec<String>,
         #[command(flatten)]
         scope: HistoricalScopeArgs,
+        #[command(flatten)]
+        github: GithubLinkArgs,
         /// Maximum number of matches to return.
         #[arg(long, default_value = "10", value_parser = parse_limit)]
         limit: usize,
@@ -234,6 +257,7 @@ Examples:
         about = "Locate historical commits that may have introduced a regression",
         long_about = "Locate historical commits that may have introduced a regression.\n\nUse `gitscry regression` when a regression is observable and you want suspects: commits in the requested revision range whose material supports them as candidates that may have introduced the regression. Suspects are historical candidates; they do not replace an executable `git bisect`.\n\nRequired inputs: one or more SYMPTOM words and `--path`, the repository-relative path affected by the regression. `--symbol` narrows the suspect history to a symbol in that path. `--good` pins the last known good revision so suspects are limited to the good..bad range; `--bad` pins the last known bad revision and defaults to HEAD.\n\nHistory scope narrows that pinned suspect window: `--from-rev` excludes that revision and its ancestors; `--to-rev` is inclusive and defaults to `--bad`. `--since` and `--until` intersect with the suspect window using committer time. Date-only bounds cover inclusive UTC calendar days; timestamps require RFC 3339 with `Z` or an explicit UTC offset.\n\nExamples:\n\n  gitscry regression provider normalization --path src/lib.rs\n\n  gitscry regression slow startup --path src/main.rs --good v0.1.0 --symbol main\n\n  gitscry regression timeout --path src/app.py --good v0.2 --bad v0.3 --since 2024-01-01"
     )]
+    #[command(after_long_help = MATERIAL_LINKS_LONG_HELP)]
     Regression {
         /// Words describing the observable regression symptom.
         #[arg(required = true, num_args = 1..)]
@@ -252,6 +276,8 @@ Examples:
         bad: String,
         #[command(flatten)]
         scope: HistoricalScopeArgs,
+        #[command(flatten)]
+        github: GithubLinkArgs,
         /// Maximum number of matches to return.
         #[arg(long, default_value = "10", value_parser = parse_limit)]
         limit: usize,
@@ -272,6 +298,7 @@ Examples:
         about = "Explain the local history behind one line or symbol",
         long_about = "Explain the local history behind one line or symbol.\n\nUse `gitscry why` when a line or symbol raises a question and you want the commits whose material explains why it looks the way it does at the target revision.\n\nRequired inputs: a repository-relative PATH and exactly one anchor, `--line` (a one-based line number) or `--symbol` (a symbol name). `--at` pins the local revision containing the target and defaults to HEAD.\n\nHistorical scope: `--from-rev REV` excludes REV and its ancestors; `--to-rev REV` includes REV and its ancestors, intersected with the target revision selected by `--at`. Without `--to-rev`, the target revision is the upper bound. `--since` and `--until` filter by committer time and accept UTC dates or RFC 3339 timestamps with offsets. Scope flags combine, and revisions must be in the published cache.\n\nExamples:\n\n  gitscry why src/lib.rs --line 12\n\n  gitscry why src/lib.rs --symbol provider --at HEAD~1 --from-rev HEAD~5 --to-rev HEAD~1\n\n  gitscry why src/lib.rs --line 12 --since 2025-01-01 --until 2025-01-31"
     )]
+    #[command(after_long_help = MATERIAL_LINKS_LONG_HELP)]
     Why {
         /// Repository-relative path at the target revision.
         path: String,
@@ -302,6 +329,8 @@ Examples:
         /// Include bounded cached hunks tied to the target line or symbol.
         #[arg(long)]
         patch: bool,
+        #[command(flatten)]
+        github: GithubLinkArgs,
         /// Output a stable structured JSON report instead of human-readable text.
         #[arg(long)]
         json: bool,
@@ -311,6 +340,7 @@ Examples:
         about = "Trace a fix back to the introducing change and observed failure",
         long_about = "Trace a fix back to the introducing change and observed failure.\n\nUse `gitscry trace-fix` when a fix commit is known and you want what it fixed: the introducing change identified from the fix's parent diff and the observed failure recorded in the fix commit message.\n\nRequired input: FIX_REVISION is the fix target, a local revision containing the fix commit. `--path` narrows the material to a repository-relative path changed by the fix and may be repeated.\n\nHistory scope narrows introducing-change candidates without retargeting FIX_REVISION: `--from-rev` excludes that revision and its ancestors; `--to-rev` is inclusive and defaults to FIX_REVISION. `--since` and `--until` intersect with that commit range using committer time. Date-only bounds cover inclusive UTC calendar days; timestamps require RFC 3339 with `Z` or an explicit UTC offset.\n\nExamples:\n\n  gitscry trace-fix HEAD\n\n  gitscry trace-fix HEAD~1 --path src/lib.rs\n\n  gitscry trace-fix HEAD --from-rev HEAD~5 --since 2024-01-01"
     )]
+    #[command(after_long_help = MATERIAL_LINKS_LONG_HELP)]
     TraceFix {
         /// Local revision containing the fix commit.
         fix_revision: String,
@@ -319,6 +349,8 @@ Examples:
         paths: Vec<String>,
         #[command(flatten)]
         scope: HistoricalScopeArgs,
+        #[command(flatten)]
+        github: GithubLinkArgs,
         /// Maximum number of matches to return.
         #[arg(long, default_value = "10", value_parser = parse_limit)]
         limit: usize,

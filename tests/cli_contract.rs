@@ -476,6 +476,44 @@ fn json_preserves_unclipped_paths_steps_and_complete_citations() {
         assert_eq!(invalid_path["base64"], "c3JjL2JhZC3/LnJz");
     }
 }
+#[test]
+fn material_commands_share_github_link_options_and_caveats() {
+    let repo = TestRepo::new();
+    for name in [
+        "examples",
+        "failures",
+        "related",
+        "tests",
+        "regression",
+        "why",
+        "trace-fix",
+    ] {
+        let output = repo.run([name, "--help"]);
+        assert_eq!(output.status.code(), Some(0), "{name}");
+        let help = String::from_utf8_lossy(&output.stdout)
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        for detail in [
+            "--github-links",
+            "--github-repo <OWNER/REPO>",
+            "authenticated `gh` CLI",
+            "does not enable link fetching by itself",
+            "navigation only",
+            "do not change Git material",
+            "do not promise command-specific benefits",
+            "participant descriptions do not outweigh changes visible in Git",
+        ] {
+            assert!(help.contains(detail), "{name} help missing {detail}");
+        }
+        if name == "tests" {
+            assert!(help.contains("test co-change history does not prove assertions exist"));
+        }
+        if name == "regression" {
+            assert!(help.contains("regression suspects are not root-cause findings"));
+        }
+    }
+}
 
 #[test]
 fn json_keeps_every_relation_citation_while_text_stays_clipped() {

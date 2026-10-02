@@ -5,7 +5,7 @@ use std::{
 
 use serde::Serialize;
 
-use crate::analysis::{Report, ReportKind};
+use crate::analysis::Report;
 
 use super::{gh, remote};
 
@@ -88,7 +88,6 @@ pub(super) struct Page {
 }
 
 pub(crate) fn fetch(report: &Report, explicit_repository: Option<&str>) -> LinksReport {
-    debug_assert!(matches!(report.kind, ReportKind::Search));
     let commits = returned_commits(report);
     if commits.is_empty() {
         return LinksReport::new(None, FetchStatus::Complete, None, Vec::new());
