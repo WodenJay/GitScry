@@ -1,4 +1,7 @@
-use std::{collections::HashSet, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+};
 
 use crate::app::AppError;
 
@@ -185,66 +188,80 @@ pub(super) fn pin_trace_fix(
     }
     let mut deleted_lines = Vec::new();
     if let (Some(parent), Some(hunks)) = (parent.as_deref(), hunks.as_ref()) {
-        let ignore_file = blame_ignore_file(git)?;
         for hunk in hunks {
             if !selected_ordinals.contains(&hunk.change_ordinal) {
                 continue;
             }
-            let Some(change) = changes
+            let Some(path) = changes
                 .iter()
                 .find(|change| change.ordinal == hunk.change_ordinal)
+                .and_then(|change| change.old_path.as_deref())
             else {
                 continue;
             };
-            let Some(path) = change.old_path.as_deref() else {
-                continue;
-            };
-            let path_text = String::from_utf8_lossy(path).into_owned();
             let mut old_line = hunk.old_start;
             for diff_line in hunk.text.split_inclusive(|byte| *byte == b'\n') {
-                let Some(marker) = diff_line.first().copied() else {
-                    continue;
-                };
-                match marker {
-                    b'-' => {
+                match diff_line.first() {
+                    Some(b'-') => {
                         if let Ok(line) = usize::try_from(old_line) {
-                            let (blame, used_ignore_file) =
-                                read_blame(git, parent, &path_text, line, ignore_file.as_deref())?;
-                            if used_ignore_file {
-                                push_warning(
-                                    &mut warnings,
-                                    "warning: blame ignored revisions from .git-blame-ignore-revs; trace-fix attribution may be incomplete."
-                                        .to_owned(),
-                                );
-                            }
-                            if let Some(blame) = &blame {
-                                if shallow && blame.boundary {
-                                    push_warning(
-                                        &mut warnings,
-                                        "warning: fix-parent blame reached a shallow boundary; introducing lineage may be incomplete (confidence: low)."
-                                            .to_owned(),
-                                    );
-                                }
-                            } else {
-                                push_warning(
-                                    &mut warnings,
-                                    "warning: fix-parent deleted-line blame is unavailable; introducing lineage may be incomplete (confidence: low)."
-                                        .to_owned(),
-                                );
-                            }
                             deleted_lines.push(DeletedLine {
                                 path: path.to_vec(),
                                 line,
-                                blame,
+                                blame: None,
                             });
                         }
                         old_line += 1;
                     }
-                    b' ' => old_line += 1,
-                    b'+' | b'\\' | b'@' => {}
+                    Some(b' ') => old_line += 1,
                     _ => {}
                 }
             }
+        }
+        let ignore_file = blame_ignore_file(git)?;
+        let mut start = 0;
+        while start < deleted_lines.len() {
+            let mut end = start + 1;
+            while end < deleted_lines.len()
+                && deleted_lines[end].path == deleted_lines[start].path
+                && deleted_lines[end].line == deleted_lines[end - 1].line + 1
+            {
+                end += 1;
+            }
+            let path = String::from_utf8_lossy(&deleted_lines[start].path);
+            let (mut blamed, used_ignore_file) = read_blame_range(
+                git,
+                parent,
+                &path,
+                deleted_lines[start].line,
+                deleted_lines[end - 1].line,
+                ignore_file.as_deref(),
+            )?;
+            if used_ignore_file {
+                push_warning(
+                    &mut warnings,
+                    "warning: blame ignored revisions from .git-blame-ignore-revs; trace-fix attribution may be incomplete."
+                        .to_owned(),
+                );
+            }
+            for deleted in &mut deleted_lines[start..end] {
+                deleted.blame = blamed.remove(&deleted.line);
+                if let Some(blame) = &deleted.blame {
+                    if shallow && blame.boundary {
+                        push_warning(
+                            &mut warnings,
+                            "warning: fix-parent blame reached a shallow boundary; introducing lineage may be incomplete (confidence: low)."
+                                .to_owned(),
+                        );
+                    }
+                } else {
+                    push_warning(
+                        &mut warnings,
+                        "warning: fix-parent deleted-line blame is unavailable; introducing lineage may be incomplete (confidence: low)."
+                            .to_owned(),
+                    );
+                }
+            }
+            start = end;
         }
     }
     if hunks_available && deleted_lines.is_empty() {
@@ -698,6 +715,19 @@ fn read_blame(
     line: usize,
     ignore_file: Option<&str>,
 ) -> Result<(Option<Blame>, bool), AppError> {
+    let (mut blamed, used_ignore_file) =
+        read_blame_range(git, revision, path, line, line, ignore_file)?;
+    Ok((blamed.remove(&line), used_ignore_file))
+}
+
+fn read_blame_range(
+    git: &Git,
+    revision: &str,
+    path: &str,
+    start: usize,
+    end: usize,
+    ignore_file: Option<&str>,
+) -> Result<(HashMap<usize, Blame>, bool), AppError> {
     let mut args = vec![
         "-c".to_owned(),
         "core.fsmonitor=false".to_owned(),
@@ -711,7 +741,7 @@ fn read_blame(
     }
     args.extend([
         "-L".to_owned(),
-        format!("{line},{line}"),
+        format!("{start},{end}"),
         revision.to_owned(),
         "--".to_owned(),
         path.to_owned(),
@@ -727,19 +757,51 @@ fn read_blame(
                 "--no-textconv",
                 "--line-porcelain",
                 "-L",
-                &format!("{line},{line}"),
+                &format!("{start},{end}"),
                 revision,
                 "--",
                 path,
             ];
             match git.output(fallback, &[]) {
-                Ok(output) => return Ok((parse_blame(&output)?, false)),
-                Err(_) => return Ok((None, false)),
+                Ok(output) => return Ok((parse_blame_range(&output)?, false)),
+                Err(_) => return Ok((HashMap::new(), false)),
             }
         }
-        Err(_) => return Ok((None, false)),
+        Err(_) => return Ok((HashMap::new(), false)),
     };
-    Ok((parse_blame(&output)?, ignore_file.is_some()))
+    Ok((parse_blame_range(&output)?, ignore_file.is_some()))
+}
+
+fn parse_blame_range(output: &[u8]) -> Result<HashMap<usize, Blame>, AppError> {
+    let mut blamed = HashMap::new();
+    let mut start = 0;
+    let mut end = 0;
+    for line in output.split_inclusive(|byte| *byte == b'\n') {
+        end += line.len();
+        if !line.starts_with(b"\t") {
+            continue;
+        }
+        let record = &output[start..end];
+        if let Some(blame) = parse_blame(record)? {
+            let final_line = record
+                .split(|byte| *byte == b'\n')
+                .next()
+                .and_then(|header| std::str::from_utf8(header).ok())
+                .and_then(|header| header.split_ascii_whitespace().nth(2))
+                .and_then(|number| number.parse::<usize>().ok())
+                .ok_or_else(|| {
+                    AppError::operational("error: parsing Git blame: invalid final line number")
+                })?;
+            blamed.insert(final_line, blame);
+        }
+        start = end;
+    }
+    if start != output.len() {
+        return Err(AppError::operational(
+            "error: parsing Git blame: incomplete line record",
+        ));
+    }
+    Ok(blamed)
 }
 
 fn parse_blame(output: &[u8]) -> Result<Option<Blame>, AppError> {
