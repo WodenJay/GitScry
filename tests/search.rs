@@ -1078,6 +1078,112 @@ fn partial_cjk_fragments_are_not_explained_as_exact_matches() {
 }
 
 #[test]
+fn complete_cjk_occurrences_rank_over_partial_fragment_matches() {
+    let repo = TestRepo::new();
+    repo.commit(
+        "complete.txt",
+        b"complete\n",
+        "Add cache behavior\n\n修复缓存更新逻辑",
+    );
+    let complete = repo.head();
+    repo.commit("complete-subject.txt", b"complete subject\n", "缓存更新");
+    let complete_subject = repo.head();
+    repo.commit("缓存更新.txt", b"complete path\n", "Update cache");
+    let complete_path = repo.head();
+    repo.commit("separated.txt", b"separated\n", "缓存-存更-更新");
+    let separated = repo.head();
+    repo.commit("reordered.txt", b"reordered\n", "更新-存更-缓存");
+    let reordered = repo.head();
+    repo.commit("distributed.txt", b"distributed\n", "缓存\n\n更新");
+    let distributed = repo.head();
+    repo.index();
+
+    let output = repo.run(["search", "缓存更新", "--limit", "10", "--json"]);
+    assert_eq!(output.status.code(), Some(0));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let materials = report["materials"].as_array().unwrap();
+    assert_eq!(report["matched_count"], 6, "{report}");
+    let top_oids = materials
+        .iter()
+        .take(3)
+        .map(|material| material["citations"][0]["oid"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    for oid in [&complete, &complete_subject, &complete_path] {
+        assert!(top_oids.contains(&oid.as_str()), "{report}");
+    }
+
+    for oid in [&separated, &reordered, &distributed] {
+        let material = materials
+            .iter()
+            .find(|material| material["citations"][0]["oid"] == *oid)
+            .unwrap_or_else(|| panic!("missing partial match {oid}: {report}"));
+        let basis = material["basis"].as_array().unwrap();
+        assert!(
+            basis
+                .iter()
+                .any(|item| item == "partial CJK fragment match (1)"),
+            "{material}"
+        );
+        assert!(
+            basis.iter().all(|item| !item
+                .as_str()
+                .unwrap_or_default()
+                .starts_with("subject match")),
+            "{material}"
+        );
+    }
+}
+
+#[test]
+fn complete_cjk_match_survives_partial_candidates_beyond_budget() {
+    let repo = TestRepo::new();
+    repo.commit(
+        "complete.txt",
+        b"complete\n",
+        "Add cache behavior\n\n修复缓存更新逻辑",
+    );
+    let complete = repo.head();
+    let fragments = ["缓存", "存更", "更新"].join("/");
+    let partial_message = format!("{fragments} {fragments} {fragments}");
+    let mut partials = Vec::new();
+    for index in 0..25 {
+        let path = format!("partial-{index}.txt");
+        repo.commit(&path, b"partial\n", &partial_message);
+        partials.push(repo.head());
+    }
+    repo.index();
+
+    let output = repo.run(["search", "缓存更新", "--limit", "1", "--json"]);
+    assert_eq!(output.status.code(), Some(0));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["matched_count"], 26, "{report}");
+    assert_eq!(
+        report["materials"][0]["citations"][0]["oid"], complete,
+        "{report}"
+    );
+
+    let scoped = repo.run([
+        "search",
+        "缓存更新",
+        "--limit",
+        "1",
+        "--from-rev",
+        &complete,
+        "--json",
+    ]);
+    assert_eq!(scoped.status.code(), Some(0));
+    let scoped_report: serde_json::Value = serde_json::from_slice(&scoped.stdout).unwrap();
+    assert_eq!(scoped_report["matched_count"], 25, "{scoped_report}");
+    let scoped_oid = scoped_report["materials"][0]["citations"][0]["oid"]
+        .as_str()
+        .unwrap();
+    assert!(
+        partials.iter().any(|oid| oid == scoped_oid),
+        "{scoped_report}"
+    );
+}
+
+#[test]
 fn search_replays_issue_2_secret_redaction_case() {
     let repo = TestRepo::new();
     repo.commit(

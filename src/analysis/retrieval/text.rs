@@ -128,7 +128,7 @@ fn push_unique(terms: &mut Vec<String>, seen: &mut HashSet<String>, term: String
     }
 }
 
-fn is_cjk_run(term: &str) -> bool {
+pub(super) fn is_cjk_run(term: &str) -> bool {
     !term.is_empty() && term.chars().all(is_cjk)
 }
 

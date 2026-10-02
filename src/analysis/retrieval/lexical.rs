@@ -7,6 +7,7 @@ const SUBJECT_WEIGHT: f64 = 1.5;
 const COVERAGE_WEIGHT: f64 = 2.0;
 const REPOSITORY_WEIGHT: f64 = 1.0;
 const ANCHOR_BONUS: f64 = 3.0;
+const COMPLETE_CJK_BONUS: f64 = 3.0;
 
 /// How well one commit answers the intent's words: the shared lexical pipeline.
 ///
@@ -19,6 +20,7 @@ pub(in crate::analysis) struct Signals {
     repository_matches: usize,
     exact_subject_matches: usize,
     exact_repository_matches: usize,
+    complete_cjk_matches: usize,
     /// Query terms matched by prose, including partial CJK fragments.
     covered: usize,
     partial_coverage: usize,
@@ -53,6 +55,10 @@ pub(in crate::analysis) fn signals(
     let mut all_text_refs = vec![subject, body];
     all_text_refs.extend(path_text_refs.iter().copied());
 
+    let complete_cjk_matches = intent
+        .complete_cjk_terms()
+        .filter(|term| all_text_refs.iter().any(|text| text.contains(*term)))
+        .count();
     let subject_matches = count_matches(intent.terms(), &subject_terms, &[subject]);
     let repository_matches = count_matches(intent.terms(), &path_terms, &path_text_refs);
     let prose_matches = count_matches(intent.terms(), &prose, &[subject, body]);
@@ -62,6 +68,7 @@ pub(in crate::analysis) fn signals(
         exact_subject_matches: subject_matches.exact,
         repository_matches: repository_matches.total(),
         exact_repository_matches: repository_matches.exact,
+        complete_cjk_matches,
         covered: prose_matches.total(),
         partial_coverage: prose_matches.partial,
         identified: identified_matches.total(),
@@ -133,6 +140,7 @@ impl Signals {
 
     fn weighted(&self, coverage: usize) -> f64 {
         self.lexical
+            + self.complete_cjk_matches as f64 * COMPLETE_CJK_BONUS
             + self.subject_matches as f64 * SUBJECT_WEIGHT
             + coverage as f64 / self.total_terms as f64 * COVERAGE_WEIGHT
             + self.repository_matches as f64 * REPOSITORY_WEIGHT
