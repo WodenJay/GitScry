@@ -22,21 +22,14 @@ pub(super) fn compose(
         return Ok(changes);
     }
     let reverts = retrieval::reverts(session, scope)?;
-    let commits = match scope {
-        Some(scope) => session.commits_scoped(scope)?,
-        None => session.commits()?,
-    }
-    .into_iter()
-    .map(|commit| (commit.oid.clone(), commit))
-    .collect::<BTreeMap<_, _>>();
     let mut recordings = BTreeMap::new();
     let mut originals_by_revert: BTreeMap<&str, Vec<String>> = BTreeMap::new();
     for (_, _, suggestion) in &changes {
         let oid = suggestion.citations[0].oid.as_str();
         let paths = session.projected_paths(oid)?;
-        if let Some(commit) = commits.get(oid)
+        if let Some(position) = session.commit_position(oid)?
             && let Some(revert) =
-                retrieval::link_change(session, &reverts, scope, oid, &paths, commit.position)?
+                retrieval::link_change(session, &reverts, scope, oid, &paths, position)?
         {
             recordings.insert(oid.to_owned(), revert);
             originals_by_revert

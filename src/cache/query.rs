@@ -160,6 +160,17 @@ impl QuerySession {
         commit_message(&self.connection, oid)
     }
 
+    pub(crate) fn commit_position(&self, oid: &str) -> Result<Option<i64>, AppError> {
+        self.connection
+            .query_row(
+                "SELECT position FROM commits WHERE oid = ?1",
+                [oid],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| search_error("reading commit position", error))
+    }
+
     pub(crate) fn commits(&self) -> Result<Vec<StoredCommit>, AppError> {
         commits(&self.connection)
     }
