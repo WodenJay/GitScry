@@ -6,6 +6,8 @@ pub(crate) struct CurrentChange {
     pub(crate) staged: bool,
     pub(crate) head: Option<String>,
     pub(crate) changes: Vec<CurrentPath>,
+    pub(crate) content: Vec<CurrentHunk>,
+    pub(crate) content_omissions: Vec<ContentOmission>,
 }
 
 pub(crate) struct CurrentPath {
@@ -14,6 +16,19 @@ pub(crate) struct CurrentPath {
     pub(crate) new_path: Option<Vec<u8>>,
 }
 
+#[derive(Clone)]
+pub(crate) struct CurrentHunk {
+    pub(crate) path: Vec<u8>,
+    pub(crate) added: bool,
+    pub(crate) old_start: usize,
+    pub(crate) new_start: usize,
+    pub(crate) text: Vec<u8>,
+}
+
+pub(crate) struct ContentOmission {
+    pub(crate) path: Vec<u8>,
+    pub(crate) reason: &'static str,
+}
 impl CurrentChange {
     pub(crate) fn paths(&self) -> Vec<Vec<u8>> {
         let mut paths = self
@@ -118,10 +133,14 @@ impl Repository {
                 .cmp(&b.new_path.as_ref().or(b.old_path.as_ref()))
                 .then_with(|| a.status.cmp(&b.status))
         });
+        let (content, content_omissions) =
+            super::current_content::read(&git, &self.root, &changes, staged, head.is_some())?;
         Ok(CurrentChange {
             staged,
             head,
             changes,
+            content,
+            content_omissions,
         })
     }
 }

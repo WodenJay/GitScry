@@ -53,6 +53,33 @@ impl Git {
         Ok(output.stdout)
     }
 
+    /// Stop the child once its output exceeds a caller's content budget.
+    pub(super) fn limited_output<I, S>(
+        &self,
+        args: I,
+        limit: usize,
+    ) -> Result<Option<Vec<u8>>, AppError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        let mut bytes = Vec::new();
+        let mut exceeded = false;
+        let result = self.stream(args, &[], |chunk| {
+            if bytes.len().saturating_add(chunk.len()) > limit {
+                exceeded = true;
+                return Err(AppError::operational("content output limit reached"));
+            }
+            bytes.extend_from_slice(chunk);
+            Ok(())
+        });
+        if exceeded {
+            Ok(None)
+        } else {
+            result?;
+            Ok(Some(bytes))
+        }
+    }
     pub(super) fn success<I, S>(&self, args: I) -> Result<bool, AppError>
     where
         I: IntoIterator<Item = S>,
