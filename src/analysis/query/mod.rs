@@ -18,6 +18,7 @@ use crate::{
 pub(crate) use scope::SearchScopeOptions;
 
 pub(crate) enum Request {
+    Hotspots,
     Context {
         staged: bool,
     },
@@ -74,6 +75,7 @@ pub(crate) enum QueryReport {
     Context(super::ContextReport),
     Analysis(Report),
     Timeline(TimelineReport),
+    Hotspots(super::HotspotsReport),
 }
 
 impl QueryReport {
@@ -81,7 +83,7 @@ impl QueryReport {
         match self {
             Self::Context(report) => &report.warnings,
             Self::Analysis(report) => &report.warnings,
-            Self::Timeline(_) => &[],
+            Self::Timeline(_) | Self::Hotspots(_) => &[],
         }
     }
 
@@ -89,7 +91,7 @@ impl QueryReport {
         match self {
             Self::Context(_) => &[],
             Self::Analysis(report) => &report.notices,
-            Self::Timeline(_) => &[],
+            Self::Timeline(_) | Self::Hotspots(_) => &[],
         }
     }
 }
@@ -148,6 +150,7 @@ impl Context {
             QueryReport::Context(report) => report.scope = scope,
             QueryReport::Analysis(report) => report.scope = scope,
             QueryReport::Timeline(report) => report.scope = scope,
+            QueryReport::Hotspots(_) => {}
         }
         Outcome {
             progress: self.session.progress().to_vec(),
@@ -162,6 +165,7 @@ pub(crate) fn execute(request: Request, options: Options) -> Result<Outcome, App
         return Err(AppError::input("limit must be greater than zero"));
     }
     match request {
+        Request::Hotspots => run_hotspots(options.limit),
         Request::Context { staged } => run_context(staged, options),
         Request::Search { words, hybrid } => {
             if hybrid {
@@ -465,4 +469,19 @@ fn run_trace_fix(
         patch::attach_trace_fix_patch_excerpts(&context.session, &mut report)?;
     }
     Ok(context.finish(QueryReport::Analysis(report)))
+}
+
+fn run_hotspots(limit: usize) -> Result<Outcome, AppError> {
+    let repository = Repository::discover()?;
+    let session = cache::open_query(&repository.root)?;
+    let target = session.completed_tip()?;
+    session.require_revision(&target)?;
+    let paths = repository.tracked_files(&target)?;
+    let touches = session.hotspot_touches(&target, paths)?;
+    let report = super::HotspotsReport::aggregate(target, touches, limit);
+    Ok(Outcome {
+        progress: session.progress().to_vec(),
+        warnings: session.warnings().to_vec(),
+        report: QueryReport::Hotspots(report),
+    })
 }

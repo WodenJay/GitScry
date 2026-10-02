@@ -6,6 +6,8 @@
 //! assembles material. Ranking mechanics stay private; wording belongs to `render`.
 
 mod capabilities;
+mod hotspots;
+pub(crate) use hotspots::Report as HotspotsReport;
 mod patch;
 mod provenance;
 pub(crate) mod query;

@@ -36,6 +36,22 @@ pub(crate) struct Repository {
 }
 
 impl Repository {
+    pub(crate) fn tracked_files(&self, revision: &str) -> Result<Vec<Vec<u8>>, AppError> {
+        let tree = self.git.output(["ls-tree", "-r", "-z", revision], &[])?;
+        let mut paths = Vec::new();
+        for entry in tree
+            .split(|byte| *byte == 0)
+            .filter(|entry| !entry.is_empty())
+        {
+            let Some(tab) = entry.iter().position(|byte| *byte == b'\t') else {
+                return Err(AppError::operational("error: invalid Git tree entry"));
+            };
+            if entry[..tab].split(|byte| *byte == b' ').nth(1) == Some(b"blob") {
+                paths.push(entry[tab + 1..].to_vec());
+            }
+        }
+        Ok(paths)
+    }
     pub(crate) fn discover() -> Result<Self, AppError> {
         let cwd = std::env::current_dir().map_err(|error| {
             AppError::operational(format!("error: reading current directory: {error}"))
