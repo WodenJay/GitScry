@@ -105,14 +105,20 @@ try {
     try {
         & $installedExecutable index --semantic
         if ($LASTEXITCODE -ne 0) { throw "Packaged semantic inference failed with exit code $LASTEXITCODE." }
-        Add-Content -LiteralPath (Join-Path $smokeRepo 'fixture.txt') -Value 'second offline inference'
-        Invoke-Git $smokeRepo @('add', 'fixture.txt')
-        Invoke-Git $smokeRepo @('-c', 'user.name=Smoke', '-c', 'user.email=smoke@example.invalid', 'commit', '-qm', 'second')
         foreach ($name in @('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy')) {
             [Environment]::SetEnvironmentVariable($name, 'http://127.0.0.1:9', 'Process')
         }
+        $null = & $installedExecutable index --semantic
+        if ($LASTEXITCODE -ne 0) { throw "Packaged no-op semantic indexing failed with exit code $LASTEXITCODE." }
+        Add-Content -LiteralPath (Join-Path $smokeRepo 'fixture.txt') -Value 'second offline inference'
+        Invoke-Git $smokeRepo @('add', 'fixture.txt')
+        Invoke-Git $smokeRepo @('-c', 'user.name=Smoke', '-c', 'user.email=smoke@example.invalid', 'commit', '-qm', 'second')
         & $installedExecutable index --semantic
         if ($LASTEXITCODE -ne 0) { throw "Cached offline semantic inference failed with exit code $LASTEXITCODE." }
+        $searchOutput = & $installedExecutable search 'second offline inference' --hybrid --limit 2
+        if ($LASTEXITCODE -ne 0 -or ($searchOutput -join "`n") -notmatch 'second') {
+            throw "Packaged offline hybrid search failed: $($searchOutput -join "`n")"
+        }
     } finally {
         Pop-Location
     }

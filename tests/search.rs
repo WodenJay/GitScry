@@ -3,7 +3,7 @@ mod support;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use std::{fs, path::Path, process::Command};
 
-use rusqlite::Connection;
+use rusqlite::{Connection, params};
 use support::{TestRepo, git, git_command, git_stdout};
 
 impl TestRepo {
@@ -128,6 +128,109 @@ fn hybrid_search_requires_text_query_and_enabled_semantic_index() {
     let error = String::from_utf8_lossy(&hybrid.stderr);
     assert!(error.contains("semantic"), "{error}");
     assert!(error.contains("gitscry index --semantic"), "{error}");
+}
+
+#[test]
+#[ignore = "requires the pinned CPU runtime and prepared MiniLM model assets"]
+fn hybrid_search_mixes_reference_document_vectors_with_current_runtime_queries() {
+    #[derive(serde::Deserialize)]
+    struct Fixture {
+        cases: Vec<Case>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Case {
+        name: String,
+        reference_vectors: Vec<Vec<f32>>,
+    }
+
+    let fixture: Fixture =
+        serde_json::from_str(include_str!("fixtures/minilm-document-embeddings.json")).unwrap();
+    let reference_vector = |name: &str| {
+        fixture
+            .cases
+            .iter()
+            .find(|case| case.name == name)
+            .unwrap_or_else(|| panic!("missing reference case {name}"))
+            .reference_vectors[0]
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect::<Vec<_>>()
+    };
+
+    let repo = TestRepo::new();
+    repo.commit_at(
+        "one.txt",
+        b"first unrelated record\n",
+        "Commit One",
+        "2001-01-01T00:00:00Z",
+    );
+    let relevant_oid = repo.head();
+    repo.commit_at(
+        "two.txt",
+        b"second unrelated record\n",
+        "Commit Two",
+        "2001-01-02T00:00:00Z",
+    );
+    let distractor_oid = repo.head();
+
+    let indexed = repo.run(["index", "--semantic"]);
+    assert_eq!(
+        indexed.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&indexed.stderr)
+    );
+
+    let cache = Connection::open(repo.dir.path().join(".gitscry/cache.sqlite")).unwrap();
+    let replace_vector = |oid: &str, vector: &[u8]| {
+        assert_eq!(
+            cache
+                .execute(
+                    "UPDATE semantic_vectors SET embedding = ?1, runtime_provenance = 'previous-runtime' \
+                     WHERE commit_id = (SELECT commit_id FROM commits WHERE oid = ?2)",
+                    params![vector, oid],
+                )
+                .unwrap(),
+            1,
+            "expected indexed vector for {oid}"
+        );
+    };
+    replace_vector(&relevant_oid, &reference_vector("document-ordinary"));
+    replace_vector(&distractor_oid, &reference_vector("document-unicode"));
+    assert_eq!(
+        cache
+            .execute(
+                "UPDATE metadata SET value = 'previous-runtime' WHERE key = 'semantic_runtime_provenance'",
+                [],
+            )
+            .unwrap(),
+        1,
+        "expected semantic runtime provenance metadata"
+    );
+    drop(cache);
+
+    let output = repo.run([
+        "search",
+        "Fix lock ordering between worker threads",
+        "--hybrid",
+        "--limit",
+        "2",
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = String::from_utf8_lossy(&output.stdout);
+    let relevant = output.find("Commit One").expect("expected matching commit");
+    let distractor = output
+        .find("Commit Two")
+        .expect("expected distractor commit");
+    assert!(
+        relevant < distractor,
+        "unexpected hybrid ranking:\n{output}"
+    );
 }
 
 #[test]
