@@ -1180,11 +1180,19 @@ fn detected_rename_sides_are_excluded_from_associations() {
 fn case_distinct_paths_and_symlink_tests_keep_safe_identities() {
     use std::os::unix::fs::symlink;
     let repo = TestRepo::new();
+    fs::create_dir_all(repo.dir.path().join("src")).unwrap();
+    fs::write(repo.dir.path().join("src/A.rs"), "upper\n").unwrap();
+    // Exercise case-distinct paths where supported without aliasing the fixture on macOS.
+    let companion = if repo.dir.path().join("src/a.rs").exists() {
+        "src/b.rs"
+    } else {
+        "src/a.rs"
+    };
     commit(
         &repo,
         &[
             ("src/A.rs", "upper\n"),
-            ("src/a.rs", "lower\n"),
+            (companion, "lower\n"),
             ("tests/a.rs", "test\n"),
         ],
         "association",
@@ -1200,7 +1208,7 @@ fn case_distinct_paths_and_symlink_tests_keep_safe_identities() {
     let report = json(repo.run(["context", "--staged", "--json"]));
     let suggestions = report["suggestions"].as_array().unwrap();
     assert_eq!(suggestions.len(), 1);
-    assert_eq!(suggestions[0]["path"], "src/a.rs");
+    assert_eq!(suggestions[0]["path"], companion);
     assert_eq!(
         suggestions[0]["associated_current_paths"],
         serde_json::json!(["src/A.rs"])
