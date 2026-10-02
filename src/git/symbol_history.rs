@@ -13,12 +13,36 @@ pub(super) fn trace(git: &Git, target: &WhyTarget) -> SymbolTrace {
         paths: Vec::new(),
         introduction: Err("Git returned no history for the symbol range".to_owned()),
     };
-    trace.introduction = walk(git, target, &mut trace).map_err(|error| error.to_string());
+    trace.introduction = walk(git, target, &mut trace).map_err(introduction_error);
     trace
 }
 
 fn unknown(reason: &str) -> AppError {
     AppError::operational(reason)
+}
+
+fn introduction_error(error: AppError) -> String {
+    let message = error.to_string();
+    let lowercase = message.to_ascii_lowercase();
+    let missing_object = [
+        "unable to read ",
+        "bad object ",
+        "missing object",
+        "no such object",
+        "could not read ",
+        "could not get object info",
+        "object file ",
+        "not a valid object name",
+    ]
+    .iter()
+    .any(|needle| lowercase.contains(needle));
+
+    if missing_object {
+        "required Git objects are missing or unreadable; symbol introduction cannot be verified"
+            .to_owned()
+    } else {
+        message
+    }
 }
 
 fn walk(git: &Git, target: &WhyTarget, trace: &mut SymbolTrace) -> Result<String, AppError> {
@@ -35,6 +59,7 @@ fn walk(git: &Git, target: &WhyTarget, trace: &mut SymbolTrace) -> Result<String
         end: target.symbol_end.unwrap_or(*number),
     };
     let shallow = history::read_shallow_boundaries(git)?;
+    let mut merge_uncertain = false;
     loop {
         trace.paths.push(path.as_bytes().to_vec());
         let native = history::trace_symbol(git, &revision, &path, span.start, span.end)?
@@ -52,12 +77,27 @@ fn walk(git: &Git, target: &WhyTarget, trace: &mut SymbolTrace) -> Result<String
         let mut continued = false;
         for oid in commits.lines() {
             let (commit, changes, _) = history::read_trace_fix(git, oid)?;
-            if commit.parents.len() > 1 {
-                return Err(unknown("merge history makes symbol continuity uncertain"));
-            }
             let current = target::read_blob_at(git, oid, &path)?
                 .ok_or_else(|| unknown("historical symbol source is unavailable"))?;
             let current_span = symbol::locate_unique(&current, &name, &path)?;
+            if commit.parents.len() > 1 {
+                let first_parent = &commit.parents[0];
+                if let Some(source) = target::read_blob_at(git, first_parent, &path)?
+                    && let Ok(previous_span) = symbol::locate_unique(&source, &name, &path)
+                {
+                    if symbol::identity(&current, &name, &current_span)
+                        != symbol::identity(&source, &name, &previous_span)
+                    {
+                        // Keep tracing first-parent edits, but don't claim a verified origin.
+                        merge_uncertain = true;
+                    }
+                    span = previous_span;
+                    revision = first_parent.clone();
+                    continued = true;
+                    break;
+                }
+                return Err(unknown("merge history makes symbol continuity uncertain"));
+            }
             if native.contains(oid) {
                 trace.revisions.push(oid.to_owned());
             }
@@ -75,6 +115,9 @@ fn walk(git: &Git, target: &WhyTarget, trace: &mut SymbolTrace) -> Result<String
                 ));
             }
             let Some(parent) = commit.parents.first() else {
+                if merge_uncertain {
+                    return Err(unknown("merge history makes symbol continuity uncertain"));
+                }
                 return Ok(oid.to_owned());
             };
             let previous = target::read_blob_at(git, parent, &path)?;
