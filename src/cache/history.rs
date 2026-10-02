@@ -98,8 +98,20 @@ pub(crate) struct RemovalChange {
     pub(crate) commit_time: i64,
     pub(crate) message: Vec<u8>,
     pub(crate) first_parent_id: Option<String>,
+    pub(crate) ordinal: i64,
     pub(crate) status: String,
     pub(crate) new_path: Option<Vec<u8>>,
+}
+
+pub(crate) struct OtherFileChange {
+    pub(crate) status: String,
+    pub(crate) old_path: Option<Vec<u8>>,
+    pub(crate) new_path: Option<Vec<u8>>,
+}
+
+pub(crate) struct OtherFileChanges {
+    pub(crate) changes: Vec<OtherFileChange>,
+    pub(crate) truncated: bool,
 }
 
 impl QuerySession {
@@ -111,7 +123,7 @@ impl QuerySession {
         self.connection
             .query_row(
                 "SELECT c.commit_time, c.message, c.message_length,
-                    COALESCE(parent.oid, p.external_oid), ch.status, ch.new_path
+                    COALESCE(parent.oid, p.external_oid), ch.ordinal, ch.status, ch.new_path
              FROM commits c
              JOIN changes ch ON ch.commit_id = c.commit_id
              LEFT JOIN commit_parents p ON p.commit_id = c.commit_id AND p.position = 0
@@ -124,12 +136,56 @@ impl QuerySession {
                         commit_time: row.get(0)?,
                         message: super::decode_message_row(row, 1, 2)?,
                         first_parent_id: row.get(3)?,
-                        status: row.get(4)?,
-                        new_path: row.get(5)?,
+                        ordinal: row.get(4)?,
+                        status: row.get(5)?,
+                        new_path: row.get(6)?,
                     })
                 },
             )
             .map_err(|error| search_error("reading deletion event locators", error))
+    }
+
+    pub(crate) fn other_file_changes(
+        &self,
+        oid: &str,
+        own_ordinal: i64,
+        own_old_path: &[u8],
+        own_new_path: Option<&[u8]>,
+        limit: usize,
+    ) -> Result<OtherFileChanges, AppError> {
+        let result_limit = limit.saturating_add(1).min(i64::MAX as usize) as i64;
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT ch.status, ch.old_path, ch.new_path
+             FROM changes ch
+             JOIN commits c ON c.commit_id = ch.commit_id
+             WHERE c.oid = ?1 AND ch.ordinal != ?2
+               AND (ch.old_path IS NULL OR (ch.old_path != ?3 AND (?4 IS NULL OR ch.old_path != ?4)))
+               AND (ch.new_path IS NULL OR (ch.new_path != ?3 AND (?4 IS NULL OR ch.new_path != ?4)))
+             ORDER BY CASE WHEN ch.old_path IS NULL THEN ch.new_path ELSE ch.old_path END,
+                      ch.old_path, ch.new_path, ch.ordinal
+             LIMIT ?5",
+            )
+            .map_err(|error| search_error("preparing same-commit file navigation", error))?;
+        let rows = statement
+            .query_map(
+                params![oid, own_ordinal, own_old_path, own_new_path, result_limit],
+                |row| {
+                    Ok(OtherFileChange {
+                        status: row.get(0)?,
+                        old_path: row.get(1)?,
+                        new_path: row.get(2)?,
+                    })
+                },
+            )
+            .map_err(|error| search_error("reading same-commit file navigation", error))?;
+        let mut changes = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| search_error("reading same-commit file navigation", error))?;
+        let truncated = changes.len() > limit;
+        changes.truncate(limit);
+        Ok(OtherFileChanges { changes, truncated })
     }
 
     pub(crate) fn path_history(

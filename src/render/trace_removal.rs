@@ -7,6 +7,7 @@ use super::{
 };
 use crate::analysis::TraceRemovalReport as Report;
 
+const SAME_COMMIT_NAVIGATION_NOTICE: &str = "Same-commit co-changes are navigation only; they do not prove replacement, migration intent, causality, or cross-file identity.";
 pub(super) fn format_report(report: &Report) -> String {
     let mut lines = vec![format!(
         "Deletion events for literal {} in published cache {}",
@@ -57,6 +58,35 @@ pub(super) fn format_report(report: &Report) -> String {
                     escape::code_line(&matched.line)
                 ));
             }
+
+            lines.push(format!(
+                "    Same-commit file navigation: {}",
+                event.same_commit_files.status.as_str()
+            ));
+            lines.push(format!("      {SAME_COMMIT_NAVIGATION_NOTICE}"));
+            if event.same_commit_files.files.is_empty()
+                && event.same_commit_files.status.as_str() == "complete"
+            {
+                lines.push("      No other files changed.".to_owned());
+            }
+            for change in &event.same_commit_files.files {
+                let old_path = change
+                    .old_path
+                    .as_deref()
+                    .map(escape::path)
+                    .unwrap_or_else(|| "—".to_owned());
+                let new_path = change
+                    .new_path
+                    .as_deref()
+                    .map(escape::path)
+                    .unwrap_or_else(|| "—".to_owned());
+                lines.push(format!(
+                    "      {}  {} -> {}",
+                    escape::subject(&change.status),
+                    old_path,
+                    new_path
+                ));
+            }
         }
     }
     lines.join("\n")
@@ -92,6 +122,19 @@ pub(super) fn format_json_report(
                     old_path: json::json_path(&event.old_path),
                     new_path: event.new_path.as_deref().map(json::json_path),
                 },
+                same_commit_files: JsonSameCommitFiles {
+                    status: event.same_commit_files.status.as_str(),
+                    files: event
+                        .same_commit_files
+                        .files
+                        .iter()
+                        .map(|change| JsonOtherFileChange {
+                            status: &change.status,
+                            old_path: change.old_path.as_deref().map(json::json_path),
+                            new_path: change.new_path.as_deref().map(json::json_path),
+                        })
+                        .collect(),
+                },
                 matches: event
                     .matches
                     .iter()
@@ -103,7 +146,11 @@ pub(super) fn format_json_report(
             })
             .collect(),
         warnings,
-        notices: Vec::new(),
+        notices: if report.events.is_empty() {
+            Vec::new()
+        } else {
+            vec![SAME_COMMIT_NAVIGATION_NOTICE.to_owned()]
+        },
     };
     serde_json::to_string(&output)
 }
@@ -138,6 +185,7 @@ struct JsonEvent<'a> {
     first_parent_id: &'a str,
     old_path: JsonPath<'a>,
     file_change: JsonFileChange<'a>,
+    same_commit_files: JsonSameCommitFiles<'a>,
     matches: Vec<JsonMatch<'a>>,
 }
 
@@ -145,6 +193,19 @@ struct JsonEvent<'a> {
 struct JsonFileChange<'a> {
     status: &'a str,
     old_path: JsonPath<'a>,
+    new_path: Option<JsonPath<'a>>,
+}
+
+#[derive(Serialize)]
+struct JsonSameCommitFiles<'a> {
+    status: &'static str,
+    files: Vec<JsonOtherFileChange<'a>>,
+}
+
+#[derive(Serialize)]
+struct JsonOtherFileChange<'a> {
+    status: &'a str,
+    old_path: Option<JsonPath<'a>>,
     new_path: Option<JsonPath<'a>>,
 }
 
