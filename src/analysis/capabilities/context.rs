@@ -93,6 +93,7 @@ pub(crate) fn run(
     root: &Path,
     limit: usize,
     scope: Option<&SearchFilter>,
+    hybrid: bool,
 ) -> Result<Report, AppError> {
     let paths = input.paths();
     let excluded = paths.iter().cloned().collect::<HashSet<_>>();
@@ -191,7 +192,7 @@ pub(crate) fn run(
         report.warnings.push("warning: historical test paths absent as safe regular files in the current worktree were omitted; renames are not resolved".to_owned());
     }
     for (strength, time, suggestion) in
-        super::context_content::discover(session, &mut report, scope)?
+        super::context_content::discover(session, &mut report, scope, hybrid)?
     {
         ranked.push((strength, time, suggestion, Vec::new()));
     }

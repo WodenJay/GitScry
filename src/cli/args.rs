@@ -76,6 +76,9 @@ Examples:
         /// Select HEAD-to-index paths/status only.
         #[arg(long)]
         staged: bool,
+        /// Expand candidates with ready local semantic resources; never falls back.
+        #[arg(long)]
+        hybrid: bool,
         /// Total ceiling; the three-per-category ceiling remains fixed.
         #[arg(long, default_value = "8", value_parser = parse_limit)]
         limit: usize,

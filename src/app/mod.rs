@@ -145,10 +145,16 @@ pub(crate) fn execute(
         ),
         Command::Context {
             staged,
+            hybrid,
             limit,
             scope,
             ..
-        } => (Request::Context { staged }, limit, false, scope.into()),
+        } => (
+            Request::Context { staged, hybrid },
+            limit,
+            false,
+            scope.into(),
+        ),
         Command::Related {
             paths,
             limit,

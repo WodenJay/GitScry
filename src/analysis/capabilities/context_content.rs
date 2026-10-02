@@ -74,7 +74,13 @@ pub(super) fn discover(
     session: &QuerySession,
     report: &mut Report,
     scope: Option<&SearchFilter>,
+    hybrid: bool,
 ) -> Result<Vec<(usize, i64, Suggestion)>, AppError> {
+    let _encoder = if hybrid {
+        Some(crate::semantic::Encoder::load_for_query("")?.0)
+    } else {
+        None
+    };
     let mut locals: Vec<(&CurrentHunk, BTreeSet<String>)> = Vec::new();
     for hunk in &report.input.content {
         if locals.len() >= LOCAL_LIMIT {

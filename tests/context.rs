@@ -5,6 +5,36 @@ use std::{fs, process::Output};
 use support::{TestRepo, git};
 
 #[test]
+fn hybrid_is_explicit_and_no_change_needs_no_semantic_resources() {
+    let repo = TestRepo::new();
+    let empty = json(repo.run(["context", "--hybrid", "--json"]));
+    assert!(empty["suggestions"].as_array().unwrap().is_empty());
+    assert!(empty["cache_tip"].is_null());
+    commit(
+        &repo,
+        &[(
+            "old.rs",
+            "fn route() { refreshSessionCache(\"session-expired\"); }\n",
+        )],
+        "update",
+    );
+    repo.index();
+    fs::write(
+        repo.dir.path().join("new.rs"),
+        "fn route() { refreshSessionCache(\"session-expired\"); }\n",
+    )
+    .unwrap();
+    assert_eq!(historical(&json(repo.run(["context", "--json"]))).len(), 1);
+    let output = repo.run(["context", "--hybrid", "--json"]);
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        error.contains("semantic") && error.contains("gitscry index --semantic"),
+        "{error}"
+    );
+}
+
+#[test]
 fn generic_descriptions_return_verified_local_historical_matches() {
     let repo = TestRepo::new();
     commit(

@@ -20,6 +20,7 @@ pub(crate) use scope::SearchScopeOptions;
 pub(crate) enum Request {
     Context {
         staged: bool,
+        hybrid: bool,
     },
     Search {
         words: Vec<String>,
@@ -162,7 +163,7 @@ pub(crate) fn execute(request: Request, options: Options) -> Result<Outcome, App
         return Err(AppError::input("limit must be greater than zero"));
     }
     match request {
-        Request::Context { staged } => run_context(staged, options),
+        Request::Context { staged, hybrid } => run_context(staged, hybrid, options),
         Request::Search { words, hybrid } => {
             if hybrid {
                 run_hybrid_search(words, options)
@@ -205,7 +206,7 @@ pub(crate) fn execute(request: Request, options: Options) -> Result<Outcome, App
     }
 }
 
-fn run_context(staged: bool, options: Options) -> Result<Outcome, AppError> {
+fn run_context(staged: bool, hybrid: bool, options: Options) -> Result<Outcome, AppError> {
     let repository = Repository::discover()?;
     let input = repository.current_change(staged)?;
     if input.changes.is_empty() {
@@ -217,12 +218,16 @@ fn run_context(staged: bool, options: Options) -> Result<Outcome, AppError> {
         });
     }
     let context = Context::open(options.scope)?;
+    if hybrid {
+        context.session.require_semantic_ready()?;
+    }
     let report = capabilities::context::run(
         &context.session,
         input,
         &repository.root,
         options.limit,
         context.filter(),
+        hybrid,
     )?;
     Ok(context.finish(QueryReport::Context(report)))
 }
