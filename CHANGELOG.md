@@ -1,3 +1,49 @@
+## [0.6.0] - 2026-10-02
+
+### 🚀 Features
+
+- *(github)* Link other material queries
+- *(github)* Link code and timeline results
+- *(github)* Merge code and timeline links
+- *(github)* Add PR issue associations
+- *(github)* Merge PR issue associations
+- *(why)* Separate attribution and modifications
+- *(why)* Add factual history attribution
+- *(why)* Trace symbol history
+- *(why)* Merge symbol history
+- *(github)* Paginate association coverage
+- *(github)* Merge coverage-first pagination
+
+### 🐛 Bug Fixes
+
+- *(index)* Resolve sole local branch
+- *(git)* Normalize target paths
+- *(query)* Default targets to cache tip
+- *(why)* Preserve uncertain symbol changes
+- *(github)* Preserve links at object limit
+- *(regression)* Trace before filtering material
+- *(tests)* Compile Unix GitHub link checks
+- *(tests)* Delimit fake gh responses with newlines
+- *(tests)* Align GitHub issue fetch expectations
+- *(release)* Publish drafts and dispatch crates.io
+
+### ⚡ Performance
+
+- *(trace-fix)* Batch deleted-line reads
+
+### 🚜 Refactor
+
+- *(render)* Narrow generic report kinds
+- *(github)* Own association lookup state
+- Merge architecture deepening
+
+### 📚 Documentation
+
+- *(cli)* Clarify timeline association coverage
+- *(cli)* Clarify association budgets
+- Define historical change patterns
+- Add cli help design, remove outdate adr
+- Mv cli help design
 ## [0.5.0] - 2026-10-02
 
 ### 🚀 Features
