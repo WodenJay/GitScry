@@ -97,6 +97,7 @@ pub(crate) struct CodeHunk {
 pub(crate) struct RemovalChange {
     pub(crate) commit_time: i64,
     pub(crate) message: Vec<u8>,
+    pub(crate) change_ordinal: i64,
     pub(crate) first_parent_id: Option<String>,
     pub(crate) status: String,
     pub(crate) new_path: Option<Vec<u8>>,
@@ -111,7 +112,7 @@ impl QuerySession {
         self.connection
             .query_row(
                 "SELECT c.commit_time, c.message, c.message_length,
-                    COALESCE(parent.oid, p.external_oid), ch.status, ch.new_path
+                    COALESCE(parent.oid, p.external_oid), ch.status, ch.new_path, ch.ordinal
              FROM commits c
              JOIN changes ch ON ch.commit_id = c.commit_id
              LEFT JOIN commit_parents p ON p.commit_id = c.commit_id AND p.position = 0
@@ -126,6 +127,7 @@ impl QuerySession {
                         first_parent_id: row.get(3)?,
                         status: row.get(4)?,
                         new_path: row.get(5)?,
+                        change_ordinal: row.get(6)?,
                     })
                 },
             )
@@ -222,7 +224,7 @@ impl QuerySession {
         max_hunks: usize,
         max_hunk_bytes: usize,
     ) -> Result<PatchHistory, AppError> {
-        patch_history(&self.connection, oid, None, max_hunks, max_hunk_bytes)
+        patch_history(&self.connection, oid, None, None, max_hunks, max_hunk_bytes)
     }
 
     pub(crate) fn patch_history_for_change(
@@ -236,6 +238,25 @@ impl QuerySession {
             &self.connection,
             oid,
             Some(change_ordinal),
+            None,
+            max_hunks,
+            max_hunk_bytes,
+        )
+    }
+
+    pub(crate) fn patch_history_for_change_at_lines(
+        &self,
+        oid: &str,
+        change_ordinal: i64,
+        matching_lines: &HashSet<i64>,
+        max_hunks: usize,
+        max_hunk_bytes: usize,
+    ) -> Result<PatchHistory, AppError> {
+        patch_history(
+            &self.connection,
+            oid,
+            Some(change_ordinal),
+            Some(matching_lines),
             max_hunks,
             max_hunk_bytes,
         )
@@ -476,6 +497,7 @@ fn patch_history(
     connection: &Connection,
     oid: &str,
     change_ordinal: Option<i64>,
+    preferred_lines: Option<&HashSet<i64>>,
     max_hunks: usize,
     max_hunk_bytes: usize,
 ) -> Result<PatchHistory, AppError> {
@@ -494,7 +516,11 @@ fn patch_history(
         )
         .map_err(|error| search_error("checking cached patch completeness", error))?;
 
-    let limit = i64::try_from(max_hunks.saturating_add(1)).unwrap_or(i64::MAX);
+    let limit = if preferred_lines.is_some() {
+        i64::MAX
+    } else {
+        i64::try_from(max_hunks.saturating_add(1)).unwrap_or(i64::MAX)
+    };
     let mut statement = connection
         .prepare(
             "SELECT ch.ordinal, ch.old_path, ch.new_path, h.ordinal,
@@ -522,6 +548,21 @@ fn patch_history(
             ))
         })
         .map_err(|error| search_error("reading cached patch hunks", error))?
+        .filter_map(|row| match row {
+            Ok(row) => {
+                let relevant = preferred_lines.is_none_or(|matching_lines| {
+                    let old_start = row.4;
+                    let old_end = old_start.saturating_add(row.5);
+                    row.5 > 0
+                        && matching_lines
+                            .iter()
+                            .any(|line| *line >= old_start && *line < old_end)
+                });
+                relevant.then_some(Ok(row))
+            }
+            Err(error) => Some(Err(error)),
+        })
+        .take(max_hunks.saturating_add(1))
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| search_error("reading cached patch hunks", error))?;
     drop(statement);
