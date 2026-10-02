@@ -5,7 +5,7 @@ use std::{
 
 use serde::Serialize;
 
-use crate::analysis::{Report, ReportKind, TimelineReport};
+use crate::analysis::{Report, ReportKind, TimelineReport, WhyAttribution};
 
 use super::{gh, remote};
 
@@ -153,15 +153,31 @@ fn fetch_commits(commits: Vec<String>, explicit_repository: Option<&str>) -> Lin
 
 fn returned_commits(report: &Report) -> Vec<String> {
     let mut seen = HashSet::new();
-    report
-        .materials
-        .iter()
-        .flat_map(|material| material.citations.iter())
-        .filter(|citation| seen.insert(citation.oid.clone()))
-        .map(|citation| citation.oid.clone())
-        .collect()
-}
+    let mut commits = Vec::new();
+    let mut push_once = |oid: &str| {
+        if seen.insert(oid.to_owned()) {
+            commits.push(oid.to_owned());
+        }
+    };
 
+    if let Some(why) = &report.why {
+        if let WhyAttribution::Available(attribution) = &why.attribution {
+            push_once(&attribution.oid);
+        }
+        for modification in &why.target_related_modifications {
+            push_once(&modification.oid);
+        }
+    } else {
+        for citation in report
+            .materials
+            .iter()
+            .flat_map(|material| material.citations.iter())
+        {
+            push_once(&citation.oid);
+        }
+    }
+    commits
+}
 fn returned_code_commits(report: &Report) -> Vec<String> {
     let mut seen = HashSet::new();
     report

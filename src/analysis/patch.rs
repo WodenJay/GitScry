@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use super::{Detail, Intent, Material, Report, anchors_overlap};
 use crate::{
     app::AppError,
-    cache::{HunkId, PatchHistory, PatchHistoryHunk, QuerySession},
+    cache::{HunkId, PatchHistoryHunk, QuerySession},
 };
 
 const MAX_SCANNED_HUNKS: usize = 64;
@@ -109,6 +109,40 @@ pub(crate) fn attach_selected_patch_excerpts(
     })
 }
 
+pub(crate) fn attach_why_patch_excerpts(
+    session: &QuerySession,
+    report: &mut Report,
+    priorities: &HunkPriorities,
+) -> Result<(), AppError> {
+    report.patch_mode = true;
+    let Some(why) = report.why.as_mut() else {
+        return Ok(());
+    };
+    for modification in &mut why.target_related_modifications {
+        modification.patch = Some(selected_patch_excerpt(
+            session,
+            &modification.oid,
+            |cached| {
+                priorities
+                    .get(&modification.oid)
+                    .and_then(|hunks| hunks.get(&cached.id()).copied())
+            },
+        )?);
+    }
+    if let super::WhyAttribution::Available(attribution) = &mut why.attribution {
+        attribution.patch = Some(selected_patch_excerpt(
+            session,
+            &attribution.oid,
+            |cached| {
+                priorities
+                    .get(&attribution.oid)
+                    .and_then(|hunks| hunks.get(&cached.id()).copied())
+            },
+        )?);
+    }
+    Ok(())
+}
+
 fn attach_patch_excerpts_using(
     session: &QuerySession,
     report: &mut Report,
@@ -125,67 +159,72 @@ fn attach_patch_excerpts_using(
             });
             continue;
         };
-
-        let history: PatchHistory =
-            session.patch_history(&citation.oid, MAX_SCANNED_HUNKS, MAX_CACHED_HUNK_BYTES)?;
-        let has_cached_hunks = !history.hunks.is_empty();
-        let mut truncated = history.truncated;
-        let mut hunks = Vec::new();
-        let mut remaining_bytes = MAX_RESULT_EXCERPT_BYTES;
-        let mut excerpt_paths = HashSet::new();
-        let mut selected = history
-            .hunks
-            .into_iter()
-            .filter_map(|cached| {
-                priority_for(material, &citation.oid, &cached).map(|priority| (priority, cached))
-            })
-            .collect::<Vec<_>>();
-        selected.sort_by_key(|(priority, _)| *priority);
-
-        for (_, cached) in selected {
-            if hunks.len() == MAX_EXCERPTS {
-                truncated = true;
-                break;
-            }
-            let cached_paths = [&cached.old_path, &cached.new_path]
-                .into_iter()
-                .flatten()
-                .cloned()
-                .collect::<HashSet<_>>();
-            if excerpt_paths.len() + cached_paths.difference(&excerpt_paths).count()
-                > MAX_EXCERPT_FILES
-            {
-                truncated = true;
-                break;
-            }
-            excerpt_paths.extend(cached_paths);
-            if remaining_bytes == 0 {
-                truncated = true;
-                break;
-            }
-
-            let excerpt = bounded_patch_hunk(cached, &mut remaining_bytes);
-            truncated |= excerpt.truncated;
-            hunks.push(excerpt);
-        }
-
-        let status = if !has_cached_hunks
-            || (hunks.is_empty() && (history.truncated || history.missing_objects))
-        {
-            PatchStatus::Unavailable
-        } else if hunks.is_empty() {
-            PatchStatus::NoRelevantHunks
-        } else {
-            PatchStatus::Available
-        };
-        material.patch = Some(PatchExcerpt {
-            commit_oid: citation.oid.clone(),
-            status,
-            hunks,
-            truncated,
-        });
+        let oid = citation.oid.clone();
+        let patch =
+            selected_patch_excerpt(session, &oid, |cached| priority_for(material, &oid, cached))?;
+        material.patch = Some(patch);
     }
     Ok(())
+}
+
+fn selected_patch_excerpt(
+    session: &QuerySession,
+    oid: &str,
+    mut priority_for: impl FnMut(&PatchHistoryHunk) -> Option<usize>,
+) -> Result<PatchExcerpt, AppError> {
+    let history = session.patch_history(oid, MAX_SCANNED_HUNKS, MAX_CACHED_HUNK_BYTES)?;
+    let has_cached_hunks = !history.hunks.is_empty();
+    let mut truncated = history.truncated;
+    let mut hunks = Vec::new();
+    let mut remaining_bytes = MAX_RESULT_EXCERPT_BYTES;
+    let mut excerpt_paths = HashSet::new();
+    let mut selected = history
+        .hunks
+        .into_iter()
+        .filter_map(|cached| priority_for(&cached).map(|priority| (priority, cached)))
+        .collect::<Vec<_>>();
+    selected.sort_by_key(|(priority, _)| *priority);
+
+    for (_, cached) in selected {
+        if hunks.len() == MAX_EXCERPTS {
+            truncated = true;
+            break;
+        }
+        let cached_paths = [&cached.old_path, &cached.new_path]
+            .into_iter()
+            .flatten()
+            .cloned()
+            .collect::<HashSet<_>>();
+        if excerpt_paths.len() + cached_paths.difference(&excerpt_paths).count() > MAX_EXCERPT_FILES
+        {
+            truncated = true;
+            break;
+        }
+        excerpt_paths.extend(cached_paths);
+        if remaining_bytes == 0 {
+            truncated = true;
+            break;
+        }
+        let excerpt = bounded_patch_hunk(cached, &mut remaining_bytes);
+        truncated |= excerpt.truncated;
+        hunks.push(excerpt);
+    }
+
+    let status = if !has_cached_hunks
+        || (hunks.is_empty() && (history.truncated || history.missing_objects))
+    {
+        PatchStatus::Unavailable
+    } else if hunks.is_empty() {
+        PatchStatus::NoRelevantHunks
+    } else {
+        PatchStatus::Available
+    };
+    Ok(PatchExcerpt {
+        commit_oid: oid.to_owned(),
+        status,
+        hunks,
+        truncated,
+    })
 }
 
 pub(crate) fn attach_timeline_patch_excerpts(

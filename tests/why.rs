@@ -30,7 +30,7 @@ impl TestRepo {
 }
 
 #[test]
-fn why_reports_blame_and_explanation_for_a_line() {
+fn why_reports_blame_without_inventing_a_line_explanation() {
     let repo = TestRepo::new();
     repo.commit(
         "target.txt",
@@ -43,9 +43,13 @@ fn why_reports_blame_and_explanation_for_a_line() {
     let output = repo.run(["why", "target.txt", "--line", "1", "--limit", "1"]);
     assert_eq!(output.status.code(), Some(0));
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("Why history (1 match):"));
-    assert!(stdout.contains("target: line 1 at "));
-    assert!(stdout.contains("confidence: high"));
+    assert!(stdout.contains("Why at line 1 at revision "));
+    assert!(stdout.contains("Attribution: "));
+    assert!(stdout.contains("Attribution count: 1"));
+    assert!(stdout.contains("Add target"));
+    assert!(stdout.contains("Attribution scope: target line."));
+    assert!(!stdout.contains("confidence:"));
+    assert!(!stdout.contains("Because callers need a stable target"));
     assert!(
         String::from_utf8_lossy(&output.stderr)
             .contains("Remote context unavailable from local history.")
@@ -78,8 +82,9 @@ fn why_resolves_symbols_and_pins_an_explicit_revision() {
     ]);
     assert_eq!(output.status.code(), Some(0));
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("target: symbol explain (line 1)"));
+    assert!(stdout.contains("Why at symbol explain (line 1) at revision "));
     assert!(stdout.contains("Initial symbol"));
+    assert!(stdout.contains("Attribution scope: symbol starting line only."));
     assert!(!stdout.contains("Later symbol change"));
 }
 
@@ -127,12 +132,13 @@ fn why_defaults_to_published_cache_tip_on_feature_branch() {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(
-        String::from_utf8_lossy(&output.stdout).contains(&format!("target: line 1 at {cache_tip}"))
+        String::from_utf8_lossy(&output.stdout)
+            .contains(&format!("Why at line 1 at revision {cache_tip}"))
     );
 }
 
 #[test]
-fn why_exposes_rename_boundary_and_rejects_invalid_anchors() {
+fn why_exposes_rename_history_and_rejects_invalid_anchors() {
     let repo = TestRepo::new();
     repo.commit("old.txt", b"kept\n", "Add old path", None);
     repo.rename("old.txt", "new.txt", "Move old path");
@@ -140,7 +146,10 @@ fn why_exposes_rename_boundary_and_rejects_invalid_anchors() {
     repo.index();
     let output = repo.run(["why", "new.txt", "--line", "1"]);
     assert_eq!(output.status.code(), Some(0));
-    assert!(String::from_utf8_lossy(&output.stdout).contains("rename boundary"));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Add old path"));
+    assert!(stdout.contains("rename events alone are not target-related modifications"));
+    assert!(!stdout.contains("rename boundary"));
 
     let missing_anchor = repo.run(["why", "new.txt"]);
     assert_eq!(missing_anchor.status.code(), Some(2));
@@ -218,11 +227,7 @@ fn why_does_not_promote_an_adjacent_line_rewrite() {
     let output = repo.run(["why", "target.txt", "--line", "2", "--limit", "10"]);
     assert_eq!(output.status.code(), Some(0));
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let third = stdout
-        .split("- ")
-        .find(|section| section.contains("Rewrite third line"))
-        .expect("show adjacent rewrite");
-    assert!(!third.contains("confidence: high"));
+    assert!(!stdout.contains("Rewrite third line"));
 }
 
 #[test]
@@ -258,12 +263,7 @@ fn why_does_not_mark_unrelated_multihunk_changes_as_direct() {
     let output = repo.run(["why", "f.txt", "--line", "20", "--limit", "10"]);
     assert_eq!(output.status.code(), Some(0));
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let unrelated = stdout
-        .split("- ")
-        .find(|section| section.contains("Adjust unrelated line"))
-        .expect("show unrelated change");
-    assert!(!unrelated.contains("confidence: high"));
-    assert!(!unrelated.contains("diff hunk corroborates the target line"));
+    assert!(!stdout.contains("Adjust unrelated line"));
 }
 
 #[test]
@@ -305,12 +305,7 @@ fn why_does_not_run_textconv_during_blame() {
     assert_eq!(output.status.code(), Some(0));
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Change target"));
-    assert!(
-        stdout
-            .split("- ")
-            .nth(1)
-            .is_some_and(|section| section.contains("Change target"))
-    );
+    assert!(!stdout.contains(repo.dir.path().to_str().expect("UTF-8 test path")));
 }
 
 #[test]
@@ -345,7 +340,7 @@ fn why_warns_for_configured_blame_ignore_file() {
 }
 
 #[test]
-fn why_symbol_anchor_ignores_a_prose_mention() {
+fn why_symbol_anchor_reports_starting_line_attribution() {
     let repo = TestRepo::new();
     repo.commit(
         "src/lib.rs",
@@ -357,11 +352,11 @@ fn why_symbol_anchor_ignores_a_prose_mention() {
     repo.index();
     let output = repo.run(["why", "src/lib.rs", "--symbol", "explain"]);
     assert_eq!(output.status.code(), Some(0));
-    assert!(String::from_utf8_lossy(&output.stdout).contains("target: symbol explain (line 3)"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Why at symbol explain (line 3)"));
 }
 
 #[test]
-fn why_scores_cochanged_paths_without_confusing_renames() {
+fn why_does_not_count_cochanged_paths_as_target_modifications() {
     let repo = TestRepo::new();
     repo.commit("target.txt", b"target\n", "Create target", None);
     fs::write(repo.dir.path().join("related.txt"), b"related\n").expect("write related file");
@@ -375,7 +370,10 @@ fn why_scores_cochanged_paths_without_confusing_renames() {
     repo.index();
     let output = repo.run(["why", "target.txt", "--line", "1"]);
     assert_eq!(output.status.code(), Some(0));
-    assert!(String::from_utf8_lossy(&output.stdout).contains("co-changed paths (1)"));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Attribution: "));
+    assert!(stdout.contains("Other file history: 0"));
+    assert!(!stdout.contains("related.txt"));
 }
 
 #[test]
@@ -414,7 +412,10 @@ fn why_degrades_cleanly_at_a_submodule_boundary() {
     repo.index();
     let output = repo.run(["why", "module", "--line", "1"]);
     assert_eq!(output.status.code(), Some(0));
-    assert_eq!(output.stdout, b"No explanatory history found.\n");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Attribution unavailable:"));
+    assert!(stdout.contains("target path is a submodule"));
+    assert!(stdout.contains("File history in scope: 0"));
     assert!(String::from_utf8_lossy(&output.stderr).contains("target path is a submodule"));
 }
 
@@ -463,13 +464,16 @@ fn why_marks_merge_boundaries_and_honors_limit() {
     repo.index();
     let merge_output = repo.run(["why", "target.txt", "--line", "1"]);
     assert_eq!(merge_output.status.code(), Some(0));
-    assert!(String::from_utf8_lossy(&merge_output.stdout).contains("merge boundary"));
+    assert!(
+        String::from_utf8_lossy(&merge_output.stdout)
+            .contains("Target-line tracing follows first-parent history")
+    );
 
     repo.commit("target.txt", b"latest\n", "Latest target change", None);
     repo.index();
     let limited = repo.run(["why", "target.txt", "--line", "1", "--limit", "1"]);
     let stdout = String::from_utf8_lossy(&limited.stdout);
-    assert!(stdout.contains("results truncated"));
+    assert!(stdout.contains("Omitted "));
 }
 
 #[test]
@@ -491,7 +495,7 @@ fn why_warns_when_blame_ignores_a_revision() {
 }
 
 #[test]
-fn why_scope_intersects_target_and_filters_materials() {
+fn why_scope_intersects_target_and_filters_target_modifications() {
     let repo = TestRepo::new();
     repo.commit(
         "target.txt",
@@ -519,14 +523,26 @@ fn why_scope_intersects_target_and_filters_materials() {
             "--json",
         ],
     );
+    assert_eq!(scoped["schema_version"], 5);
     assert_eq!(scoped["scope"]["to_rev"], later);
     assert_eq!(scoped["scope"]["target_rev"], initial);
     assert_eq!(scoped["scope"]["cache_tip"], later);
-    assert_eq!(scoped["materials"].as_array().unwrap().len(), 1);
-    assert_eq!(scoped["materials"][0]["subject"], "Initial target history");
-    assert_eq!(scoped["materials"][0]["patch"]["status"], "available");
+    assert_eq!(
+        scoped["target_related_modifications"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+    assert_eq!(scoped["why"]["attribution"]["state"], "available");
+    assert_eq!(
+        scoped["why"]["attribution"]["commit"]["subject"],
+        "Initial target history"
+    );
+    let patch = &scoped["why"]["attribution"]["commit"]["patch"];
+    assert_eq!(patch["status"], "available");
     assert!(
-        scoped["materials"][0]["patch"]["hunks"][0]["text"]
+        patch["hunks"][0]["text"]
             .as_str()
             .unwrap()
             .contains("+target")
@@ -549,7 +565,14 @@ fn why_scope_intersects_target_and_filters_materials() {
         ],
     );
     assert_eq!(excluded["matched_count"], 0);
-    assert_eq!(excluded["materials"], serde_json::json!([]));
+    assert_eq!(
+        excluded["target_related_modifications"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        excluded["why"]["attribution"]["state"],
+        "outside_historical_scope"
+    );
 
     let dated = json(
         &repo,
@@ -567,6 +590,7 @@ fn why_scope_intersects_target_and_filters_materials() {
     );
     assert_eq!(dated["scope"]["since"], "9999-01-01");
     assert_eq!(dated["matched_count"], 0);
+    assert_eq!(dated["why"]["counts"]["file_history"], 0);
 
     let text = repo.run([
         "why",
@@ -605,15 +629,22 @@ fn why_scope_hides_out_of_scope_blame_citations() {
             "--json",
         ],
     );
-    assert_eq!(report["materials"].as_array().unwrap().len(), 1);
-    assert_eq!(report["materials"][0]["subject"], "Initial line");
-    assert!(
-        !report["materials"][0]["citations"]
+    assert_eq!(
+        report["why"]["attribution"]["state"],
+        "outside_historical_scope"
+    );
+    assert_eq!(
+        report["target_related_modifications"]
             .as_array()
             .unwrap()
-            .iter()
-            .any(|citation| citation["oid"] == target)
+            .len(),
+        1
     );
+    assert_eq!(
+        report["target_related_modifications"][0]["subject"],
+        "Initial line"
+    );
+    assert!(report["why"]["attribution"]["commit"].is_null());
 }
 
 fn json(repo: &TestRepo, args: &[&str]) -> serde_json::Value {
@@ -700,43 +731,38 @@ fn why_patch_excerpts_follow_line_and_symbol_anchors() {
             "--json",
         ],
     );
-    assert_eq!(plain["schema_version"], 1);
-    assert_eq!(patched["schema_version"], 2);
+    assert_eq!(plain["schema_version"], 5);
+    assert_eq!(patched["schema_version"], 5);
+    assert!(plain.get("materials").is_none());
     assert_eq!(patched["matched_count"], plain["matched_count"]);
-    assert_eq!(
-        plain["materials"].as_array().unwrap().len(),
-        patched["materials"].as_array().unwrap().len()
+    let plain_modifications = plain["target_related_modifications"].as_array().unwrap();
+    let patched_modifications = patched["target_related_modifications"].as_array().unwrap();
+    assert_eq!(plain_modifications.len(), patched_modifications.len());
+    assert!(
+        plain_modifications
+            .iter()
+            .all(|modification| modification.get("patch").is_none())
     );
-    for (plain_material, patched_material) in plain["materials"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .zip(patched["materials"].as_array().unwrap())
+    assert!(plain["why"]["attribution"]["commit"].get("patch").is_none());
+    for (plain_modification, patched_modification) in
+        plain_modifications.iter().zip(patched_modifications)
     {
-        let mut material = patched_material.clone();
-        material.as_object_mut().unwrap().remove("patch");
+        let mut patched_modification = patched_modification.clone();
+        patched_modification
+            .as_object_mut()
+            .unwrap()
+            .remove("patch");
         assert_eq!(
-            &material, plain_material,
-            "patch must not change material or ranking"
+            &patched_modification, plain_modification,
+            "patch must not change target modifications or ranking"
         );
     }
-    assert!(
-        plain["materials"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|material| material.get("patch").is_none())
-    );
 
-    let target = patched["materials"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|material| material["subject"] == "Change target and helper")
-        .expect("target-changing material");
-    let patch = &target["patch"];
+    let attribution = &patched["why"]["attribution"]["commit"];
+    assert_eq!(attribution["subject"], "Change target and helper");
+    let patch = &attribution["patch"];
     assert_eq!(patch["status"], "available");
-    assert_eq!(patch["commit_oid"], target["citations"][0]["oid"]);
+    assert_eq!(patch["commit_oid"], attribution["oid"]);
     let hunks = patch["hunks"].as_array().unwrap();
     assert_eq!(hunks.len(), 1);
     assert_eq!(hunks[0]["new_path"], "src/engine.rs");
@@ -744,15 +770,12 @@ fn why_patch_excerpts_follow_line_and_symbol_anchors() {
     assert!(hunk_text.contains("target_value = \"new\""));
     assert!(!hunk_text.contains("helper_value"));
     assert!(!hunk_text.contains("README.md"));
-
-    let unrelated = patched["materials"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|material| material["subject"] == "Touch unrelated helper")
-        .expect("unrelated helper material");
-    assert_eq!(unrelated["patch"]["status"], "no_relevant_hunks");
-    assert_eq!(unrelated["patch"]["hunks"], serde_json::json!([]));
+    assert!(
+        patched_modifications
+            .iter()
+            .all(|modification| { modification["subject"] != "Touch unrelated helper" })
+    );
+    assert_eq!(patched["why"]["counts"]["other_file_history"], 1);
 
     let symbol = json(
         &repo,
@@ -767,12 +790,12 @@ fn why_patch_excerpts_follow_line_and_symbol_anchors() {
             "--json",
         ],
     );
-    let symbol_target = symbol["materials"]
+    let symbol_target = symbol["target_related_modifications"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|material| material["subject"] == "Change target and helper")
-        .expect("symbol-changing material");
+        .find(|modification| modification["subject"] == "Change target and helper")
+        .expect("symbol-changing modification");
     let symbol_hunks = symbol_target["patch"]["hunks"].as_array().unwrap();
     assert_eq!(symbol_hunks.len(), 1);
     assert!(
@@ -796,7 +819,7 @@ fn why_patch_excerpts_follow_line_and_symbol_anchors() {
 }
 
 #[test]
-fn why_scoped_patch_does_not_reassign_line_ownership_to_older_material() {
+fn why_scoped_patch_keeps_eligible_modifications_separate_from_attribution() {
     let repo = TestRepo::new();
     repo.commit("target.txt", b"initial\n", "Create target", None);
     repo.commit("target.txt", b"older\n", "Older target change", None);
@@ -817,28 +840,40 @@ fn why_scoped_patch_does_not_reassign_line_ownership_to_older_material() {
             "--json",
         ],
     );
-    assert_eq!(report["matched_count"], 2);
-    let material = report["materials"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|material| material["subject"] == "Older target change")
-        .expect("older material remains eligible for ranking");
-    assert!(
-        material["basis"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|basis| basis == "diff hunk corroborates the target line")
+    assert_eq!(
+        report["why"]["attribution"]["state"],
+        "outside_historical_scope"
     );
-    assert_eq!(material["patch"]["status"], "no_relevant_hunks");
-    assert_eq!(material["patch"]["hunks"], serde_json::json!([]));
+    assert_eq!(report["matched_count"], 2);
+    let modifications = report["target_related_modifications"].as_array().unwrap();
+    assert_eq!(modifications.len(), 2);
+    let older_change = modifications
+        .iter()
+        .find(|modification| modification["subject"] == "Older target change")
+        .expect("older target change remains eligible");
     assert!(
-        report["materials"]
+        older_change["basis"]
             .as_array()
             .unwrap()
             .iter()
-            .all(|material| material["subject"] != "Newer target owner")
+            .any(|basis| {
+                basis
+                    .as_str()
+                    .unwrap()
+                    .contains("changed lines overlap target line 1")
+            })
+    );
+    assert_eq!(older_change["patch"]["status"], "available");
+    assert!(
+        older_change["patch"]["hunks"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("+older")
+    );
+    assert!(
+        modifications
+            .iter()
+            .all(|modification| modification["subject"] != "Newer target owner")
     );
 }
 
@@ -879,7 +914,7 @@ fn why_symbol_patch_keeps_body_hunks_after_signature_edit() {
             "--json",
         ],
     );
-    let body_material = patched["materials"]
+    let body_material = patched["target_related_modifications"]
         .as_array()
         .unwrap()
         .iter()
@@ -924,7 +959,7 @@ fn why_symbol_patch_ignores_braces_inside_literals_and_comments() {
             "--json",
         ],
     );
-    let material = patched["materials"]
+    let material = patched["target_related_modifications"]
         .as_array()
         .unwrap()
         .iter()
@@ -979,7 +1014,7 @@ fn why_symbol_patch_ignores_braces_inside_javascript_strings() {
             "--json",
         ],
     );
-    let material = patched["materials"]
+    let material = patched["target_related_modifications"]
         .as_array()
         .unwrap()
         .iter()
@@ -992,4 +1027,141 @@ fn why_symbol_patch_ignores_braces_inside_javascript_strings() {
             .unwrap()
             .contains("result = 2")
     );
+}
+
+#[test]
+fn why_separates_attribution_target_modifications_and_other_history() {
+    let repo = TestRepo::new();
+    let initial = "fn target() {\n    let value = 1;\n    let neighbor = 0;\n}\n";
+    repo.commit("src/lib.rs", initial.as_bytes(), "Create target", None);
+
+    let unrelated = initial.replace("neighbor = 0", "neighbor = 1");
+    fs::write(repo.dir.path().join("README.md"), "unrelated\n").expect("write unrelated file");
+    git(repo.dir.path(), ["add", "README.md"]);
+    repo.commit(
+        "src/lib.rs",
+        unrelated.as_bytes(),
+        "Change neighbor and other file",
+        Some("Because this explains a separate concern."),
+    );
+
+    let target_change = unrelated.replace("value = 1", "value = 2");
+    repo.commit(
+        "src/lib.rs",
+        target_change.as_bytes(),
+        "Update target",
+        None,
+    );
+    let attribution_oid = repo.head();
+    repo.index();
+
+    let report = json(&repo, &["why", "src/lib.rs", "--line", "2", "--json"]);
+    assert_eq!(report["schema_version"], 5);
+    assert!(report.get("materials").is_none());
+    assert_eq!(
+        report["target_related_modifications"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        report["target_related_modifications"][0]["subject"],
+        "Create target"
+    );
+    assert_eq!(report["why"]["anchor"]["kind"], "line");
+    assert_eq!(report["why"]["attribution"]["state"], "available");
+    assert_eq!(report["why"]["attribution"]["scope"], "target_line");
+    assert_eq!(
+        report["why"]["attribution"]["commit"]["oid"],
+        attribution_oid
+    );
+    assert_eq!(
+        report["why"]["attribution"]["commit"]["consolidated_target_modification"],
+        true
+    );
+    assert_eq!(report["why"]["counts"]["attribution"], 1);
+    assert_eq!(
+        report["why"]["counts"]["standalone_target_related_modifications"],
+        1
+    );
+    assert_eq!(report["why"]["counts"]["other_file_history"], 1);
+    assert_eq!(report["why"]["counts"]["file_history"], 3);
+    assert!(
+        serde_json::to_string(&report)
+            .unwrap()
+            .find("confidence")
+            .is_none()
+    );
+    assert_eq!(report["why"]["timeline_follow_up"]["args"][0], "timeline");
+    assert_eq!(report["why"]["timeline_follow_up"]["args"][1], "src/lib.rs");
+    assert_eq!(
+        report["why"]["timeline_follow_up"]["args"][3],
+        attribution_oid
+    );
+
+    let text = repo.run(["why", "src/lib.rs", "--line", "2"]);
+    assert_eq!(text.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&text.stdout);
+    assert!(stdout.contains("Attribution"));
+    assert!(stdout.contains("Other file history: 1"));
+    assert!(!stdout.contains("confidence:"));
+}
+
+#[test]
+fn why_does_not_reuse_target_line_across_merge_branches() {
+    let repo = TestRepo::new();
+    let initial = concat!(
+        "fn run() {\n",
+        "    let target = 1;\n",
+        "    let neighbor = 0;\n",
+        "    let tail = 0;\n",
+        "}\n",
+    );
+    repo.commit("src/main.rs", initial.as_bytes(), "Create target", None);
+
+    git(repo.dir.path(), ["switch", "-c", "side"]);
+    let side = initial.replace("neighbor = 0", "neighbor = 1");
+    repo.commit(
+        "src/main.rs",
+        side.as_bytes(),
+        "Change side branch neighbor",
+        None,
+    );
+
+    git(repo.dir.path(), ["switch", "main"]);
+    let shifted = initial.replace(
+        "    let target = 1;",
+        "    let inserted = 0;\n    let target = 1;",
+    );
+    repo.commit(
+        "src/main.rs",
+        shifted.as_bytes(),
+        "Insert before target",
+        None,
+    );
+    git(
+        repo.dir.path(),
+        ["merge", "--no-ff", "side", "-m", "Merge side branch"],
+    );
+    repo.index();
+
+    let report = json(&repo, &["why", "src/main.rs", "--line", "3", "--json"]);
+    let modifications = report["target_related_modifications"].as_array().unwrap();
+    assert_eq!(
+        modifications.len(),
+        0,
+        "the attribution commit is consolidated; side-branch changes are not target-related: {report:#?}"
+    );
+    assert_eq!(
+        report["why"]["attribution"]["commit"]["subject"],
+        "Create target"
+    );
+    assert!(
+        report["why"]["attribution"]["commit"]["consolidated_target_modification"]
+            .as_bool()
+            .unwrap()
+    );
+    assert_eq!(report["why"]["counts"]["file_history"], 4);
+    assert_eq!(report["why"]["counts"]["other_file_history"], 3);
 }

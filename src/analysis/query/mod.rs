@@ -372,6 +372,7 @@ fn run_why(
         &target,
         &reachable,
         eligible.as_ref(),
+        context.scope.as_ref().map(|scope| &scope.report),
         options.limit,
         options.patch,
     )?;

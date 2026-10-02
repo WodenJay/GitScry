@@ -27,6 +27,7 @@ pub(crate) struct Report {
     pub(crate) patch_mode: bool,
     pub(crate) warnings: Vec<String>,
     pub(crate) notices: Vec<String>,
+    pub(crate) why: Option<Box<WhySummary>>,
     pub(crate) scope: Option<SearchScopeInfo>,
 }
 #[derive(Clone, Debug)]
@@ -96,16 +97,49 @@ pub(crate) enum Detail {
     Failure(Failure),
     /// Co-change support for a candidate path.
     Relation(Relation),
-    /// The target anchor and revision behind a why explanation.
-    Why(WhyDetail),
     /// The fix, introducing change, and deleted-line evidence behind trace-fix.
     TraceFix(TraceFixDetail),
 }
 
-pub(crate) struct WhyDetail {
+/// The separate facts returned by a line or symbol `why` query.
+pub(crate) struct WhySummary {
     pub(crate) anchor: String,
+    pub(crate) anchor_kind: &'static str,
+    pub(crate) anchor_line: Option<usize>,
+    pub(crate) symbol_end: Option<usize>,
+    pub(crate) attribution_scope: &'static str,
     pub(crate) revision: String,
-    pub(crate) line: usize,
+    pub(crate) target_related_modifications: Vec<WhyModification>,
+    pub(crate) attribution: WhyAttribution,
+    pub(crate) standalone_target_related_modification_count: usize,
+    pub(crate) other_file_history_count: usize,
+    pub(crate) file_history_count: usize,
+    pub(crate) omitted_target_related_modifications: usize,
+    pub(crate) timeline_follow_up_args: Option<Vec<String>>,
+    pub(crate) limitations: Vec<String>,
+}
+
+pub(crate) struct WhyModification {
+    pub(crate) oid: String,
+    pub(crate) subject: String,
+    pub(crate) paths: Vec<Vec<u8>>,
+    pub(crate) basis: Vec<String>,
+    pub(crate) patch: Option<PatchExcerpt>,
+}
+
+pub(crate) enum WhyAttribution {
+    Available(WhyAttributionCommit),
+    OutsideHistoricalScope,
+    Unavailable { reason: String },
+}
+
+pub(crate) struct WhyAttributionCommit {
+    pub(crate) oid: String,
+    pub(crate) subject: String,
+    pub(crate) shallow_boundary: bool,
+    pub(crate) consolidated_target_modification: bool,
+    pub(crate) basis: Vec<String>,
+    pub(crate) patch: Option<PatchExcerpt>,
 }
 
 pub(crate) struct TraceFixPatchAnchor {
@@ -216,6 +250,7 @@ pub(crate) fn report(
         truncated: matched_count > limit,
         warnings: Vec::new(),
         notices: Vec::new(),
+        why: None,
         scope: None,
         patch_mode: false,
     }
@@ -230,6 +265,7 @@ pub(crate) fn empty_report(kind: ReportKind) -> Report {
         truncated: false,
         warnings: Vec::new(),
         notices: Vec::new(),
+        why: None,
         scope: None,
         patch_mode: false,
     }

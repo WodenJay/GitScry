@@ -216,6 +216,7 @@ fn run_with_scope(
         warnings: Vec::new(),
         notices: Vec::new(),
         patch_mode: false,
+        why: None,
         scope: None,
     })
 }

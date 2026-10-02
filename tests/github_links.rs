@@ -87,7 +87,7 @@ fn indexed_material_repo() -> support::TestRepo {
     repo
 }
 
-const MATERIAL_COMMANDS: [(&str, &[&str]); 7] = [
+const LINKABLE_COMMANDS: [(&str, &[&str]); 7] = [
     (
         "examples",
         &[
@@ -182,6 +182,43 @@ const MATERIAL_COMMANDS: [(&str, &[&str]); 7] = [
         ],
     ),
 ];
+
+fn returned_commit_ids(report: &serde_json::Value) -> Vec<String> {
+    let mut commits = Vec::new();
+    let mut add = |oid: &str| {
+        if !commits.iter().any(|seen| seen == oid) {
+            commits.push(oid.to_owned());
+        }
+    };
+
+    if report.get("why").is_some_and(|why| !why.is_null()) {
+        if let Some(oid) = report["why"]["attribution"]["commit"]["oid"].as_str() {
+            add(oid);
+        }
+        if let Some(modifications) = report["target_related_modifications"].as_array() {
+            for modification in modifications {
+                if let Some(oid) = modification["oid"].as_str() {
+                    add(oid);
+                }
+            }
+        }
+    } else if let Some(materials) = report["materials"].as_array() {
+        for material in materials {
+            if let Some(citations) = material["citations"].as_array() {
+                for citation in citations {
+                    if let Some(oid) = citation["oid"].as_str() {
+                        add(oid);
+                    }
+                }
+            }
+        }
+    }
+    commits
+}
+
+fn expected_query_schema_version(name: &str) -> u8 {
+    if name == "why" { 5 } else { 4 }
+}
 
 #[test]
 fn github_options_allow_a_search_with_no_matches() {
@@ -280,18 +317,18 @@ fn invalid_github_repository_does_not_fail_the_git_search() {
 }
 
 #[test]
-fn remaining_material_queries_keep_git_output_with_explicit_link_options() {
+fn remaining_queries_keep_git_output_with_explicit_link_options() {
     let repo = indexed_material_repo();
 
-    for (name, args) in MATERIAL_COMMANDS {
+    for (name, args) in LINKABLE_COMMANDS {
         let mut baseline_args = args.to_vec();
         baseline_args.push("--json");
         let baseline_output = repo.run(baseline_args.clone());
         assert_eq!(baseline_output.status.code(), Some(0), "{name}");
         let baseline: serde_json::Value = serde_json::from_slice(&baseline_output.stdout).unwrap();
         assert!(
-            !baseline["materials"].as_array().unwrap().is_empty(),
-            "{name}"
+            !returned_commit_ids(&baseline).is_empty(),
+            "{name}: expected returned commits"
         );
 
         let mut repository_only_args = args.to_vec();
@@ -306,18 +343,14 @@ fn remaining_material_queries_keep_git_output_with_explicit_link_options() {
         assert_eq!(enabled.status.code(), Some(0), "{name}");
         let mut value: serde_json::Value = serde_json::from_slice(&enabled.stdout).unwrap();
         assert_eq!(value["kind"], name, "{name}");
-        assert_eq!(value["schema_version"], 4, "{name}");
+        assert_eq!(
+            value["schema_version"],
+            expected_query_schema_version(name),
+            "{name}"
+        );
         assert_eq!(value["github_links"]["status"], "failed", "{name}");
 
-        let mut expected = Vec::<String>::new();
-        for material in value["materials"].as_array().unwrap() {
-            for citation in material["citations"].as_array().unwrap() {
-                let sha = citation["oid"].as_str().unwrap();
-                if !expected.iter().any(|seen| seen == sha) {
-                    expected.push(sha.to_owned());
-                }
-            }
-        }
+        let expected = returned_commit_ids(&value);
         let actual = value["github_links"]["commit_associations"]
             .as_array()
             .unwrap()
@@ -1263,15 +1296,18 @@ mod unix {
 }
 
 #[cfg(unix)]
-mod remaining_material_links {
+mod remaining_query_links {
     use super::unix::{FakeGh, successful_response};
-    use super::{MATERIAL_COMMANDS, indexed_material_repo};
+    use super::{
+        LINKABLE_COMMANDS, expected_query_schema_version, indexed_material_repo,
+        returned_commit_ids,
+    };
     #[test]
-    fn remaining_material_commands_fetch_links_for_returned_citations_only() {
+    fn queries_fetch_links_for_returned_commits_only() {
         let repo = indexed_material_repo();
         let gh = FakeGh::new(&successful_response());
 
-        for (name, args) in MATERIAL_COMMANDS {
+        for (name, args) in LINKABLE_COMMANDS {
             let mut baseline_args = args.to_vec();
             baseline_args.push("--json");
             let baseline_output = repo.run(baseline_args.clone());
@@ -1292,8 +1328,15 @@ mod remaining_material_links {
             assert_eq!(output.status.code(), Some(0), "{name}");
             let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
             assert_eq!(value["kind"], name, "{name}");
-            assert_eq!(value["schema_version"], 4, "{name}");
-            assert!(!value["materials"].as_array().unwrap().is_empty(), "{name}");
+            assert_eq!(
+                value["schema_version"],
+                expected_query_schema_version(name),
+                "{name}"
+            );
+            assert!(
+                !returned_commit_ids(&value).is_empty(),
+                "{name}: expected returned commits"
+            );
 
             let links = &value["github_links"];
             assert_eq!(links["status"], "complete", "{name}");
@@ -1304,15 +1347,7 @@ mod remaining_material_links {
                 "{name}"
             );
 
-            let mut expected = Vec::<String>::new();
-            for material in value["materials"].as_array().unwrap() {
-                for citation in material["citations"].as_array().unwrap() {
-                    let sha = citation["oid"].as_str().unwrap();
-                    if !expected.iter().any(|seen| seen == sha) {
-                        expected.push(sha.to_owned());
-                    }
-                }
-            }
+            let expected = returned_commit_ids(&value);
             let actual = links["commit_associations"]
                 .as_array()
                 .unwrap()
@@ -1338,13 +1373,13 @@ mod remaining_material_links {
     }
 
     #[test]
-    fn github_failures_do_not_change_any_remaining_material_query() {
+    fn github_failures_do_not_change_any_remaining_query() {
         let repo = indexed_material_repo();
         let secret = "TOKEN_SHOULD_NOT_LEAK";
         let gh =
             FakeGh::with_exit_status(&format!(r#"{{"errors":[{{"message":"{secret}"}}]}}"#), 1);
 
-        for (name, args) in MATERIAL_COMMANDS {
+        for (name, args) in LINKABLE_COMMANDS {
             let mut baseline_args = args.to_vec();
             baseline_args.push("--json");
             let baseline_output = repo.run(baseline_args);

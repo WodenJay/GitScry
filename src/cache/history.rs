@@ -170,6 +170,10 @@ impl QuerySession {
         ancestors(&self.connection, oid)
     }
 
+    pub(crate) fn first_parent_ancestors(&self, oid: &str) -> Result<HashSet<String>, AppError> {
+        first_parent_ancestors(&self.connection, oid)
+    }
+
     pub(crate) fn history_hunks(&self, oid: &str) -> Result<Vec<HistoryHunk>, AppError> {
         hunks(&self.connection, oid)
     }
@@ -376,6 +380,29 @@ fn ancestors(connection: &Connection, oid: &str) -> Result<HashSet<String>, AppE
         }
     }
     Ok(ancestors)
+}
+
+fn first_parent_ancestors(connection: &Connection, oid: &str) -> Result<HashSet<String>, AppError> {
+    let mut statement = connection
+        .prepare(
+            "WITH RECURSIVE first_parent_chain(commit_id) AS (
+                SELECT commit_id FROM commits WHERE oid = ?1
+                UNION ALL
+                SELECT parent.parent_id
+                FROM commit_parents AS parent
+                JOIN first_parent_chain AS child ON child.commit_id = parent.commit_id
+                WHERE parent.position = 0 AND parent.parent_id IS NOT NULL
+            )
+            SELECT commits.oid
+            FROM first_parent_chain
+            JOIN commits ON commits.commit_id = first_parent_chain.commit_id",
+        )
+        .map_err(|error| search_error("preparing first-parent history", error))?;
+    let rows = statement
+        .query_map([oid], |row| row.get::<_, String>(0))
+        .map_err(|error| search_error("querying first-parent history", error))?;
+    rows.collect::<Result<HashSet<_>, _>>()
+        .map_err(|error| search_error("reading first-parent history", error))
 }
 
 fn hunks(connection: &Connection, oid: &str) -> Result<Vec<HistoryHunk>, AppError> {
