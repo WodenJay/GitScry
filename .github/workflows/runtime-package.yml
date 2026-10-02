@@ -120,6 +120,8 @@ jobs:
           key: gitscry-semantic-model-${{ runner.os }}-${{ steps.semantic-model.outputs.revision }}
       - name: Check fixed semantic embedding parity
         run: cargo test --locked --lib --all-features -- --ignored --nocapture matches_fixed_reference_embeddings
+      - name: Check prepared model lookup
+        run: cargo test --locked --lib --all-features -- --ignored --nocapture prepared_model_is_available_to_offline_queries
       - name: Check mixed-generation semantic retrieval
         run: cargo test --locked --test search --all-features -- --ignored --nocapture hybrid_search_mixes_reference_document_vectors_with_current_runtime_queries
       - name: Install cargo-dist on Unix

@@ -89,7 +89,7 @@ pub(crate) fn existing() -> Result<Assets, AppError> {
         }
     }
     Ok(Assets {
-        model: directory.join("onnx/model.onnx"),
+        model: directory.join("model.onnx"),
         tokenizer: directory.join("tokenizer.json"),
     })
 }
@@ -105,7 +105,7 @@ pub(crate) fn ensure_tokenizer() -> Result<PathBuf, AppError> {
     let _lock = acquire_download_lock(&directory)?;
     for resource in RESOURCES
         .iter()
-        .filter(|resource| resource.path != "onnx/model.onnx")
+        .filter(|resource| resource.path != "model.onnx")
     {
         ensure_resource(&directory, resource)?;
     }
@@ -296,4 +296,17 @@ pub(crate) fn encoder_fingerprint() -> String {
         hasher.update(resource.sha256.as_bytes());
     }
     format!("{:x}", hasher.finalize())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    #[ignore = "requires prepared MiniLM model assets or network access"]
+    fn prepared_model_is_available_to_offline_queries() {
+        let prepared = super::ensure().unwrap();
+        let existing = super::existing().unwrap();
+        assert_eq!(existing.model, prepared.model);
+        assert_eq!(existing.tokenizer, prepared.tokenizer);
+        assert!(existing.model.is_file());
+    }
 }
