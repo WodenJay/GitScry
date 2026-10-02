@@ -466,14 +466,14 @@ mod unix {
     use super::support::{TestRepo, git};
     use tempfile::TempDir;
 
-    struct FakeGh {
+    pub(super) struct FakeGh {
         directory: TempDir,
         log: PathBuf,
         exit_status: String,
     }
 
     impl FakeGh {
-        fn new(response: &str) -> Self {
+        pub(super) fn new(response: &str) -> Self {
             Self::with_responses(
                 vec![response.to_owned()],
                 vec![issue_response(false, serde_json::json!([]))],
@@ -514,13 +514,13 @@ mod unix {
             }
         }
 
-        fn with_exit_status(response: &str, exit_status: i32) -> Self {
+        pub(super) fn with_exit_status(response: &str, exit_status: i32) -> Self {
             let mut gh = Self::new(response);
             gh.exit_status = exit_status.to_string();
             gh
         }
 
-        fn run(&self, repo: &TestRepo, args: &[&str]) -> Output {
+        pub(super) fn run(&self, repo: &TestRepo, args: &[&str]) -> Output {
             let original_path = std::env::var_os("PATH").unwrap_or_default();
             let path = std::env::join_paths(
                 std::iter::once(self.directory.path().to_path_buf())
@@ -547,7 +547,7 @@ mod unix {
                 .expect("run gitscry")
         }
 
-        fn calls(&self) -> usize {
+        pub(super) fn calls(&self) -> usize {
             fs::read_to_string(&self.log)
                 .unwrap_or_default()
                 .lines()
@@ -642,7 +642,7 @@ mod unix {
         .to_string()
     }
 
-    fn successful_response() -> String {
+    pub(super) fn successful_response() -> String {
         response(false, serde_json::json!([pull_request_node()]))
     }
     #[test]
@@ -945,7 +945,8 @@ mod unix {
             2
         );
         assert_eq!(gh.calls(), 5);
-        let calls = gh.log().lines().collect::<Vec<_>>();
+        let log = gh.log();
+        let calls = log.lines().collect::<Vec<_>>();
         assert!(calls[0].contains("associatedPullRequests"));
         assert!(calls[1].contains("closingIssuesReferences"));
         assert!(
@@ -1026,7 +1027,8 @@ mod unix {
         );
         assert!(links["reason"].as_str().unwrap().contains("request limit"));
         assert_eq!(gh.calls(), 20);
-        let calls = gh.log().lines().collect::<Vec<_>>();
+        let log = gh.log();
+        let calls = log.lines().collect::<Vec<_>>();
         assert!(
             calls[..10]
                 .iter()
@@ -1111,7 +1113,8 @@ mod unix {
                 .all(|pull_request| pull_request["number"] != 201)
         );
         assert_eq!(gh.calls(), 20);
-        let calls = gh.log().lines().collect::<Vec<_>>();
+        let log = gh.log();
+        let calls = log.lines().collect::<Vec<_>>();
         assert!(
             calls[..5]
                 .iter()
