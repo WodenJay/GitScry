@@ -92,6 +92,7 @@ Instead of manually stitching together `git log`, `blame`, old diffs, reverts, a
 - **Which commit may have introduced this regression?** → `regression`
 - **What change originally introduced the code removed by this fix?** → `trace-fix`
 - **What history is relevant to this topic?** → `search`
+- **Which existing files were touched repeatedly?** → `hotspots`
 
 Results stay traceable: GitScry shows the commits, paths, confidence, and evidence behind each finding.
 
@@ -175,6 +176,7 @@ This is enough! GitScry intentionally uses a single lightweight instruction inst
 | **`regression`** | Ranks commits that may have introduced an observed regression using affected-path history, symptom matches, diff hunks, symbols, test history, and an optional good→bad revision range. | `gitscry regression slow startup --path src/main.rs --good v0.1.0 --symbol main` |
 | **`why`** | Explains the history behind a specific line or symbol by tracing blame, diffs, path history, renames, and explanatory commit messages. | `gitscry why src/lib.rs --symbol provider` |
 | **`trace-fix`** | Starts from a known fix and traces deleted/replaced lines back to the change that introduced them. | `gitscry trace-fix HEAD --path src/lib.rs` |
+| **`hotspots`** | Ranks tracked files at the published cache tip by distinct non-merge touching commits. | `gitscry hotspots --json --limit 20` |
 | **`index`** | Builds or refreshes the local cache from the repository's default-branch history. | `gitscry index` |
 | **`update`** | Updates GitScry to the latest stable release. | `gitscry update` |
 
