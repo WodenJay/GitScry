@@ -31,12 +31,14 @@ struct IsolatedExecutable {
 
 impl IsolatedExecutable {
     fn new() -> Self {
-        let install = tempfile::tempdir().expect("create isolated installation");
         let source = PathBuf::from(env!("CARGO_BIN_EXE_gitscry"));
+        let install = tempfile::tempdir_in(source.parent().expect("binary directory"))
+            .expect("create isolated installation");
         let path = install
             .path()
             .join(source.file_name().expect("binary filename"));
-        fs::copy(source, &path).expect("copy executable without runtime");
+        // Hard-link the immutable binary: no writable descriptor can race a parallel exec.
+        fs::hard_link(source, &path).expect("link executable without runtime");
         Self {
             _install: install,
             path,
