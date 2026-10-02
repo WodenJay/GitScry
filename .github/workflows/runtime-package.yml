@@ -18,8 +18,9 @@ on:
       - 'scripts/**'
       - 'src/app/index.rs'
       - 'src/app/update.rs'
+      - 'src/app/update/**'
       - 'src/cache/query.rs'
-      - 'src/cache/semantic.rs'
+      - 'src/cache/semantic/**'
       - 'src/lib.rs'
       - 'src/runtime/**'
       - 'src/semantic/**'
@@ -46,8 +47,9 @@ on:
       - 'scripts/**'
       - 'src/app/index.rs'
       - 'src/app/update.rs'
+      - 'src/app/update/**'
       - 'src/cache/query.rs'
-      - 'src/cache/semantic.rs'
+      - 'src/cache/semantic/**'
       - 'src/lib.rs'
       - 'src/runtime/**'
       - 'src/semantic/**'
@@ -92,8 +94,10 @@ jobs:
           revision="$(grep '^pub(crate) const REVISION:' src/semantic/resources.rs | cut -d '"' -f 2)"
           test -n "$revision"
           echo "revision=$revision" >> "$GITHUB_OUTPUT"
+      # Native tests use target/debug, where prepare-runtime installs the runtime.
+      # Explicit --target builds use target/<triple>/debug instead.
       - name: Run native tests
-        run: cargo test --locked --all-targets --all-features --target ${{ matrix.target }}
+        run: cargo test --locked --all-targets --all-features
       - name: Prepare pinned ONNX Runtime
         run: cargo run --manifest-path xtask/Cargo.toml --locked -- prepare-runtime
       - name: Validate PowerShell installer syntax
@@ -117,7 +121,7 @@ jobs:
       - name: Check fixed semantic embedding parity
         run: cargo test --locked --lib --all-features -- --ignored --nocapture matches_fixed_reference_embeddings
       - name: Check mixed-generation semantic retrieval
-        run: cargo test --locked --test search --all-features --target ${{ matrix.target }} -- --ignored --nocapture hybrid_search_mixes_reference_document_vectors_with_current_runtime_queries
+        run: cargo test --locked --test search --all-features -- --ignored --nocapture hybrid_search_mixes_reference_document_vectors_with_current_runtime_queries
       - name: Install cargo-dist on Unix
         if: runner.os != 'Windows'
         shell: bash
