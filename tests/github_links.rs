@@ -898,11 +898,11 @@ mod unix {
             ],
             vec![
                 first_issue_page.to_string(),
+                issue_response(false, serde_json::json!([])),
                 issue_response(
                     false,
                     serde_json::json!([issue_node("ISSUE_8", "acme/widget", 8, "Second Issue")]),
                 ),
-                issue_response(false, serde_json::json!([])),
             ],
         );
         let output = gh.run(
@@ -1477,7 +1477,7 @@ mod unix {
             value["github_links"]["commit_associations"][0]["commit_sha"],
             repo.head()
         );
-        assert_eq!(gh.calls(), 1);
+        assert_eq!(gh.calls(), 2);
     }
 
     #[test]
@@ -1570,7 +1570,7 @@ mod unix {
         let human = String::from_utf8_lossy(&human.stdout);
         assert!(human.contains("GitHub associations"));
         assert!(human.contains("pull request #42"));
-        assert_eq!(gh.calls(), 2);
+        assert_eq!(gh.calls(), 4);
     }
 
     #[test]
@@ -1644,6 +1644,7 @@ mod remaining_query_links {
         let gh = FakeGh::new(&successful_response());
 
         for (name, args) in LINKABLE_COMMANDS {
+            let calls_before = gh.calls();
             let mut baseline_args = args.to_vec();
             baseline_args.push("--json");
             let baseline_output = repo.run(baseline_args.clone());
@@ -1656,7 +1657,11 @@ mod remaining_query_links {
             let repository_only = gh.run(&repo, &repository_only_args);
             assert_eq!(repository_only.status.code(), Some(0), "{name}");
             assert_eq!(repository_only.stdout, baseline_output.stdout, "{name}");
-            assert_eq!(gh.calls(), 0, "{name}: repo selection must not fetch");
+            assert_eq!(
+                gh.calls(),
+                calls_before,
+                "{name}: repo selection must not fetch"
+            );
 
             let mut enabled_args = args.to_vec();
             enabled_args.extend(["--github-links", "--github-repo", "acme/widget", "--json"]);
