@@ -1,6 +1,6 @@
 use crate::app::AppError;
 
-use super::text::{normalize_path, query_terms};
+use super::text::{is_cjk_run, normalize_path, query_terms};
 
 /// What one natural-language query asks the cache for.
 pub(crate) struct Intent {
@@ -56,6 +56,13 @@ impl Intent {
             anchors: normalize_anchors(paths.iter().cloned())?,
             explicit_paths: Vec::new(),
         })
+    }
+
+    pub(crate) fn complete_cjk_terms(&self) -> impl Iterator<Item = &str> {
+        self.terms
+            .iter()
+            .filter(|term| is_cjk_run(term) && term.chars().count() > 1)
+            .map(String::as_str)
     }
 
     pub(in crate::analysis) fn terms(&self) -> &[String] {

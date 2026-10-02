@@ -100,8 +100,15 @@ impl QuerySession {
         match_query: &str,
         limit: i64,
         explicit_paths: &[String],
+        complete_terms: &[String],
     ) -> Result<Vec<SearchCandidate>, AppError> {
-        candidates(&self.connection, match_query, limit, explicit_paths)
+        candidates(
+            &self.connection,
+            match_query,
+            limit,
+            explicit_paths,
+            complete_terms,
+        )
     }
 
     pub(crate) fn match_count_scoped(
@@ -703,20 +710,28 @@ fn candidates(
     match_query: &str,
     limit: i64,
     explicit_paths: &[String],
+    complete_terms: &[String],
 ) -> Result<Vec<SearchCandidate>, AppError> {
     let path_filter = explicit_path_filter(explicit_paths, 2);
-    let limit_parameter = explicit_paths.len() + 2;
+    let complete_filter = complete_cjk_filter(complete_terms, explicit_paths.len() + 2);
+    let limit_parameter = explicit_paths.len() + complete_terms.len() + 2;
     let query = format!(
         "SELECT c.commit_id, c.oid, c.commit_time, c.message, c.message_length,
                 bm25(search_fts, 10.0, 3.0, 2.0), c.position
          FROM search_fts
          JOIN commits AS c ON c.commit_id = search_fts.rowid
          WHERE search_fts MATCH ?1 {path_filter}
-         ORDER BY bm25(search_fts, 10.0, 3.0, 2.0), c.commit_time DESC, c.oid ASC
+         ORDER BY CASE WHEN ({complete_filter}) THEN 0 ELSE 1 END,
+                  bm25(search_fts, 10.0, 3.0, 2.0), c.commit_time DESC, c.oid ASC
          LIMIT ?{limit_parameter}"
     );
     let mut values = vec![Value::Text(match_query.to_owned())];
     values.extend(explicit_paths.iter().cloned().map(Value::Text));
+    values.extend(
+        complete_terms
+            .iter()
+            .map(|term| Value::Blob(term.as_bytes().to_vec())),
+    );
     values.push(Value::Integer(limit));
     let mut statement = connection
         .prepare(&query)
@@ -742,6 +757,26 @@ fn candidates(
         .map_err(|error| search_error("reading search results", error))?;
     load_candidate_paths(connection, &mut candidates)?;
     Ok(candidates)
+}
+
+fn complete_cjk_filter(terms: &[String], first_parameter: usize) -> String {
+    if terms.is_empty() {
+        return "0".to_owned();
+    }
+    terms
+        .iter()
+        .enumerate()
+        .map(|(index, _)| {
+            let parameter = first_parameter + index;
+            format!(
+                "(instr(c.message, ?{parameter}) > 0 OR EXISTS (\
+                    SELECT 1 FROM commit_paths AS complete_path \
+                    WHERE complete_path.commit_id = c.commit_id \
+                      AND instr(complete_path.raw_path, ?{parameter}) > 0))"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" OR ")
 }
 
 fn explicit_path_filter(explicit_paths: &[String], first_parameter: usize) -> String {

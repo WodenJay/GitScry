@@ -81,9 +81,18 @@ pub(in crate::analysis) fn pool(
         return Ok(None);
     }
 
+    let complete_terms = intent
+        .complete_cjk_terms()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
     let candidates = match scope {
         Some(scope) => session.candidates_scoped(&query, scope, intent.explicit_paths())?,
-        None => session.candidates(&query, candidate_limit(limit), intent.explicit_paths())?,
+        None => session.candidates(
+            &query,
+            candidate_limit(limit),
+            intent.explicit_paths(),
+            &complete_terms,
+        )?,
     };
     let candidates = score_candidates(intent, candidates);
     Ok(Some(Pool {
@@ -103,9 +112,18 @@ pub(in crate::analysis) fn pool_with_depth(
         return Ok(None);
     }
     let query = match_query(terms);
+    let complete_terms = intent
+        .complete_cjk_terms()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
     let candidates = match scope {
         Some(scope) => session.candidates_scoped(&query, scope, intent.explicit_paths())?,
-        None => session.candidates(&query, candidate_limit(depth), intent.explicit_paths())?,
+        None => session.candidates(
+            &query,
+            candidate_limit(depth),
+            intent.explicit_paths(),
+            &complete_terms,
+        )?,
     };
     let candidates = score_candidates(intent, candidates);
     if candidates.is_empty() {
