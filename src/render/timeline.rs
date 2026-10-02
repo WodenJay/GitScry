@@ -68,7 +68,7 @@ pub(super) fn format_json_report(
         .collect::<Vec<_>>();
     let output = JsonReport {
         schema_version: if github_links.is_some() {
-            3
+            4
         } else if report.patch_mode {
             2
         } else {

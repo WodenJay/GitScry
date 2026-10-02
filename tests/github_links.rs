@@ -207,7 +207,7 @@ fn github_options_allow_a_search_with_no_matches() {
         String::from_utf8_lossy(&output.stderr)
     );
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(value["schema_version"], 3);
+    assert_eq!(value["schema_version"], 4);
     assert_eq!(value["github_links"]["status"], "complete");
     assert_eq!(value["github_links"]["repository"], serde_json::Value::Null);
     assert_eq!(value["github_links"]["issue_status"], "not_queried");
@@ -306,7 +306,7 @@ fn remaining_material_queries_keep_git_output_with_explicit_link_options() {
         assert_eq!(enabled.status.code(), Some(0), "{name}");
         let mut value: serde_json::Value = serde_json::from_slice(&enabled.stdout).unwrap();
         assert_eq!(value["kind"], name, "{name}");
-        assert_eq!(value["schema_version"], 3, "{name}");
+        assert_eq!(value["schema_version"], 4, "{name}");
         assert_eq!(value["github_links"]["status"], "failed", "{name}");
 
         let mut expected = Vec::<String>::new();
@@ -365,7 +365,7 @@ fn code_search_emits_deduplicated_link_status_without_changing_matches() {
     let baseline: serde_json::Value = serde_json::from_slice(&baseline.stdout).unwrap();
     let enabled: serde_json::Value = serde_json::from_slice(&enabled.stdout).unwrap();
     assert_eq!(baseline["schema_version"], 1);
-    assert_eq!(enabled["schema_version"], 3);
+    assert_eq!(enabled["schema_version"], 4);
     assert_eq!(enabled["code_matches"], baseline["code_matches"]);
     assert_eq!(enabled["matched_count"], baseline["matched_count"]);
     assert_eq!(enabled["code_matches"].as_array().unwrap().len(), 3);
@@ -409,7 +409,7 @@ fn timeline_github_options_preserve_entries_and_only_the_explicit_repo_enables_f
     assert_eq!(enabled.status.code(), Some(0));
     let baseline: serde_json::Value = serde_json::from_slice(&baseline.stdout).unwrap();
     let enabled: serde_json::Value = serde_json::from_slice(&enabled.stdout).unwrap();
-    assert_eq!(enabled["schema_version"], 3);
+    assert_eq!(enabled["schema_version"], 4);
     assert_eq!(enabled["entries"], baseline["entries"]);
     assert_eq!(enabled["github_links"]["status"], "failed");
     assert_eq!(
@@ -436,27 +436,47 @@ mod unix {
     struct FakeGh {
         directory: TempDir,
         log: PathBuf,
-        response: String,
         exit_status: String,
     }
 
     impl FakeGh {
         fn new(response: &str) -> Self {
+            Self::with_responses(
+                vec![response.to_owned()],
+                vec![issue_response(false, serde_json::json!([]))],
+            )
+        }
+
+        fn with_responses(
+            pull_request_responses: Vec<String>,
+            issue_responses: Vec<String>,
+        ) -> Self {
+            assert!(!pull_request_responses.is_empty());
+            assert!(!issue_responses.is_empty());
             let directory = tempfile::tempdir().expect("create fake gh directory");
             let executable = directory.path().join("gh");
             fs::write(
                 &executable,
-                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$GITSCRY_GH_LOG\"\nprintf '%s\\n' \"$GITSCRY_GH_RESPONSE\"\nexit \"$GITSCRY_GH_EXIT_STATUS\"\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$GITSCRY_GH_LOG\"\ncase \"$*\" in\n  *closingIssuesReferences*)\n    response_file=\"$GITSCRY_GH_ISSUE_RESPONSES\"\n    call=$(grep -c closingIssuesReferences \"$GITSCRY_GH_LOG\")\n    ;;\n  *)\n    response_file=\"$GITSCRY_GH_PR_RESPONSES\"\n    call=$(grep -vc closingIssuesReferences \"$GITSCRY_GH_LOG\")\n    ;;\nesac\nresponse=$(sed -n \"${call}p\" \"$response_file\")\nif [ -z \"$response\" ]; then response=$(tail -n 1 \"$response_file\"); fi\nprintf '%s\\n' \"$response\"\nexit \"$GITSCRY_GH_EXIT_STATUS\"\n",
             )
             .expect("write fake gh");
             let mut permissions = fs::metadata(&executable).unwrap().permissions();
             permissions.set_mode(0o755);
             fs::set_permissions(&executable, permissions).unwrap();
             let log = directory.path().join("calls");
+            fs::write(
+                directory.path().join("pull-request-responses"),
+                format!("{}\\n", pull_request_responses.join("\\n")),
+            )
+            .expect("write pull-request responses");
+            fs::write(
+                directory.path().join("issue-responses"),
+                format!("{}\\n", issue_responses.join("\\n")),
+            )
+            .expect("write issue responses");
             Self {
                 directory,
                 log,
-                response: response.to_owned(),
                 exit_status: "0".to_owned(),
             }
         }
@@ -480,7 +500,14 @@ mod unix {
                 .env("GIT_CONFIG_NOSYSTEM", "1")
                 .env("GIT_CONFIG_GLOBAL", repo.dir.path().join("global-config"))
                 .env("GITSCRY_GH_LOG", &self.log)
-                .env("GITSCRY_GH_RESPONSE", &self.response)
+                .env(
+                    "GITSCRY_GH_PR_RESPONSES",
+                    self.directory.path().join("pull-request-responses"),
+                )
+                .env(
+                    "GITSCRY_GH_ISSUE_RESPONSES",
+                    self.directory.path().join("issue-responses"),
+                )
                 .env("GITSCRY_GH_EXIT_STATUS", &self.exit_status)
                 .env("PATH", path)
                 .output()
@@ -545,18 +572,46 @@ mod unix {
     }
 
     fn pull_request_node() -> serde_json::Value {
+        pull_request_node_with("PR_42", 42, "Shared \"PR\" \u{1b}[31m")
+    }
+
+    fn pull_request_node_with(id: &str, number: u64, title: &str) -> serde_json::Value {
         serde_json::json!({
-            "number": 42,
-            "title": "Shared \"PR\" \u{1b}[31m",
-            "url": "https://github.com/acme/widget/pull/42",
+            "id": id,
+            "number": number,
+            "title": title,
+            "url": format!("https://github.com/acme/widget/pull/{number}"),
             "repository": {"nameWithOwner": "acme/widget"}
         })
+    }
+
+    fn issue_node(id: &str, repository: &str, number: u64, title: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "number": number,
+            "title": title,
+            "url": format!("https://github.com/{repository}/issues/{number}"),
+            "repository": {"nameWithOwner": repository}
+        })
+    }
+
+    fn issue_response(has_next_page: bool, nodes: serde_json::Value) -> String {
+        serde_json::json!({
+            "data": {
+                "node": {
+                    "closingIssuesReferences": {
+                        "pageInfo": {"hasNextPage": has_next_page},
+                        "nodes": nodes
+                    }
+                }
+            }
+        })
+        .to_string()
     }
 
     fn successful_response() -> String {
         response(false, serde_json::json!([pull_request_node()]))
     }
-
     #[test]
     fn repository_option_alone_never_invokes_gh() {
         let repo = indexed_repo("RepoOnlyMarker");
@@ -696,11 +751,12 @@ mod unix {
         assert_eq!(value["scope"], baseline["scope"]);
         assert_eq!(baseline["schema_version"], 2);
         assert!(value["materials"][0]["patch"].is_object());
-        assert_eq!(value["schema_version"], 3);
+        assert_eq!(value["schema_version"], 4);
         assert_eq!(links["repository"], "acme/widget");
         assert_eq!(links["status"], "complete");
-        assert_eq!(links["issue_status"], "not_queried");
+        assert_eq!(links["issue_status"], "complete");
         assert_eq!(links["pull_requests"].as_array().unwrap().len(), 1);
+        assert_eq!(links["pull_requests"][0]["issue_status"], "complete");
         assert_eq!(links["pull_requests"][0]["number"], 42);
         assert_eq!(links["pull_requests"][0]["type"], "pull_request");
         assert_eq!(
@@ -721,10 +777,12 @@ mod unix {
                         .as_str()
                         .is_some_and(|sha| sha.len() == 40))
         );
-        assert_eq!(gh.calls(), 2);
+        assert_eq!(gh.calls(), 3);
         assert!(gh.log().contains("associatedPullRequests(first: 50)"));
         assert!(gh.log().contains("owner=acme"));
         assert!(gh.log().contains("name=widget"));
+        assert!(gh.log().contains("closingIssuesReferences(first: 50)"));
+        assert!(!gh.log().contains("userLinkedOnly"));
         let human = gh.run(
             &repo,
             &[
@@ -738,6 +796,9 @@ mod unix {
         assert_eq!(human.status.code(), Some(0));
         assert!(!human.stdout.contains(&0x1b));
         assert!(String::from_utf8_lossy(&human.stdout).contains("Shared \"PR\""));
+        let human = String::from_utf8_lossy(&human.stdout);
+        assert!(human.contains("issue associations (complete)"));
+        assert!(!human.contains("closing issues"));
     }
     fn add_remote(repo: &TestRepo, name: &str, url: &str) {
         git(repo.dir.path(), ["remote", "add", name, url]);
@@ -800,7 +861,7 @@ mod unix {
                 .unwrap()
                 .contains("later pages were not fetched")
         );
-        assert_eq!(gh.calls(), 1);
+        assert_eq!(gh.calls(), 2);
     }
 
     #[test]
@@ -908,7 +969,92 @@ mod unix {
         assert_eq!(value["github_links"]["status"], "complete");
         assert!(gh.log().contains("owner=acme"));
         assert!(gh.log().contains("name=widget"));
-        assert_eq!(gh.calls(), 1);
+        assert_eq!(gh.calls(), 2);
+    }
+
+    #[test]
+    fn pull_requests_expose_deduplicated_issues_and_preserve_cross_repository_identity() {
+        let repo = TestRepo::new();
+        commit(&repo, "TwoLayerMarker first", "first");
+        commit(&repo, "TwoLayerMarker second", "second");
+        repo.index();
+
+        let first_issue = issue_node("I_one", "acme/one", 1, "Issue \"One\" \u{1b}[31m");
+        let same_number_elsewhere = issue_node(
+            "I_other",
+            "acme/two",
+            1,
+            "Same number, different repository",
+        );
+        let second_issue = issue_node("I_second", "acme/one", 2, "Second issue");
+        let gh = FakeGh::with_responses(
+            vec![
+                response(
+                    false,
+                    serde_json::json!([
+                        pull_request_node_with("PR_one", 41, "First PR"),
+                        pull_request_node_with("PR_two", 42, "Second PR")
+                    ]),
+                ),
+                response(
+                    false,
+                    serde_json::json!([pull_request_node_with("PR_one", 41, "First PR")]),
+                ),
+            ],
+            vec![
+                issue_response(
+                    false,
+                    serde_json::json!([first_issue.clone(), same_number_elsewhere, second_issue]),
+                ),
+                issue_response(false, serde_json::json!([first_issue])),
+            ],
+        );
+
+        let output = gh.run(
+            &repo,
+            &[
+                "search",
+                "TwoLayerMarker",
+                "--github-links",
+                "--github-repo",
+                "acme/widget",
+                "--json",
+            ],
+        );
+
+        assert_eq!(output.status.code(), Some(0));
+        assert!(!output.stdout.contains(&0x1b));
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let links = &value["github_links"];
+        assert_eq!(value["schema_version"], 4);
+        assert_eq!(links["issue_status"], "complete");
+        assert_eq!(links["issues"].as_array().unwrap().len(), 3);
+        assert_eq!(
+            links["issues"][0]["title"],
+            format!("Issue \"One\" {}[31m", char::from(27))
+        );
+        assert_eq!(links["issues"][0]["repository"], "acme/one");
+        assert_eq!(
+            links["issues"][0]["url"],
+            "https://github.com/acme/one/issues/1"
+        );
+        assert_eq!(links["issues"][1]["repository"], "acme/two");
+        assert_eq!(links["issues"][1]["number"], 1);
+        assert_eq!(links["pull_requests"].as_array().unwrap().len(), 2);
+        assert_eq!(links["pull_requests"][0]["issue_status"], "complete");
+        assert_eq!(
+            links["pull_requests"][0]["issue_urls"],
+            serde_json::json!([
+                "https://github.com/acme/one/issues/1",
+                "https://github.com/acme/two/issues/1",
+                "https://github.com/acme/one/issues/2"
+            ])
+        );
+        assert_eq!(
+            links["pull_requests"][1]["issue_urls"],
+            serde_json::json!(["https://github.com/acme/one/issues/1"])
+        );
+        assert_eq!(gh.calls(), 4);
     }
     #[test]
     fn code_search_links_only_distinct_returned_commits() {
@@ -945,7 +1091,7 @@ mod unix {
         );
         let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(baseline["schema_version"], 1);
-        assert_eq!(value["schema_version"], 3);
+        assert_eq!(value["schema_version"], 4);
         assert_eq!(value["code_matches"], baseline["code_matches"]);
         assert_eq!(value["matched_count"], baseline["matched_count"]);
         assert_eq!(value["scope"], baseline["scope"]);
@@ -1013,7 +1159,7 @@ mod unix {
         let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(baseline["entries"].as_array().unwrap().len(), 1);
         assert_eq!(baseline["entries"][0]["commit_id"], second);
-        assert_eq!(value["schema_version"], 3);
+        assert_eq!(value["schema_version"], 4);
         assert_eq!(baseline["schema_version"], 2);
         assert_eq!(baseline["entries"][0]["patch"]["status"], "available");
         assert_eq!(value["entries"], baseline["entries"]);
@@ -1103,7 +1249,7 @@ mod unix {
 
         assert_eq!(output.status.code(), Some(0));
         let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(value["schema_version"], 3);
+        assert_eq!(value["schema_version"], 4);
         assert!(value["entries"].as_array().unwrap().is_empty());
         assert_eq!(value["github_links"]["status"], "complete");
         assert!(
@@ -1146,7 +1292,7 @@ mod remaining_material_links {
             assert_eq!(output.status.code(), Some(0), "{name}");
             let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
             assert_eq!(value["kind"], name, "{name}");
-            assert_eq!(value["schema_version"], 3, "{name}");
+            assert_eq!(value["schema_version"], 4, "{name}");
             assert!(!value["materials"].as_array().unwrap().is_empty(), "{name}");
 
             let links = &value["github_links"];
