@@ -1636,15 +1636,8 @@ fn plain_index_requires_explicit_semantic_encoder_migration() {
         .unwrap();
     drop(cache);
 
-    let run = |args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_gitscry"))
-            .args(args)
-            .current_dir(repo.dir.path())
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", repo.dir.path().join("global-config"))
-            .output()
-            .unwrap()
-    };
+    let executable = IsolatedExecutable::new();
+    let run = |args: &[&str]| executable.run(repo.dir.path(), args);
     let plain = run(&["index"]);
     assert_eq!(plain.status.code(), Some(1));
     let error = String::from_utf8_lossy(&plain.stderr);
