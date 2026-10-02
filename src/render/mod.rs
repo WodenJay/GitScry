@@ -10,6 +10,7 @@ mod github_links;
 mod json;
 mod material;
 
+mod patterns;
 mod timeline;
 mod trace_removal;
 use crate::{
@@ -25,6 +26,7 @@ fn format_report(
 ) -> String {
     match report {
         QueryReport::Followups(report) => followups::format_report(report),
+        QueryReport::Patterns(report) => patterns::format_report(report),
         QueryReport::Context(report) => context::format_report(report),
         QueryReport::TraceRemoval(report) => trace_removal::format_report(report),
         QueryReport::Analysis(report) => {
@@ -55,6 +57,7 @@ fn format_json_report(
         QueryReport::Followups(report) => {
             followups::format_json_report(report, additional_warnings)
         }
+        QueryReport::Patterns(report) => patterns::format_json_report(report, additional_warnings),
         QueryReport::Context(report) => context::format_json_report(report, additional_warnings),
         QueryReport::TraceRemoval(report) => {
             trace_removal::format_json_report(report, additional_warnings)

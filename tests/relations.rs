@@ -713,3 +713,422 @@ fn related_and_tests_help_document_scope_rules() {
         }
     }
 }
+
+#[test]
+fn patterns_discover_joint_subsets_and_include_seed_only_denominator() {
+    let repo = TestRepo::new();
+    for index in 0..3 {
+        let content = format!("version {index}\n");
+        let incidental = format!("extra/{index}.txt");
+        repo.commit_files(
+            &[
+                ("A", content.as_bytes()),
+                ("B", content.as_bytes()),
+                ("C", content.as_bytes()),
+                (&incidental, b"extra"),
+            ],
+            "joint change",
+        );
+    }
+    repo.commit_files(&[("A", b"alone\n")], "seed only");
+    repo.index();
+    let output = repo.run(["related", "A", "A", "--patterns", "--json"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["kind"], "patterns");
+    assert_eq!(value["eligible_seed_commits"], 4);
+    assert_eq!(value["patterns"].as_array().unwrap().len(), 1);
+    let pattern = &value["patterns"][0];
+    assert_eq!(pattern["support_count"], 3);
+    assert_eq!(pattern["proportion"], 0.75);
+    let members = pattern["members"].as_array().unwrap();
+    assert_eq!(members.len(), 3);
+    assert_eq!(members[0]["path"], "A");
+    assert_eq!(members[0]["seed"], true);
+    assert_eq!(members[1]["seed"], false);
+    assert_eq!(pattern["citations"].as_array().unwrap().len(), 3);
+    let human = repo.run(["related", "A", "--patterns"]);
+    assert!(stdout(&human).contains("all seeds"));
+    assert!(stdout(&human).contains("75.0%"));
+}
+
+#[test]
+fn patterns_require_all_seeds_and_keep_only_closed_combinations() {
+    let repo = TestRepo::new();
+    for index in 0..3 {
+        let content = format!("{index}\n");
+        repo.commit_files(
+            &[
+                ("A", content.as_bytes()),
+                ("B", content.as_bytes()),
+                ("C", content.as_bytes()),
+                ("D", content.as_bytes()),
+            ],
+            "complete",
+        );
+    }
+    repo.commit_files(&[("A", b"only A"), ("X", b"X")], "partial");
+    repo.index();
+    let output = repo.run(["related", "A", "B", "--patterns", "--json"]);
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["eligible_seed_commits"], 3);
+    assert_eq!(value["patterns"].as_array().unwrap().len(), 1);
+    assert_eq!(value["patterns"][0]["members"].as_array().unwrap().len(), 4);
+    assert_eq!(value["patterns"][0]["proportion"], 1.0);
+    let absent = repo.run(["related", "A", "missing", "--patterns", "--json"]);
+    let absent: serde_json::Value = serde_json::from_slice(&absent.stdout).unwrap();
+    assert_eq!(absent["eligible_seed_commits"], 0);
+    assert_eq!(absent["patterns"], serde_json::json!([]));
+}
+
+#[test]
+fn patterns_scope_before_counts_keep_historical_members_and_cap_references() {
+    let repo = TestRepo::new();
+    repo.commit_files(
+        &[("A", b"initial"), ("B", b"initial"), ("C", b"initial")],
+        "start",
+    );
+    let start = repo.head();
+    for index in 0..6 {
+        let content = format!("{index}\n");
+        repo.commit_files(
+            &[
+                ("A", content.as_bytes()),
+                ("B", content.as_bytes()),
+                ("C", content.as_bytes()),
+            ],
+            "joint",
+        );
+    }
+    let end = repo.head();
+    repo.remove("C", "delete C");
+    repo.index();
+    let output = repo.run([
+        "related",
+        "A",
+        "--patterns",
+        "--from-rev",
+        &start,
+        "--to-rev",
+        &end,
+        "--json",
+    ]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["eligible_seed_commits"], 6);
+    assert_eq!(value["patterns"][0]["support_count"], 6);
+    assert_eq!(
+        value["patterns"][0]["citations"].as_array().unwrap().len(),
+        5
+    );
+    assert_eq!(value["patterns"][0]["references_not_shown"], 1);
+    assert_eq!(
+        value["patterns"][0]["members"][2]["exists_at_target"],
+        false
+    );
+    assert_eq!(value["target_revision"], repo.head());
+    assert_eq!(value["scope"]["to_rev"], end);
+}
+
+#[test]
+fn patterns_minimum_support_and_cli_validation() {
+    let repo = TestRepo::new();
+    for index in 0..2 {
+        let content = format!("{index}");
+        repo.commit_files(
+            &[
+                ("A", content.as_bytes()),
+                ("B", content.as_bytes()),
+                ("C", content.as_bytes()),
+            ],
+            "joint",
+        );
+    }
+    repo.index();
+    let empty = repo.run(["related", "A", "--patterns", "--json"]);
+    let empty: serde_json::Value = serde_json::from_slice(&empty.stdout).unwrap();
+    assert_eq!(empty["patterns"], serde_json::json!([]));
+    let output = repo.run(["related", "A", "--patterns", "--min-support", "2", "--json"]);
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["patterns"][0]["support_count"], 2);
+    for args in [
+        vec!["related", "A", "--min-support", "2"],
+        vec!["related", "A", "--patterns", "--min-support", "1"],
+        vec!["related", "A", "--patterns", "--limit", "0"],
+        vec!["related", "../A", "--patterns"],
+        vec!["related", "A", "--patterns", "--github-links"],
+    ] {
+        assert_eq!(repo.run(args).status.code(), Some(2));
+    }
+}
+
+#[test]
+fn patterns_rank_distinct_groups_before_limit_and_ignore_mass_changes() {
+    let repo = TestRepo::new();
+    for (prefix, count) in [("B", 4), ("D", 3)] {
+        for index in 0..count {
+            let content = format!("{prefix}{index}");
+            let peer = format!("{prefix}2");
+            repo.commit_files(
+                &[
+                    ("A", content.as_bytes()),
+                    (prefix, content.as_bytes()),
+                    (&peer, content.as_bytes()),
+                ],
+                "joint",
+            );
+        }
+    }
+    repo.commit_mass_change("A", "B");
+    repo.index();
+    let output = repo.run(["related", "A", "--patterns", "--limit", "1", "--json"]);
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["eligible_seed_commits"], 7);
+    assert_eq!(value["excluded_mass_changes"], 1);
+    assert_eq!(value["matched_count"], 2);
+    assert_eq!(value["returned_count"], 1);
+    assert_eq!(value["patterns"][0]["support_count"], 4);
+    assert_eq!(value["patterns"][0]["members"][1]["path"], "B");
+    assert_eq!(
+        repo.run(["related", "A", "--patterns", "--json"]).stdout,
+        repo.run(["related", "A", "--patterns", "--json"]).stdout
+    );
+}
+
+#[test]
+fn patterns_exclude_merge_replays_and_intersect_time_scope() {
+    let repo = TestRepo::new();
+    repo.commit_files_at(
+        &[("A", b"0"), ("B", b"0"), ("C", b"0")],
+        "start",
+        "2025-01-01T00:00:00Z",
+        "2025-01-01T00:00:00Z",
+    );
+    git(repo.dir.path(), ["checkout", "-b", "feature"]);
+    for index in 1..3 {
+        let content = format!("{index}");
+        repo.commit_files_at(
+            &[
+                ("A", content.as_bytes()),
+                ("B", content.as_bytes()),
+                ("C", content.as_bytes()),
+            ],
+            "joint",
+            "2025-01-02T00:00:00Z",
+            "2025-01-02T00:00:00Z",
+        );
+    }
+    git(repo.dir.path(), ["checkout", "main"]);
+    git(
+        repo.dir.path(),
+        ["merge", "--no-ff", "feature", "-m", "merge feature"],
+    );
+    repo.index();
+    let output = repo.run(["related", "A", "--patterns", "--json"]);
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["eligible_seed_commits"], 3);
+    assert_eq!(value["excluded_merges"], 1);
+    assert_eq!(value["patterns"][0]["support_count"], 3);
+    let scoped = repo.run([
+        "related",
+        "A",
+        "--patterns",
+        "--min-support",
+        "2",
+        "--since",
+        "2025-01-02",
+        "--until",
+        "2025-01-02",
+        "--json",
+    ]);
+    let scoped: serde_json::Value = serde_json::from_slice(&scoped.stdout).unwrap();
+    assert_eq!(scoped["eligible_seed_commits"], 2);
+    assert_eq!(scoped["excluded_merges"], 0);
+    assert_eq!(scoped["patterns"][0]["support_count"], 2);
+}
+
+#[test]
+fn patterns_include_fifty_paths_but_exclude_fifty_one() {
+    let repo = TestRepo::new();
+    for (index, count) in [50, 50, 51].into_iter().enumerate() {
+        let version = repo.run(["related", "A", "--patterns"]); // no cache: must not build it
+        assert_eq!(version.status.code(), Some(1));
+        let marker = format!("{index}");
+        let files = (0..count)
+            .map(|index| {
+                (
+                    if index == 0 {
+                        "A".to_owned()
+                    } else {
+                        format!("file/{index}")
+                    },
+                    marker.as_bytes().to_vec(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let borrowed = files
+            .iter()
+            .map(|(path, bytes)| (path.as_str(), bytes.as_slice()))
+            .collect::<Vec<_>>();
+        repo.commit_files(&borrowed, "boundary");
+    }
+    repo.index();
+    let output = repo.run(["related", "A", "--patterns", "--min-support", "2", "--json"]);
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["eligible_seed_commits"], 2);
+    assert_eq!(value["excluded_mass_changes"], 1);
+    assert_eq!(value["patterns"][0]["support_count"], 2);
+    assert_eq!(
+        value["patterns"][0]["members"].as_array().unwrap().len(),
+        50
+    );
+}
+
+#[test]
+fn patterns_retain_smaller_closed_groups_and_scope_can_change_closedness() {
+    let repo = TestRepo::new();
+    for index in 0..3 {
+        let content = format!("{index}");
+        repo.commit_files(
+            &[
+                ("A", content.as_bytes()),
+                ("B", content.as_bytes()),
+                ("C", content.as_bytes()),
+                ("D", content.as_bytes()),
+            ],
+            "large",
+        );
+    }
+    let end = repo.head();
+    repo.commit_files(
+        &[("A", b"small"), ("B", b"small"), ("C", b"small")],
+        "small",
+    );
+    repo.index();
+    let full = repo.run(["related", "A", "--patterns", "--json"]);
+    let full: serde_json::Value = serde_json::from_slice(&full.stdout).unwrap();
+    assert_eq!(full["matched_count"], 2);
+    assert_eq!(full["patterns"][0]["support_count"], 4);
+    assert_eq!(full["patterns"][0]["members"].as_array().unwrap().len(), 3);
+    assert_eq!(full["patterns"][1]["support_count"], 3);
+    let scoped = repo.run(["related", "A", "--patterns", "--to-rev", &end, "--json"]);
+    let scoped: serde_json::Value = serde_json::from_slice(&scoped.stdout).unwrap();
+    assert_eq!(scoped["matched_count"], 1);
+    assert_eq!(
+        scoped["patterns"][0]["members"].as_array().unwrap().len(),
+        4
+    );
+}
+
+#[test]
+fn patterns_do_not_fabricate_joint_support_or_fold_case_or_use_worktree_existence() {
+    let repo = TestRepo::new();
+    for index in 0..3 {
+        let content = format!("{index}");
+        repo.commit_files(
+            &[("A", content.as_bytes()), ("B", content.as_bytes())],
+            "pair B",
+        );
+        repo.commit_files(
+            &[
+                ("A", format!("C{index}").as_bytes()),
+                ("C", content.as_bytes()),
+            ],
+            "pair C",
+        );
+    }
+    repo.index();
+    let output = repo.run(["related", "A", "--patterns", "--json"]);
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["matched_count"], 0);
+    let case = repo.run(["related", "a", "--patterns", "--json"]);
+    let case: serde_json::Value = serde_json::from_slice(&case.stdout).unwrap();
+    assert_eq!(case["eligible_seed_commits"], 0);
+    for index in 0..3 {
+        let content = format!("joint {index}");
+        repo.commit_files(
+            &[
+                ("A", content.as_bytes()),
+                ("B", content.as_bytes()),
+                ("C", content.as_bytes()),
+            ],
+            "joint",
+        );
+    }
+    repo.index();
+    fs::remove_file(repo.dir.path().join("C")).unwrap();
+    let output = repo.run(["related", "A", "--patterns", "--json"]);
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["patterns"][0]["members"][2]["exists_at_target"], true);
+}
+
+#[test]
+fn patterns_discover_all_closed_groups_without_budget_cancellation() {
+    let repo = TestRepo::new();
+    // Each observation omits a different item: intersections grow exponentially.
+    for omitted in 0..13 {
+        let marker = format!("{omitted}");
+        let mut files = vec![("A".to_owned(), marker.as_bytes().to_vec())];
+        for item in 0..13 {
+            if item != omitted {
+                files.push((format!("item/{item}"), marker.as_bytes().to_vec()));
+            }
+        }
+        let borrowed = files
+            .iter()
+            .map(|(path, bytes)| (path.as_str(), bytes.as_slice()))
+            .collect::<Vec<_>>();
+        repo.commit_files(&borrowed, "omit one");
+    }
+    repo.index();
+    let output = repo.run(["related", "A", "--patterns", "--limit", "1", "--json"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    // All subsets of 2..=10 items qualify: 13 - subset size supporting commits.
+    assert_eq!(value["matched_count"], 8086);
+    assert_eq!(value["returned_count"], 1);
+    assert_eq!(value["eligible_seed_commits"], 13);
+    assert_eq!(value["patterns"][0]["support_count"], 11);
+}
+
+#[test]
+fn patterns_disclose_unscoped_history_and_order_count_recency_then_paths() {
+    let repo = TestRepo::new();
+    for (path, day) in [("old", "01"), ("z", "02"), ("b", "02")] {
+        for index in 0..3 {
+            let marker = format!("{path}{index}");
+            let date = format!("2024-01-{day}T00:00:00Z");
+            repo.commit_files_at(
+                &[
+                    ("A", marker.as_bytes()),
+                    ("common", marker.as_bytes()),
+                    (path, marker.as_bytes()),
+                ],
+                "group",
+                &date,
+                &date,
+            );
+        }
+    }
+    repo.index();
+    let human = repo.run(["related", "A", "--patterns"]);
+    assert!(stdout(&human).contains("History: all available published-cache commits"));
+    let output = repo.run(["related", "A", "--patterns", "--json"]);
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        value["history_coverage"],
+        "available published-cache commits only"
+    );
+    let patterns = value["patterns"].as_array().unwrap();
+    assert_eq!(patterns.len(), 3);
+    for (pattern, path) in patterns.iter().zip(["b", "z", "old"]) {
+        assert_eq!(pattern["support_count"], 3);
+        assert!(
+            pattern["members"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|member| member["path"] == path)
+        );
+    }
+}

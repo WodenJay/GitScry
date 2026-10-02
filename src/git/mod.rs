@@ -79,6 +79,20 @@ impl Repository {
         target::pin_timeline(&self.git, revision, path)
     }
 
+    pub(crate) fn file_paths_at(
+        &self,
+        revision: &str,
+    ) -> Result<std::collections::BTreeSet<Vec<u8>>, AppError> {
+        let output = self
+            .git
+            .output(["ls-tree", "-r", "--name-only", "-z", revision], &[])?;
+        Ok(output
+            .split(|byte| *byte == 0)
+            .filter(|path| !path.is_empty())
+            .map(|path| path.to_vec())
+            .collect())
+    }
+
     pub(crate) fn resolve_commit(&self, revision: &str) -> Result<String, AppError> {
         if revision.contains('\0') {
             return Err(AppError::input("revision must not contain a NUL byte"));

@@ -190,10 +190,24 @@ pub(crate) fn execute(
         ),
         Command::Related {
             paths,
+            patterns,
+            min_support,
             limit,
             scope,
             ..
-        } => (Request::Related(paths), limit, false, scope.into()),
+        } => (
+            if patterns {
+                Request::Patterns {
+                    paths,
+                    min_support: min_support.unwrap_or(3),
+                }
+            } else {
+                Request::Related(paths)
+            },
+            limit,
+            false,
+            scope.into(),
+        ),
         Command::Tests {
             paths,
             limit,
@@ -316,6 +330,7 @@ pub(crate) fn execute(
         query::QueryReport::TraceRemoval(_) => {
             unreachable!("trace-removal has no GitHub link option")
         }
+        query::QueryReport::Patterns(_) => unreachable!("patterns has no GitHub link option"),
         query::QueryReport::Analysis(report) => github::fetch(report, explicit_repo.as_deref()),
         query::QueryReport::Timeline(report) => {
             github::fetch_timeline(report, explicit_repo.as_deref())
