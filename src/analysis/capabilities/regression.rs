@@ -13,11 +13,25 @@ pub(crate) fn run(
     session: &QuerySession,
     intent: &Intent,
     target: &RegressionTarget,
-    reachable: &HashSet<String>,
+    eligible_revisions: &HashSet<String>,
     limit: usize,
     with_patch: bool,
 ) -> Result<Report, AppError> {
-    let history = session.path_history(&target.path, reachable)?;
+    // Scope selects material, not the history needed to map the bad revision's coordinates.
+    let reachable = if target.symbol_line.is_some() {
+        session.ancestors(&target.bad_revision)?
+    } else {
+        eligible_revisions.clone()
+    };
+    let mut history = session.path_history(&target.path, &reachable)?;
+    let history_len = history
+        .iter()
+        .filter(|commit| eligible_revisions.contains(&commit.oid))
+        .count();
+    let last_candidate = history
+        .iter()
+        .rposition(|commit| eligible_revisions.contains(&commit.oid));
+    history.truncate(last_candidate.map_or(0, |index| index + 1));
     let missing_objects = session.has_missing_objects(&history)?;
     let mut symbol_range = target
         .symbol_line
@@ -25,10 +39,13 @@ pub(crate) fn run(
         .map(|(start, end)| (start as i64, end as i64));
     let mut priorities = HunkPriorities::new();
 
-    let rename_boundary = history.iter().any(has_path_boundary);
-    let history_len = history.len();
+    let rename_boundary = history
+        .iter()
+        .any(|commit| eligible_revisions.contains(&commit.oid) && has_path_boundary(commit));
+    let mut history_index = 0;
     let mut ranked = Vec::new();
-    for (history_index, commit) in history.into_iter().enumerate() {
+    for commit in history {
+        let eligible = eligible_revisions.contains(&commit.oid);
         let hunks = session.history_hunks(&commit.oid)?;
         // Material and excerpts see the same symbol range before tracing to the parent.
         let mut overlaps_symbol = false;
@@ -44,7 +61,7 @@ pub(crate) fn run(
             });
             symptom_hunk |= symptom_match;
             overlaps_symbol |= symbol_match;
-            if with_patch && (symptom_match || symbol_match) {
+            if eligible && with_patch && (symptom_match || symbol_match) {
                 let priority = match (symptom_match, symbol_match) {
                     (true, true) => 0,
                     (false, true) => 1,
@@ -64,6 +81,11 @@ pub(crate) fn run(
         } else {
             false
         };
+        if !eligible {
+            continue;
+        }
+        let temporal = temporal_score(history_index, history_len);
+        history_index += 1;
         if symbol_range.is_some() && !symbol_match {
             continue;
         }
@@ -75,7 +97,6 @@ pub(crate) fn run(
             .iter()
             .filter(|path| is_test_path(path))
             .count();
-        let temporal = temporal_score(history_index, history_len);
         let rename_boundary = has_path_boundary(&commit);
         if lexical_hits == 0 && hunk_hits == 0 && !symbol_match && test_paths == 0 {
             continue;

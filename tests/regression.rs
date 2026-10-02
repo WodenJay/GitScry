@@ -862,6 +862,67 @@ fn regression_scope_intersects_the_pinned_good_bad_window() {
 }
 
 #[test]
+fn regression_symbol_scope_keeps_coordinate_history_outside_material_scope() {
+    let repo = TestRepo::new();
+    repo.commit(
+        "lib.rs",
+        b"fn calculate() {\n    1\n}\n",
+        "Create calculation",
+        None,
+    );
+    set_head_date(&repo, "2024-01-01T00:00:00Z");
+    let good = repo.head();
+    repo.commit(
+        "lib.rs",
+        b"fn calculate() {\n    2\n}\n",
+        "Adjust calculation",
+        None,
+    );
+    set_head_date(&repo, "2024-01-02T00:00:00Z");
+    let suspect = repo.head();
+    repo.commit(
+        "lib.rs",
+        b"// one\n// two\n// three\n// four\nfn calculate() {\n    2\n}\n",
+        "Shift calculation coordinates",
+        None,
+    );
+    set_head_date(&repo, "2024-01-03T00:00:00Z");
+    let bad = repo.head();
+    repo.index();
+
+    for scope in [["--until", "2024-01-02"], ["--to-rev", suspect.as_str()]] {
+        let report = json(
+            &repo,
+            &[
+                "regression",
+                "calculation",
+                "--path",
+                "lib.rs",
+                "--symbol",
+                "calculate",
+                "--good",
+                &good,
+                "--bad",
+                &bad,
+                scope[0],
+                scope[1],
+                "--patch",
+                "--json",
+            ],
+        );
+        assert_eq!(report["matched_count"], 1, "scope: {scope:?}");
+        let material = &report["materials"][0];
+        assert_eq!(material["citations"][0]["oid"], suspect);
+        assert_eq!(material["patch"]["status"], "available");
+        assert!(
+            material["patch"]["hunks"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("+    2")
+        );
+    }
+}
+#[test]
 fn regression_scope_uses_inclusive_utc_calendar_days() {
     let repo = TestRepo::new();
     repo.commit("app.py", b"return 'safe'\n", "Initial stable version", None);
