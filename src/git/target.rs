@@ -62,12 +62,12 @@ pub(super) fn pin_timeline(
     requested_revision: &str,
     path: &str,
 ) -> Result<TimelineTarget, AppError> {
-    validate_path(path)?;
+    let path = validate_path(path)?;
     if requested_revision.contains('\0') {
         return Err(AppError::input("revision must not contain a NUL byte"));
     }
     let revision = resolve_revision(git, requested_revision)?;
-    let entry = read_tree_entry(git, &revision, path)?;
+    let entry = read_tree_entry(git, &revision, &path)?;
     if entry.kind != "blob" {
         return Err(AppError::input(format!(
             "path is not a file at timeline revision: {path}"
@@ -84,9 +84,10 @@ pub(super) fn pin_trace_fix(
     requested_revision: &str,
     paths: &[String],
 ) -> Result<TraceFixTarget, AppError> {
-    for path in paths {
-        validate_path(path)?;
-    }
+    let paths = paths
+        .iter()
+        .map(|path| validate_path(path))
+        .collect::<Result<Vec<_>, _>>()?;
     if requested_revision.contains('\0') {
         return Err(AppError::input("revision must not contain a NUL byte"));
     }
@@ -137,13 +138,12 @@ pub(super) fn pin_trace_fix(
             .collect::<HashSet<_>>(),
         Some(all_changes) => {
             let mut selected = HashSet::new();
-            for path in paths {
-                let normalized = normalize_path(path.as_bytes());
+            for path in &paths {
+                let normalized = path.as_bytes();
                 let matches = all_changes.iter().filter(|change| {
-                    change.old_path.as_deref().map(normalize_path).as_deref()
-                        == Some(normalized.as_slice())
+                    change.old_path.as_deref().map(normalize_path).as_deref() == Some(normalized)
                         || change.new_path.as_deref().map(normalize_path).as_deref()
-                            == Some(normalized.as_slice())
+                            == Some(normalized)
                 });
                 let mut found = false;
                 for change in matches {
@@ -274,7 +274,7 @@ pub(super) fn pin(
     path: &str,
     anchor: WhyAnchor,
 ) -> Result<WhyTarget, AppError> {
-    validate_path(path)?;
+    let path = validate_path(path)?;
     let requested_revision = revision.unwrap_or("HEAD");
     if requested_revision.contains('\0') {
         return Err(AppError::input("revision must not contain a NUL byte"));
@@ -287,7 +287,7 @@ pub(super) fn pin(
             .push("warning: local history is shallow; why material may be incomplete.".to_owned());
     }
 
-    let entry = read_tree_entry(git, &revision, path)?;
+    let entry = read_tree_entry(git, &revision, &path)?;
     if entry.kind == "commit" {
         warnings.push(
             "warning: target path is a submodule; history stops at the submodule boundary."
@@ -316,10 +316,10 @@ pub(super) fn pin(
                 "error: reading target path at {requested_revision}: {error}"
             ))
         })?;
-    let (anchor, number, symbol_end) = resolve_anchor(&anchor, &content, path)?;
+    let (anchor, number, symbol_end) = resolve_anchor(&anchor, &content, &path)?;
     let ignore_file = blame_ignore_file(git)?;
     let (blame, used_ignore_file) =
-        read_blame(git, &revision, path, number, ignore_file.as_deref())?;
+        read_blame(git, &revision, &path, number, ignore_file.as_deref())?;
     if blame.is_none() {
         warnings.push(
             "warning: Git line attribution unavailable; explanation ranking uses cached history."
@@ -359,7 +359,7 @@ pub(super) fn pin_regression(
     path: &str,
     symbol: Option<&str>,
 ) -> Result<RegressionTarget, AppError> {
-    validate_path(path)?;
+    let path = validate_path(path)?;
     let bad_revision = resolve_revision(git, bad_revision)?;
     let good_revision = good_revision
         .map(|revision| resolve_revision(git, revision))
@@ -373,7 +373,7 @@ pub(super) fn pin_regression(
         ));
     }
 
-    let entry = read_tree_entry(git, &bad_revision, path)?;
+    let entry = read_tree_entry(git, &bad_revision, &path)?;
     if entry.kind != "blob" {
         return Err(AppError::input(format!(
             "path is not a file at bad revision: {path}",
@@ -382,7 +382,7 @@ pub(super) fn pin_regression(
     let content = git.output(["cat-file", "blob", &format!("{bad_revision}:{path}")], &[])?;
     let (symbol, symbol_line, symbol_end) = match symbol {
         Some(name) => {
-            let span = symbol::locate(&content, name, path)?;
+            let span = symbol::locate(&content, name, &path)?;
             (Some(name.to_owned()), Some(span.start), Some(span.end))
         }
         None => (None, None, None),
@@ -421,15 +421,40 @@ fn normalize_path(path: &[u8]) -> Vec<u8> {
     normalized
 }
 
-fn validate_path(path: &str) -> Result<(), AppError> {
-    let value = Path::new(path);
+fn validate_path(path: &str) -> Result<String, AppError> {
     if path.is_empty() {
         return Err(AppError::input("path must not be empty"));
     }
     if path.contains('\0') {
         return Err(AppError::input("path must not contain a NUL byte"));
     }
-    if value.is_absolute()
+    if path.starts_with('/') || path.starts_with('\\') {
+        return Err(AppError::input(format!(
+            "path must be repository-relative: {path}"
+        )));
+    }
+
+    let normalized = path
+        .split(['/', '\\'])
+        .filter(|component| !component.is_empty() && *component != ".")
+        .collect::<Vec<_>>()
+        .join("/");
+    if normalized.is_empty() {
+        return Err(AppError::input(format!(
+            "path must name a repository file: {path}"
+        )));
+    }
+
+    let value = Path::new(&normalized);
+
+    #[cfg(windows)]
+    let has_prefix = value
+        .components()
+        .any(|component| matches!(component, std::path::Component::Prefix(_)));
+    #[cfg(not(windows))]
+    let has_prefix = false;
+    if has_prefix
+        || value.is_absolute()
         || value.has_root()
         || value
             .components()
@@ -439,7 +464,8 @@ fn validate_path(path: &str) -> Result<(), AppError> {
             "path must be repository-relative: {path}"
         )));
     }
-    Ok(())
+
+    Ok(normalized)
 }
 
 pub(super) fn resolve_revision(git: &Git, requested: &str) -> Result<String, AppError> {
