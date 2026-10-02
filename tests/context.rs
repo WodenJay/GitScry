@@ -5,6 +5,262 @@ use std::{fs, process::Output};
 use support::{TestRepo, git};
 
 #[test]
+fn current_association_outranks_provenance_and_unrelated_reverts_are_ineligible() {
+    let repo = TestRepo::new();
+    commit(
+        &repo,
+        &[
+            ("old.rs", "fn route() {}\n"),
+            ("unrelated.rs", "fn item() {}\n"),
+        ],
+        "base",
+    );
+    let session = "fn route() { refreshSessionCache(\"session-expired\"); }\n";
+    let invoice = "fn invoice() { rebuildInvoiceLedger(\"invoice-overdue\"); }\n";
+    commit(&repo, &[("old.rs", session)], "update");
+    let abandoned = repo.head();
+    git(repo.dir.path(), ["revert", "--no-edit", &abandoned]);
+    git(
+        repo.dir.path(),
+        [
+            "commit",
+            "--amend",
+            "-m",
+            &format!(
+                "Revert update\n\nThis reverts commit {abandoned}.\n\nReason: regression.\nRetry when legacy callers migrate."
+            ),
+        ],
+    );
+    commit(
+        &repo,
+        &[(
+            "unrelated.rs",
+            "fn item() { dispatchPaymentQueue(\"payment-overdue\"); }\n",
+        )],
+        "update",
+    );
+    let unrelated = repo.head();
+    git(repo.dir.path(), ["revert", "--no-edit", &unrelated]);
+    git(
+        repo.dir.path(),
+        [
+            "commit",
+            "--amend",
+            "-m",
+            &format!(
+                "Revert update\n\nThis reverts commit {unrelated}.\n\nReason: documented regression.\nRetry when dependencies are updated."
+            ),
+        ],
+    );
+    let unrelated_revert = repo.head();
+    commit(
+        &repo,
+        &[("unrelated.rs", "fn item() { restorePaymentQueue(); }\n")],
+        "fix: restore payment queue",
+    );
+    let unrelated_follow_up = repo.head();
+    commit(
+        &repo,
+        &[
+            ("example-session.rs", session),
+            ("example-invoice.rs", invoice),
+        ],
+        "update",
+    );
+    let stronger = repo.head();
+    repo.index();
+    fs::write(repo.dir.path().join("a.rs"), session).unwrap();
+    fs::write(repo.dir.path().join("b.rs"), invoice).unwrap();
+    let report = json(repo.run(["context", "--json"]));
+    let entries = report["suggestions"].as_array().unwrap();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0]["category"], "historical_change");
+    assert_eq!(entries[0]["citations"][0]["oid"], stronger);
+    assert_eq!(
+        entries[0]["associated_current_paths"],
+        serde_json::json!(["a.rs", "b.rs"])
+    );
+    assert_eq!(entries[1]["category"], "recorded_abandonment");
+    assert_eq!(entries[1]["citations"][0]["oid"], abandoned);
+    assert_eq!(
+        entries[1]["associated_current_paths"],
+        serde_json::json!(["a.rs"])
+    );
+    for entry in entries {
+        assert!(
+            entry["citations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(
+                    |citation| ![&unrelated, &unrelated_revert, &unrelated_follow_up]
+                        .iter()
+                        .any(|oid| citation["oid"] == **oid)
+                )
+        );
+    }
+}
+
+#[test]
+fn abandonment_unknowns_and_provenance_respect_historical_scope() {
+    let repo = TestRepo::new();
+    commit(&repo, &[("old.rs", "fn route() {}\n")], "base");
+    commit(
+        &repo,
+        &[(
+            "old.rs",
+            "fn route() { refreshSessionCache(\"session-expired\"); }\n",
+        )],
+        "update",
+    );
+    let original = repo.head();
+    git(repo.dir.path(), ["revert", "--no-edit", &original]);
+    let revert = repo.head();
+    commit(
+        &repo,
+        &[("old.rs", "fn route() { restoreLegacyCache(); }\n")],
+        "fix: restore cache",
+    );
+    let follow_up = repo.head();
+    repo.index();
+    fs::write(
+        repo.dir.path().join("new.rs"),
+        "fn route() { refreshSessionCache(\"session-expired\"); }\n",
+    )
+    .unwrap();
+
+    let all = json(repo.run(["context", "--json"]));
+    let entry = &all["suggestions"][0];
+    assert_eq!(entry["category"], "recorded_abandonment");
+    assert!(entry["abandonment"]["reason"].is_null());
+    assert!(entry["abandonment"]["retry"].is_null());
+    assert_eq!(entry["citations"][2]["oid"], follow_up);
+    let text = repo.run(["context"]);
+    let text = String::from_utf8_lossy(&text.stdout);
+    assert!(text.contains("unknown"));
+
+    let before_revert = json(repo.run(["context", "--json", "--to-rev", &original]));
+    let entry = &before_revert["suggestions"][0];
+    assert_eq!(entry["category"], "historical_change");
+    assert_eq!(entry["citations"].as_array().unwrap().len(), 1);
+    assert_eq!(entry["citations"][0]["oid"], original);
+    assert!(
+        entry["content_matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|m| m["historical_oid"] == original)
+    );
+
+    let before_follow_up = json(repo.run(["context", "--json", "--to-rev", &revert]));
+    let entry = &before_follow_up["suggestions"][0];
+    assert_eq!(entry["category"], "recorded_abandonment");
+    assert_eq!(entry["citations"].as_array().unwrap().len(), 2);
+    assert_eq!(entry["citations"][1]["oid"], revert);
+
+    let after_original = json(repo.run(["context", "--json", "--from-rev", &original]));
+    for entry in after_original["suggestions"].as_array().unwrap() {
+        assert!(
+            entry["citations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|c| c["oid"] != original)
+        );
+        assert!(
+            entry["content_matches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|m| m["historical_oid"] != original)
+        );
+    }
+}
+
+#[test]
+fn related_abandonment_merges_routes_and_cites_recorded_provenance() {
+    let repo = TestRepo::new();
+    commit(&repo, &[("old.rs", "fn route() {}\n")], "base");
+    commit(
+        &repo,
+        &[(
+            "old.rs",
+            "fn route() { refreshSessionCache(\"session-expired\"); }\n",
+        )],
+        "update",
+    );
+    let original = repo.head();
+    git(repo.dir.path(), ["revert", "--no-edit", &original]);
+    git(
+        repo.dir.path(),
+        [
+            "commit",
+            "--amend",
+            "-m",
+            &format!(
+                "Revert update\n\nThis reverts commit {original}.\n\nReason: session cache caused a regression for legacy callers."
+            ),
+        ],
+    );
+    let revert = repo.head();
+    commit(
+        &repo,
+        &[("old.rs", "fn route() { restoreLegacyCache(); }\n")],
+        "fix: restore legacy cache",
+    );
+    let follow_up = repo.head();
+    repo.index();
+    for path in ["a.rs", "b.rs"] {
+        fs::write(
+            repo.dir.path().join(path),
+            "fn route() { refreshSessionCache(\"session-expired\"); }\n",
+        )
+        .unwrap();
+    }
+    let report = json(repo.run(["context", "--json"]));
+    let entries = report["suggestions"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    let entry = &entries[0];
+    assert_eq!(entry["category"], "recorded_abandonment");
+    assert_eq!(
+        entry["associated_current_paths"],
+        serde_json::json!(["a.rs", "b.rs"])
+    );
+    assert_eq!(entry["citations"][0]["oid"], original);
+    assert_eq!(entry["citations"][1]["oid"], revert);
+    assert_eq!(entry["citations"][1]["note"], "reverts this change");
+    assert_eq!(entry["citations"][2]["oid"], follow_up);
+    assert_eq!(entry["citations"][2]["note"], "follow-up");
+    assert!(
+        entry["abandonment"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("regression")
+    );
+    assert!(entry["abandonment"]["retry"].is_null());
+    for oid in [&original, &revert] {
+        assert!(
+            entry["content_matches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m["historical_oid"] == *oid)
+        );
+    }
+    let text = repo.run(["context"]);
+    let text = String::from_utf8_lossy(&text.stdout);
+    for value in [
+        "recorded_abandonment",
+        "regression",
+        &original,
+        &revert,
+        &follow_up,
+    ] {
+        assert!(text.contains(value));
+    }
+}
+
+#[test]
 fn generic_descriptions_return_verified_local_historical_matches() {
     let repo = TestRepo::new();
     commit(
@@ -750,6 +1006,53 @@ fn case_distinct_paths_and_symlink_tests_keep_safe_identities() {
         serde_json::json!(["src/A.rs"])
     );
     assert_eq!(fs::read_to_string(target).unwrap(), "external\n");
+}
+
+#[test]
+fn four_categories_share_order_and_total_and_category_ceilings() {
+    let repo = TestRepo::new();
+    let signal = "fn source() { refreshSessionCache(\"session-expired\"); }\n";
+    commit(&repo, &[("source.rs", "fn source() {}\n")], "base");
+    for i in 0..4 {
+        let test = format!("tests/check{i}.rs");
+        let companion = format!("companion{i}.rs");
+        commit(&repo, &[(&test, "test\n"), (&companion, "other\n")], "base");
+        commit(
+            &repo,
+            &[
+                ("source.rs", signal),
+                (&test, "changed test\n"),
+                (&companion, "changed other\n"),
+            ],
+            "update",
+        );
+        let original = repo.head();
+        git(repo.dir.path(), ["revert", "--no-edit", &original]);
+        let historical = format!("historical{i}.rs");
+        commit(&repo, &[(&historical, signal)], "update");
+    }
+    repo.index();
+    fs::write(repo.dir.path().join("source.rs"), signal).unwrap();
+    let report = json(repo.run(["context", "--json", "--limit", "12"]));
+    let entries = report["suggestions"].as_array().unwrap();
+    assert_eq!(entries.len(), 12);
+    for (chunk, category) in entries.chunks(3).zip([
+        "recorded_abandonment",
+        "historical_change",
+        "test",
+        "co_changing_file",
+    ]) {
+        assert!(chunk.iter().all(|entry| entry["category"] == category));
+    }
+    assert_eq!(report["truncated"], true);
+    assert_eq!(
+        report,
+        json(repo.run(["context", "--json", "--limit", "12"]))
+    );
+    let default = json(repo.run(["context", "--json"]));
+    assert_eq!(default["suggestions"], serde_json::json!(&entries[..8]));
+    let one = json(repo.run(["context", "--json", "--limit", "1"]));
+    assert_eq!(one["suggestions"], serde_json::json!(&entries[..1]));
 }
 
 #[test]

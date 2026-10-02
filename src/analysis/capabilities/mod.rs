@@ -5,6 +5,7 @@
 
 mod code_search;
 pub(crate) mod context;
+mod context_abandonment;
 mod context_content;
 mod examples;
 mod failures;

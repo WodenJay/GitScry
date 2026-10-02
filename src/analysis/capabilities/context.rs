@@ -30,6 +30,7 @@ pub(crate) struct Report {
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Category {
+    RecordedAbandonment,
     HistoricalChange,
     Test,
     CoChangingFile,
@@ -37,6 +38,7 @@ pub(crate) enum Category {
 impl Category {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
+            Self::RecordedAbandonment => "recorded_abandonment",
             Self::Test => "test",
             Self::CoChangingFile => "co_changing_file",
             Self::HistoricalChange => "historical_change",
@@ -55,6 +57,7 @@ pub(crate) struct Suggestion {
     pub(crate) citations_truncated: bool,
     pub(crate) content_matches: Vec<ContentMatch>,
     pub(crate) content_matches_truncated: bool,
+    pub(crate) abandonment: Option<super::super::Failure>,
 }
 
 pub(crate) struct ContentMatch {
@@ -62,6 +65,7 @@ pub(crate) struct ContentMatch {
     pub(crate) current_added: bool,
     pub(crate) current_old_start: usize,
     pub(crate) current_new_start: usize,
+    pub(crate) historical_oid: String,
     pub(crate) historical_path: Vec<u8>,
     pub(crate) historical_added: bool,
     pub(crate) historical_line: usize,
@@ -183,6 +187,7 @@ pub(crate) fn run(
                 citations_truncated: count > CITATION_LIMIT,
                 content_matches: Vec::new(),
                 content_matches_truncated: false,
+                abandonment: None,
             },
             supporting,
         ));
@@ -190,8 +195,9 @@ pub(crate) fn run(
     if omitted_tests {
         report.warnings.push("warning: historical test paths absent as safe regular files in the current worktree were omitted; renames are not resolved".to_owned());
     }
+    let changes = super::context_content::discover(session, &mut report, scope)?;
     for (strength, time, suggestion) in
-        super::context_content::discover(session, &mut report, scope)?
+        super::context_abandonment::compose(session, changes, scope)?
     {
         ranked.push((strength, time, suggestion, Vec::new()));
     }
@@ -200,13 +206,21 @@ pub(crate) fn run(
             .then_with(|| a.2.category.cmp(&b.2.category))
             .then_with(|| b.1.cmp(&a.1))
             .then_with(|| a.2.path.cmp(&b.2.path))
+            .then_with(|| {
+                a.2.citations
+                    .first()
+                    .map(|c| &c.oid)
+                    .cmp(&b.2.citations.first().map(|c| &c.oid))
+            })
     });
     report.matched_count = ranked.len();
     let mut tests = 0;
     let mut files = 0;
     let mut changes = 0;
+    let mut abandonments = 0;
     for (_, _, mut suggestion, supporting) in ranked {
         let category_count = match suggestion.category {
+            Category::RecordedAbandonment => &mut abandonments,
             Category::Test => &mut tests,
             Category::CoChangingFile => &mut files,
             Category::HistoricalChange => &mut changes,
