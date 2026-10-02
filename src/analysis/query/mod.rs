@@ -28,6 +28,7 @@ pub(crate) enum Request {
     },
     Context {
         staged: bool,
+        hybrid: bool,
     },
     Search {
         words: Vec<String>,
@@ -189,7 +190,7 @@ pub(crate) fn execute(request: Request, options: Options) -> Result<Outcome, App
             days,
             max_commits,
         } => followups::run(revision, paths, to_rev, days, max_commits, options),
-        Request::Context { staged } => run_context(staged, options),
+        Request::Context { staged, hybrid } => run_context(staged, hybrid, options),
         Request::Search { words, hybrid } => {
             if hybrid {
                 run_hybrid_search(words, options)
@@ -243,24 +244,30 @@ pub(crate) fn execute(request: Request, options: Options) -> Result<Outcome, App
     }
 }
 
-fn run_context(staged: bool, options: Options) -> Result<Outcome, AppError> {
+fn run_context(staged: bool, hybrid: bool, options: Options) -> Result<Outcome, AppError> {
     let repository = Repository::discover()?;
     let input = repository.current_change(staged)?;
     if input.changes.is_empty() {
         scope::validate_time_bounds(&options.scope)?;
+        let mut report = super::ContextReport::empty(input);
+        report.semantic_requested = hybrid;
         return Ok(Outcome {
             progress: Vec::new(),
             warnings: Vec::new(),
-            report: QueryReport::Context(super::ContextReport::empty(input)),
+            report: QueryReport::Context(report),
         });
     }
     let context = Context::open(options.scope)?;
+    if hybrid {
+        context.session.require_semantic_ready()?;
+    }
     let report = capabilities::context::run(
         &context.session,
         input,
         &repository.root,
         options.limit,
         context.filter(),
+        hybrid,
     )?;
     Ok(context.finish(QueryReport::Context(report)))
 }

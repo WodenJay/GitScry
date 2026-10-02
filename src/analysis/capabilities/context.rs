@@ -24,6 +24,10 @@ pub(crate) struct Report {
     pub(crate) omitted_content_signals: usize,
     pub(crate) historical_content_truncated: bool,
     pub(crate) omitted_historical_hunks: usize,
+    pub(crate) semantic_requested: bool,
+    pub(crate) omitted_semantic_bases: usize,
+    pub(crate) semantic_candidates: usize,
+    pub(crate) semantic_content_truncated: bool,
     pub(crate) limitations: Vec<String>,
     pub(crate) warnings: Vec<String>,
 }
@@ -82,6 +86,8 @@ impl Report {
             truncated: false, omitted_input_paths: 0, warnings: Vec::new(),
             omitted_content_bases: 0, omitted_content_signals: 0,
             historical_content_truncated: false, omitted_historical_hunks: 0,
+            semantic_requested: false, omitted_semantic_bases: 0,
+            semantic_candidates: 0, semantic_content_truncated: false,
             limitations: vec![
                 "Exact changed-code identity and path associations are context material, not a same-kind change conclusion, mandatory edits, coverage verdicts, or required test execution.".to_owned(),
                 "Content is bounded to 512 local hunk sides, 24 signals per side, 20,000 historical hunks, 64 MiB decoded payloads, 256 KiB per historical hunk, 128 verified commits, and 16 excerpts per commit (240 bytes each). Symlink targets and submodule contents are not read. Rename detection is not exhaustive.".to_owned(),
@@ -97,6 +103,7 @@ pub(crate) fn run(
     root: &Path,
     limit: usize,
     scope: Option<&SearchFilter>,
+    hybrid: bool,
 ) -> Result<Report, AppError> {
     let paths = input.paths();
     let excluded = paths.iter().cloned().collect::<HashSet<_>>();
@@ -195,7 +202,7 @@ pub(crate) fn run(
     if omitted_tests {
         report.warnings.push("warning: historical test paths absent as safe regular files in the current worktree were omitted; renames are not resolved".to_owned());
     }
-    let changes = super::context_content::discover(session, &mut report, scope)?;
+    let changes = super::context_content::discover(session, &mut report, scope, hybrid)?;
     for (strength, time, suggestion) in
         super::context_abandonment::compose(session, changes, scope)?
     {

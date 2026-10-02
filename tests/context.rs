@@ -5,6 +5,206 @@ use std::{fs, process::Output};
 use support::{TestRepo, git};
 
 #[test]
+fn hybrid_is_explicit_and_no_change_needs_no_semantic_resources() {
+    let repo = TestRepo::new();
+    let empty = json(repo.run(["context", "--hybrid", "--json"]));
+    assert!(empty["suggestions"].as_array().unwrap().is_empty());
+    assert_eq!(empty["semantic_requested"], true);
+    assert_eq!(
+        json(repo.run(["context", "--json"]))["semantic_requested"],
+        false
+    );
+    assert!(empty["cache_tip"].is_null());
+    commit(
+        &repo,
+        &[(
+            "old.rs",
+            "fn route() { refreshSessionCache(\"session-expired\"); }\n",
+        )],
+        "update",
+    );
+    repo.index();
+    fs::write(
+        repo.dir.path().join("new.rs"),
+        "fn route() { refreshSessionCache(\"session-expired\"); }\n",
+    )
+    .unwrap();
+    assert_eq!(historical(&json(repo.run(["context", "--json"]))).len(), 1);
+    let output = repo.run(["context", "--hybrid", "--json"]);
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        error.contains("semantic") && error.contains("gitscry index --semantic"),
+        "{error}"
+    );
+}
+
+#[test]
+#[ignore = "requires the pinned CPU runtime and prepared MiniLM model assets"]
+fn hybrid_merges_verified_local_bases_and_rejects_semantic_only_matches() {
+    let repo = TestRepo::new();
+    let alpha = "fn route() { refreshSessionCache(\"session-expired\"); }\n";
+    commit(&repo, &[("history.rs", alpha)], "update");
+    let matched_oid = repo.head();
+    commit(
+        &repo,
+        &[("unrelated.rs", "fn value() { let status = \"success\"; }\n")],
+        "refresh session cache session expired",
+    );
+    let distractor_oid = repo.head();
+    let indexed = repo.run(["index", "--semantic"]);
+    assert!(
+        indexed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&indexed.stderr)
+    );
+    for path in ["a.rs", "b.rs"] {
+        fs::write(repo.dir.path().join(path), alpha).unwrap();
+    }
+    let report = json(repo.run(["context", "--hybrid", "--json"]));
+    let changes = historical(&report);
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0]["citations"][0]["oid"], matched_oid);
+    assert_eq!(
+        changes[0]["associated_current_paths"],
+        serde_json::json!(["a.rs", "b.rs"])
+    );
+    assert_eq!(
+        changes[0]["selection_routes"],
+        serde_json::json!(["changed_code", "local_semantic"])
+    );
+    assert_eq!(changes[0]["content_matches"].as_array().unwrap().len(), 2);
+    assert_eq!(changes[0]["content_matches"][0]["excerpt"], alpha.trim());
+    assert!(
+        !changes
+            .iter()
+            .any(|s| s["citations"][0]["oid"] == distractor_oid)
+    );
+    let text = repo.run(["context", "--hybrid"]);
+    assert!(text.status.success());
+    let text = String::from_utf8_lossy(&text.stdout);
+    assert!(
+        text.contains(&matched_oid)
+            && text.contains("local_semantic")
+            && text.contains(alpha.trim())
+    );
+    let excluded = json(repo.run(["context", "--hybrid", "--from-rev", &matched_oid, "--json"]));
+    assert!(historical(&excluded).is_empty());
+    git(repo.dir.path(), ["add", "a.rs", "b.rs"]);
+    for path in ["a.rs", "b.rs"] {
+        fs::write(repo.dir.path().join(path), "fn value() {}\n").unwrap();
+    }
+    let staged = json(repo.run(["context", "--staged", "--hybrid", "--json"]));
+    assert_eq!(staged["suggestions"], report["suggestions"]);
+    assert!(historical(&json(repo.run(["context", "--hybrid", "--json"]))).is_empty());
+}
+
+#[test]
+#[ignore = "requires the pinned CPU runtime and prepared MiniLM model assets"]
+fn hybrid_can_expand_beyond_the_ordinary_verified_commit_budget() {
+    let repo = TestRepo::new();
+    let alpha = "fn alpha() { refreshSessionCache(\"session-expired\"); }\n";
+    let beta = "fn beta() { rotateCredentialToken(\"credential-rotation\"); }\n";
+    // The existing ordinary ceiling is 128 verified commits. One small added
+    // line per commit exercises expansion without a huge patch/history fixture.
+    for n in 0..128 {
+        commit(
+            &repo,
+            &[("filler.rs", &alpha.repeat(n + 1))],
+            "Update documentation for cooking recipes, kitchen utensils, baking bread, gardening, watering flowers, bicycle maintenance, weather forecasts and vacation planning",
+        );
+    }
+    commit(
+        &repo,
+        &[("target.rs", &format!("{alpha}{beta}"))],
+        "\"credential-rotation\" rotateCredentialToken",
+    );
+    let target = repo.head();
+    let indexed = repo.run(["index", "--semantic"]);
+    assert!(
+        indexed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&indexed.stderr)
+    );
+    fs::write(repo.dir.path().join("alpha.rs"), alpha).unwrap();
+    fs::write(repo.dir.path().join("beta.rs"), beta).unwrap();
+    let ordinary = json(repo.run(["context", "--json"]));
+    assert!(
+        !historical(&ordinary)
+            .iter()
+            .any(|s| s["citations"][0]["oid"] == target)
+    );
+    let hybrid = json(repo.run(["context", "--hybrid", "--json"]));
+    let found = historical(&hybrid)
+        .into_iter()
+        .find(|s| s["citations"][0]["oid"] == target)
+        .unwrap_or_else(|| panic!("semantic route adds the additional verified commit: {hybrid}"));
+    assert_eq!(
+        found["associated_current_paths"],
+        serde_json::json!(["alpha.rs", "beta.rs"])
+    );
+    assert_eq!(found["content_matches"].as_array().unwrap().len(), 2);
+    assert_eq!(hybrid["semantic_candidates"], 64);
+    assert_eq!(hybrid["suggestions"].as_array().unwrap().len(), 3);
+}
+
+#[test]
+#[ignore = "requires the pinned CPU runtime and prepared MiniLM model assets"]
+fn hybrid_preserves_recorded_abandonment_and_excerpt_provenance() {
+    let repo = TestRepo::new();
+    commit(&repo, &[("history.rs", "fn route() {}\n")], "base");
+    let alpha = "fn route() { refreshSessionCache(\"session-expired\"); }\n";
+    commit(&repo, &[("history.rs", alpha)], "update");
+    let original = repo.head();
+    git(repo.dir.path(), ["revert", "--no-edit", &original]);
+    let revert = repo.head();
+    let indexed = repo.run(["index", "--semantic"]);
+    assert!(
+        indexed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&indexed.stderr)
+    );
+    fs::write(repo.dir.path().join("current.rs"), alpha).unwrap();
+    let report = json(repo.run(["context", "--hybrid", "--json"]));
+    let suggestions = report["suggestions"].as_array().unwrap();
+    assert_eq!(suggestions.len(), 1);
+    let entry = &suggestions[0];
+    assert_eq!(entry["category"], "recorded_abandonment");
+    assert_eq!(entry["citations"][0]["oid"], original);
+    assert_eq!(entry["citations"][1]["oid"], revert);
+    assert_eq!(
+        entry["associated_current_paths"],
+        serde_json::json!(["current.rs"])
+    );
+    assert_eq!(
+        entry["selection_routes"],
+        serde_json::json!(["changed_code", "local_semantic", "recorded_revert"])
+    );
+    let matches = entry["content_matches"].as_array().unwrap();
+    assert_eq!(matches.len(), 2);
+    for oid in [&original, &revert] {
+        assert!(
+            matches
+                .iter()
+                .any(|matched| matched["historical_oid"] == *oid
+                    && matched["excerpt"] == alpha.trim())
+        );
+    }
+    let text = repo.run(["context", "--hybrid"]);
+    assert!(text.status.success());
+    let text = String::from_utf8_lossy(&text.stdout);
+    for value in [
+        "recorded_abandonment",
+        "local_semantic",
+        &original,
+        &revert,
+        alpha.trim(),
+    ] {
+        assert!(text.contains(value));
+    }
+}
+
+#[test]
 fn current_association_outranks_provenance_and_unrelated_reverts_are_ineligible() {
     let repo = TestRepo::new();
     commit(
