@@ -1,14 +1,17 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::{
     app::AppError,
     cache::QuerySession,
-    git::{WhyAnchor, WhyTarget},
+    git::{SymbolTrace, WhyAnchor, WhyTarget},
 };
 
 use super::super::patch::{self, HunkPriorities};
 use super::super::retrieval;
-use super::super::{Citation, Confidence, Detail, Material, Report, ReportKind, WhyDetail};
+use super::super::{
+    Citation, Confidence, Detail, Material, Report, ReportKind, SymbolFact, SymbolSummary,
+    WhyDetail,
+};
 
 const EXPLANATION_MARKERS: &[&str] = &[
     "because",
@@ -41,6 +44,7 @@ pub(crate) fn run(
     eligible_revisions: Option<&HashSet<String>>,
     limit: usize,
     with_patch: bool,
+    symbol_trace: Option<SymbolTrace>,
 ) -> Result<Report, AppError> {
     if !target.anchor_valid {
         let mut report = super::super::empty_report(ReportKind::Why);
@@ -48,6 +52,20 @@ pub(crate) fn run(
         report.notices.extend(target.warnings.iter().cloned());
         report.notices.push(REMOTE_CONTEXT_NOTICE.to_owned());
         return Ok(report);
+    }
+    if matches!(&target.anchor, WhyAnchor::Symbol { .. }) {
+        return run_symbol(
+            session,
+            target,
+            reachable,
+            eligible_revisions,
+            limit,
+            with_patch,
+            symbol_trace.unwrap_or_else(|| SymbolTrace {
+                revisions: Vec::new(),
+                introduction: Err("Git symbol-range history is unavailable".to_owned()),
+            }),
+        );
     }
     let commits = session.path_history(&target.path, reachable)?;
     let missing_objects = session.has_missing_objects(&commits)?;
@@ -225,6 +243,201 @@ pub(crate) fn run(
     retrieval::assign_citations(&mut materials);
 
     let mut report = super::super::report(ReportKind::Why, materials, matched_count, limit);
+    report.notices.extend(target.warnings.iter().cloned());
+    report.notices.push(REMOTE_CONTEXT_NOTICE.to_owned());
+    if missing_objects {
+        report.notices.push(
+            "warning: local cache is missing Git objects; why material may be incomplete."
+                .to_owned(),
+        );
+    }
+    if with_patch {
+        patch::attach_selected_patch_excerpts(session, &mut report, &priorities)?;
+    }
+    Ok(report)
+}
+
+fn run_symbol(
+    session: &QuerySession,
+    target: &WhyTarget,
+    reachable: &HashSet<String>,
+    eligible_revisions: Option<&HashSet<String>>,
+    limit: usize,
+    with_patch: bool,
+    trace: SymbolTrace,
+) -> Result<Report, AppError> {
+    let commits = session.path_history(&target.path, reachable)?;
+    let missing_objects = session.has_missing_objects(&commits)?;
+    let commits_by_oid = commits
+        .iter()
+        .map(|commit| (commit.oid.as_str(), commit))
+        .collect::<HashMap<_, _>>();
+    let SymbolTrace {
+        revisions,
+        introduction,
+    } = trace;
+    let trace_revisions = revisions.iter().map(String::as_str).collect::<HashSet<_>>();
+    let cache_gap = revisions
+        .iter()
+        .any(|oid| !reachable.contains(oid) || !commits_by_oid.contains_key(oid.as_str()));
+    let uncertain_lineage = revisions
+        .iter()
+        .filter_map(|oid| commits_by_oid.get(oid.as_str()))
+        .any(|commit| {
+            commit.parent_count > 1
+                || commit.shallow_boundary
+                || commit.changes.iter().any(|change| {
+                    commit.anchored_ordinals.contains(&change.ordinal)
+                        && (change.status.starts_with('R') || change.status.starts_with('C'))
+                })
+        });
+    let shallow_history = target
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("local history is shallow"));
+    let oldest_event = revisions.last().map(String::as_str);
+
+    let introduction = match introduction {
+        Err(reason) => SymbolFact::Unknown { reason },
+        Ok(_) if cache_gap => SymbolFact::Unknown {
+            reason: "symbol history extends beyond published cache coverage".to_owned(),
+        },
+        Ok(_) if missing_objects => SymbolFact::Unknown {
+            reason: "local Git objects needed to confirm the introduction are missing".to_owned(),
+        },
+        Ok(_) if shallow_history || uncertain_lineage => SymbolFact::Unknown {
+            reason: "shallow, merge, or path-move history makes symbol lineage uncertain"
+                .to_owned(),
+        },
+        Ok(oid) if !eligible_revisions.is_none_or(|eligible| eligible.contains(&oid)) => {
+            SymbolFact::Unknown {
+                reason: "symbol introduction is outside the current query scope".to_owned(),
+            }
+        }
+        Ok(oid) => match commits_by_oid.get(oid.as_str()) {
+            Some(commit) => SymbolFact::Known {
+                commit_oid: oid,
+                subject: commit.subject.clone(),
+            },
+            None => SymbolFact::Unknown {
+                reason: "symbol introduction is not present in cached path history".to_owned(),
+            },
+        },
+    };
+
+    let anchor_line_attribution = match &target.blame {
+        None => SymbolFact::Unknown {
+            reason: "Git could not attribute the symbol anchor line".to_owned(),
+        },
+        Some(blame) if !eligible_revisions.is_none_or(|eligible| eligible.contains(&blame.oid)) => {
+            SymbolFact::Unknown {
+                reason: "anchor-line attribution is outside the current query scope".to_owned(),
+            }
+        }
+        Some(blame) => SymbolFact::Known {
+            commit_oid: blame.oid.clone(),
+            subject: blame.subject.clone(),
+        },
+    };
+
+    let mut priorities = HunkPriorities::new();
+    if with_patch {
+        let mut historical_start = anchor_line(&target.anchor) as i64;
+        let mut historical_end = target.symbol_end.unwrap_or(historical_start as usize) as i64;
+        for commit in &commits {
+            let hunks = session.history_hunks(&commit.oid)?;
+            if trace_revisions.contains(commit.oid.as_str()) {
+                for hunk in &hunks {
+                    if commit.anchored_ordinals.contains(&hunk.change_ordinal)
+                        && retrieval::hunk_overlaps_symbol(
+                            hunk,
+                            historical_start.min(historical_end),
+                            historical_start.max(historical_end),
+                        )
+                    {
+                        priorities
+                            .entry(commit.oid.clone())
+                            .or_default()
+                            .insert(hunk.id(), 0);
+                    }
+                }
+            }
+            retrieval::trace_line(commit, &hunks, &mut historical_start);
+            retrieval::trace_line(commit, &hunks, &mut historical_end);
+        }
+    }
+
+    let mut entries = Vec::new();
+    for oid in &revisions {
+        if Some(oid.as_str()) == oldest_event || !reachable.contains(oid) {
+            continue;
+        }
+        if !eligible_revisions.is_none_or(|eligible| eligible.contains(oid)) {
+            continue;
+        }
+        let Some(commit) = commits_by_oid.get(oid.as_str()) else {
+            continue;
+        };
+        let explanation = explanation_strength(&commit.subject, &commit.body);
+        let cochanged = cochanged_paths(commit, &target.path);
+        let mut basis = vec!["Git range tracing identifies a change to this symbol".to_owned()];
+        if explanation > 0 {
+            basis.push("explanatory commit body".to_owned());
+        }
+        if cochanged > 0 {
+            basis.push(format!("co-changed paths ({cochanged})"));
+        }
+        let confidence = if explanation >= 2 {
+            Confidence::High
+        } else if explanation > 0 {
+            Confidence::Medium
+        } else {
+            Confidence::Low
+        };
+        entries.push(retrieval::Ranked {
+            score: explanation as f64 * 8.0 + cochanged.min(5) as f64 * 1.5,
+            commit_time: commit.commit_time,
+            oid: commit.oid.clone(),
+            value: Entry {
+                subject: commit.subject.clone(),
+                paths: commit.paths.clone(),
+                confidence,
+                basis,
+                citations: vec![Citation::new(commit.oid.clone(), commit.subject.clone())],
+            },
+        });
+    }
+    let matched_count = entries.len();
+    retrieval::sort(&mut entries);
+    let mut materials = entries
+        .into_iter()
+        .take(limit)
+        .map(|ranked| {
+            let entry = ranked.value;
+            Material {
+                subject: entry.subject,
+                paths: entry.paths,
+                confidence: entry.confidence,
+                basis: entry.basis,
+                citations: entry.citations,
+                detail: Some(Detail::Why(WhyDetail {
+                    anchor: anchor_description(&target.anchor),
+                    revision: target.revision.clone(),
+                    line: anchor_line(&target.anchor),
+                })),
+                patch: None,
+            }
+        })
+        .collect::<Vec<_>>();
+    retrieval::assign_citations(&mut materials);
+
+    let mut report = super::super::report(ReportKind::Why, materials, matched_count, limit);
+    report.patch_mode = with_patch;
+    report.symbol_summary = Some(SymbolSummary {
+        target: anchor_description(&target.anchor),
+        introduction,
+        anchor_line_attribution,
+    });
     report.notices.extend(target.warnings.iter().cloned());
     report.notices.push(REMOTE_CONTEXT_NOTICE.to_owned());
     if missing_objects {

@@ -217,6 +217,7 @@ fn run_with_scope(
         notices: Vec::new(),
         patch_mode: false,
         scope: None,
+        symbol_summary: None,
     })
 }
 

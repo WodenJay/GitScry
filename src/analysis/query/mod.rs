@@ -359,6 +359,8 @@ fn run_why(
     let context = Context::for_target(session, options.scope, &target.revision)?;
     let reachable = context.session.ancestors(&target.revision)?;
     let eligible = context.eligible_revisions(&target.revision)?;
+    let symbol_trace = matches!(&target.anchor, WhyAnchor::Symbol { .. })
+        .then(|| repository.trace_why_symbol(&target));
     let report = capabilities::why(
         &context.session,
         &target,
@@ -366,6 +368,7 @@ fn run_why(
         eligible.as_ref(),
         options.limit,
         options.patch,
+        symbol_trace,
     )?;
     Ok(context.finish(QueryReport::Analysis(report)))
 }

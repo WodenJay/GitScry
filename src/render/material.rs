@@ -1,6 +1,6 @@
 use crate::analysis::{
     Detail, Failure, Material, PatchExcerpt, PatchStatus, Relation, Report, ReportKind,
-    SearchScopeInfo, Step,
+    SearchScopeInfo, Step, SymbolFact, SymbolSummary,
 };
 
 /// Printed when history does not state why an approach failed.
@@ -111,10 +111,38 @@ pub(crate) fn format_report(report: &Report) -> String {
         }
         lines
     };
+    if let Some(summary) = &report.symbol_summary {
+        lines.splice(0..0, format_symbol_summary(summary));
+    }
     if let Some(scope) = &report.scope {
         lines.insert(0, scope_summary(scope));
     }
     lines.join("\n")
+}
+
+fn format_symbol_summary(summary: &SymbolSummary) -> Vec<String> {
+    let mut lines = vec!["Symbol summary:".to_owned()];
+    lines.push(format!("target: {}", summary.target));
+    for (label, fact) in [
+        ("introduction", &summary.introduction),
+        ("anchor-line attribution", &summary.anchor_line_attribution),
+    ] {
+        let line = match fact {
+            SymbolFact::Known {
+                commit_oid,
+                subject,
+            } => format!(
+                "  {label}: known {} — {}",
+                &commit_oid[..commit_oid.len().min(12)],
+                escape::subject(subject.trim()),
+            ),
+            SymbolFact::Unknown { reason } => {
+                format!("  {label}: unknown — {}", escape::subject(reason.trim()))
+            }
+        };
+        lines.push(line);
+    }
+    lines
 }
 
 fn header(report: &Report) -> String {

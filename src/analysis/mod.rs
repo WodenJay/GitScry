@@ -28,6 +28,7 @@ pub(crate) struct Report {
     pub(crate) warnings: Vec<String>,
     pub(crate) notices: Vec<String>,
     pub(crate) scope: Option<SearchScopeInfo>,
+    pub(crate) symbol_summary: Option<SymbolSummary>,
 }
 #[derive(Clone, Debug)]
 pub(crate) struct SearchScopeInfo {
@@ -106,6 +107,17 @@ pub(crate) struct WhyDetail {
     pub(crate) anchor: String,
     pub(crate) revision: String,
     pub(crate) line: usize,
+}
+
+pub(crate) struct SymbolSummary {
+    pub(crate) target: String,
+    pub(crate) introduction: SymbolFact,
+    pub(crate) anchor_line_attribution: SymbolFact,
+}
+
+pub(crate) enum SymbolFact {
+    Known { commit_oid: String, subject: String },
+    Unknown { reason: String },
 }
 
 pub(crate) struct TraceFixPatchAnchor {
@@ -218,6 +230,7 @@ pub(crate) fn report(
         notices: Vec::new(),
         scope: None,
         patch_mode: false,
+        symbol_summary: None,
     }
 }
 
@@ -232,5 +245,6 @@ pub(crate) fn empty_report(kind: ReportKind) -> Report {
         notices: Vec::new(),
         scope: None,
         patch_mode: false,
+        symbol_summary: None,
     }
 }

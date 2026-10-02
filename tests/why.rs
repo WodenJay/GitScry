@@ -84,6 +84,131 @@ fn why_resolves_symbols_and_pins_an_explicit_revision() {
 }
 
 #[test]
+fn why_symbol_separates_introduction_anchor_and_modifications() {
+    let repo = TestRepo::new();
+    let initial = concat!(
+        "fn calculate() {\n",
+        "    let result = 1;\n",
+        "}\n\n",
+        "fn helper() {\n",
+        "    let value = 1;\n",
+        "}\n",
+    );
+    repo.commit("src/lib.rs", initial.as_bytes(), "Create calculation", None);
+    let introduction = repo.head();
+
+    let body_changed = initial.replace("result = 1", "result = 2");
+    repo.commit(
+        "src/lib.rs",
+        body_changed.as_bytes(),
+        "Update calculation behavior",
+        Some("Because this fixes the production calculation regression."),
+    );
+    let body_revision = repo.head();
+
+    let declaration_changed = body_changed.replace("fn calculate()", "fn calculate(input: i32)");
+    repo.commit(
+        "src/lib.rs",
+        declaration_changed.as_bytes(),
+        "Change calculation declaration",
+        None,
+    );
+    let declaration = repo.head();
+
+    let neighbor_changed = declaration_changed.replace("value = 1", "value = 2");
+    repo.commit(
+        "src/lib.rs",
+        neighbor_changed.as_bytes(),
+        "Tune unrelated helper",
+        Some("Because this detailed explanation belongs to another function."),
+    );
+    repo.index();
+
+    let report = json(
+        &repo,
+        &[
+            "why",
+            "src/lib.rs",
+            "--symbol",
+            "calculate",
+            "--limit",
+            "1",
+            "--json",
+        ],
+    );
+    let summary = &report["symbol_summary"];
+    assert_eq!(summary["introduction"]["status"], "known");
+    assert_eq!(summary["introduction"]["commit_oid"], introduction);
+    assert_eq!(summary["anchor_line_attribution"]["status"], "known");
+    assert_eq!(
+        summary["anchor_line_attribution"]["commit_oid"],
+        declaration
+    );
+    assert_eq!(report["matched_count"], 2);
+    assert_eq!(report["truncated"], true);
+    let materials = report["materials"].as_array().unwrap();
+    assert_eq!(materials.len(), 1);
+    assert_eq!(materials[0]["subject"], "Update calculation behavior");
+
+    let pinned = json(
+        &repo,
+        &[
+            "why",
+            "src/lib.rs",
+            "--symbol",
+            "calculate",
+            "--at",
+            body_revision.as_str(),
+            "--limit",
+            "10",
+            "--json",
+        ],
+    );
+    assert_eq!(
+        pinned["symbol_summary"]["anchor_line_attribution"]["commit_oid"],
+        introduction
+    );
+    assert_eq!(pinned["matched_count"], 1);
+    assert!(
+        pinned["materials"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|material| {
+                material["subject"] != "Change calculation declaration"
+                    && material["subject"] != "Tune unrelated helper"
+                    && material["subject"] != "Create calculation"
+            })
+    );
+}
+
+#[test]
+fn why_symbol_rejects_ambiguous_or_unlocated_declarations() {
+    let repo = TestRepo::new();
+    repo.commit(
+        "src/lib.rs",
+        b"fn duplicate() {}\nfn duplicate() {}\n",
+        "Duplicate declarations",
+        None,
+    );
+
+    let ambiguous = repo.run(["why", "src/lib.rs", "--symbol", "duplicate"]);
+    assert_eq!(ambiguous.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&ambiguous.stderr).contains("ambiguous"));
+    assert!(String::from_utf8_lossy(&ambiguous.stderr).contains("1, 2"));
+
+    repo.commit(
+        "src/lib.rs",
+        b"// duplicate() appears in this prose.\nlet value = duplicate();\n",
+        "Mention only",
+        None,
+    );
+    let unlocated = repo.run(["why", "src/lib.rs", "--symbol", "duplicate"]);
+    assert_eq!(unlocated.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&unlocated.stderr).contains("declaration"));
+}
+
+#[test]
 fn why_rejects_explicit_out_of_cache_targets() {
     let repo = TestRepo::new();
     repo.commit("main.txt", b"main\n", "Main history", None);
