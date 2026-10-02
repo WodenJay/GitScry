@@ -21,6 +21,10 @@ The contents of a cache-reachable commit or file version opened to inspect the c
 Information returned from the cache that is traceable to its underlying commits, paths, or diffs and helps an Agent reason about a change.
 _Avoid_: evidence, answer, recommendation
 
+**change pattern**:
+A recurring combination of files observed changing together in Git history. It describes historical co-change, not a requirement that future changes modify every file in the combination.
+_Avoid_: change recipe, required change set
+
 **suspect**:
 A commit that may have introduced a regression, supported by material from its path, symbol, diff, or history.
 _Avoid_: culprit, root cause
