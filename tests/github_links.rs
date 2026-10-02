@@ -499,12 +499,12 @@ mod unix {
             let log = directory.path().join("calls");
             fs::write(
                 directory.path().join("pull-request-responses"),
-                format!("{}\\n", pull_request_responses.join("\\n")),
+                format!("{}\n", pull_request_responses.join("\n")),
             )
             .expect("write pull-request responses");
             fs::write(
                 directory.path().join("issue-responses"),
-                format!("{}\\n", issue_responses.join("\\n")),
+                format!("{}\n", issue_responses.join("\n")),
             )
             .expect("write issue responses");
             Self {
