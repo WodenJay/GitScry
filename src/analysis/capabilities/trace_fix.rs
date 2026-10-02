@@ -177,9 +177,15 @@ fn candidate_history(
 ) -> Result<PathHistories, AppError> {
     let mut histories = PathHistories::new();
     for deleted in deleted_lines {
-        let path_histories = histories.entry(deleted.path.clone()).or_default();
-        for commit in session.path_history(&deleted.path, reachable)? {
-            path_histories.entry(commit.oid.clone()).or_insert(commit);
+        if let std::collections::hash_map::Entry::Vacant(entry) =
+            histories.entry(deleted.path.clone())
+        {
+            let history = session
+                .path_history(&deleted.path, reachable)?
+                .into_iter()
+                .map(|commit| (commit.oid.clone(), commit))
+                .collect();
+            entry.insert(history);
         }
     }
     Ok(histories)

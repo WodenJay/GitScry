@@ -23,6 +23,14 @@ pub(super) enum FetchError {
     RequestFailed,
 }
 
+pub(super) struct PullRequestNode {
+    pub(super) node_id: Option<String>,
+    pub(super) number: u64,
+    pub(super) title: String,
+    pub(super) url: String,
+    pub(super) repository: String,
+}
+
 pub(super) fn fetch(
     repository: &GitHubRepository,
     commit_oid: &str,
@@ -193,16 +201,12 @@ fn parse_response(output: &[u8], command_failed: bool) -> Result<Page, FetchErro
         if pull_request.id.is_none() {
             partial = true;
         }
-        pull_requests.push(PullRequest {
-            kind: "pull_request",
+        pull_requests.push(PullRequestNode {
             node_id: pull_request.id,
             number: pull_request.number,
             title: pull_request.title,
             url: pull_request.url,
             repository: repository.name_with_owner,
-            issue_status: super::links::IssueStatus::NotQueried,
-            issue_reason: None,
-            issue_urls: Vec::new(),
         });
     }
 

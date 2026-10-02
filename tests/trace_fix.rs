@@ -68,6 +68,116 @@ impl TestRepo {
 }
 
 #[test]
+fn trace_fix_batches_deleted_ranges_without_losing_per_line_attribution() {
+    let repo = TestRepo::new();
+    let initial = b"old_a\nold_b\nkeep\nold_c\nold_d\n";
+    repo.commit("app.txt", initial, "Initial app", None);
+    repo.commit(
+        "app.txt",
+        b"bug_a\nbug_b\nkeep\nold_c\nold_d\n",
+        "Introduce first bug",
+        None,
+    );
+    let first = repo.head();
+    repo.commit(
+        "app.txt",
+        b"bug_a\nbug_b\nkeep\nbug_c\nbug_d\n",
+        "Introduce second bug",
+        None,
+    );
+    let second = repo.head();
+    repo.commit(
+        "app.txt",
+        b"prefix\nbug_a\nbug_b\nkeep\nbug_c\nbug_d\n",
+        "Shift original line coordinates",
+        None,
+    );
+    repo.commit(
+        "app.txt",
+        b"prefix\nfixed_a\nfixed_b\nkeep\nfixed_c\nfixed_d\n",
+        "Fix observed failures",
+        None,
+    );
+    repo.index();
+
+    let trace_file = repo.dir.path().join("blame-trace.log");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_gitscry"))
+        .args([
+            "trace-fix",
+            "HEAD",
+            "--path",
+            "app.txt",
+            "--patch",
+            "--json",
+        ])
+        .current_dir(repo.dir.path())
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", repo.dir.path().join("global-config"))
+        .env("GIT_TRACE", &trace_file)
+        .output()
+        .expect("run trace-fix with Git tracing");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let materials = report["materials"].as_array().unwrap();
+    assert_eq!(materials.len(), 2);
+    for (oid, text) in [(&first, "bug_a"), (&second, "bug_c")] {
+        let material = materials
+            .iter()
+            .find(|material| material["citations"][0]["oid"] == *oid)
+            .unwrap();
+        assert!(
+            material["basis"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|basis| basis == "deleted lines: 2")
+        );
+        assert_eq!(material["patch"]["status"], "available");
+        assert_eq!(material["patch"]["commit_oid"], *oid);
+        assert!(
+            material["patch"]["hunks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|hunk| hunk["text"].as_str().unwrap().contains(text))
+        );
+    }
+    let trace = fs::read_to_string(trace_file).expect("read Git trace");
+    assert_eq!(
+        trace
+            .lines()
+            .filter(|line| line.contains("built-in: git blame "))
+            .count(),
+        2,
+        "{trace}"
+    );
+    fs::write(
+        repo.dir.path().join(".git-blame-ignore-revs"),
+        "not-a-revision\n",
+    )
+    .expect("write invalid blame ignore file");
+    let fallback = repo.run([
+        "trace-fix",
+        "HEAD",
+        "--path",
+        "app.txt",
+        "--patch",
+        "--json",
+    ]);
+    assert!(
+        fallback.status.success(),
+        "{}",
+        String::from_utf8_lossy(&fallback.stderr)
+    );
+    let fallback: serde_json::Value = serde_json::from_slice(&fallback.stdout).unwrap();
+    assert_eq!(fallback["materials"], report["materials"]);
+}
+
+#[test]
 fn trace_fix_keeps_hunks_aligned_after_type_change() {
     let repo = TestRepo::new();
     repo.commit_files(
