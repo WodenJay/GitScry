@@ -9,6 +9,7 @@ mod context_content;
 mod examples;
 mod failures;
 mod hybrid;
+pub(crate) mod patterns;
 mod regression;
 mod relations;
 mod search;

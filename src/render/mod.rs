@@ -9,6 +9,7 @@ mod github_links;
 mod json;
 mod material;
 
+mod patterns;
 mod timeline;
 use crate::{
     analysis::query::QueryReport,
@@ -22,6 +23,7 @@ fn format_report(
     github_links: Option<&crate::github::LinksReport>,
 ) -> String {
     match report {
+        QueryReport::Patterns(report) => patterns::format_report(report),
         QueryReport::Context(report) => context::format_report(report),
         QueryReport::Analysis(report) => {
             let mut output = material::format_report(report);
@@ -48,6 +50,7 @@ fn format_json_report(
     github_links: Option<&crate::github::LinksReport>,
 ) -> Result<String, serde_json::Error> {
     match report {
+        QueryReport::Patterns(report) => patterns::format_json_report(report, additional_warnings),
         QueryReport::Context(report) => context::format_json_report(report, additional_warnings),
         QueryReport::Analysis(report) => {
             json::format_json_report(report, additional_warnings, github_links)

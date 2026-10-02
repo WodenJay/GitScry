@@ -249,13 +249,19 @@ Examples:
 
     #[command(
         about = "Find historical paths changed alongside one or more seed paths",
-        long_about = "Find historical paths changed alongside one or more seed paths.\n\nUse `gitscry related` when you are changing one or more paths and want to know which other paths historically changed together with them, such as mirrored files or coupled modules.\n\nRequired input: one or more repository-relative seed PATHS.\n\nScope applies only to cached history. `--from-rev REV` excludes that commit and its ancestors; `--to-rev REV` includes that commit and its ancestors and defaults to the published cache tip. Revisions must exist in the published cache, and the lower revision must be an ancestor of the upper revision. `--since` and `--until` filter committer time: `YYYY-MM-DD` means an inclusive UTC calendar day, while RFC 3339 timestamps with `Z` or an explicit offset mean inclusive instants. Timezone-free timestamps are rejected. All bounds intersect. Scope filters co-change counts, scoring denominators, and supporting commits before ranking and `--limit`; scoped output reports resolved bounds and the effective cache tip. Without scope flags, all cached history is used.\n\nExamples:\n\n  gitscry related src/lib.rs --from-rev <base> --to-rev release\n\n  gitscry related src/cli.rs --since 2025-01-01 --until 2025-01-31"
+        long_about = "Find historical paths changed alongside one or more seed paths.\n\nUse `gitscry related` when you are changing one or more paths and want to know which other paths historically changed together with them, such as mirrored files or coupled modules.\n\nRequired input: one or more repository-relative seed PATHS.\n\nDefault mode ranks individual paths using commits touching any seed. `--patterns` instead requires every seed in each supporting commit and returns closed concrete-path combinations with at least three distinct members and at least one non-seed. Paths are case-sensitive, duplicate seeds collapse, and directories do not expand. `--min-support N` sets the minimum distinct-commit support (default 3, minimum 2, pattern mode only). Equal-support subsets are omitted in favor of their closed supersets; incidental extra paths do not prevent support. `--limit` caps combinations, not members.\n\nPattern history excludes merges and commits touching more than 50 distinct paths; exclusion counts are scoped. Seed-only and two-path commits still count in the eligible all-seed denominator. Each group reports exact support and its proportion of eligible all-seed commits, up to five supporting commit citations, and omitted reference counts. Members are marked as seeds or non-seeds and present or missing at the published cache tip, even when the historical scope ends earlier. Historical/deleted paths remain evidence; rename continuity is not inferred. Empty results never fall back to individual paths. This is historical material, not a required-edit checklist. Pattern mode is local-only and cannot be combined with `--github-links` or `--github-repo`. `--json` provides a structured grouped report.\n\nScope applies only to cached history. `--from-rev REV` excludes that commit and its ancestors; `--to-rev REV` includes that commit and its ancestors and defaults to the published cache tip. Revisions must exist in the published cache, and the lower revision must be an ancestor of the upper revision. `--since` and `--until` filter committer time: `YYYY-MM-DD` means an inclusive UTC calendar day, while RFC 3339 timestamps with `Z` or an explicit offset mean inclusive instants. Timezone-free timestamps are rejected. All bounds intersect. Scope filters co-change counts, scoring denominators, and supporting commits before ranking and `--limit`; scoped output reports resolved bounds and the effective cache tip. Without scope flags, all cached history is used.\n\nExamples:\n\n  gitscry related src/lib.rs --from-rev <base> --to-rev release\n\n  gitscry related src/cli.rs --since 2025-01-01 --until 2025-01-31"
     )]
     #[command(after_long_help = MATERIAL_LINKS_LONG_HELP)]
     Related {
         /// Repository-relative seed paths matched against history.
         #[arg(required = true, num_args = 1..)]
         paths: Vec<String>,
+        /// Discover closed combinations supported by commits containing all seeds.
+        #[arg(long, conflicts_with_all = ["github_links", "github_repo"])]
+        patterns: bool,
+        /// Minimum distinct supporting commits (at least two); pattern mode only.
+        #[arg(long, requires = "patterns", value_parser = parse_min_support)]
+        min_support: Option<usize>,
         #[command(flatten)]
         scope: HistoricalScopeArgs,
         #[command(flatten)]
@@ -466,6 +472,14 @@ impl Command {
             Self::Update | Self::Index { .. } => false,
         }
     }
+}
+
+fn parse_min_support(value: &str) -> Result<usize, String> {
+    let count = parse_limit(value)?;
+    if count < 2 {
+        return Err("minimum support must be at least two".to_owned());
+    }
+    Ok(count)
 }
 
 fn parse_line(value: &str) -> Result<usize, String> {

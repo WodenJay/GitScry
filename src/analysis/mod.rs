@@ -12,6 +12,7 @@ pub(crate) mod query;
 mod retrieval;
 
 pub(crate) use capabilities::context::{Report as ContextReport, Suggestion as ContextSuggestion};
+pub(crate) use capabilities::patterns::Report as PatternsReport;
 pub(crate) use capabilities::timeline::{Entry as TimelineEntry, Report as TimelineReport};
 pub(crate) use patch::{PatchExcerpt, PatchHunk, PatchStatus};
 use retrieval::Intent;

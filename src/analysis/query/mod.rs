@@ -39,6 +39,10 @@ pub(crate) enum Request {
         paths: Vec<String>,
     },
     Related(Vec<String>),
+    Patterns {
+        paths: Vec<String>,
+        min_support: usize,
+    },
     Tests(Vec<String>),
     Regression {
         words: Vec<String>,
@@ -72,6 +76,7 @@ pub(crate) struct Options {
 
 pub(crate) enum QueryReport {
     Context(super::ContextReport),
+    Patterns(capabilities::patterns::Report),
     Analysis(Report),
     Timeline(TimelineReport),
 }
@@ -79,6 +84,7 @@ pub(crate) enum QueryReport {
 impl QueryReport {
     pub(crate) fn warnings(&self) -> &[String] {
         match self {
+            Self::Patterns(_) => &[],
             Self::Context(report) => &report.warnings,
             Self::Analysis(report) => &report.warnings,
             Self::Timeline(_) => &[],
@@ -87,6 +93,7 @@ impl QueryReport {
 
     pub(crate) fn notices(&self) -> &[String] {
         match self {
+            Self::Patterns(_) => &[],
             Self::Context(_) => &[],
             Self::Analysis(report) => &report.notices,
             Self::Timeline(_) => &[],
@@ -145,6 +152,7 @@ impl Context {
     fn finish(self, mut report: QueryReport) -> Outcome {
         let scope = self.scope.map(|scope| scope.report);
         match &mut report {
+            QueryReport::Patterns(report) => report.scope = scope,
             QueryReport::Context(report) => report.scope = scope,
             QueryReport::Analysis(report) => report.scope = scope,
             QueryReport::Timeline(report) => report.scope = scope,
@@ -182,6 +190,18 @@ pub(crate) fn execute(request: Request, options: Options) -> Result<Outcome, App
             run_text(words, paths, options, capabilities::failures)
         }
         Request::Related(paths) => run_paths(paths, options, capabilities::related),
+        Request::Patterns { paths, min_support } => {
+            Intent::paths(&paths)?;
+            let context = Context::open(options.scope)?;
+            let report = capabilities::patterns::run(
+                &context.session,
+                &paths,
+                context.filter(),
+                min_support,
+                options.limit,
+            )?;
+            Ok(context.finish(QueryReport::Patterns(report)))
+        }
         Request::Tests(paths) => run_paths(paths, options, capabilities::tests),
         Request::Regression {
             words,
