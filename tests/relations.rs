@@ -845,6 +845,10 @@ fn patterns_minimum_support_and_cli_validation() {
         );
     }
     repo.index();
+    let help = repo.run(["related", "--help"]);
+    assert_eq!(help.status.code(), Some(0), "{}", stderr(&help));
+    assert!(stdout(&help).contains("closed file-incarnation combinations"));
+    assert!(stdout(&help).contains("Each citation lists the actual changed path"));
     let empty = repo.run(["related", "A", "--patterns", "--json"]);
     let empty: serde_json::Value = serde_json::from_slice(&empty.stdout).unwrap();
     assert_eq!(empty["patterns"], serde_json::json!([]));
@@ -1131,4 +1135,292 @@ fn patterns_disclose_unscoped_history_and_order_count_recency_then_paths() {
                 .any(|member| member["path"] == path)
         );
     }
+}
+
+#[test]
+fn patterns_follow_rename_aliases_and_report_paths_per_commit() {
+    let repo = TestRepo::new();
+    repo.commit_files(&[("A", b"seed\n")], "create seed");
+    let origin = repo.head();
+
+    for index in 0..1 {
+        let content = format!("before {index}\n");
+        repo.commit_files(
+            &[
+                ("A", content.as_bytes()),
+                ("B", content.as_bytes()),
+                ("C", content.as_bytes()),
+            ],
+            "joint before rename",
+        );
+    }
+
+    git(repo.dir.path(), ["mv", "A", "Z"]);
+    fs::write(repo.dir.path().join("B"), b"rename joint B\n").unwrap();
+    fs::write(repo.dir.path().join("C"), b"rename joint C\n").unwrap();
+    git(repo.dir.path(), ["add", "--all"]);
+    git(
+        repo.dir.path(),
+        ["commit", "-m", "rename with joint change"],
+    );
+    let rename = repo.head();
+    git(repo.dir.path(), ["mv", "Z", "Q"]);
+    fs::write(repo.dir.path().join("B"), b"second rename joint B\n").unwrap();
+    fs::write(repo.dir.path().join("C"), b"second rename joint C\n").unwrap();
+    git(repo.dir.path(), ["add", "--all"]);
+    git(
+        repo.dir.path(),
+        ["commit", "-m", "rename again with joint change"],
+    );
+    let chain_rename = repo.head();
+
+    for index in 0..2 {
+        let content = format!("after {index}\n");
+        repo.commit_files(
+            &[
+                ("Q", content.as_bytes()),
+                ("B", content.as_bytes()),
+                ("C", content.as_bytes()),
+            ],
+            "joint after rename",
+        );
+    }
+    let target = repo.head();
+    repo.index();
+
+    let output = repo.run([
+        "related",
+        "A",
+        "Z",
+        "--patterns",
+        "--min-support",
+        "3",
+        "--json",
+    ]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["eligible_seed_commits"], 6);
+    let patterns = report["patterns"].as_array().unwrap();
+    assert_eq!(patterns.len(), 1, "{report}");
+    let pattern = &patterns[0];
+    assert_eq!(pattern["support_count"], 5);
+    assert_eq!(pattern["proportion"], 5.0 / 6.0);
+
+    let members = pattern["members"].as_array().unwrap();
+    assert_eq!(members.len(), 3);
+    let seed = members
+        .iter()
+        .find(|member| member["seed"] == true)
+        .unwrap();
+    assert_eq!(seed["path"], "A");
+    assert_eq!(seed["introduced_in"], origin);
+    assert_eq!(seed["target_paths"], serde_json::json!(["Q"]));
+    assert_eq!(seed["exists_at_target"], true);
+
+    let citations = pattern["citations"].as_array().unwrap();
+    assert_eq!(citations.len(), 5);
+    let mut cited_paths = std::collections::BTreeSet::new();
+    for citation in citations {
+        let cited_seed = citation["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|member| member["introduced_in"] == origin)
+            .unwrap();
+        for path in cited_seed["changed_paths"].as_array().unwrap() {
+            cited_paths.insert(path.as_str().unwrap());
+        }
+    }
+    assert!(cited_paths.contains("A"));
+    assert!(cited_paths.contains("Z"));
+    assert!(cited_paths.contains("Q"));
+    let rename_citation = citations
+        .iter()
+        .find(|citation| citation["oid"] == rename)
+        .unwrap();
+    let renamed_seed = rename_citation["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|member| member["introduced_in"] == origin)
+        .unwrap();
+    assert_eq!(renamed_seed["changed_paths"], serde_json::json!(["A", "Z"]));
+    let chain_citation = citations
+        .iter()
+        .find(|citation| citation["oid"] == chain_rename)
+        .unwrap();
+    let chain_seed = chain_citation["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|member| member["introduced_in"] == origin)
+        .unwrap();
+    assert_eq!(chain_seed["changed_paths"], serde_json::json!(["Q", "Z"]));
+
+    let human = repo.run(["related", "A", "--patterns"]);
+    assert_eq!(human.status.code(), Some(0), "{}", stderr(&human));
+    assert!(stdout(&human).contains("incarnation introduced at"));
+    assert!(stdout(&human).contains("changed paths: "));
+
+    let scoped = repo.run([
+        "related",
+        "A",
+        "--patterns",
+        "--min-support",
+        "2",
+        "--from-rev",
+        chain_rename.as_str(),
+        "--json",
+    ]);
+    assert_eq!(scoped.status.code(), Some(0), "{}", stderr(&scoped));
+    let scoped: serde_json::Value = serde_json::from_slice(&scoped.stdout).unwrap();
+    assert_eq!(scoped["eligible_seed_commits"], 2);
+    assert_eq!(scoped["target_revision"], target);
+    assert_eq!(scoped["patterns"][0]["support_count"], 2);
+    let scoped_seed = scoped["patterns"][0]["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|member| member["seed"] == true)
+        .unwrap();
+    assert_eq!(scoped_seed["introduced_in"], origin);
+    assert_eq!(scoped_seed["target_paths"], serde_json::json!(["Q"]));
+    for citation in scoped["patterns"][0]["citations"].as_array().unwrap() {
+        let cited_seed = citation["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|member| member["introduced_in"] == origin)
+            .unwrap();
+        assert_eq!(cited_seed["changed_paths"], serde_json::json!(["Q"]));
+    }
+}
+
+#[test]
+fn patterns_separate_recreated_paths_into_distinct_incarnations() {
+    let repo = TestRepo::new();
+    repo.commit_files(&[("A", b"first incarnation\n")], "create first A");
+    let first = repo.head();
+
+    for index in 0..3 {
+        let content = format!("first {index}\n");
+        repo.commit_files(
+            &[
+                ("A", content.as_bytes()),
+                ("B", content.as_bytes()),
+                ("C", content.as_bytes()),
+            ],
+            "joint first incarnation",
+        );
+    }
+    repo.remove("A", "remove first A");
+    repo.commit_files(&[("A", b"second incarnation\n")], "recreate A");
+    let second = repo.head();
+    for index in 0..2 {
+        let content = format!("second {index}\n");
+        repo.commit_files(
+            &[
+                ("A", content.as_bytes()),
+                ("B", content.as_bytes()),
+                ("C", content.as_bytes()),
+            ],
+            "joint second incarnation",
+        );
+    }
+    repo.index();
+
+    let output = repo.run(["related", "A", "--patterns", "--min-support", "2", "--json"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["eligible_seed_commits"], 8);
+    let patterns = report["patterns"].as_array().unwrap();
+    assert_eq!(patterns.len(), 2, "{report}");
+
+    let mut supports = std::collections::BTreeMap::new();
+    for pattern in patterns {
+        let seed = pattern["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|member| member["seed"] == true)
+            .unwrap();
+        assert_eq!(seed["path"], "A");
+        supports.insert(seed["introduced_in"].as_str().unwrap(), pattern);
+        for citation in pattern["citations"].as_array().unwrap() {
+            let cited_seed = citation["members"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|member| member["introduced_in"] == seed["introduced_in"])
+                .unwrap();
+            assert_eq!(cited_seed["changed_paths"], serde_json::json!(["A"]));
+        }
+    }
+
+    let old = supports.get(first.as_str()).unwrap();
+    assert_eq!(old["support_count"], 3);
+    let old_seed = old["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|member| member["seed"] == true)
+        .unwrap();
+    assert_eq!(old_seed["exists_at_target"], false);
+    assert_eq!(old_seed["target_paths"], serde_json::json!([]));
+
+    let current = supports.get(second.as_str()).unwrap();
+    assert_eq!(current["support_count"], 2);
+    let current_seed = current["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|member| member["seed"] == true)
+        .unwrap();
+    assert_eq!(current_seed["exists_at_target"], true);
+    assert_eq!(current_seed["target_paths"], serde_json::json!(["A"]));
+}
+
+#[test]
+fn patterns_keep_copied_paths_as_distinct_incarnations() {
+    let repo = TestRepo::new();
+    repo.commit_files(&[("A", b"original\n")], "create source A");
+    let source = repo.head();
+    repo.commit_files(
+        &[
+            ("A", b"updated source\n"),
+            ("B", b"updated source\n"),
+            ("C", b"first C\n"),
+        ],
+        "copy A and change source",
+    );
+    let copy = repo.head();
+    for index in 0..2 {
+        let content = format!("co-change {index}\n");
+        repo.commit_files(
+            &[
+                ("A", content.as_bytes()),
+                ("B", content.as_bytes()),
+                ("C", content.as_bytes()),
+            ],
+            "change source and copy together",
+        );
+    }
+    repo.index();
+
+    let output = repo.run(["related", "A", "--patterns", "--min-support", "3", "--json"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["eligible_seed_commits"], 4);
+    let patterns = report["patterns"].as_array().unwrap();
+    assert_eq!(patterns.len(), 1, "{report}");
+    let pattern = &patterns[0];
+    assert_eq!(pattern["support_count"], 3);
+    let members = pattern["members"].as_array().unwrap();
+    assert_eq!(members.len(), 3);
+    let source_member = members.iter().find(|member| member["path"] == "A").unwrap();
+    let copy_member = members.iter().find(|member| member["path"] == "B").unwrap();
+    assert_eq!(source_member["introduced_in"], source);
+    assert_eq!(copy_member["introduced_in"], copy);
+    assert_ne!(source_member["introduced_in"], copy_member["introduced_in"]);
+    assert_eq!(copy_member["target_paths"], serde_json::json!(["B"]));
 }
