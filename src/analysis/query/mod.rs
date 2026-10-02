@@ -42,10 +42,10 @@ pub(crate) enum Request {
         path: String,
         symbol: Option<String>,
         good: Option<String>,
-        bad: String,
+        bad: Option<String>,
     },
     Why {
-        revision: String,
+        revision: Option<String>,
         path: String,
         anchor: WhyAnchor,
     },
@@ -314,14 +314,18 @@ fn run_regression(
     path: String,
     symbol: Option<String>,
     good: Option<String>,
-    bad: String,
+    bad: Option<String>,
     options: Options,
 ) -> Result<Outcome, AppError> {
     let intent = Intent::symptom(&words, &path)?;
     let repository = Repository::discover()?;
+    let session = cache::open_query(&repository.root)?;
+    let bad = match bad {
+        Some(revision) => revision,
+        None => session.completed_tip()?,
+    };
     let target =
         repository.pin_regression_target(&bad, good.as_deref(), &path, symbol.as_deref())?;
-    let session = cache::open_query(&repository.root)?;
     session.require_revision(&target.bad_revision)?;
     if let Some(good_revision) = &target.good_revision {
         session.require_revision(good_revision)?;
@@ -347,14 +351,18 @@ fn run_regression(
 }
 
 fn run_why(
-    revision: String,
+    revision: Option<String>,
     path: String,
     anchor: WhyAnchor,
     options: Options,
 ) -> Result<Outcome, AppError> {
     let repository = Repository::discover()?;
-    let target = repository.pin_why_target(&revision, &path, anchor)?;
     let session = cache::open_query(&repository.root)?;
+    let revision = match revision {
+        Some(revision) => revision,
+        None => session.completed_tip()?,
+    };
+    let target = repository.pin_why_target(&revision, &path, anchor)?;
     session.require_revision(&target.revision)?;
     let context = Context::for_target(session, options.scope, &target.revision)?;
     let reachable = context.session.ancestors(&target.revision)?;

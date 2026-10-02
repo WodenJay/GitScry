@@ -255,7 +255,7 @@ Examples:
 
     #[command(
         about = "Locate historical commits that may have introduced a regression",
-        long_about = "Locate historical commits that may have introduced a regression.\n\nUse `gitscry regression` when a regression is observable and you want suspects: commits in the requested revision range whose material supports them as candidates that may have introduced the regression. Suspects are historical candidates; they do not replace an executable `git bisect`.\n\nRequired inputs: one or more SYMPTOM words and `--path`, the repository-relative path affected by the regression. `--symbol` narrows the suspect history to a symbol in that path. `--good` pins the last known good revision so suspects are limited to the good..bad range; `--bad` pins the last known bad revision and defaults to HEAD.\n\nHistory scope narrows that pinned suspect window: `--from-rev` excludes that revision and its ancestors; `--to-rev` is inclusive and defaults to `--bad`. `--since` and `--until` intersect with the suspect window using committer time. Date-only bounds cover inclusive UTC calendar days; timestamps require RFC 3339 with `Z` or an explicit UTC offset.\n\nExamples:\n\n  gitscry regression provider normalization --path src/lib.rs\n\n  gitscry regression slow startup --path src/main.rs --good v0.1.0 --symbol main\n\n  gitscry regression timeout --path src/app.py --good v0.2 --bad v0.3 --since 2024-01-01"
+        long_about = "Locate historical commits that may have introduced a regression.\n\nUse `gitscry regression` when a regression is observable and you want suspects: commits in the requested revision range whose material supports them as candidates that may have introduced the regression. Suspects are historical candidates; they do not replace an executable `git bisect`.\n\nRequired inputs: one or more SYMPTOM words and `--path`, the repository-relative path affected by the regression. `--symbol` narrows the suspect history to a symbol in that path. `--good` pins the last known good revision so suspects are limited to the good..bad range; `--bad` pins the last known bad revision and defaults to the published cache tip.\n\nHistory scope narrows that pinned suspect window: `--from-rev` excludes that revision and its ancestors; `--to-rev` is inclusive and defaults to `--bad`. `--since` and `--until` intersect with the suspect window using committer time. Date-only bounds cover inclusive UTC calendar days; timestamps require RFC 3339 with `Z` or an explicit UTC offset.\n\nExamples:\n\n  gitscry regression provider normalization --path src/lib.rs\n\n  gitscry regression slow startup --path src/main.rs --good v0.1.0 --symbol main\n\n  gitscry regression timeout --path src/app.py --good v0.2 --bad v0.3 --since 2024-01-01"
     )]
     #[command(after_long_help = MATERIAL_LINKS_LONG_HELP)]
     Regression {
@@ -271,9 +271,9 @@ Examples:
         /// Last known good revision; suspects are limited to the good..bad range.
         #[arg(long)]
         good: Option<String>,
-        /// Last known bad revision; defaults to HEAD.
-        #[arg(long, default_value = "HEAD")]
-        bad: String,
+        /// Last known bad revision; defaults to the published cache tip.
+        #[arg(long, value_name = "REV")]
+        bad: Option<String>,
         #[command(flatten)]
         scope: HistoricalScopeArgs,
         #[command(flatten)]
@@ -296,7 +296,7 @@ Examples:
     ))]
     #[command(
         about = "Explain the local history behind one line or symbol",
-        long_about = "Explain the local history behind one line or symbol.\n\nUse `gitscry why` when a line or symbol raises a question and you want the commits whose material explains why it looks the way it does at the target revision.\n\nRequired inputs: a repository-relative PATH and exactly one anchor, `--line` (a one-based line number) or `--symbol` (a symbol name). `--at` pins the local revision containing the target and defaults to HEAD.\n\nHistorical scope: `--from-rev REV` excludes REV and its ancestors; `--to-rev REV` includes REV and its ancestors, intersected with the target revision selected by `--at`. Without `--to-rev`, the target revision is the upper bound. `--since` and `--until` filter by committer time and accept UTC dates or RFC 3339 timestamps with offsets. Scope flags combine, and revisions must be in the published cache.\n\nExamples:\n\n  gitscry why src/lib.rs --line 12\n\n  gitscry why src/lib.rs --symbol provider --at HEAD~1 --from-rev HEAD~5 --to-rev HEAD~1\n\n  gitscry why src/lib.rs --line 12 --since 2025-01-01 --until 2025-01-31"
+        long_about = "Explain the local history behind one line or symbol.\n\nUse `gitscry why` when a line or symbol raises a question and you want the commits whose material explains why it looks the way it does at the target revision.\n\nRequired inputs: a repository-relative PATH and exactly one anchor, `--line` (a one-based line number) or `--symbol` (a symbol name). `--at` pins the local revision containing the target and defaults to the published cache tip.\n\nHistorical scope: `--from-rev REV` excludes REV and its ancestors; `--to-rev REV` includes REV and its ancestors, intersected with the target revision selected by `--at`. Without `--to-rev`, the target revision is the upper bound. `--since` and `--until` filter by committer time and accept UTC dates or RFC 3339 timestamps with offsets. Scope flags combine, and revisions must be in the published cache.\n\nExamples:\n\n  gitscry why src/lib.rs --line 12\n\n  gitscry why src/lib.rs --symbol provider --at HEAD~1 --from-rev HEAD~5 --to-rev HEAD~1\n\n  gitscry why src/lib.rs --line 12 --since 2025-01-01 --until 2025-01-31"
     )]
     #[command(after_long_help = MATERIAL_LINKS_LONG_HELP)]
     Why {
@@ -308,9 +308,9 @@ Examples:
         /// Symbol name to explain.
         #[arg(long, conflicts_with = "line")]
         symbol: Option<String>,
-        /// Local revision containing the target; defaults to HEAD.
-        #[arg(long, default_value = "HEAD")]
-        at: String,
+        /// Local revision containing the target; defaults to the published cache tip.
+        #[arg(long, value_name = "REV")]
+        at: Option<String>,
         /// Exclude this cached revision and its ancestors from eligible history.
         #[arg(long = "from-rev", value_name = "REV")]
         from_rev: Option<String>,
