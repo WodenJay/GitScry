@@ -111,6 +111,27 @@ fn why_rejects_explicit_out_of_cache_targets() {
 }
 
 #[test]
+fn why_defaults_to_published_cache_tip_on_feature_branch() {
+    let repo = TestRepo::new();
+    repo.commit("target.txt", b"main\n", "Main target", None);
+    let cache_tip = repo.head();
+    repo.index();
+    git(repo.dir.path(), ["switch", "-c", "feature"]);
+    repo.commit("target.txt", b"feature\n", "Feature target", None);
+
+    let output = repo.run(["why", "target.txt", "--line", "1"]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains(&format!("target: line 1 at {cache_tip}"))
+    );
+}
+
+#[test]
 fn why_exposes_rename_boundary_and_rejects_invalid_anchors() {
     let repo = TestRepo::new();
     repo.commit("old.txt", b"kept\n", "Add old path", None);
@@ -362,6 +383,7 @@ fn why_rejects_line_one_for_an_empty_file() {
     let repo = TestRepo::new();
     repo.commit("empty.txt", b"", "Create empty file", None);
 
+    repo.index();
     let output = repo.run(["why", "empty.txt", "--line", "1"]);
     assert_eq!(output.status.code(), Some(2));
 }

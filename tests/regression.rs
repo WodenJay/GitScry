@@ -346,6 +346,26 @@ fn regression_rejects_out_of_cache_bad_revision() {
 }
 
 #[test]
+fn regression_defaults_to_published_cache_tip_on_feature_branch() {
+    let repo = TestRepo::new();
+    repo.commit("target.txt", b"main\n", "Main target", None);
+    repo.index();
+    git(repo.dir.path(), ["switch", "-c", "feature"]);
+    repo.commit("target.txt", b"feature\n", "Feature target", None);
+
+    let output = repo.run(["regression", "target", "--path", "target.txt"]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Main target"));
+    assert!(!stdout.contains("Feature target"));
+}
+
+#[test]
 fn regression_uses_word_boundaries_for_symptom_terms() {
     let repo = TestRepo::new();
     repo.commit("target.txt", b"hidden video\n", "Show hidden video", None);
