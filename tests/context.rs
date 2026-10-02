@@ -9,6 +9,11 @@ fn hybrid_is_explicit_and_no_change_needs_no_semantic_resources() {
     let repo = TestRepo::new();
     let empty = json(repo.run(["context", "--hybrid", "--json"]));
     assert!(empty["suggestions"].as_array().unwrap().is_empty());
+    assert_eq!(empty["semantic_requested"], true);
+    assert_eq!(
+        json(repo.run(["context", "--json"]))["semantic_requested"],
+        false
+    );
     assert!(empty["cache_tip"].is_null());
     commit(
         &repo,

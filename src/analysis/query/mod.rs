@@ -211,10 +211,12 @@ fn run_context(staged: bool, hybrid: bool, options: Options) -> Result<Outcome, 
     let input = repository.current_change(staged)?;
     if input.changes.is_empty() {
         scope::validate_time_bounds(&options.scope)?;
+        let mut report = super::ContextReport::empty(input);
+        report.semantic_requested = hybrid;
         return Ok(Outcome {
             progress: Vec::new(),
             warnings: Vec::new(),
-            report: QueryReport::Context(super::ContextReport::empty(input)),
+            report: QueryReport::Context(report),
         });
     }
     let context = Context::open(options.scope)?;
