@@ -1,3 +1,5 @@
+mod package;
+
 use super::{AppError, Outcome, UpdateStage};
 use crate::runtime::install_verified_package;
 use semver::Version;
@@ -6,16 +8,14 @@ use sha2::{Digest, Sha256};
 use std::{
     ffi::OsStr,
     fs::{self, File, OpenOptions},
-    io::{self, Cursor, Read, Write},
-    path::{Component, Path, PathBuf},
+    io,
+    path::{Path, PathBuf},
 };
 use tempfile::Builder;
 
 const RELEASE_URL: &str = "https://api.github.com/repos/WodenJay/GitScry/releases/latest";
 const USER_AGENT: &str = concat!("gitscry/", env!("CARGO_PKG_VERSION"));
-const MAX_EXECUTABLE_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_DOWNLOAD_BYTES: u64 = 256 * 1024 * 1024;
-const MAX_ARCHIVE_BYTES: usize = 256 * 1024 * 1024;
 #[derive(Clone, Debug)]
 struct Asset {
     name: String,
@@ -345,10 +345,7 @@ fn install_archive_with_publish(
         .map_err(|error| format!("creating private update storage: {error}"))?;
     let staged = temporary.path().join(target.executable_name());
 
-    match target.archive_format() {
-        ArchiveFormat::TarXz => extract_tar_xz(archive, target, temporary.path())?,
-        ArchiveFormat::Zip => extract_zip(archive, target, temporary.path())?,
-    }
+    package::extract(archive, target, temporary.path())?;
     copy_executable_permissions(executable, &staged)?;
     // Versioned manifests and content-addressed runtime IDs keep the old executable usable until it is replaced.
     install_verified_package(temporary.path(), parent, app_version, target.triple())
@@ -369,308 +366,6 @@ fn install_archive_with_publish(
     #[cfg(not(windows))]
     let warnings = Vec::new();
     Ok(warnings)
-}
-
-struct LimitedVec {
-    bytes: Vec<u8>,
-    limit: usize,
-}
-
-impl LimitedVec {
-    fn new(limit: usize) -> Self {
-        Self {
-            bytes: Vec::with_capacity(limit.min(1024 * 1024)),
-            limit,
-        }
-    }
-
-    fn into_inner(self) -> Vec<u8> {
-        self.bytes
-    }
-}
-
-impl Write for LimitedVec {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        let new_len =
-            self.bytes.len().checked_add(bytes.len()).ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidData, "archive is too large")
-            })?;
-        if new_len > self.limit {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "archive is too large",
-            ));
-        }
-        self.bytes.extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-#[derive(Debug)]
-enum PackageFile {
-    Executable,
-    Runtime(PathBuf),
-}
-
-fn extract_tar_xz(archive: &[u8], target: Target, staging_dir: &Path) -> Result<(), String> {
-    let mut compressed = Cursor::new(archive);
-    let mut decompressed = LimitedVec::new(MAX_ARCHIVE_BYTES);
-    lzma_rs::xz_decompress(&mut compressed, &mut decompressed)
-        .map_err(|error| format!("decompressing the tar.xz archive: {error}"))?;
-    let decompressed = decompressed.into_inner();
-
-    let mut found_executable = false;
-    let mut total_runtime_bytes = 0_u64;
-    let mut archive = tar::Archive::new(Cursor::new(decompressed));
-    let entries = archive
-        .entries()
-        .map_err(|error| format!("reading the tar archive: {error}"))?;
-    for entry in entries {
-        let mut entry = entry.map_err(|error| format!("reading a tar entry: {error}"))?;
-        let path = entry
-            .path()
-            .map_err(|error| format!("reading a tar entry path: {error}"))?
-            .into_owned();
-        let entry_type = entry.header().entry_type();
-        if entry_type.is_symlink() || entry_type.is_hard_link() {
-            return Err("archive contains an unsafe link entry".to_owned());
-        }
-        let is_file = entry_type.is_file();
-        let Some(file) = package_file(&path, target.executable_name(), is_file)? else {
-            continue;
-        };
-        let size = entry.size();
-        match file {
-            PackageFile::Executable => {
-                if !is_file {
-                    return Err(format!(
-                        "archive entry `{}` is not a regular file",
-                        target.executable_name()
-                    ));
-                }
-                if found_executable {
-                    return Err(format!(
-                        "archive contains multiple `{}` executables",
-                        target.executable_name()
-                    ));
-                }
-                write_entry(
-                    &mut entry,
-                    size,
-                    &staging_dir.join(target.executable_name()),
-                    MAX_EXECUTABLE_BYTES,
-                    "executable",
-                )?;
-                found_executable = true;
-            }
-            PackageFile::Runtime(relative) => {
-                if is_file {
-                    total_runtime_bytes = write_runtime_entry(
-                        &mut entry,
-                        size,
-                        &staging_dir.join(relative),
-                        total_runtime_bytes,
-                    )?;
-                } else if !entry_type.is_dir() {
-                    return Err("archive contains a non-regular ONNX Runtime entry".to_owned());
-                }
-            }
-        }
-    }
-    require_executable(found_executable, target)
-}
-
-fn extract_zip(archive: &[u8], target: Target, staging_dir: &Path) -> Result<(), String> {
-    let mut archive = zip::ZipArchive::new(Cursor::new(archive))
-        .map_err(|error| format!("reading the zip archive: {error}"))?;
-    let mut found_executable = false;
-    let mut total_runtime_bytes = 0_u64;
-    for index in 0..archive.len() {
-        let mut entry = archive
-            .by_index(index)
-            .map_err(|error| format!("reading a zip entry: {error}"))?;
-        let raw_name = entry.name().to_owned();
-        validate_archive_path(Path::new(&raw_name))?;
-        let path = entry
-            .enclosed_name()
-            .ok_or_else(|| "archive contains an unsafe path".to_owned())?
-            .to_path_buf();
-        validate_archive_path(&path)?;
-        if entry.is_symlink() {
-            return Err("archive contains an unsafe link entry".to_owned());
-        }
-        let is_file = entry.is_file();
-        let Some(file) = package_file(&path, target.executable_name(), is_file)? else {
-            continue;
-        };
-        let size = entry.size();
-        match file {
-            PackageFile::Executable => {
-                if !is_file {
-                    return Err(format!(
-                        "archive entry `{}` is not a regular file",
-                        target.executable_name()
-                    ));
-                }
-                if found_executable {
-                    return Err(format!(
-                        "archive contains multiple `{}` executables",
-                        target.executable_name()
-                    ));
-                }
-                write_entry(
-                    &mut entry,
-                    size,
-                    &staging_dir.join(target.executable_name()),
-                    MAX_EXECUTABLE_BYTES,
-                    "executable",
-                )?;
-                found_executable = true;
-            }
-            PackageFile::Runtime(relative) => {
-                if is_file {
-                    total_runtime_bytes = write_runtime_entry(
-                        &mut entry,
-                        size,
-                        &staging_dir.join(relative),
-                        total_runtime_bytes,
-                    )?;
-                } else if !entry.is_dir() {
-                    return Err("archive contains a non-regular ONNX Runtime entry".to_owned());
-                }
-            }
-        }
-    }
-    require_executable(found_executable, target)
-}
-
-fn package_file(
-    path: &Path,
-    executable: &str,
-    is_file: bool,
-) -> Result<Option<PackageFile>, String> {
-    validate_archive_path(path)?;
-    let components = path.components().collect::<Vec<_>>();
-    let runtime_positions = components
-        .iter()
-        .enumerate()
-        .filter(|(_, component)| component.as_os_str() == OsStr::new("runtime"))
-        .map(|(index, _)| index)
-        .collect::<Vec<_>>();
-    if !runtime_positions.is_empty() {
-        if runtime_positions.len() != 1 || runtime_positions[0] > 1 {
-            return Err("archive contains an invalid ONNX Runtime path".to_owned());
-        }
-        let suffix = &components[runtime_positions[0]..];
-        if (is_file && suffix.len() != 3) || (!is_file && suffix.len() > 2) {
-            return Err("archive contains an invalid ONNX Runtime package layout".to_owned());
-        }
-        let mut relative = PathBuf::from("runtime");
-        for component in suffix.iter().skip(1) {
-            relative.push(component.as_os_str());
-        }
-        return Ok(Some(PackageFile::Runtime(relative)));
-    }
-
-    if path.file_name() == Some(OsStr::new(executable)) {
-        if components.len() > 2 {
-            return Err("archive contains an invalid executable path".to_owned());
-        }
-        return Ok(Some(PackageFile::Executable));
-    }
-    Ok(None)
-}
-
-fn require_executable(found: bool, target: Target) -> Result<(), String> {
-    if found {
-        Ok(())
-    } else {
-        Err(format!(
-            "archive does not contain the `{}` executable",
-            target.executable_name()
-        ))
-    }
-}
-
-fn write_runtime_entry<R: Read>(
-    entry: &mut R,
-    size: u64,
-    destination: &Path,
-    total_runtime_bytes: u64,
-) -> Result<u64, String> {
-    let new_total = total_runtime_bytes
-        .checked_add(size)
-        .ok_or_else(|| "ONNX Runtime payload is too large".to_owned())?;
-    if new_total > MAX_ARCHIVE_BYTES as u64 {
-        return Err("ONNX Runtime payload exceeds the extraction limit".to_owned());
-    }
-    if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("creating ONNX Runtime staging directory: {error}"))?;
-    }
-    write_entry(
-        entry,
-        size,
-        destination,
-        MAX_ARCHIVE_BYTES as u64,
-        "runtime file",
-    )?;
-    Ok(new_total)
-}
-fn validate_archive_path(path: &Path) -> Result<(), String> {
-    if path.as_os_str().is_empty() || path.to_string_lossy().contains('\\') {
-        return Err("archive contains an unsafe path".to_owned());
-    }
-    if path.components().any(|component| {
-        matches!(
-            component,
-            Component::CurDir | Component::ParentDir | Component::RootDir | Component::Prefix(_)
-        )
-    }) {
-        return Err(format!(
-            "archive contains an unsafe path `{}`",
-            path.display()
-        ));
-    }
-    Ok(())
-}
-
-fn write_entry<R: Read>(
-    entry: &mut R,
-    size: u64,
-    staged: &Path,
-    max_bytes: u64,
-    description: &str,
-) -> Result<(), String> {
-    if size > max_bytes {
-        return Err(format!(
-            "{description} in archive exceeds the {max_bytes}-byte extraction limit"
-        ));
-    }
-    let mut output = OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(staged)
-        .map_err(|error| format!("creating the staged {description}: {error}"))?;
-    let copied = io::copy(&mut entry.take(max_bytes + 1), &mut output)
-        .map_err(|error| format!("extracting the {description}: {error}"))?;
-    if copied > max_bytes {
-        return Err(format!(
-            "{description} in archive exceeds the {max_bytes}-byte extraction limit"
-        ));
-    }
-    if copied != size {
-        return Err(format!(
-            "extracted {description} size {copied} does not match archive size {size}"
-        ));
-    }
-    output
-        .sync_all()
-        .map_err(|error| format!("flushing the staged {description}: {error}"))?;
-    Ok(())
 }
 
 fn copy_executable_permissions(source: &Path, staged: &Path) -> Result<(), String> {
@@ -897,6 +592,7 @@ mod tests {
     use std::{
         collections::{BTreeMap, HashMap},
         fs,
+        io::{Cursor, Write},
     };
     use tempfile::TempDir;
 
