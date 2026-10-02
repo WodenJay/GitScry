@@ -58,6 +58,8 @@ pub(crate) struct Entry {
     pub(crate) elapsed_seconds: i64,
     pub(crate) paths: Vec<Vec<u8>>,
     pub(crate) change_types: Vec<String>,
+    pub(crate) revert_reference: Option<String>,
+    pub(crate) same_file_association: bool,
     pub(crate) parent_count: usize,
     pub(crate) patch: Option<crate::analysis::PatchExcerpt>,
 }
@@ -151,7 +153,7 @@ pub(super) fn run(
         traversal_truncated: false, display_truncated: false, matched_in_inspected_scope: 0,
         entries: Vec::new(), warnings: vec![
             "Coverage is limited to endpoint-reachable published cache history, not all refs; no fetch or index was performed.".into(),
-            "Same-file associations only: subsequent rename continuity, changed-region overlap and explicit-revert analysis are not supported. No causality or stability judgment is made.".into(),
+            "Explicit revert references record commit-message declarations only; they do not verify patch inversion or selected-path reversal. Same-file material does not establish causality or stability. Subsequent rename continuity and changed-region overlap are not supported.".into(),
             "Cached merge diffs are relative to the first parent; branch correspondence is conservative, not proof of fresh corrections.".into(),
         ],
     };
@@ -160,6 +162,8 @@ pub(super) fn run(
         .iter()
         .filter(|node| descendants.contains(&node.oid))
         .collect();
+    let mut explicit_reference_entries = Vec::new();
+    let mut same_file_entries = Vec::new();
     for (index, node) in candidates.iter().enumerate() {
         let eligible = node.commit_time <= time_ceiling;
         if (eligible && report.inspected_count == max_commits)
@@ -187,6 +191,13 @@ pub(super) fn run(
         } else {
             report.lineage_inspected_count += 1;
         }
+        let has_revert_reference = if eligible {
+            session
+                .commit_message(&node.oid)?
+                .is_some_and(|message| explicitly_references_seed(&message, &seed))
+        } else {
+            false
+        };
         let mut state = node
             .parents
             .first()
@@ -254,47 +265,74 @@ pub(super) fn run(
             }
         }
         states.insert(node.oid.clone(), state);
-        if !associated.is_empty() {
+        let has_same_file_association = !associated.is_empty();
+        if has_revert_reference || has_same_file_association {
             let mut combined: Vec<_> = associated.into_iter().zip(change_types).collect();
             combined.sort();
             combined.dedup();
             let (paths, change_types): (Vec<Vec<u8>>, Vec<String>) = combined.into_iter().unzip();
-            report.matched_in_inspected_scope += 1;
-            if report.entries.len() < options.limit {
-                let patch = if options.patch {
-                    Some(crate::analysis::patch::selected_patch_excerpt(
-                        &session,
-                        &node.oid,
-                        |hunk| {
-                            [&hunk.old_path, &hunk.new_path]
-                                .into_iter()
-                                .flatten()
-                                .any(|path| paths.contains(path))
-                                .then_some(0)
-                        },
-                    )?)
-                } else {
-                    None
-                };
-                report.entries.push(Entry {
-                    commit_id: node.oid.clone(),
-                    subject: session.forward_subject(&node.oid)?,
-                    commit_time: node.commit_time,
-                    elapsed_seconds: node.commit_time - seed_time,
-                    paths,
-                    change_types,
-                    parent_count: node.parents.len(),
-                    patch,
-                });
+            let entry = Entry {
+                commit_id: node.oid.clone(),
+                subject: session.forward_subject(&node.oid)?,
+                commit_time: node.commit_time,
+                elapsed_seconds: node.commit_time - seed_time,
+                paths,
+                change_types,
+                revert_reference: has_revert_reference.then(|| seed.clone()),
+                same_file_association: has_same_file_association,
+                parent_count: node.parents.len(),
+                patch: None,
+            };
+            if has_revert_reference {
+                explicit_reference_entries.push(entry);
             } else {
-                report.display_truncated = true;
+                same_file_entries.push(entry);
             }
         }
+    }
+    report.matched_in_inspected_scope = explicit_reference_entries.len() + same_file_entries.len();
+    report.display_truncated = report.matched_in_inspected_scope > options.limit;
+    for mut entry in explicit_reference_entries
+        .into_iter()
+        .chain(same_file_entries)
+        .take(options.limit)
+    {
+        if options.patch {
+            let include_commit_patch = entry.revert_reference.is_some();
+            let paths = entry.paths.clone();
+            entry.patch = Some(crate::analysis::patch::selected_patch_excerpt(
+                &session,
+                &entry.commit_id,
+                |hunk| {
+                    if include_commit_patch {
+                        return Some(0);
+                    }
+                    [&hunk.old_path, &hunk.new_path]
+                        .into_iter()
+                        .flatten()
+                        .any(|path| paths.contains(path))
+                        .then_some(0)
+                },
+            )?);
+        }
+        report.entries.push(entry);
     }
     Ok(Outcome {
         progress: session.progress().to_vec(),
         warnings: session.warnings().to_vec(),
         report: QueryReport::Followups(report),
+    })
+}
+
+fn explicitly_references_seed(message: &[u8], seed: &str) -> bool {
+    String::from_utf8_lossy(message).lines().any(|line| {
+        let Some(reference) = line.trim().strip_prefix("This reverts commit ") else {
+            return false;
+        };
+        let reference = reference.strip_suffix('.').unwrap_or(reference);
+        reference.len() == seed.len()
+            && reference.bytes().all(|byte| byte.is_ascii_hexdigit())
+            && reference.eq_ignore_ascii_case(seed)
     })
 }
 
