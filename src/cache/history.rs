@@ -4,7 +4,7 @@ use rusqlite::{Connection, params};
 
 use crate::app::AppError;
 
-use super::query::{SEARCH_SCOPE_CTE, SearchFilter};
+use super::scope::{SEARCH_SCOPE_CTE, SearchFilter};
 use super::{HunkReader, QuerySession, cache_error, message_parts, read_hunks};
 
 pub(crate) struct HistoryCommit {

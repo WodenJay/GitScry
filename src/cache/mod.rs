@@ -6,6 +6,8 @@ mod history;
 mod payload;
 mod query;
 mod schema;
+mod scope;
+pub(crate) use scope::SearchFilter;
 mod semantic;
 mod write;
 use crate::app::AppError;
@@ -13,9 +15,7 @@ pub(crate) use generation::prepare;
 pub(crate) use history::HunkId;
 pub(crate) use history::{CodeHunk, HistoryCommit, HistoryHunk, PatchHistory, PatchHistoryHunk};
 use payload::HunkReader;
-pub(crate) use query::{
-    RelationHistory, SearchCandidate, SearchFilter, SearchMaterial, SemanticCandidate,
-};
+pub(crate) use query::{RelationHistory, SearchCandidate, SearchMaterial, SemanticCandidate};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 pub(crate) use semantic::{SemanticPreference, maintain as maintain_semantic};
 use std::{
