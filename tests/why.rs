@@ -1712,6 +1712,89 @@ fn why_separates_attribution_target_modifications_and_other_history() {
 }
 
 #[test]
+fn why_symbol_rewritten_renamed_move_is_unknown() {
+    let repo = TestRepo::new();
+    repo.commit(
+        "src/old.rs",
+        b"fn original() { let result = 1; }\n",
+        "Create source",
+        None,
+    );
+    repo.commit(
+        "src/new.rs",
+        b"fn helper() {}\n",
+        "Create destination",
+        None,
+    );
+    fs::write(repo.dir.path().join("src/old.rs"), b"fn remaining() {}\n").unwrap();
+    repo.commit(
+        "src/new.rs",
+        b"fn helper() {}\nfn calculate() { let result = 999; }\n",
+        "Rename rewrite and move",
+        None,
+    );
+    git(repo.dir.path(), ["add", "-A"]);
+    git(repo.dir.path(), ["commit", "--amend", "--no-edit"]);
+    repo.index();
+    let report = json(
+        &repo,
+        &["why", "src/new.rs", "--symbol", "calculate", "--json"],
+    );
+    assert_eq!(
+        report["symbol_summary"]["introduction"]["status"],
+        "unknown"
+    );
+    assert!(
+        report["symbol_summary"]["introduction"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("rewritten relocation")
+    );
+    assert_eq!(report["matched_count"], 0);
+}
+
+#[test]
+fn why_symbol_same_name_does_not_override_competing_move() {
+    let repo = TestRepo::new();
+    repo.commit(
+        "src/lib.rs",
+        b"fn calculate() { let result = 1; }\n",
+        "Create old incarnation",
+        None,
+    );
+    let old = repo.head();
+    repo.commit(
+        "src/source.rs",
+        b"fn original() { let result = 999; }\n",
+        "Create different source",
+        None,
+    );
+    fs::write(
+        repo.dir.path().join("src/source.rs"),
+        b"fn remaining() {}\n",
+    )
+    .unwrap();
+    repo.commit(
+        "src/lib.rs",
+        b"fn calculate() { let result = 999; }\n",
+        "Replace with relocated source",
+        None,
+    );
+    git(repo.dir.path(), ["add", "-A"]);
+    git(repo.dir.path(), ["commit", "--amend", "--no-edit"]);
+    repo.index();
+    let report = json(
+        &repo,
+        &["why", "src/lib.rs", "--symbol", "calculate", "--json"],
+    );
+    assert_eq!(
+        report["symbol_summary"]["introduction"]["status"],
+        "unknown"
+    );
+    assert!(!report.to_string().contains(&old));
+}
+
+#[test]
 fn why_does_not_reuse_target_line_across_merge_branches() {
     let repo = TestRepo::new();
     let initial = concat!(

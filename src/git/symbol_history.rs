@@ -85,6 +85,36 @@ fn walk(git: &Git, target: &WhyTarget, trace: &mut SymbolTrace) -> Result<String
                     && symbol::identity(&current, &name, &current_span)
                         != symbol::identity(source, &name, &previous_span)
                 {
+                    let changes = changes.as_ref().ok_or_else(|| {
+                        unknown("source changes unavailable for symbol continuity")
+                    })?;
+                    for change in changes {
+                        let Some(old_path) = change.old_path.as_deref() else {
+                            continue;
+                        };
+                        let Ok(old_path) = std::str::from_utf8(old_path) else {
+                            continue;
+                        };
+                        let Some(source) = target::read_blob_at(git, parent, old_path)? else {
+                            continue;
+                        };
+                        let after = target::read_blob_at(git, oid, old_path)?;
+                        for (old_name, old_span) in symbol::declarations(&source, old_path) {
+                            if old_path == path && old_name == name {
+                                continue;
+                            }
+                            if symbol::identity(&source, &old_name, &old_span)
+                                == symbol::identity(&current, &name, &current_span)
+                                && after.as_ref().is_none_or(|after| {
+                                    symbol::declaration_lines(after, &old_name).is_empty()
+                                })
+                            {
+                                return Err(unknown(
+                                    "ambiguous symbol continuity/origin: same-name replacement has a competing move source",
+                                ));
+                            }
+                        }
+                    }
                     trace.modifications.push(SymbolChange {
                         oid: oid.to_owned(),
                         path: path.as_bytes().to_vec(),
@@ -112,15 +142,30 @@ fn walk(git: &Git, target: &WhyTarget, trace: &mut SymbolTrace) -> Result<String
                 let Some(source) = target::read_blob_at(git, parent, source_path)? else {
                     continue;
                 };
-                let after = target::read_blob_at(git, oid, source_path)?;
                 let changed = changes
                     .iter()
                     .any(|change| change.old_path.as_deref() == Some(source_path.as_bytes()));
+                let after = if changed {
+                    target::read_blob_at(git, oid, source_path)?
+                } else {
+                    None
+                };
                 for (old_name, old_span) in symbol::declarations(&source, source_path) {
-                    let survives = after.as_ref().is_some_and(|after| {
-                        !symbol::declaration_lines(after, &old_name).is_empty()
-                    });
-                    if changed && !survives && (old_name == name || source_path == path) {
+                    let survives = !changed
+                        || after.as_ref().is_some_and(|after| {
+                            !symbol::declaration_lines(after, &old_name).is_empty()
+                        });
+                    if changed
+                        && !survives
+                        && (old_name == name
+                            || source_path == path
+                            || previous.is_some()
+                            || changes.iter().any(|change| {
+                                change.status.starts_with('R')
+                                    && change.old_path.as_deref() == Some(source_path.as_bytes())
+                                    && change.new_path.as_deref() == Some(path.as_bytes())
+                            }))
+                    {
                         removed_declaration = true;
                     }
                     if symbol::identity(&source, &old_name, &old_span) == identity {
