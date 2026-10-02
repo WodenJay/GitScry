@@ -40,6 +40,8 @@ pub(crate) fn run(
     let anchor_info = AnchorInfo::from_target(target);
     let unavailable_trace = SymbolTrace {
         revisions: Vec::new(),
+        modifications: Vec::new(),
+        paths: Vec::new(),
         introduction: Err("Git symbol-range history is unavailable".to_owned()),
     };
     let symbol_trace = anchor_info
@@ -69,13 +71,31 @@ pub(crate) fn run(
         return Ok(report);
     }
 
-    let commits = session.path_history(&target.path, reachable)?;
+    let mut commits = session.path_history(&target.path, reachable)?;
+    if let Some(trace) = symbol_trace {
+        let mut seen = commits
+            .iter()
+            .map(|commit| commit.oid.clone())
+            .collect::<HashSet<_>>();
+        let paths = trace.paths.iter().collect::<HashSet<_>>();
+        for path in paths {
+            for commit in session.path_history(path, reachable)? {
+                if seen.insert(commit.oid.clone()) {
+                    commits.push(commit);
+                }
+            }
+        }
+    }
 
     let first_parent_history = session.first_parent_ancestors(&target.revision)?;
     let missing_objects = session.has_missing_objects(&commits)?;
-    let trace_revisions = symbol_trace
-        .as_ref()
-        .map(|trace| trace.revisions.iter().cloned().collect::<HashSet<_>>());
+    let trace_revisions = symbol_trace.as_ref().map(|trace| {
+        trace
+            .modifications
+            .iter()
+            .map(|change| change.oid.clone())
+            .collect::<HashSet<_>>()
+    });
     let symbol_summary = symbol_trace.map(|trace| {
         summarize_symbol(
             target,
@@ -95,7 +115,6 @@ pub(crate) fn run(
                 SymbolFact::Unknown { .. } => None,
             });
     let mut start_line = anchor_info.line as i64;
-    let mut end_line = anchor_info.symbol_end.unwrap_or(anchor_info.line) as i64;
     let mut target_modifications = HashMap::<String, (i64, WhyModification)>::new();
     let mut symbol_scores = HashMap::<String, usize>::new();
     let mut priorities = HunkPriorities::new();
@@ -105,20 +124,30 @@ pub(crate) fn run(
             continue;
         }
         let hunks = session.history_hunks(&commit.oid)?;
-        let range_start = start_line.min(end_line);
-        let range_end = start_line.max(end_line);
         let related_hunks = if anchor_info.is_symbol() {
-            let related = hunks
+            let change = symbol_trace.and_then(|trace| {
+                trace
+                    .modifications
+                    .iter()
+                    .find(|change| change.oid == commit.oid)
+            });
+            hunks
                 .iter()
                 .filter(|hunk| {
-                    commit.anchored_ordinals.contains(&hunk.change_ordinal)
-                        && retrieval::hunk_overlaps_symbol(hunk, range_start, range_end)
+                    change.is_some_and(|change| {
+                        commit.changes.iter().any(|path| {
+                            path.ordinal == hunk.change_ordinal
+                                && path.new_path.as_ref().or(path.old_path.as_ref())
+                                    == Some(&change.path)
+                        }) && retrieval::hunk_overlaps_symbol(
+                            hunk,
+                            change.start as i64,
+                            change.end as i64,
+                        )
+                    })
                 })
                 .map(|hunk| hunk.id())
-                .collect::<Vec<_>>();
-            retrieval::trace_line(commit, &hunks, &mut start_line);
-            retrieval::trace_line(commit, &hunks, &mut end_line);
-            related
+                .collect::<Vec<_>>()
         } else {
             retrieval::trace_line(commit, &hunks, &mut start_line)
                 .into_iter()
@@ -303,14 +332,7 @@ fn summarize_symbol(
         .revisions
         .iter()
         .filter_map(|oid| commits_by_oid.get(oid.as_str()))
-        .any(|commit| {
-            commit.parent_count > 1
-                || commit.shallow_boundary
-                || commit.changes.iter().any(|change| {
-                    commit.anchored_ordinals.contains(&change.ordinal)
-                        && (change.status.starts_with('R') || change.status.starts_with('C'))
-                })
-        });
+        .any(|commit| commit.parent_count > 1 || commit.shallow_boundary);
     let shallow_history = target
         .warnings
         .iter()

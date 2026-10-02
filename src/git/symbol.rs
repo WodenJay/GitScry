@@ -74,6 +74,62 @@ pub(super) fn declaration_lines(content: &[u8], name: &str) -> Vec<usize> {
         .collect()
 }
 
+/// Enumerate supported declarations for conservative same-change correspondence.
+pub(super) fn declarations(content: &[u8], path: &str) -> Vec<(String, Span)> {
+    let mut declarations = Vec::new();
+    for (index, line) in content.split(|byte| *byte == b'\n').enumerate() {
+        for token in line
+            .split(|byte| !is_symbol_byte(*byte))
+            .filter(|token| !token.is_empty())
+        {
+            if is_declaration(line, token)
+                && let Ok(name) = std::str::from_utf8(token)
+            {
+                declarations.push((
+                    name.to_owned(),
+                    Span {
+                        start: index + 1,
+                        end: symbol_span_end(content, index + 1, path.ends_with(".rs")),
+                    },
+                ));
+            }
+        }
+    }
+    declarations
+}
+
+/// Ignore only the declaration's identifier and outer indentation, not body tokens.
+pub(super) fn identity(content: &[u8], name: &str, span: &Span) -> Vec<u8> {
+    let mut result = Vec::new();
+    for (offset, line) in content
+        .split(|byte| *byte == b'\n')
+        .skip(span.start - 1)
+        .take(span.end - span.start + 1)
+        .enumerate()
+    {
+        let line = line.trim_ascii();
+        if offset == 0 {
+            let index = line
+                .windows(name.len())
+                .enumerate()
+                .find(|(index, token)| {
+                    *token == name.as_bytes()
+                        && (*index == 0 || !is_symbol_byte(line[*index - 1]))
+                        && (index + name.len() == line.len()
+                            || !is_symbol_byte(line[index + name.len()]))
+                })
+                .unwrap()
+                .0;
+            result.extend_from_slice(&line[..index]);
+            result.extend_from_slice(b"<symbol>");
+            result.extend_from_slice(&line[index + name.len()..]);
+        } else {
+            result.extend_from_slice(line);
+        }
+        result.push(b'\n');
+    }
+    result
+}
 fn contains_symbol(line: &[u8], symbol: &[u8]) -> bool {
     if symbol.is_empty() {
         return false;

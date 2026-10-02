@@ -30,6 +30,198 @@ impl TestRepo {
 }
 
 #[test]
+fn why_symbol_relocations_preserve_historical_material() {
+    for whole_file in [true, false] {
+        let repo = TestRepo::new();
+        repo.commit(
+            "src/old.rs",
+            b"fn calculate() {\n    let result = 1;\n}\n",
+            "Create calculation",
+            None,
+        );
+        let introduction = repo.head();
+        repo.commit(
+            "src/old.rs",
+            b"fn calculate() {\n    let result = 2;\n}\n",
+            "Correct calculation",
+            Some("Because callers need the corrected result."),
+        );
+        let modification = repo.head();
+        if whole_file {
+            repo.rename("src/old.rs", "src/new.rs", "Rename file");
+        } else {
+            repo.commit(
+                "src/new.rs",
+                b"fn helper() {}\n",
+                "Create destination",
+                None,
+            );
+            fs::write(repo.dir.path().join("src/old.rs"), b"fn remaining() {}\n").unwrap();
+            repo.commit(
+                "src/new.rs",
+                b"fn helper() {}\nfn calculate() {\n    let result = 2;\n}\n",
+                "Move calculation",
+                None,
+            );
+            git(repo.dir.path(), ["add", "src/old.rs"]);
+            git(repo.dir.path(), ["commit", "--amend", "--no-edit"]);
+        }
+        let relocation = repo.head();
+        repo.index();
+        let report = json(
+            &repo,
+            &[
+                "why",
+                "src/new.rs",
+                "--symbol",
+                "calculate",
+                "--patch",
+                "--json",
+            ],
+        );
+        assert_eq!(
+            report["symbol_summary"]["introduction"]["commit_oid"], introduction,
+            "{report}"
+        );
+        assert_eq!(report["matched_count"], 1);
+        assert_eq!(
+            report["target_related_modifications"][0]["oid"],
+            modification
+        );
+        assert!(
+            report["target_related_modifications"][0]
+                .to_string()
+                .contains("src/old.rs")
+        );
+        assert!(
+            !report["target_related_modifications"]
+                .to_string()
+                .contains(&relocation)
+        );
+        assert!(
+            report["target_related_modifications"][0]["patch"]
+                .to_string()
+                .contains("result = 2")
+        );
+        let scoped = json(
+            &repo,
+            &[
+                "why",
+                "src/new.rs",
+                "--symbol",
+                "calculate",
+                "--from-rev",
+                modification.as_str(),
+                "--patch",
+                "--json",
+            ],
+        );
+        assert_eq!(
+            scoped["symbol_summary"]["introduction"]["status"],
+            "unknown"
+        );
+        assert!(!scoped.to_string().contains(&introduction));
+        assert_eq!(scoped["matched_count"], 0);
+        assert!(
+            !scoped["target_related_modifications"]
+                .to_string()
+                .contains(&modification)
+        );
+        let time_scoped = json(
+            &repo,
+            &[
+                "why",
+                "src/new.rs",
+                "--symbol",
+                "calculate",
+                "--since",
+                "9999-01-01",
+                "--json",
+            ],
+        );
+        assert_eq!(time_scoped["matched_count"], 0);
+        assert!(!time_scoped.to_string().contains(&introduction));
+        assert!(!time_scoped.to_string().contains(&modification));
+        repo.commit(
+            "src/new.rs",
+            b"fn calculate() { let result = 999; }\n",
+            "Later replacement",
+            None,
+        );
+        repo.index();
+        let pinned = json(
+            &repo,
+            &[
+                "why",
+                "src/new.rs",
+                "--symbol",
+                "calculate",
+                "--at",
+                relocation.as_str(),
+                "--json",
+            ],
+        );
+        assert_eq!(
+            pinned["symbol_summary"]["introduction"]["commit_oid"],
+            introduction
+        );
+        assert_eq!(
+            pinned["target_related_modifications"][0]["oid"],
+            modification
+        );
+    }
+}
+
+#[test]
+fn why_symbol_uncertain_moves_do_not_claim_creation() {
+    for ambiguous in [true, false] {
+        let repo = TestRepo::new();
+        repo.commit(
+            "src/old.rs",
+            b"fn calculate() { let result = 1; }\n",
+            "Create source",
+            None,
+        );
+        if ambiguous {
+            repo.commit(
+                "src/other.rs",
+                b"fn calculate() { let result = 1; }\n",
+                "Create second source",
+                None,
+            );
+        }
+        repo.commit(
+            "src/new.rs",
+            b"fn helper() {}\n",
+            "Create destination",
+            None,
+        );
+        fs::write(repo.dir.path().join("src/old.rs"), b"fn remaining() {}\n").unwrap();
+        if ambiguous {
+            fs::write(repo.dir.path().join("src/other.rs"), b"fn another() {}\n").unwrap();
+        }
+        let contents: &[u8] = if ambiguous {
+            b"fn helper() {}\nfn calculate() { let result = 1; }\n"
+        } else {
+            b"fn helper() {}\nfn calculate() { let result = 999; }\n"
+        };
+        repo.commit("src/new.rs", contents, "Uncertain move", None);
+        git(repo.dir.path(), ["add", "-A"]);
+        git(repo.dir.path(), ["commit", "--amend", "--no-edit"]);
+        repo.index();
+        let report = json(
+            &repo,
+            &["why", "src/new.rs", "--symbol", "calculate", "--json"],
+        );
+        assert_eq!(
+            report["symbol_summary"]["introduction"]["status"], "unknown",
+            "{report}"
+        );
+        assert_eq!(report["matched_count"], 0);
+    }
+}
+
+#[test]
 fn why_reports_blame_without_inventing_a_line_explanation() {
     let repo = TestRepo::new();
     repo.commit(
@@ -285,6 +477,103 @@ fn why_symbol_separates_introduction_anchor_and_modifications() {
         time_scoped["symbol_summary"]["anchor_line_attribution"]
             .get("commit_oid")
             .is_none()
+    );
+}
+#[test]
+fn why_symbol_recreation_starts_a_new_incarnation() {
+    let repo = TestRepo::new();
+    repo.commit(
+        "src/lib.rs",
+        b"fn calculate() { let result = 1; }\n",
+        "Old creation",
+        None,
+    );
+    let old = repo.head();
+    repo.commit(
+        "src/lib.rs",
+        b"fn calculate() { let result = 2; }\n",
+        "Old modification",
+        None,
+    );
+    repo.commit(
+        "src/lib.rs",
+        b"fn helper() {}\n",
+        "Delete calculation",
+        None,
+    );
+    repo.commit(
+        "src/lib.rs",
+        b"fn helper() {}\nfn calculate() { let result = 3; }\n",
+        "Recreate calculation",
+        None,
+    );
+    let recreation = repo.head();
+    repo.index();
+    let report = json(
+        &repo,
+        &["why", "src/lib.rs", "--symbol", "calculate", "--json"],
+    );
+    assert_eq!(
+        report["symbol_summary"]["introduction"]["commit_oid"],
+        recreation
+    );
+    assert_eq!(report["matched_count"], 0);
+    assert!(!report.to_string().contains(&old));
+}
+
+#[test]
+fn why_symbol_name_change_preserves_earlier_material() {
+    let repo = TestRepo::new();
+    repo.commit(
+        "src/lib.rs",
+        b"fn original() {\n    let result = 1;\n}\n",
+        "Create original",
+        None,
+    );
+    let introduction = repo.head();
+    repo.commit(
+        "src/lib.rs",
+        b"fn original() {\n    let result = 2;\n}\n",
+        "Change original body",
+        Some("Because callers need the corrected result."),
+    );
+    let modification = repo.head();
+    repo.commit(
+        "src/lib.rs",
+        b"fn calculate() {\n    let result = 2;\n}\n",
+        "Rename calculation",
+        None,
+    );
+    let rename = repo.head();
+    repo.index();
+    let report = json(
+        &repo,
+        &[
+            "why",
+            "src/lib.rs",
+            "--symbol",
+            "calculate",
+            "--patch",
+            "--json",
+        ],
+    );
+    assert_eq!(
+        report["symbol_summary"]["introduction"]["commit_oid"],
+        introduction
+    );
+    assert_eq!(
+        report["symbol_summary"]["anchor_line_attribution"]["commit_oid"],
+        rename
+    );
+    assert_eq!(report["matched_count"], 1);
+    assert_eq!(
+        report["target_related_modifications"][0]["oid"],
+        modification
+    );
+    assert!(
+        report["target_related_modifications"][0]["patch"]
+            .to_string()
+            .contains("result = 2")
     );
 }
 
@@ -1420,6 +1709,89 @@ fn why_separates_attribution_target_modifications_and_other_history() {
     assert!(stdout.contains("Attribution"));
     assert!(stdout.contains("Other file history: 1"));
     assert!(!stdout.contains("confidence:"));
+}
+
+#[test]
+fn why_symbol_rewritten_renamed_move_is_unknown() {
+    let repo = TestRepo::new();
+    repo.commit(
+        "src/old.rs",
+        b"fn original() { let result = 1; }\n",
+        "Create source",
+        None,
+    );
+    repo.commit(
+        "src/new.rs",
+        b"fn helper() {}\n",
+        "Create destination",
+        None,
+    );
+    fs::write(repo.dir.path().join("src/old.rs"), b"fn remaining() {}\n").unwrap();
+    repo.commit(
+        "src/new.rs",
+        b"fn helper() {}\nfn calculate() { let result = 999; }\n",
+        "Rename rewrite and move",
+        None,
+    );
+    git(repo.dir.path(), ["add", "-A"]);
+    git(repo.dir.path(), ["commit", "--amend", "--no-edit"]);
+    repo.index();
+    let report = json(
+        &repo,
+        &["why", "src/new.rs", "--symbol", "calculate", "--json"],
+    );
+    assert_eq!(
+        report["symbol_summary"]["introduction"]["status"],
+        "unknown"
+    );
+    assert!(
+        report["symbol_summary"]["introduction"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("rewritten relocation")
+    );
+    assert_eq!(report["matched_count"], 0);
+}
+
+#[test]
+fn why_symbol_same_name_does_not_override_competing_move() {
+    let repo = TestRepo::new();
+    repo.commit(
+        "src/lib.rs",
+        b"fn calculate() { let result = 1; }\n",
+        "Create old incarnation",
+        None,
+    );
+    let old = repo.head();
+    repo.commit(
+        "src/source.rs",
+        b"fn original() { let result = 999; }\n",
+        "Create different source",
+        None,
+    );
+    fs::write(
+        repo.dir.path().join("src/source.rs"),
+        b"fn remaining() {}\n",
+    )
+    .unwrap();
+    repo.commit(
+        "src/lib.rs",
+        b"fn calculate() { let result = 999; }\n",
+        "Replace with relocated source",
+        None,
+    );
+    git(repo.dir.path(), ["add", "-A"]);
+    git(repo.dir.path(), ["commit", "--amend", "--no-edit"]);
+    repo.index();
+    let report = json(
+        &repo,
+        &["why", "src/lib.rs", "--symbol", "calculate", "--json"],
+    );
+    assert_eq!(
+        report["symbol_summary"]["introduction"]["status"],
+        "unknown"
+    );
+    assert!(!report.to_string().contains(&old));
 }
 
 #[test]
