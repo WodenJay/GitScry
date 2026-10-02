@@ -319,6 +319,7 @@ fn json_flag_is_available_only_for_query_commands() {
         "regression",
         "trace-fix",
         "timeline",
+        "trace-removal",
     ] {
         let help = repo.run([name, "--help"]);
         assert_eq!(help.status.code(), Some(0), "{name}");
@@ -713,6 +714,10 @@ fn update_help_is_canonical_and_upgrade_is_an_exact_alias() {
 
     let root = repo.run(["--help"]);
     let root_help = String::from_utf8_lossy(&root.stdout);
-    assert!(root_help.contains("update      Update GitScry"));
-    assert!(!root_help.contains("upgrade     "));
+    assert!(root_help.lines().any(|line| line.trim_start().starts_with("update ") && line.contains("Update GitScry")));
+    assert!(
+        !root_help
+            .lines()
+            .any(|line| line.trim_start().starts_with("upgrade "))
+    );
 }

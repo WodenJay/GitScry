@@ -170,3 +170,274 @@ fn rejects_invalid_queries_and_execution_errors_but_empty_results_succeed() {
         Some(1)
     );
 }
+
+#[test]
+fn literal_matching_excludes_context_additions_and_case_variants_across_hunks() {
+    let repo = TestRepo::new();
+    let mut old = vec!["padding"; 30];
+    old[0] = "old()";
+    old[15] = "old()";
+    old[29] = "old() old()";
+    commit(
+        &repo,
+        &[("a.rs", &old.join("\n"))],
+        "Root",
+        "2000-01-01T00:00:00Z",
+    );
+    let mut new = old.clone();
+    new[0] = "Old()";
+    new[29] = "new()";
+    commit(
+        &repo,
+        &[("a.rs", &new.join("\n")), ("b.rs", "old()\n")],
+        "Remove two hunks",
+        "2000-01-02T00:00:00Z",
+    );
+    repo.index();
+    let report = query(&repo, &[]);
+    assert_eq!(report["matched_count"], 1);
+    assert_eq!(
+        report["events"][0]["matches"],
+        serde_json::json!([
+            {"line_number": 1, "line": "old()"}, {"line_number": 30, "line": "old() old()"}
+        ])
+    );
+    let literal = repo.run(["trace-removal", "--code", "old() old()", "--json"]);
+    let literal: Value = serde_json::from_slice(&literal.stdout).unwrap();
+    assert_eq!(literal["events"][0]["matches"].as_array().unwrap().len(), 1);
+    let absent = repo.run(["trace-removal", "--code", "old.*", "--json"]);
+    assert!(absent.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&absent.stdout).unwrap()["matched_count"],
+        0
+    );
+}
+
+#[test]
+fn equal_timestamps_use_commit_then_path_ties_and_dates_filter_before_limit() {
+    let repo = TestRepo::new();
+    let root = commit(
+        &repo,
+        &[("a.rs", "old()\n"), ("b.rs", "old()\n")],
+        "Root",
+        "2000-01-01T00:00:00Z",
+    );
+    let first = commit(
+        &repo,
+        &[("a.rs", "new()\n"), ("b.rs", "new()\n")],
+        "First removal",
+        "2000-01-02T00:00:00Z",
+    );
+    commit(
+        &repo,
+        &[("a.rs", "old()\n")],
+        "Restore",
+        "2000-01-02T00:00:00Z",
+    );
+    let second = commit(
+        &repo,
+        &[("a.rs", "new()\n")],
+        "Second removal",
+        "2000-01-02T00:00:00Z",
+    );
+    repo.index();
+    let report = query(&repo, &[]);
+    let mut expected = vec![
+        (first.clone(), "a.rs"),
+        (first.clone(), "b.rs"),
+        (second, "a.rs"),
+    ];
+    expected.sort();
+    for (event, (id, path)) in report["events"].as_array().unwrap().iter().zip(expected) {
+        assert_eq!(event["commit_id"], id);
+        assert_eq!(event["old_path"], path);
+    }
+    assert_eq!(
+        query(&repo, &["--from-rev", &first, "--limit", "1"])["matched_count"],
+        1
+    );
+    assert_eq!(
+        query(&repo, &["--from-rev", &root, "--until", "2000-01-01"])["matched_count"],
+        0
+    );
+    assert_eq!(
+        query(
+            &repo,
+            &[
+                "--since",
+                "2000-01-02",
+                "--until",
+                "2000-01-02",
+                "--limit",
+                "1"
+            ]
+        )["matched_count"],
+        3
+    );
+}
+
+#[test]
+fn reports_detected_rename_old_paths_and_whole_file_deletions_not_pure_moves() {
+    let repo = TestRepo::new();
+    let original = "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nold()\n";
+    let parent = commit(
+        &repo,
+        &[("old.rs", original), ("deleted.rs", "old()\n")],
+        "Root",
+        "2000-01-01T00:00:00Z",
+    );
+    git(repo.dir.path(), ["mv", "old.rs", "new.rs"]);
+    fs::remove_file(repo.dir.path().join("deleted.rs")).unwrap();
+    commit(
+        &repo,
+        &[(
+            "new.rs",
+            "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnew()\n",
+        )],
+        "Rename with edit and delete",
+        "2000-01-02T00:00:00Z",
+    );
+    git(repo.dir.path(), ["mv", "new.rs", "moved.rs"]);
+    commit(&repo, &[], "Pure move", "2000-01-03T00:00:00Z");
+    repo.index();
+    let report = query(&repo, &["--path", "old.rs"]);
+    assert_eq!(report["matched_count"], 1);
+    assert_eq!(report["events"][0]["first_parent_id"], parent);
+    let change = &report["events"][0]["file_change"];
+    assert!(change["status"].as_str().unwrap().starts_with('R'));
+    assert_eq!(change["old_path"], "old.rs");
+    assert_eq!(change["new_path"], "new.rs");
+    assert_eq!(query(&repo, &["--path", "new.rs"])["matched_count"], 0);
+    assert_eq!(
+        query(&repo, &["--path", "deleted.rs"])["events"][0]["file_change"]["status"],
+        "D"
+    );
+    assert_eq!(query(&repo, &[])["matched_count"], 2);
+}
+
+#[test]
+fn merge_events_compare_with_the_first_parent_not_other_parents() {
+    let repo = TestRepo::new();
+    let root = commit(
+        &repo,
+        &[("a.rs", "old()\n")],
+        "Root",
+        "2000-01-01T00:00:00Z",
+    );
+    git(repo.dir.path(), ["checkout", "-b", "side"]);
+    let side = commit(
+        &repo,
+        &[("a.rs", "new()\n")],
+        "Side removal",
+        "2000-01-02T00:00:00Z",
+    );
+    git(repo.dir.path(), ["checkout", "main"]);
+    git(
+        repo.dir.path(),
+        ["merge", "--no-ff", "side", "-m", "Merge removal"],
+    );
+    let merge = repo.head();
+    repo.index();
+    let scoped = query(&repo, &["--from-rev", &side]);
+    assert_eq!(scoped["matched_count"], 1);
+    assert_eq!(scoped["events"][0]["commit_id"], merge);
+    assert_eq!(scoped["events"][0]["first_parent_id"], root);
+    // Merging a branch that retains old() must not invent another deletion.
+    git(repo.dir.path(), ["checkout", "-b", "retaining", &root]);
+    commit(
+        &repo,
+        &[("unrelated", "change")],
+        "Keep old text",
+        "2000-01-03T00:00:00Z",
+    );
+    git(repo.dir.path(), ["checkout", "main"]);
+    git(
+        repo.dir.path(),
+        ["merge", "--no-ff", "retaining", "-m", "Merge retained text"],
+    );
+    repo.index();
+    assert_eq!(query(&repo, &[])["matched_count"], 2);
+}
+
+#[test]
+fn shallow_coverage_stays_visible_with_usable_parent_locators() {
+    let source = TestRepo::new();
+    let root = commit(
+        &source,
+        &[("a.rs", "old()\n")],
+        "Root",
+        "2000-01-01T00:00:00Z",
+    );
+    commit(
+        &source,
+        &[("a.rs", "new()\n")],
+        "Remove",
+        "2000-01-02T00:00:00Z",
+    );
+    let holder = tempfile::tempdir().unwrap();
+    let clone = holder.path().join("clone");
+    let cloned = git_command(holder.path())
+        .args(["clone", "--depth", "2", "--no-local"])
+        .arg(source.dir.path())
+        .arg(&clone)
+        .output()
+        .unwrap();
+    assert!(cloned.status.success());
+    assert!(TestRepo::run_at(&clone, ["index"]).status.success());
+    let output = TestRepo::run_at(&clone, ["trace-removal", "--code", "old()", "--json"]);
+    assert!(output.status.success());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["matched_count"], 1);
+    assert_eq!(report["events"][0]["first_parent_id"], root);
+    assert!(
+        report["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|warning| warning.as_str().unwrap().contains("shallow"))
+    );
+    let human = TestRepo::run_at(&clone, ["trace-removal", "--code", "old()"]);
+    assert!(human.status.success());
+    assert!(String::from_utf8_lossy(&human.stderr).contains("shallow"));
+}
+
+#[test]
+fn command_help_and_json_contract_are_explicit_and_extensible() {
+    let repo = TestRepo::new();
+    let help = repo.run(["trace-removal", "--help"]);
+    assert!(help.status.success());
+    let text = String::from_utf8(help.stdout).unwrap();
+    for option in [
+        "--code",
+        "--path",
+        "--from-rev",
+        "--to-rev",
+        "--since",
+        "--until",
+        "--limit",
+        "--json",
+    ] {
+        assert!(text.contains(option), "{option}");
+    }
+    assert!(text.contains("[default: 10]"));
+    assert!(text.contains("first parent"));
+    assert!(text.contains("not a resolved symbol"));
+    assert!(String::from_utf8_lossy(&repo.run(["--help"]).stdout).contains("trace-removal"));
+    commit(
+        &repo,
+        &[("a.rs", "old()\n")],
+        "Root",
+        "2000-01-01T00:00:00Z",
+    );
+    repo.index();
+    let report = query(&repo, &[]);
+    assert_eq!(
+        report["query"],
+        serde_json::json!({"code": "old()", "path": null})
+    );
+    assert_eq!(report["cache_tip"], repo.head());
+    assert_eq!(report["limit"], 10);
+    assert!(report["warnings"].is_array());
+    assert!(report["notices"].is_array());
+    assert_eq!(report["truncated"], false);
+}
