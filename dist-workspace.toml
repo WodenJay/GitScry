@@ -16,8 +16,10 @@ include = ["runtime/"]
 
 # Where to host releases
 hosting = "github"
-# Create the GitHub release after all artifacts are built
-create-release = true
+# Upload all assets to the prepared draft before publishing an immutable release.
+create-release = false
+publish-jobs = ["./dispatch-crates-io-publish"]
+github-custom-job-permissions = { "dispatch-crates-io-publish" = { actions = "write" } }
 # Whether to install an updater program
 install-updater = false
 [[dist.extra-artifacts]]
