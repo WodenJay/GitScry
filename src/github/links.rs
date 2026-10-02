@@ -5,7 +5,7 @@ use std::{
 
 use serde::Serialize;
 
-use crate::analysis::Report;
+use crate::analysis::{Report, ReportKind, TimelineReport};
 
 use super::{gh, remote};
 
@@ -88,7 +88,29 @@ pub(super) struct Page {
 }
 
 pub(crate) fn fetch(report: &Report, explicit_repository: Option<&str>) -> LinksReport {
-    let commits = returned_commits(report);
+    let commits = if report.kind == ReportKind::CodeSearch {
+        returned_code_commits(report)
+    } else {
+        returned_commits(report)
+    };
+    fetch_commits(commits, explicit_repository)
+}
+
+pub(crate) fn fetch_timeline(
+    report: &TimelineReport,
+    explicit_repository: Option<&str>,
+) -> LinksReport {
+    let mut seen = HashSet::new();
+    let commits = report
+        .entries
+        .iter()
+        .filter(|entry| seen.insert(entry.commit_id.clone()))
+        .map(|entry| entry.commit_id.clone())
+        .collect();
+    fetch_commits(commits, explicit_repository)
+}
+
+fn fetch_commits(commits: Vec<String>, explicit_repository: Option<&str>) -> LinksReport {
     if commits.is_empty() {
         return LinksReport::new(None, FetchStatus::Complete, None, Vec::new());
     }
@@ -109,6 +131,16 @@ fn returned_commits(report: &Report) -> Vec<String> {
         .flat_map(|material| material.citations.iter())
         .filter(|citation| seen.insert(citation.oid.clone()))
         .map(|citation| citation.oid.clone())
+        .collect()
+}
+
+fn returned_code_commits(report: &Report) -> Vec<String> {
+    let mut seen = HashSet::new();
+    report
+        .code_matches
+        .iter()
+        .filter(|code_match| seen.insert(code_match.commit_id.clone()))
+        .map(|code_match| code_match.commit_id.clone())
         .collect()
 }
 

@@ -67,6 +67,11 @@ pub(crate) fn execute(
             github_repo,
             ..
         } => (*github_links).then(|| github_repo.clone()),
+        Command::Timeline {
+            github_links,
+            github_repo,
+            ..
+        } => (*github_links).then(|| github_repo.clone()),
         Command::Examples { github, .. }
         | Command::Failures { github, .. }
         | Command::Related { github, .. }
@@ -259,11 +264,11 @@ pub(crate) fn execute(
             scope,
         },
     )?;
-    let github_links = github_link_request.map(|explicit_repo| {
-        let query::QueryReport::Analysis(report) = &result.report else {
-            unreachable!("GitHub links are enabled only for material queries");
-        };
-        github::fetch(report, explicit_repo.as_deref())
+    let github_links = github_link_request.map(|explicit_repo| match &result.report {
+        query::QueryReport::Analysis(report) => github::fetch(report, explicit_repo.as_deref()),
+        query::QueryReport::Timeline(report) => {
+            github::fetch_timeline(report, explicit_repo.as_deref())
+        }
     });
     Ok(Outcome {
         progress: result.progress,

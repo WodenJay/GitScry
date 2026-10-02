@@ -333,6 +333,94 @@ fn remaining_material_queries_keep_git_output_with_explicit_link_options() {
     }
 }
 
+#[test]
+fn code_search_emits_deduplicated_link_status_without_changing_matches() {
+    let repo = support::TestRepo::new();
+    std::fs::write(
+        repo.dir.path().join("example.txt"),
+        "CodeNeedle first\nCodeNeedle second\nCodeNeedle third\n",
+    )
+    .unwrap();
+    support::git(repo.dir.path(), ["add", "example.txt"]);
+    support::git(repo.dir.path(), ["commit", "-m", "Add code markers"]);
+    repo.index();
+
+    let baseline = repo.run(["search", "--code", "CodeNeedle", "--json"]);
+    let enabled = repo.run([
+        "search",
+        "--code",
+        "CodeNeedle",
+        "--github-links",
+        "--github-repo",
+        "../bad",
+        "--json",
+    ]);
+    assert_eq!(baseline.status.code(), Some(0));
+    assert_eq!(
+        enabled.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&enabled.stderr)
+    );
+    let baseline: serde_json::Value = serde_json::from_slice(&baseline.stdout).unwrap();
+    let enabled: serde_json::Value = serde_json::from_slice(&enabled.stdout).unwrap();
+    assert_eq!(baseline["schema_version"], 1);
+    assert_eq!(enabled["schema_version"], 3);
+    assert_eq!(enabled["code_matches"], baseline["code_matches"]);
+    assert_eq!(enabled["matched_count"], baseline["matched_count"]);
+    assert_eq!(enabled["code_matches"].as_array().unwrap().len(), 3);
+    assert_eq!(enabled["github_links"]["status"], "failed");
+    let associations = enabled["github_links"]["commit_associations"]
+        .as_array()
+        .unwrap();
+    assert_eq!(associations.len(), 1);
+    assert_eq!(associations[0]["commit_sha"], repo.head());
+    assert_eq!(associations[0]["status"], "failed");
+}
+
+#[test]
+fn timeline_github_options_preserve_entries_and_only_the_explicit_repo_enables_fetching() {
+    let repo = support::TestRepo::new();
+    std::fs::write(repo.dir.path().join("history.txt"), "first").unwrap();
+    support::git(repo.dir.path(), ["add", "history.txt"]);
+    support::git(repo.dir.path(), ["commit", "-m", "first timeline entry"]);
+    repo.index();
+
+    let baseline = repo.run(["timeline", "history.txt", "--json"]);
+    let configured = repo.run([
+        "timeline",
+        "history.txt",
+        "--github-repo",
+        "acme/widget",
+        "--json",
+    ]);
+    let enabled = repo.run([
+        "timeline",
+        "history.txt",
+        "--github-links",
+        "--github-repo",
+        "../bad",
+        "--json",
+    ]);
+
+    assert_eq!(baseline.status.code(), Some(0));
+    assert_eq!(configured.status.code(), Some(0));
+    assert_eq!(configured.stdout, baseline.stdout);
+    assert_eq!(enabled.status.code(), Some(0));
+    let baseline: serde_json::Value = serde_json::from_slice(&baseline.stdout).unwrap();
+    let enabled: serde_json::Value = serde_json::from_slice(&enabled.stdout).unwrap();
+    assert_eq!(enabled["schema_version"], 3);
+    assert_eq!(enabled["entries"], baseline["entries"]);
+    assert_eq!(enabled["github_links"]["status"], "failed");
+    assert_eq!(
+        enabled["github_links"]["commit_associations"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
 #[cfg(unix)]
 mod unix {
     use std::{
@@ -821,6 +909,210 @@ mod unix {
         assert!(gh.log().contains("owner=acme"));
         assert!(gh.log().contains("name=widget"));
         assert_eq!(gh.calls(), 1);
+    }
+    #[test]
+    fn code_search_links_only_distinct_returned_commits() {
+        let repo = TestRepo::new();
+        commit(
+            &repo,
+            "Add code markers",
+            "CodeNeedle first\nCodeNeedle second\nCodeNeedle third\n",
+        );
+        repo.index();
+
+        let baseline = repo.run(["search", "--code", "CodeNeedle", "--json"]);
+        assert_eq!(baseline.status.code(), Some(0));
+        let baseline: serde_json::Value = serde_json::from_slice(&baseline.stdout).unwrap();
+        let gh = FakeGh::new(&successful_response());
+        let output = gh.run(
+            &repo,
+            &[
+                "search",
+                "--code",
+                "CodeNeedle",
+                "--github-links",
+                "--github-repo",
+                "acme/widget",
+                "--json",
+            ],
+        );
+
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(baseline["schema_version"], 1);
+        assert_eq!(value["schema_version"], 3);
+        assert_eq!(value["code_matches"], baseline["code_matches"]);
+        assert_eq!(value["matched_count"], baseline["matched_count"]);
+        assert_eq!(value["scope"], baseline["scope"]);
+        assert_eq!(value["code_matches"].as_array().unwrap().len(), 3);
+        assert_eq!(value["github_links"]["status"], "complete");
+        assert_eq!(
+            value["github_links"]["commit_associations"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            value["github_links"]["commit_associations"][0]["commit_sha"],
+            repo.head()
+        );
+        assert_eq!(gh.calls(), 1);
+    }
+
+    #[test]
+    fn timeline_links_only_the_scoped_current_page() {
+        let repo = TestRepo::new();
+        commit(&repo, "first timeline entry", "first");
+        let first = repo.head();
+        commit(&repo, "second timeline entry", "second");
+        let second = repo.head();
+        commit(&repo, "third timeline entry", "third");
+        repo.index();
+
+        let baseline = repo.run([
+            "timeline",
+            "history.txt",
+            "--from-rev",
+            &first,
+            "--limit",
+            "1",
+            "--patch",
+            "--json",
+        ]);
+        let gh = FakeGh::new(&successful_response());
+        let output = gh.run(
+            &repo,
+            &[
+                "timeline",
+                "history.txt",
+                "--from-rev",
+                &first,
+                "--limit",
+                "1",
+                "--patch",
+                "--github-links",
+                "--github-repo",
+                "acme/widget",
+                "--json",
+            ],
+        );
+        assert_eq!(baseline.status.code(), Some(0));
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let baseline: serde_json::Value = serde_json::from_slice(&baseline.stdout).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(baseline["entries"].as_array().unwrap().len(), 1);
+        assert_eq!(baseline["entries"][0]["commit_id"], second);
+        assert_eq!(value["schema_version"], 3);
+        assert_eq!(baseline["schema_version"], 2);
+        assert_eq!(baseline["entries"][0]["patch"]["status"], "available");
+        assert_eq!(value["entries"], baseline["entries"]);
+        assert_eq!(value["total"], baseline["total"]);
+        assert_eq!(value["offset"], baseline["offset"]);
+        assert_eq!(value["scope"], baseline["scope"]);
+        assert_eq!(
+            value["github_links"]["commit_associations"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            value["github_links"]["commit_associations"][0]["commit_sha"],
+            second
+        );
+        let human = gh.run(
+            &repo,
+            &[
+                "timeline",
+                "history.txt",
+                "--from-rev",
+                &first,
+                "--limit",
+                "1",
+                "--patch",
+                "--github-links",
+                "--github-repo",
+                "acme/widget",
+            ],
+        );
+        assert_eq!(
+            human.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&human.stderr)
+        );
+        let human = String::from_utf8_lossy(&human.stdout);
+        assert!(human.contains("GitHub associations"));
+        assert!(human.contains("pull request #42"));
+        assert_eq!(gh.calls(), 2);
+    }
+
+    #[test]
+    fn timeline_repository_alone_does_not_invoke_gh() {
+        let repo = TestRepo::new();
+        commit(&repo, "timeline without links", "content");
+        repo.index();
+        let baseline = repo.run(["timeline", "history.txt", "--json"]);
+        let gh = FakeGh::new(&successful_response());
+        let configured = gh.run(
+            &repo,
+            &[
+                "timeline",
+                "history.txt",
+                "--github-repo",
+                "acme/widget",
+                "--json",
+            ],
+        );
+
+        assert_eq!(configured.status.code(), Some(0));
+        assert_eq!(configured.stdout, baseline.stdout);
+        assert_eq!(gh.calls(), 0);
+    }
+
+    #[test]
+    fn timeline_empty_page_does_not_invoke_gh() {
+        let repo = TestRepo::new();
+        commit(&repo, "timeline without links", "content");
+        repo.index();
+        let gh = FakeGh::new(&successful_response());
+        let output = gh.run(
+            &repo,
+            &[
+                "timeline",
+                "history.txt",
+                "--offset",
+                "10",
+                "--github-links",
+                "--github-repo",
+                "acme/widget",
+                "--json",
+            ],
+        );
+
+        assert_eq!(output.status.code(), Some(0));
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["schema_version"], 3);
+        assert!(value["entries"].as_array().unwrap().is_empty());
+        assert_eq!(value["github_links"]["status"], "complete");
+        assert!(
+            value["github_links"]["commit_associations"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(gh.calls(), 0);
     }
 }
 

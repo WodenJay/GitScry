@@ -188,9 +188,14 @@ fn timeline_json_pages_topologically_and_follows_renames() {
         "--last",
         "--patch",
         "--json",
+        "--github-links",
+        "--github-repo <OWNER/REPO>",
     ] {
         assert!(help.contains(option), "timeline help is missing {option}");
     }
+    assert!(
+        help.contains("does not retrieve uncached history or commits outside the returned page")
+    );
     let root_help = repo.run(["--help"]);
     let root_help_text = String::from_utf8_lossy(&root_help.stdout);
     assert!(root_help_text.contains("gitscry <command> --help"));
