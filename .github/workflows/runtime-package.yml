@@ -18,10 +18,12 @@ on:
       - 'scripts/**'
       - 'src/app/index.rs'
       - 'src/app/update.rs'
+      - 'src/cache/query.rs'
       - 'src/cache/semantic.rs'
       - 'src/lib.rs'
       - 'src/runtime/**'
       - 'src/semantic/**'
+      - 'tests/search.rs'
       - 'tests/index.rs'
       - 'tests/github_links.rs'
       - 'tests/fixtures/**'
@@ -44,10 +46,12 @@ on:
       - 'scripts/**'
       - 'src/app/index.rs'
       - 'src/app/update.rs'
+      - 'src/cache/query.rs'
       - 'src/cache/semantic.rs'
       - 'src/lib.rs'
       - 'src/runtime/**'
       - 'src/semantic/**'
+      - 'tests/search.rs'
       - 'tests/index.rs'
       - 'tests/github_links.rs'
       - 'tests/fixtures/**'
@@ -81,8 +85,6 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           target: ${{ matrix.target }}
-      - name: Prepare pinned ONNX Runtime
-        run: cargo run --manifest-path xtask/Cargo.toml --locked -- prepare-runtime
       - name: Resolve semantic model revision
         id: semantic-model
         shell: bash
@@ -91,7 +93,9 @@ jobs:
           test -n "$revision"
           echo "revision=$revision" >> "$GITHUB_OUTPUT"
       - name: Run native tests
-        run: cargo test --locked --all-targets --all-features --jobs 1 --target ${{ matrix.target }}
+        run: cargo test --locked --all-targets --all-features --target ${{ matrix.target }}
+      - name: Prepare pinned ONNX Runtime
+        run: cargo run --manifest-path xtask/Cargo.toml --locked -- prepare-runtime
       - name: Validate PowerShell installer syntax
         if: runner.os == 'Windows'
         shell: pwsh
@@ -111,7 +115,9 @@ jobs:
             ~\AppData\Local\GitScry\semantic\${{ steps.semantic-model.outputs.revision }}
           key: gitscry-semantic-model-${{ runner.os }}-${{ steps.semantic-model.outputs.revision }}
       - name: Check fixed semantic embedding parity
-        run: cargo test --locked --lib --all-features --jobs 1 -- --ignored --nocapture matches_fixed_reference_embeddings
+        run: cargo test --locked --lib --all-features -- --ignored --nocapture matches_fixed_reference_embeddings
+      - name: Check mixed-generation semantic retrieval
+        run: cargo test --locked --test search --all-features --target ${{ matrix.target }} -- --ignored --nocapture hybrid_search_mixes_reference_document_vectors_with_current_runtime_queries
       - name: Install cargo-dist on Unix
         if: runner.os != 'Windows'
         shell: bash
@@ -122,8 +128,6 @@ jobs:
         run: Invoke-RestMethod -Uri 'https://github.com/axodotdev/cargo-dist/releases/download/v0.32.0/cargo-dist-installer.ps1' | Invoke-Expression
       - name: Build native distribution archive
         run: dist build --target ${{ matrix.target }} --artifacts=local
-        env:
-          CARGO_BUILD_JOBS: 1
       - name: Validate and install the Windows package
         if: runner.os == 'Windows'
         shell: pwsh

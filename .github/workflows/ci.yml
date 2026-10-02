@@ -23,9 +23,9 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Run Clippy
-        run: cargo clippy --locked --all-targets --all-features --jobs 1 -- -D warnings
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - name: Run tests
-        run: cargo test --locked --all-targets --all-features --jobs 1
+        run: cargo test --locked --all-targets --all-features
       - name: Check installer shell syntax
         run: sh -n scripts/gitscry-installer.sh && sh -n scripts/build-installers.sh && sh -n scripts/test-package-unix.sh
       - name: Prepare pinned ONNX Runtime for semantic smoke
@@ -42,7 +42,7 @@ jobs:
           path: ~/.cache/GitScry/semantic/${{ steps.semantic-model.outputs.revision }}
           key: gitscry-semantic-model-linux-${{ steps.semantic-model.outputs.revision }}
       - name: Check fixed semantic embedding parity
-        run: cargo test --locked --lib --all-features --jobs 1 -- --ignored --nocapture matches_fixed_reference_embeddings
+        run: cargo test --locked --lib --all-features -- --ignored --nocapture matches_fixed_reference_embeddings
       - name: Smoke real semantic inference
         shell: bash
         run: |
@@ -55,6 +55,8 @@ jobs:
           git -C "$smoke_repo" -c user.name=Smoke -c user.email=smoke@example.invalid commit -qm initial
           (cd "$smoke_repo" && cargo run --manifest-path "$GITHUB_WORKSPACE/Cargo.toml" --locked -- index --semantic)
 
+      - name: Check mixed-generation semantic retrieval
+        run: cargo test --locked --test search --all-features -- --ignored --nocapture hybrid_search_mixes_reference_document_vectors_with_current_runtime_queries
   xtask:
     name: Runtime packager checks
     runs-on: ubuntu-22.04
@@ -69,7 +71,7 @@ jobs:
       - name: Check formatting
         run: cargo fmt --manifest-path xtask/Cargo.toml -- --check
       - name: Run Clippy
-        run: cargo clippy --manifest-path xtask/Cargo.toml --locked --all-targets --all-features --jobs 1 -- -D warnings
+        run: cargo clippy --manifest-path xtask/Cargo.toml --locked --all-targets --all-features -- -D warnings
 
   msrv:
     name: Minimum Rust version
@@ -81,4 +83,4 @@ jobs:
       - name: Install Rust 1.89
         uses: dtolnay/rust-toolchain@1.89.0
       - name: Run tests on the declared MSRV
-        run: cargo test --locked --all-targets --all-features --jobs 1
+        run: cargo test --locked --all-targets --all-features
