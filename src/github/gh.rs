@@ -13,8 +13,8 @@ use super::{
     remote::GitHubRepository,
 };
 
-const PULL_REQUEST_QUERY: &str = "query($owner: String!, $name: String!, $oid: GitObjectID!) { repository(owner: $owner, name: $name) { object(oid: $oid) { ... on Commit { associatedPullRequests(first: 50) { nodes { id number title url repository { nameWithOwner } } pageInfo { hasNextPage } } } } } }";
-const ISSUE_QUERY: &str = "query($id: ID!) { node(id: $id) { ... on PullRequest { closingIssuesReferences(first: 50) { nodes { number title url repository { nameWithOwner } } pageInfo { hasNextPage } } } } }";
+const PULL_REQUEST_QUERY: &str = "query($owner: String!, $name: String!, $oid: GitObjectID!, $after: String) { repository(owner: $owner, name: $name) { object(oid: $oid) { ... on Commit { associatedPullRequests(first: 50, after: $after) { nodes { id number title url repository { nameWithOwner } } pageInfo { hasNextPage endCursor } } } } } }";
+const ISSUE_QUERY: &str = "query($id: ID!, $after: String) { node(id: $id) { ... on PullRequest { closingIssuesReferences(first: 50, after: $after) { nodes { number title url repository { nameWithOwner } } pageInfo { hasNextPage endCursor } } } } }";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum FetchError {
@@ -26,29 +26,35 @@ pub(super) enum FetchError {
 pub(super) fn fetch(
     repository: &GitHubRepository,
     commit_oid: &str,
+    cursor: Option<&str>,
     deadline: Instant,
 ) -> Result<Page, FetchError> {
-    let (stdout, command_failed) = run_query(
-        PULL_REQUEST_QUERY,
-        &[
-            ("owner", &repository.owner),
-            ("name", &repository.name),
-            ("oid", commit_oid),
-        ],
-        deadline,
-    )?;
+    let mut variables = vec![
+        ("owner", repository.owner.as_str()),
+        ("name", repository.name.as_str()),
+        ("oid", commit_oid),
+    ];
+    if let Some(cursor) = cursor {
+        variables.push(("after", cursor));
+    }
+    let (stdout, command_failed) = run_query(PULL_REQUEST_QUERY, &variables, deadline)?;
     parse_response(&stdout, command_failed)
 }
 
 pub(super) fn fetch_issues(
     pull_request: &PullRequest,
+    cursor: Option<&str>,
     deadline: Instant,
 ) -> Result<IssuePage, FetchError> {
     let id = pull_request
         .node_id
         .as_deref()
         .ok_or(FetchError::RequestFailed)?;
-    let (stdout, command_failed) = run_query(ISSUE_QUERY, &[("id", id)], deadline)?;
+    let mut variables = vec![("id", id)];
+    if let Some(cursor) = cursor {
+        variables.push(("after", cursor));
+    }
+    let (stdout, command_failed) = run_query(ISSUE_QUERY, &variables, deadline)?;
     parse_issue_response(&stdout, command_failed)
 }
 
@@ -132,21 +138,45 @@ fn discard(mut reader: impl Read) {
 fn parse_response(output: &[u8], command_failed: bool) -> Result<Page, FetchError> {
     let response: ApiResponse =
         serde_json::from_slice(output).map_err(|_| FetchError::RequestFailed)?;
+    let has_data = response.data.is_some();
+    if has_global_api_error(&response.errors, has_data) {
+        return Err(FetchError::RequestFailed);
+    }
     let connection = response
         .data
         .and_then(|data| data.repository)
         .and_then(|repository| repository.object)
-        .and_then(|object| object.associated_pull_requests)
-        .ok_or(FetchError::RequestFailed)?;
+        .and_then(|object| object.associated_pull_requests);
+    let Some(connection) = connection else {
+        if has_data
+            || response
+                .errors
+                .iter()
+                .any(|error| error.get("path").is_some())
+        {
+            return Ok(Page {
+                pull_requests: Vec::new(),
+                has_next_page: false,
+                end_cursor: None,
+                partial: true,
+            });
+        }
+        return Err(FetchError::RequestFailed);
+    };
 
     let mut partial = command_failed || !response.errors.is_empty();
-    let has_next_page = connection
-        .page_info
+    let page_info = connection.page_info;
+    let has_next_page = page_info
+        .as_ref()
         .map(|page_info| page_info.has_next_page)
         .unwrap_or_else(|| {
             partial = true;
             true
         });
+    let end_cursor = page_info.and_then(|page_info| page_info.end_cursor);
+    if has_next_page && end_cursor.is_none() {
+        partial = true;
+    }
     let mut pull_requests = Vec::new();
     for pull_request in connection.nodes.unwrap_or_else(|| {
         partial = true;
@@ -179,6 +209,7 @@ fn parse_response(output: &[u8], command_failed: bool) -> Result<Page, FetchErro
     Ok(Page {
         pull_requests,
         has_next_page,
+        end_cursor,
         partial,
     })
 }
@@ -187,15 +218,24 @@ fn parse_issue_response(output: &[u8], command_failed: bool) -> Result<IssuePage
     let response: ApiResponse =
         serde_json::from_slice(output).map_err(|_| FetchError::RequestFailed)?;
     let has_data = response.data.is_some();
+    if has_global_api_error(&response.errors, has_data) {
+        return Err(FetchError::RequestFailed);
+    }
     let connection = response
         .data
         .and_then(|data| data.node)
         .and_then(|node| node.closing_issues_references);
     let Some(connection) = connection else {
-        if has_data {
+        if has_data
+            || response
+                .errors
+                .iter()
+                .any(|error| error.get("path").is_some())
+        {
             return Ok(IssuePage {
                 issues: Vec::new(),
                 has_next_page: false,
+                end_cursor: None,
                 partial: true,
             });
         }
@@ -203,13 +243,18 @@ fn parse_issue_response(output: &[u8], command_failed: bool) -> Result<IssuePage
     };
 
     let mut partial = command_failed || !response.errors.is_empty();
-    let has_next_page = connection
-        .page_info
+    let page_info = connection.page_info;
+    let has_next_page = page_info
+        .as_ref()
         .map(|page_info| page_info.has_next_page)
         .unwrap_or_else(|| {
             partial = true;
             true
         });
+    let end_cursor = page_info.and_then(|page_info| page_info.end_cursor);
+    if has_next_page && end_cursor.is_none() {
+        partial = true;
+    }
     let mut issues = Vec::new();
     for issue in connection.nodes.unwrap_or_else(|| {
         partial = true;
@@ -235,7 +280,33 @@ fn parse_issue_response(output: &[u8], command_failed: bool) -> Result<IssuePage
     Ok(IssuePage {
         issues,
         has_next_page,
+        end_cursor,
         partial,
+    })
+}
+
+fn has_global_api_error(errors: &[Value], has_data: bool) -> bool {
+    errors.iter().any(|error| {
+        let error_type = error.get("type").and_then(Value::as_str).or_else(|| {
+            error
+                .get("extensions")
+                .and_then(|extensions| extensions.get("type"))
+                .and_then(Value::as_str)
+        });
+        let is_rate_limited =
+            error_type.is_some_and(|error_type| error_type.eq_ignore_ascii_case("RATE_LIMITED"));
+        let is_authentication_error = error_type.is_some_and(|error_type| {
+            error_type.eq_ignore_ascii_case("UNAUTHORIZED")
+                || error_type.eq_ignore_ascii_case("UNAUTHENTICATED")
+                || error_type.eq_ignore_ascii_case("AUTHENTICATION_ERROR")
+                || error_type.eq_ignore_ascii_case("BAD_CREDENTIALS")
+                || (error_type.eq_ignore_ascii_case("FORBIDDEN") && error.get("path").is_none())
+        }) || error
+            .get("message")
+            .and_then(Value::as_str)
+            .is_some_and(|message| message.eq_ignore_ascii_case("Bad credentials"));
+
+        is_rate_limited || is_authentication_error || (!has_data && error.get("path").is_none())
     })
 }
 
@@ -280,6 +351,8 @@ struct ApiConnection<T> {
 struct ApiPageInfo {
     #[serde(rename = "hasNextPage")]
     has_next_page: bool,
+    #[serde(rename = "endCursor")]
+    end_cursor: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -335,7 +408,7 @@ mod issue_response_tests {
 
     #[test]
     fn inaccessible_issue_field_is_partial_instead_of_empty_or_failed() {
-        let response = br#"{"data":{"node":null},"errors":[{"message":"Resource not accessible by integration","path":["node","closingIssuesReferences"]}]}"#;
+        let response = br#"{"data":{"node":null},"errors":[{"type":"FORBIDDEN","message":"Resource not accessible by integration","path":["node","closingIssuesReferences"]}]}"#;
         let page = parse_issue_response(response, true)
             .expect("partial issue data should not stop later pull requests");
 
@@ -349,6 +422,66 @@ mod issue_response_tests {
 
         assert!(matches!(
             parse_issue_response(response, true),
+            Err(FetchError::RequestFailed)
+        ));
+    }
+
+    #[test]
+    fn both_graphql_connections_expose_the_opaque_end_cursor() {
+        let pull_request_response = br#"{"data":{"repository":{"object":{"associatedPullRequests":{"nodes":[],"pageInfo":{"hasNextPage":true,"endCursor":"pr-cursor"}}}}}}"#;
+        let pull_request_page = super::parse_response(pull_request_response, false).unwrap();
+        assert_eq!(pull_request_page.end_cursor.as_deref(), Some("pr-cursor"));
+
+        let issue_response = br#"{"data":{"node":{"closingIssuesReferences":{"nodes":[],"pageInfo":{"hasNextPage":true,"endCursor":"issue-cursor"}}}}}"#;
+        let issue_page = parse_issue_response(issue_response, false).unwrap();
+        assert_eq!(issue_page.end_cursor.as_deref(), Some("issue-cursor"));
+    }
+    #[test]
+    fn inaccessible_commit_field_is_partial_instead_of_empty_or_failed() {
+        let response = br#"{"data":{"repository":{"object":null}},"errors":[{"message":"Resource not accessible by integration","path":["repository","object"]}]}"#;
+        let page = super::parse_response(response, true)
+            .expect("partial commit data should not stop later commits");
+        assert!(page.partial);
+        assert!(page.pull_requests.is_empty());
+    }
+
+    #[test]
+    fn rate_limit_error_with_partial_data_remains_a_failure() {
+        let response = br#"{"data":{"node":{"closingIssuesReferences":{"nodes":[],"pageInfo":{"hasNextPage":false}}}},"errors":[{"type":"RATE_LIMITED","path":["node"]}]}"#;
+        assert!(matches!(
+            parse_issue_response(response, true),
+            Err(FetchError::RequestFailed)
+        ));
+    }
+
+    #[test]
+    fn path_scoped_errors_without_data_remain_local() {
+        let pull_request_response = br#"{"data":null,"errors":[{"message":"Not accessible","path":["repository","object"]}]}"#;
+        let pull_request_page = super::parse_response(pull_request_response, false)
+            .expect("path-scoped errors should be local to this commit");
+        assert!(pull_request_page.partial);
+        assert!(pull_request_page.pull_requests.is_empty());
+
+        let issue_response = br#"{"data":null,"errors":[{"message":"Not accessible","path":["node","closingIssuesReferences"]}]}"#;
+        let issue_page = parse_issue_response(issue_response, false)
+            .expect("path-scoped errors should be local to this pull request");
+        assert!(issue_page.partial);
+        assert!(issue_page.issues.is_empty());
+    }
+
+    #[test]
+    fn partial_data_with_unscoped_errors_remains_usable() {
+        let response = br#"{"data":{"repository":{"object":{"associatedPullRequests":{"nodes":[],"pageInfo":{"hasNextPage":false}}}}},"errors":[{"message":"A field could not be resolved"}]}"#;
+        let page = super::parse_response(response, false)
+            .expect("partial data without error paths should remain usable");
+        assert!(page.partial);
+    }
+
+    #[test]
+    fn authentication_error_with_partial_data_stops_fetching() {
+        let response = br#"{"data":{"node":{"closingIssuesReferences":{"nodes":[],"pageInfo":{"hasNextPage":false}}}},"errors":[{"type":"UNAUTHORIZED","path":["node"]}]}"#;
+        assert!(matches!(
+            parse_issue_response(response, false),
             Err(FetchError::RequestFailed)
         ));
     }

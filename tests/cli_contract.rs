@@ -382,6 +382,17 @@ fn json_flag_is_available_only_for_query_commands() {
     assert!(search_help.contains("--github-repo <OWNER/REPO>"));
     assert!(search_help.contains("Commit.associatedPullRequests"));
     assert!(search_help.contains("existing GitHub login"));
+    assert!(search_help.contains("Coverage comes first"));
+    assert!(search_help.contains("continuation pages"));
+    assert!(search_help.contains("15-second timeout, 20-request, 50-results-per-page"));
+    assert!(search_help.contains("complete, partial, not queried, or failed"));
+    assert!(search_help.contains(
+        "Partial GraphQL data and local object/field errors preserve usable associations"
+    ));
+    assert!(search_help.contains(
+        "global authentication, rate-limit, network, or timeout failures stop link fetching"
+    ));
+    assert!(search_help.contains("No automatic retries"));
     assert!(search_help.contains("PR number, title, URL, repository identity"));
     assert!(search_help.contains("does not audit or claim a minimum permission set"));
     assert!(search_help.contains("schema_version` is 1 by default, 2 for `--patch` alone, and 4 whenever `--github-links` is enabled, except `why` reports use version 5"));
@@ -395,7 +406,7 @@ fn json_flag_is_available_only_for_query_commands() {
     assert!(search_help.contains("omit many issue mentions"));
     assert!(search_help.contains("not proof of closure or causality"));
     assert!(
-        search_help.contains("missing data or permissions do not prove that no association exists")
+        search_help.contains("Missing data or permissions do not prove that no association exists")
     );
     assert!(search_help.contains("search does not contact GitHub"));
     assert!(search_help.contains("Examples:"));
@@ -533,6 +544,15 @@ fn material_commands_share_github_link_options_and_caveats() {
             "--github-repo <OWNER/REPO>",
             "authenticated `gh` CLI",
             "does not enable link fetching by itself",
+            "coverage-first pagination",
+            "15-second timeout",
+            "20 API requests",
+            "50 results per page",
+            "200 deduplicated PR+issue objects",
+            "complete, partial, not queried, or failed",
+            "stop link fetching only",
+            "No automatic retries",
+            "missing or unreturned associations do not prove none exist",
             "navigation only",
             "do not change Git material",
             "do not promise command-specific benefits",

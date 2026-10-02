@@ -20,7 +20,7 @@ Your Git history is a treasure trove. GitScry uncovers the implementation exampl
 
 Pick one command by intent, then run `gitscry <command> --help` for inputs, options, and examples.\n\nQuery commands support `--json` for structured output.";
 
-const MATERIAL_LINKS_LONG_HELP: &str = "`--github-links` retrieves bounded first-page pull-request associations and each PR's first-page `closingIssuesReferences` issues for complete commits represented in the query result, through the authenticated `gh` CLI. Issue links cover explicit PR associations, not arbitrary mentions; missing data or permissions do not prove no association exists. Links are navigation evidence, not proof of PR closure or causality. The optional `--github-repo OWNER/REPO` selects a repository but does not itself trigger access; without it, repository inference follows `search` rules. Without `--github-links`, no GitHub lookup occurs. Links add navigation only, do not change Git material, and do not promise command-specific benefits. In particular, test co-change history does not prove assertions exist, regression suspects are not root-cause findings, and participant descriptions do not outweigh changes visible in Git.";
+const MATERIAL_LINKS_LONG_HELP: &str = "`--github-links` walks explicit commit→PR→issue associations for returned material through the authenticated `gh` CLI. It uses coverage-first pagination: all eligible commit PR homepages and discovered PR issue homepages precede continuation pages. Both connections share a 15-second timeout, 20 API requests, 50 results per page, and 200 deduplicated PR+issue objects. Human and JSON output mark each layer complete, partial, not queried, or failed; missing or unreturned associations do not prove none exist. Partial data and local object/field errors preserve usable links and continue other lookups; global authentication, rate-limit, network, or timeout failures stop link fetching only and preserve Git materials and command exit status. No automatic retries. Issue links are explicit `closingIssuesReferences`, not arbitrary mentions, and are navigation evidence, not proof of closure or causality. `--github-repo OWNER/REPO` selects a repository but does not itself contact GitHub; without it, repository inference follows `search` rules. Without `--github-links`, no GitHub lookup occurs. Links add navigation only, do not change Git material, and do not promise command-specific benefits. In particular, test co-change history does not prove assertions exist, regression suspects are not root-cause findings, and participant descriptions do not outweigh changes visible in Git.";
 #[derive(Debug, Args, Default)]
 pub(crate) struct HistoricalScopeArgs {
     /// Exclude this cached commit and its ancestors from the query scope.
@@ -39,7 +39,7 @@ pub(crate) struct HistoricalScopeArgs {
 
 #[derive(Debug, Args, Default)]
 pub(crate) struct GithubLinkArgs {
-    /// Fetch bounded first-page GitHub PR associations for returned material commits; requires an authenticated gh CLI.
+    /// Fetch coverage-first GitHub PR and issue associations for returned material commits; requires an authenticated gh CLI.
     #[arg(long)]
     pub(crate) github_links: bool,
     /// GitHub repository to query; does not enable link fetching by itself.
@@ -86,7 +86,7 @@ Scope applies to both search modes and is limited to the published cache. `--fro
 
 Run `gitscry index` to refresh the cache; incomplete or shallow history is reported as a warning. `--limit` limits matching commits in ordinary mode and matching lines in code mode. `--json` returns structured output.
 
-`--github-links` fetches only the first 50 `Commit.associatedPullRequests` results per distinct full commit ID represented in the returned text or code results. For each linked PR it fetches only the first 50 `closingIssuesReferences` issues, including manually linked issues; it does not fetch PR bodies or infer arbitrary issue mentions, may omit many issue mentions, and cannot guarantee every PR containing a commit or every issue association. These links are navigation evidence, not proof of closure or causality, intent, or runtime call chains; in code mode, a match identifies changed lines, not a proven runtime call chain; missing data or permissions do not prove that no association exists. Lookup uses the `gh` CLI's existing GitHub login; GitScry does not audit or claim a minimum permission set. It reads PR number, title, URL, repository identity, pagination metadata, and each issue's number, title, URL, and repository identity, within a shared 15-second, 20-request budget, 50 results per page, and 200 deduplicated PR+issue objects. Without `--github-links`, search does not contact GitHub; `--github-repo OWNER/REPO` alone only selects a repository. If omitted, a repository is inferred only when local remotes identify one unique github.com repository. JSON `schema_version` is 1 by default, 2 for `--patch` alone, and 4 whenever `--github-links` is enabled, except `why` reports use version 5. Version 4 may also include the optional `patch` field; inspect optional fields instead of inferring enabled options from the version.
+`--github-links` fetches explicit `Commit.associatedPullRequests` and `PullRequest.closingIssuesReferences` for distinct complete commit IDs represented in returned text or code results. It reads PR number, title, URL, repository identity, plus issue number, title, URL, and repository identity, using the `gh` CLI's existing GitHub login; GitScry does not audit or claim a minimum permission set. Coverage comes first: request every returned commit's PR homepage, then every discovered PR's issue homepage, then continuation pages; PRs discovered later still get an issue homepage before further pagination. Both connections use opaque cursors within a shared 15-second timeout, 20-request, 50-results-per-page, 200-deduplicated-PR+issue-object budget. Each commit's PR layer and each PR's issue layer reports complete, partial, not queried, or failed, with a stop reason where relevant. Missing data or permissions do not prove that no association exists; GitScry cannot guarantee every PR containing a commit or every issue association, and the limited lookup may omit many issue mentions. Partial GraphQL data and local object/field errors preserve usable associations and continue other lookups; global authentication, rate-limit, network, or timeout failures stop link fetching but preserve Git materials and command success. No automatic retries. These links are navigation evidence, not proof of closure or causality, intent, or runtime call chains; in code mode, a match identifies changed lines, not a proven runtime call chain. Issue links cover explicit associations, not arbitrary mentions; the lookup does not fetch PR bodies or commits outside returned results. `--github-repo OWNER/REPO` alone does not contact GitHub; if omitted, a repository is inferred only from one unique local github.com remote. Without `--github-links`, search does not contact GitHub. JSON `schema_version` is 1 by default, 2 for `--patch` alone, and 4 whenever `--github-links` is enabled, except `why` reports use version 5. Version 4 may also include the optional `patch` field; inspect optional fields instead of inferring enabled options from the version.
 
 Required input: choose one mode—one or more QUERY words, or `--code TEXT`.
 
@@ -128,7 +128,7 @@ Examples:
         /// Include bounded relevant cached text hunks; unavailable history is reported.
         #[arg(long, requires = "query", conflicts_with = "code")]
         patch: bool,
-        /// Fetch bounded first-page GitHub PR associations for returned commits; requires an authenticated gh CLI.
+        /// Fetch coverage-first GitHub PR and issue associations for returned commits; requires an authenticated gh CLI.
         #[arg(long)]
         github_links: bool,
         /// GitHub repository to query; does not enable link fetching by itself.
@@ -398,7 +398,7 @@ Examples:
         /// Include bounded cached text hunks for each timeline entry.
         #[arg(long)]
         patch: bool,
-        /// Fetch bounded PR associations for returned-page commits; requires an authenticated gh CLI.
+        /// Fetch coverage-first PR and issue associations for returned-page commits; requires an authenticated gh CLI.
         #[arg(long)]
         github_links: bool,
         /// GitHub repository to query; does not enable link fetching by itself.
