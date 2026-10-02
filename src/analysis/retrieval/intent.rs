@@ -1,10 +1,11 @@
 use crate::app::AppError;
 
-use super::text::{normalize_path, tokenize};
+use super::text::{normalize_path, query_terms};
 
 /// What one natural-language query asks the cache for.
 pub(crate) struct Intent {
     terms: Vec<String>,
+    matching_terms: Vec<String>,
     /// Repository-relative anchors, from `--path` and from path-like query words.
     anchors: Vec<String>,
     explicit_paths: Vec<String>,
@@ -22,8 +23,10 @@ impl Intent {
                 .into_iter()
                 .chain(explicit_paths.iter().cloned()),
         )?;
+        let (terms, matching_terms) = query_terms(&input);
         Ok(Self {
-            terms: tokenize(&input),
+            terms,
+            matching_terms,
             anchors,
             explicit_paths,
         })
@@ -34,8 +37,10 @@ impl Intent {
         if input.trim().is_empty() {
             return Err(AppError::input("query must not be empty"));
         }
+        let (terms, matching_terms) = query_terms(&input);
         Ok(Self {
-            terms: tokenize(&input),
+            terms,
+            matching_terms,
             anchors: normalize_anchors([path.to_owned()])?,
             explicit_paths: Vec::new(),
         })
@@ -47,6 +52,7 @@ impl Intent {
         }
         Ok(Self {
             terms: Vec::new(),
+            matching_terms: Vec::new(),
             anchors: normalize_anchors(paths.iter().cloned())?,
             explicit_paths: Vec::new(),
         })
@@ -54,6 +60,10 @@ impl Intent {
 
     pub(in crate::analysis) fn terms(&self) -> &[String] {
         &self.terms
+    }
+
+    pub(in crate::analysis) fn matching_terms(&self) -> &[String] {
+        &self.matching_terms
     }
 
     /// Every anchor the caller supplied, path-like query words included.

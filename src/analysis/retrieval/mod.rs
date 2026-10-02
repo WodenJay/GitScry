@@ -68,7 +68,7 @@ pub(in crate::analysis) fn pool(
     limit: usize,
     scope: Option<&SearchFilter>,
 ) -> Result<Option<Pool>, AppError> {
-    let terms = intent.terms();
+    let terms = intent.matching_terms();
     if terms.is_empty() {
         return Ok(None);
     }
@@ -98,7 +98,7 @@ pub(in crate::analysis) fn pool_with_depth(
     depth: usize,
     scope: Option<&SearchFilter>,
 ) -> Result<Option<Pool>, AppError> {
-    let terms = intent.terms();
+    let terms = intent.matching_terms();
     if terms.is_empty() {
         return Ok(None);
     }

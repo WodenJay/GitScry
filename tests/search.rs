@@ -985,6 +985,99 @@ fn search_refreshes_cache_after_shallow_history_deepens() {
 }
 
 #[test]
+fn search_finds_cjk_fragments_in_original_text_and_paths() {
+    let repo = TestRepo::new();
+    repo.commit("history.txt", b"history\n", "修复缓存更新逻辑");
+    repo.commit(
+        "body.txt",
+        b"body\n",
+        "Document cache safety\n\n保护缓存避免丢失",
+    );
+    repo.commit("docs/中文路径/手册.txt", b"path\n", "Document indexed path");
+    repo.commit("noise.txt", b"noise\n", "修理流程说明");
+    repo.commit("mixed.txt", b"mixed\n", "修复HTTP缓存");
+    repo.commit("japanese.txt", b"japanese\n", "日本語のキャッシュ検索");
+    repo.commit("korean.txt", b"korean\n", "캐시 갱신 기능 추가");
+    repo.commit("lock.txt", b"lock\n", "锁保护队列");
+    repo.index();
+
+    for query in ["修复缓存", "缓存", "更新", "存更"] {
+        let output = repo.run(["search", query]);
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{query}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("修复缓存更新逻辑"),
+            "{query}: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+
+    let expanded_query = repo.run(["search", "修复缓存"]);
+    assert!(String::from_utf8_lossy(&expanded_query.stdout).contains("term coverage 1/1"));
+    assert!(String::from_utf8_lossy(&expanded_query.stdout).contains("subject match (1)"));
+
+    let body = repo.run(["search", "保护缓存"]);
+    assert!(String::from_utf8_lossy(&body.stdout).contains("Document cache safety"));
+    let path = repo.run(["search", "中文路"]);
+    let path_output = String::from_utf8_lossy(&path.stdout);
+    assert!(
+        path_output.contains("Document indexed path"),
+        "{path_output}"
+    );
+    assert!(
+        path_output.contains("exact repository term (1)"),
+        "{path_output}"
+    );
+
+    for (query, expected) in [
+        ("修复", "修复HTTP缓存"),
+        ("HTTP", "修复HTTP缓存"),
+        ("キャッシュ", "日本語のキャッシュ検索"),
+        ("갱신", "캐시 갱신 기능 추가"),
+        ("锁", "锁保护队列"),
+    ] {
+        let output = repo.run(["search", query]);
+        assert_eq!(output.status.code(), Some(0), "{query}");
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains(expected),
+            "{query}: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+
+    let unrelated = repo.run(["search", "修复缓存"]);
+    assert!(!String::from_utf8_lossy(&unrelated.stdout).contains("修理流程说明"));
+    assert!(String::from_utf8_lossy(&unrelated.stdout).contains("Document cache safety"));
+    let separate_characters = repo.run(["search", "锁", "修"]);
+    let results = String::from_utf8_lossy(&separate_characters.stdout);
+    assert!(results.contains("锁保护队列"));
+    assert!(results.contains("修复缓存更新逻辑"));
+}
+
+#[test]
+fn partial_cjk_fragments_are_not_explained_as_exact_matches() {
+    let repo = TestRepo::new();
+    repo.commit("cache/缓存.txt", b"cached\n", "修复流程");
+    repo.index();
+
+    let output = repo.run(["search", "修复缓存"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("修复流程"), "{stdout}");
+    assert!(stdout.contains("confidence: low"), "{stdout}");
+    assert!(
+        stdout.contains("partial CJK fragment match (1)"),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("subject match"), "{stdout}");
+    assert!(!stdout.contains("exact repository term"), "{stdout}");
+}
+
+#[test]
 fn search_replays_issue_2_secret_redaction_case() {
     let repo = TestRepo::new();
     repo.commit(

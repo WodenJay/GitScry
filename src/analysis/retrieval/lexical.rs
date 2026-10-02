@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use super::intent::Intent;
-use super::text::{normalize_path, path_matches, tokenize};
+use super::text::{exact_term_matches, normalize_path, path_matches, term_matches, tokenize};
 
 const SUBJECT_WEIGHT: f64 = 1.5;
 const COVERAGE_WEIGHT: f64 = 2.0;
@@ -17,10 +17,14 @@ const ANCHOR_BONUS: f64 = 3.0;
 pub(in crate::analysis) struct Signals {
     subject_matches: usize,
     repository_matches: usize,
-    /// Query terms answered by the commit's prose.
+    exact_subject_matches: usize,
+    exact_repository_matches: usize,
+    /// Query terms matched by prose, including partial CJK fragments.
     covered: usize,
-    /// Query terms answered by the commit's prose or the paths it touched.
+    partial_coverage: usize,
+    /// Query terms matched by prose or paths, including partial CJK fragments.
     identified: usize,
+    partial_identified: usize,
     total_terms: usize,
     matched_anchors: usize,
     lexical: f64,
@@ -41,11 +45,27 @@ pub(in crate::analysis) fn signals(
         .cloned()
         .collect::<HashSet<_>>();
     let everything = prose.union(&path_terms).cloned().collect::<HashSet<_>>();
+    let path_texts = paths
+        .iter()
+        .map(|path| String::from_utf8_lossy(path).into_owned())
+        .collect::<Vec<_>>();
+    let path_text_refs = path_texts.iter().map(String::as_str).collect::<Vec<_>>();
+    let mut all_text_refs = vec![subject, body];
+    all_text_refs.extend(path_text_refs.iter().copied());
+
+    let subject_matches = count_matches(intent.terms(), &subject_terms, &[subject]);
+    let repository_matches = count_matches(intent.terms(), &path_terms, &path_text_refs);
+    let prose_matches = count_matches(intent.terms(), &prose, &[subject, body]);
+    let identified_matches = count_matches(intent.terms(), &everything, &all_text_refs);
     Signals {
-        subject_matches: count(intent.terms(), &subject_terms),
-        repository_matches: count(intent.terms(), &path_terms),
-        covered: count(intent.terms(), &prose),
-        identified: count(intent.terms(), &everything),
+        subject_matches: subject_matches.total(),
+        exact_subject_matches: subject_matches.exact,
+        repository_matches: repository_matches.total(),
+        exact_repository_matches: repository_matches.exact,
+        covered: prose_matches.total(),
+        partial_coverage: prose_matches.partial,
+        identified: identified_matches.total(),
+        partial_identified: identified_matches.partial,
         total_terms: intent.terms().len(),
         matched_anchors: anchors_overlap(paths, intent.anchors()),
         lexical: if bm25.is_finite() { -bm25 } else { 0.0 },
@@ -68,8 +88,32 @@ fn path_terms(paths: &[Vec<u8>]) -> HashSet<String> {
         .collect()
 }
 
-fn count(terms: &[String], haystack: &HashSet<String>) -> usize {
-    terms.iter().filter(|term| haystack.contains(*term)).count()
+#[derive(Clone, Copy, Default)]
+struct TermMatches {
+    exact: usize,
+    partial: usize,
+}
+
+impl TermMatches {
+    fn total(self) -> usize {
+        self.exact + self.partial
+    }
+}
+
+fn count_matches(
+    terms: &[String],
+    haystack: &HashSet<String>,
+    original_texts: &[&str],
+) -> TermMatches {
+    let mut matches = TermMatches::default();
+    for term in terms {
+        if exact_term_matches(term, haystack, original_texts) {
+            matches.exact += 1;
+        } else if term_matches(term, haystack) {
+            matches.partial += 1;
+        }
+    }
+    matches
 }
 
 impl Signals {
@@ -110,35 +154,38 @@ impl Signals {
     }
 
     pub(in crate::analysis) fn strong(&self) -> bool {
-        self.subject_matches > 0 && (self.repository_matches > 0 || self.exact_anchor())
+        self.exact_subject_matches > 0 && (self.exact_repository_matches > 0 || self.exact_anchor())
     }
 
     pub(in crate::analysis) fn moderate(&self) -> bool {
-        self.subject_matches > 0
-            || self.repository_matches > 0
+        self.exact_subject_matches > 0
+            || self.exact_repository_matches > 0
             || self.covered > 1
             || self.identified > 1
             || self.exact_anchor()
     }
 
     pub(in crate::analysis) fn describe(&self, basis: &mut Vec<String>) {
-        self.describe_coverage(self.covered, basis);
+        self.describe_coverage(self.covered, self.partial_coverage, basis);
     }
 
     /// Describe the coverage a capability actually scored on.
     pub(in crate::analysis) fn describe_identified(&self, basis: &mut Vec<String>) {
-        self.describe_coverage(self.identified, basis);
+        self.describe_coverage(self.identified, self.partial_identified, basis);
     }
 
-    fn describe_coverage(&self, coverage: usize, basis: &mut Vec<String>) {
-        if self.subject_matches > 0 {
-            basis.push(format!("subject match ({})", self.subject_matches));
+    fn describe_coverage(&self, coverage: usize, partial: usize, basis: &mut Vec<String>) {
+        if self.exact_subject_matches > 0 {
+            basis.push(format!("subject match ({})", self.exact_subject_matches));
         }
         basis.push(format!("term coverage {coverage}/{}", self.total_terms));
-        if self.repository_matches > 0 {
+        if partial > 0 {
+            basis.push(format!("partial CJK fragment match ({partial})"));
+        }
+        if self.exact_repository_matches > 0 {
             basis.push(format!(
                 "exact repository term ({})",
-                self.repository_matches
+                self.exact_repository_matches
             ));
         }
         if self.exact_anchor() {
