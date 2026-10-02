@@ -2,7 +2,7 @@ mod support;
 
 use serde_json::Value;
 use std::fs;
-use support::{TestRepo, git};
+use support::{TestRepo, git, git_stdout};
 
 fn commit(repo: &TestRepo, path: &str, text: &str) {
     fs::write(repo.dir.path().join(path), text).unwrap();
@@ -235,4 +235,61 @@ fn cache_errors_and_shallow_coverage_remain_visible() {
     let help = String::from_utf8(help.stdout).unwrap();
     assert!(help.contains("merge-only"));
     assert!(!help.contains("--since"));
+}
+
+#[test]
+fn merge_parent_lineage_uses_identity_not_only_path_presence() {
+    for recreated in [false, true] {
+        for reversed in [false, true] {
+            let repo = TestRepo::new();
+            commit(&repo, "old", "one\ntwo\nthree\n");
+            git(repo.dir.path(), ["branch", "side"]);
+            if !recreated {
+                git(repo.dir.path(), ["mv", "old", "new"]);
+                record(&repo);
+            }
+            let main = repo.head();
+            git(repo.dir.path(), ["checkout", "side"]);
+            if recreated {
+                git(repo.dir.path(), ["rm", "old"]);
+                record(&repo);
+            }
+            commit(&repo, "old", "one\ntwo\nthree\nbranch\n");
+            let side = repo.head();
+            let (first, second) = if reversed {
+                (&side, &main)
+            } else {
+                (&main, &side)
+            };
+            // A real merge DAG with a deterministic resolution: keep the first parent's tree.
+            let tree = git_stdout(repo.dir.path(), ["rev-parse", &format!("{first}^{{tree}}")]);
+            let merged = git_stdout(
+                repo.dir.path(),
+                [
+                    "commit-tree",
+                    &tree,
+                    "-p",
+                    first,
+                    "-p",
+                    second,
+                    "-m",
+                    "merge",
+                ],
+            );
+            git(repo.dir.path(), ["checkout", "main"]);
+            git(repo.dir.path(), ["reset", "--hard", &merged]);
+            repo.index();
+            let json = report(&repo, &["hotspots", "--json"]);
+            let path = if !recreated && !reversed {
+                "new"
+            } else {
+                "old"
+            };
+            assert_eq!(
+                count(&json, path),
+                if recreated { 1 } else { 3 },
+                "recreated={recreated}, reversed={reversed}"
+            );
+        }
+    }
 }
