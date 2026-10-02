@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     time::{Duration, Instant},
 };
 
@@ -106,12 +106,14 @@ pub(crate) struct CommitAssociation {
 pub(super) struct Page {
     pub(super) pull_requests: Vec<PullRequest>,
     pub(super) has_next_page: bool,
+    pub(super) end_cursor: Option<String>,
     pub(super) partial: bool,
 }
 
 pub(super) struct IssuePage {
     pub(super) issues: Vec<Issue>,
     pub(super) has_next_page: bool,
+    pub(super) end_cursor: Option<String>,
     pub(super) partial: bool,
 }
 
@@ -193,8 +195,17 @@ fn fetch_pages(
     commits: &[String],
     repository: remote::GitHubRepository,
     deadline: Instant,
-    mut fetch_page: impl FnMut(&remote::GitHubRepository, &str, Instant) -> Result<Page, gh::FetchError>,
-    mut fetch_issue_page: impl FnMut(&PullRequest, Instant) -> Result<IssuePage, gh::FetchError>,
+    mut fetch_page: impl FnMut(
+        &remote::GitHubRepository,
+        &str,
+        Option<&str>,
+        Instant,
+    ) -> Result<Page, gh::FetchError>,
+    mut fetch_issue_page: impl FnMut(
+        &PullRequest,
+        Option<&str>,
+        Instant,
+    ) -> Result<IssuePage, gh::FetchError>,
 ) -> LinksReport {
     let mut result = LinksReport::new(
         Some(repository.name_with_owner()),
@@ -210,209 +221,566 @@ fn fetch_pages(
             .collect(),
     );
     let mut api_requests = 0;
-    let mut global_fetch_failed = false;
     let mut pull_request_indexes = HashMap::<(String, u64), usize>::new();
+    let mut commit_partial = vec![false; commits.len()];
+    let mut commit_cursors = vec![None; commits.len()];
 
     for (commit_index, commit_sha) in commits.iter().enumerate() {
-        if api_requests == MAX_API_REQUESTS {
-            set_reason(
-                &mut result.reason,
-                "GitHub request limit reached; remaining commits were not queried.",
-            );
+        if let Some(reason) = api_stop_reason(api_requests, deadline) {
+            result.reason = Some(reason.to_owned());
             break;
         }
-        if Instant::now() >= deadline {
-            set_reason(
-                &mut result.reason,
-                "GitHub association lookup timed out; remaining commits were not queried.",
-            );
+        if linked_object_count(&result) >= MAX_LINKED_OBJECTS {
+            result.reason =
+                Some("GitHub object limit reached; remaining commits were not queried.".to_owned());
             break;
         }
 
         api_requests += 1;
-        let page = match fetch_page(&repository, commit_sha, deadline) {
+        let page = match fetch_page(&repository, commit_sha, None, deadline) {
             Ok(page) => page,
             Err(error) => {
                 result.commit_associations[commit_index].status = CommitStatus::Failed;
-                set_reason(&mut result.reason, fetch_error_message(error));
-                global_fetch_failed = true;
+                result.reason = Some(fetch_error_message(error).to_owned());
                 break;
             }
         };
-
-        let mut page_limited = false;
-        for pull_request in page.pull_requests {
-            let key = (
-                pull_request.repository.to_ascii_lowercase(),
-                pull_request.number,
+        let (cursor, object_limited) = merge_pull_request_page(
+            &mut result,
+            commit_index,
+            page,
+            &mut pull_request_indexes,
+            &mut commit_partial,
+        );
+        commit_cursors[commit_index] = cursor;
+        if object_limited {
+            result.reason = Some(
+                "GitHub object limit reached; remaining associations were not queried.".to_owned(),
             );
-            let index = if let Some(index) = pull_request_indexes.get(&key) {
-                *index
-            } else {
-                if result.pull_requests.len() + result.issues.len() == MAX_LINKED_OBJECTS {
-                    page_limited = true;
+            break;
+        }
+    }
+
+    let mut issue_indexes = HashMap::<(String, u64), usize>::new();
+    let mut issue_partial = vec![false; result.pull_requests.len()];
+    let mut issue_cursors = vec![None; result.pull_requests.len()];
+    let mut global_fetch_failed = result
+        .commit_associations
+        .iter()
+        .any(|association| matches!(association.status, CommitStatus::Failed));
+
+    if !global_fetch_failed {
+        for pull_request_index in 0..result.pull_requests.len() {
+            if let Some(reason) = api_stop_reason(api_requests, deadline) {
+                result.issue_reason = Some(reason.to_owned());
+                if commit_cursors.iter().any(Option::is_some) {
+                    result.reason = Some(reason.to_owned());
+                }
+                break;
+            }
+            if linked_object_count(&result) >= MAX_LINKED_OBJECTS {
+                let reason =
+                    "GitHub object limit reached; remaining issue associations were not queried.";
+                result.issue_reason = Some(reason.to_owned());
+                if commit_cursors.iter().any(Option::is_some) {
+                    result.reason = Some(reason.to_owned());
+                }
+                break;
+            }
+
+            match fetch_and_merge_issue_page(
+                &mut result,
+                pull_request_index,
+                None,
+                &mut issue_indexes,
+                &mut issue_partial,
+                &mut api_requests,
+                deadline,
+                &mut fetch_issue_page,
+            ) {
+                IssuePageOutcome::Complete => {}
+                IssuePageOutcome::Continue(cursor) => {
+                    issue_cursors[pull_request_index] = Some(cursor);
+                }
+                IssuePageOutcome::ObjectLimit => {
+                    if commit_cursors.iter().any(Option::is_some) {
+                        result.reason = result.issue_reason.clone();
+                    }
                     break;
                 }
-                let index = result.pull_requests.len();
-                pull_request_indexes.insert(key, index);
-                result.pull_requests.push(pull_request);
-                index
-            };
-            let url = result.pull_requests[index].url.clone();
-            let associations = &mut result.commit_associations[commit_index].pull_request_urls;
-            if !associations.contains(&url) {
-                associations.push(url);
+                IssuePageOutcome::Failed => {
+                    global_fetch_failed = true;
+                    if commit_cursors.iter().any(Option::is_some) {
+                        result.reason = result.issue_reason.clone();
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    if !global_fetch_failed {
+        let mut pending_pages = VecDeque::new();
+        for (commit_index, cursor) in commit_cursors.into_iter().enumerate() {
+            if let Some(cursor) = cursor {
+                pending_pages.push_back(PendingPage::PullRequests {
+                    commit_index,
+                    cursor,
+                });
+            }
+        }
+        for (pull_request_index, cursor) in issue_cursors.into_iter().enumerate() {
+            if let Some(cursor) = cursor {
+                pending_pages.push_back(PendingPage::Issues {
+                    pull_request_index,
+                    cursor,
+                });
             }
         }
 
-        let association = &mut result.commit_associations[commit_index];
-        association.status = if page.partial || page.has_next_page || page_limited {
+        'pagination: while !pending_pages.is_empty() {
+            if let Some(reason) = api_stop_reason(api_requests, deadline) {
+                mark_pending_pages_stopped(
+                    &mut result,
+                    &pending_pages,
+                    &mut commit_partial,
+                    &mut issue_partial,
+                    reason,
+                );
+                break;
+            }
+            if linked_object_count(&result) >= MAX_LINKED_OBJECTS {
+                mark_pending_pages_stopped(
+                    &mut result,
+                    &pending_pages,
+                    &mut commit_partial,
+                    &mut issue_partial,
+                    "GitHub object limit reached; remaining association pages were not queried.",
+                );
+                break;
+            }
+
+            match pending_pages.pop_front().expect("queue is not empty") {
+                PendingPage::PullRequests {
+                    commit_index,
+                    cursor,
+                } => {
+                    let first_new_pull_request = result.pull_requests.len();
+                    api_requests += 1;
+                    let page = match fetch_page(
+                        &repository,
+                        &commits[commit_index],
+                        Some(&cursor),
+                        deadline,
+                    ) {
+                        Ok(page) => page,
+                        Err(error) => {
+                            result.commit_associations[commit_index].status = CommitStatus::Failed;
+                            let reason = fetch_error_message(error);
+                            result.reason = Some(reason.to_owned());
+                            mark_pending_pages_stopped(
+                                &mut result,
+                                &pending_pages,
+                                &mut commit_partial,
+                                &mut issue_partial,
+                                reason,
+                            );
+                            break 'pagination;
+                        }
+                    };
+                    let (next_cursor, object_limited) = merge_pull_request_page(
+                        &mut result,
+                        commit_index,
+                        page,
+                        &mut pull_request_indexes,
+                        &mut commit_partial,
+                    );
+                    if object_limited {
+                        result.reason = Some(
+                            "GitHub object limit reached; remaining associations were not queried."
+                                .to_owned(),
+                        );
+                        mark_pending_pages_stopped(
+                            &mut result,
+                            &pending_pages,
+                            &mut commit_partial,
+                            &mut issue_partial,
+                            "GitHub object limit reached; remaining association pages were not queried.",
+                        );
+                        break 'pagination;
+                    }
+                    if let Some(cursor) = next_cursor {
+                        pending_pages.push_back(PendingPage::PullRequests {
+                            commit_index,
+                            cursor,
+                        });
+                    }
+
+                    for pull_request_index in first_new_pull_request..result.pull_requests.len() {
+                        issue_partial.push(false);
+                        if let Some(reason) = api_stop_reason(api_requests, deadline) {
+                            result.issue_reason = Some(reason.to_owned());
+                            mark_pending_pages_stopped(
+                                &mut result,
+                                &pending_pages,
+                                &mut commit_partial,
+                                &mut issue_partial,
+                                reason,
+                            );
+                            break 'pagination;
+                        }
+                        if linked_object_count(&result) >= MAX_LINKED_OBJECTS {
+                            let reason = "GitHub object limit reached; remaining associations were not queried.";
+                            result.issue_reason = Some(reason.to_owned());
+                            mark_pending_pages_stopped(
+                                &mut result,
+                                &pending_pages,
+                                &mut commit_partial,
+                                &mut issue_partial,
+                                reason,
+                            );
+                            break 'pagination;
+                        }
+
+                        match fetch_and_merge_issue_page(
+                            &mut result,
+                            pull_request_index,
+                            None,
+                            &mut issue_indexes,
+                            &mut issue_partial,
+                            &mut api_requests,
+                            deadline,
+                            &mut fetch_issue_page,
+                        ) {
+                            IssuePageOutcome::Complete => {}
+                            IssuePageOutcome::Continue(cursor) => {
+                                pending_pages.push_back(PendingPage::Issues {
+                                    pull_request_index,
+                                    cursor,
+                                });
+                            }
+                            IssuePageOutcome::ObjectLimit => {
+                                mark_pending_pages_stopped(
+                                    &mut result,
+                                    &pending_pages,
+                                    &mut commit_partial,
+                                    &mut issue_partial,
+                                    "GitHub object limit reached; remaining association pages were not queried.",
+                                );
+                                break 'pagination;
+                            }
+                            IssuePageOutcome::Failed => {
+                                let reason = result.issue_reason.clone().unwrap_or_else(|| {
+                                    "GitHub association lookup failed.".to_owned()
+                                });
+                                mark_pending_pages_stopped(
+                                    &mut result,
+                                    &pending_pages,
+                                    &mut commit_partial,
+                                    &mut issue_partial,
+                                    &reason,
+                                );
+                                break 'pagination;
+                            }
+                        }
+                    }
+                }
+                PendingPage::Issues {
+                    pull_request_index,
+                    cursor,
+                } => match fetch_and_merge_issue_page(
+                    &mut result,
+                    pull_request_index,
+                    Some(&cursor),
+                    &mut issue_indexes,
+                    &mut issue_partial,
+                    &mut api_requests,
+                    deadline,
+                    &mut fetch_issue_page,
+                ) {
+                    IssuePageOutcome::Complete => {}
+                    IssuePageOutcome::Continue(cursor) => {
+                        pending_pages.push_back(PendingPage::Issues {
+                            pull_request_index,
+                            cursor,
+                        });
+                    }
+                    IssuePageOutcome::ObjectLimit => {
+                        mark_pending_pages_stopped(
+                            &mut result,
+                            &pending_pages,
+                            &mut commit_partial,
+                            &mut issue_partial,
+                            "GitHub object limit reached; remaining association pages were not queried.",
+                        );
+                        break 'pagination;
+                    }
+                    IssuePageOutcome::Failed => {
+                        let reason = result
+                            .issue_reason
+                            .clone()
+                            .unwrap_or_else(|| "GitHub association lookup failed.".to_owned());
+                        mark_pending_pages_stopped(
+                            &mut result,
+                            &pending_pages,
+                            &mut commit_partial,
+                            &mut issue_partial,
+                            &reason,
+                        );
+                        break 'pagination;
+                    }
+                },
+            }
+        }
+    }
+
+    result.status = overall_status(&result.commit_associations);
+    result.issue_status = overall_issue_status(&result.pull_requests);
+    result
+}
+
+enum PendingPage {
+    PullRequests {
+        commit_index: usize,
+        cursor: String,
+    },
+    Issues {
+        pull_request_index: usize,
+        cursor: String,
+    },
+}
+
+enum IssuePageOutcome {
+    Complete,
+    Continue(String),
+    ObjectLimit,
+    Failed,
+}
+
+fn api_stop_reason(api_requests: usize, deadline: Instant) -> Option<&'static str> {
+    if Instant::now() >= deadline {
+        Some(
+            "GitHub association lookup timed out; remaining association requests were not queried.",
+        )
+    } else if api_requests >= MAX_API_REQUESTS {
+        Some("GitHub request limit reached; remaining association requests were not queried.")
+    } else {
+        None
+    }
+}
+
+fn linked_object_count(result: &LinksReport) -> usize {
+    result.pull_requests.len() + result.issues.len()
+}
+
+fn merge_pull_request_page(
+    result: &mut LinksReport,
+    commit_index: usize,
+    page: Page,
+    pull_request_indexes: &mut HashMap<(String, u64), usize>,
+    commit_partial: &mut [bool],
+) -> (Option<String>, bool) {
+    let mut object_limited = false;
+    for pull_request in page.pull_requests {
+        let key = (
+            pull_request.repository.to_ascii_lowercase(),
+            pull_request.number,
+        );
+        let index = if let Some(index) = pull_request_indexes.get(&key) {
+            *index
+        } else {
+            if linked_object_count(result) >= MAX_LINKED_OBJECTS {
+                object_limited = true;
+                continue;
+            }
+            let index = result.pull_requests.len();
+            pull_request_indexes.insert(key, index);
+            result.pull_requests.push(pull_request);
+            index
+        };
+        let url = result.pull_requests[index].url.clone();
+        let associations = &mut result.commit_associations[commit_index].pull_request_urls;
+        if !associations.contains(&url) {
+            associations.push(url);
+        }
+    }
+
+    let next_cursor = if page.has_next_page {
+        page.end_cursor
+    } else {
+        None
+    };
+    if page.has_next_page && next_cursor.is_none() {
+        commit_partial[commit_index] = true;
+        set_reason(
+            &mut result.reason,
+            "A pull-request page could not be continued because its cursor was unavailable; later pages were not fetched.",
+        );
+    }
+    if page.partial {
+        commit_partial[commit_index] = true;
+        set_reason(
+            &mut result.reason,
+            "GitHub returned partial data; some pull-request links may be unavailable.",
+        );
+    }
+    if object_limited {
+        commit_partial[commit_index] = true;
+        result.reason = Some(
+            "GitHub object limit reached; remaining associations were not queried.".to_owned(),
+        );
+    }
+    result.commit_associations[commit_index].status =
+        if commit_partial[commit_index] || next_cursor.is_some() || object_limited {
             CommitStatus::Partial
         } else {
             CommitStatus::Complete
         };
 
-        if page.partial {
-            set_reason(
-                &mut result.reason,
-                "GitHub returned partial data; some pull-request links may be unavailable.",
-            );
-        } else if page.has_next_page {
-            set_reason(
-                &mut result.reason,
-                "Some commits have more than 50 associated pull requests; later pages were not fetched.",
-            );
-        }
-
-        if page_limited {
-            set_reason(
-                &mut result.reason,
-                "GitHub object limit reached; remaining associations were not queried.",
-            );
-            break;
-        }
-        if result.pull_requests.len() + result.issues.len() == MAX_LINKED_OBJECTS
-            && commit_index + 1 < commits.len()
-        {
-            set_reason(
-                &mut result.reason,
-                "GitHub object limit reached; remaining commits were not queried.",
-            );
-            break;
-        }
-    }
-
-    result.status = overall_status(&result.commit_associations);
-    if !global_fetch_failed {
-        fetch_issue_pages(
-            &mut result,
-            &mut api_requests,
-            deadline,
-            &mut fetch_issue_page,
-        );
-    }
-    result.issue_status = overall_issue_status(&result.pull_requests);
-    result
+    (
+        if object_limited { None } else { next_cursor },
+        object_limited,
+    )
 }
 
-fn fetch_issue_pages(
+fn fetch_and_merge_issue_page(
     result: &mut LinksReport,
+    pull_request_index: usize,
+    cursor: Option<&str>,
+    issue_indexes: &mut HashMap<(String, u64), usize>,
+    issue_partial: &mut [bool],
     api_requests: &mut usize,
     deadline: Instant,
-    fetch_issue_page: &mut impl FnMut(&PullRequest, Instant) -> Result<IssuePage, gh::FetchError>,
-) {
-    let mut issue_indexes = HashMap::<(String, u64), usize>::new();
-    for pull_request_index in 0..result.pull_requests.len() {
-        if *api_requests == MAX_API_REQUESTS {
-            set_reason(
-                &mut result.issue_reason,
-                "GitHub request limit reached; remaining issue associations were not queried.",
-            );
-            break;
-        }
-        if Instant::now() >= deadline {
-            set_reason(
-                &mut result.issue_reason,
-                "GitHub association lookup timed out; remaining issue associations were not queried.",
-            );
-            break;
-        }
-        if result.pull_requests.len() + result.issues.len() == MAX_LINKED_OBJECTS {
-            set_reason(
-                &mut result.issue_reason,
-                "GitHub object limit reached; remaining issue associations were not queried.",
-            );
-            break;
-        }
-        if result.pull_requests[pull_request_index].node_id.is_none() {
+    fetch_issue_page: &mut impl FnMut(
+        &PullRequest,
+        Option<&str>,
+        Instant,
+    ) -> Result<IssuePage, gh::FetchError>,
+) -> IssuePageOutcome {
+    if result.pull_requests[pull_request_index].node_id.is_none() {
+        let reason = "Pull request ID was unavailable; issue associations could not be queried.";
+        let pull_request = &mut result.pull_requests[pull_request_index];
+        pull_request.issue_status = IssueStatus::Failed;
+        pull_request.issue_reason = Some(reason.to_owned());
+        set_reason(&mut result.issue_reason, reason);
+        return IssuePageOutcome::Complete;
+    }
+
+    *api_requests += 1;
+    let page = match fetch_issue_page(&result.pull_requests[pull_request_index], cursor, deadline) {
+        Ok(page) => page,
+        Err(error) => {
+            let reason = fetch_error_message(error);
             let pull_request = &mut result.pull_requests[pull_request_index];
             pull_request.issue_status = IssueStatus::Failed;
-            let reason =
-                "Pull request ID was unavailable; issue associations could not be queried.";
             pull_request.issue_reason = Some(reason.to_owned());
-            set_reason(&mut result.issue_reason, reason);
-            continue;
+            result.issue_reason = Some(reason.to_owned());
+            return IssuePageOutcome::Failed;
         }
+    };
 
-        *api_requests += 1;
-        let page = match fetch_issue_page(&result.pull_requests[pull_request_index], deadline) {
-            Ok(page) => page,
-            Err(error) => {
-                let reason = fetch_error_message(error);
-                let pull_request = &mut result.pull_requests[pull_request_index];
-                pull_request.issue_status = IssueStatus::Failed;
-                pull_request.issue_reason = Some(reason.to_owned());
-                set_reason(&mut result.issue_reason, reason);
-                break;
+    let mut object_limited = false;
+    for issue in page.issues {
+        let key = (issue.repository.to_ascii_lowercase(), issue.number);
+        let index = if let Some(index) = issue_indexes.get(&key) {
+            *index
+        } else {
+            if linked_object_count(result) >= MAX_LINKED_OBJECTS {
+                object_limited = true;
+                continue;
             }
+            let index = result.issues.len();
+            issue_indexes.insert(key, index);
+            result.issues.push(issue);
+            index
+        };
+        let url = result.issues[index].url.clone();
+        let issue_urls = &mut result.pull_requests[pull_request_index].issue_urls;
+        if !issue_urls.contains(&url) {
+            issue_urls.push(url);
+        }
+    }
+
+    let next_cursor = if page.has_next_page {
+        page.end_cursor
+    } else {
+        None
+    };
+    if page.partial {
+        issue_partial[pull_request_index] = true;
+        let reason = "GitHub returned partial issue data; some issue links may be unavailable.";
+        result.pull_requests[pull_request_index].issue_reason = Some(reason.to_owned());
+        set_reason(&mut result.issue_reason, reason);
+    }
+    if page.has_next_page && next_cursor.is_none() {
+        issue_partial[pull_request_index] = true;
+        let reason = "An issue page could not be continued because its cursor was unavailable; later pages were not fetched.";
+        if result.pull_requests[pull_request_index]
+            .issue_reason
+            .is_none()
+        {
+            result.pull_requests[pull_request_index].issue_reason = Some(reason.to_owned());
+        }
+        set_reason(&mut result.issue_reason, reason);
+    }
+    if object_limited {
+        issue_partial[pull_request_index] = true;
+        let reason = "GitHub object limit reached; remaining issue associations were not queried.";
+        result.pull_requests[pull_request_index].issue_reason = Some(reason.to_owned());
+        result.issue_reason = Some(reason.to_owned());
+    }
+    result.pull_requests[pull_request_index].issue_status =
+        if issue_partial[pull_request_index] || next_cursor.is_some() || object_limited {
+            IssueStatus::Partial
+        } else {
+            IssueStatus::Complete
         };
 
-        let mut object_limited = false;
-        for issue in page.issues {
-            let key = (issue.repository.to_ascii_lowercase(), issue.number);
-            let index = if let Some(index) = issue_indexes.get(&key) {
-                *index
-            } else {
-                if result.pull_requests.len() + result.issues.len() == MAX_LINKED_OBJECTS {
-                    object_limited = true;
-                    break;
-                }
-                let index = result.issues.len();
-                issue_indexes.insert(key, index);
-                result.issues.push(issue);
-                index
-            };
-            let url = result.issues[index].url.clone();
-            let issue_urls = &mut result.pull_requests[pull_request_index].issue_urls;
-            if !issue_urls.contains(&url) {
-                issue_urls.push(url);
-            }
-        }
-
-        let pull_request = &mut result.pull_requests[pull_request_index];
-        if object_limited {
-            pull_request.issue_status = IssueStatus::Partial;
-            let reason =
-                "GitHub object limit reached; remaining issue associations were not queried.";
-            pull_request.issue_reason = Some(reason.to_owned());
-            set_reason(&mut result.issue_reason, reason);
-            break;
-        }
-        if page.partial || page.has_next_page {
-            pull_request.issue_status = IssueStatus::Partial;
-            let reason = if page.partial {
-                "GitHub returned partial issue data; some issue links may be unavailable."
-            } else {
-                "Some pull requests have more than 50 associated issues; later pages were not fetched."
-            };
-            pull_request.issue_reason = Some(reason.to_owned());
-            set_reason(&mut result.issue_reason, reason);
-        } else {
-            pull_request.issue_status = IssueStatus::Complete;
-        }
+    if object_limited {
+        IssuePageOutcome::ObjectLimit
+    } else if let Some(cursor) = next_cursor {
+        IssuePageOutcome::Continue(cursor)
+    } else {
+        IssuePageOutcome::Complete
     }
 }
 
+fn mark_pending_pages_stopped(
+    result: &mut LinksReport,
+    pending_pages: &VecDeque<PendingPage>,
+    commit_partial: &mut [bool],
+    issue_partial: &mut [bool],
+    reason: &str,
+) {
+    let mut pull_request_pages_pending = false;
+    let mut issue_pages_pending = false;
+    for page in pending_pages {
+        match page {
+            PendingPage::PullRequests { commit_index, .. } => {
+                pull_request_pages_pending = true;
+                commit_partial[*commit_index] = true;
+                result.commit_associations[*commit_index].status = CommitStatus::Partial;
+            }
+            PendingPage::Issues {
+                pull_request_index, ..
+            } => {
+                issue_pages_pending = true;
+                issue_partial[*pull_request_index] = true;
+                let pull_request = &mut result.pull_requests[*pull_request_index];
+                pull_request.issue_status = IssueStatus::Partial;
+                if pull_request.issue_reason.is_none() {
+                    pull_request.issue_reason = Some(reason.to_owned());
+                }
+            }
+        }
+    }
+    if pull_request_pages_pending {
+        result.reason = Some(reason.to_owned());
+    }
+    if issue_pages_pending {
+        result.issue_reason = Some(reason.to_owned());
+    }
+}
 fn overall_issue_status(pull_requests: &[PullRequest]) -> IssueStatus {
     if pull_requests.is_empty() {
         return IssueStatus::NotQueried;
@@ -531,6 +899,7 @@ mod tests {
         IssuePage {
             issues: Vec::new(),
             has_next_page: false,
+            end_cursor: None,
             partial: false,
         }
     }
@@ -539,6 +908,7 @@ mod tests {
         IssuePage {
             issues,
             has_next_page: false,
+            end_cursor: None,
             partial: false,
         }
     }
@@ -557,6 +927,7 @@ mod tests {
         Page {
             pull_requests,
             has_next_page: false,
+            end_cursor: None,
             partial: false,
         }
     }
@@ -588,7 +959,7 @@ mod tests {
             &commits,
             repository(),
             Instant::now() + Duration::from_secs(1),
-            |_, sha, _| {
+            |_, sha, _, _| {
                 seen.push(sha.to_owned());
                 Ok(page(if sha == "first" {
                     vec![pull_request(42), pull_request(43)]
@@ -596,7 +967,7 @@ mod tests {
                     vec![pull_request(42)]
                 }))
             },
-            |_, _| Ok(empty_issue_page()),
+            |_, _, _| Ok(empty_issue_page()),
         );
 
         assert_eq!(seen, ["first", "second"]);
@@ -616,11 +987,11 @@ mod tests {
             &commits,
             repository(),
             Instant::now() + Duration::from_secs(1),
-            |_, _, _| {
+            |_, _, _, _| {
                 calls += 1;
                 Ok(page(Vec::new()))
             },
-            |_, _| Ok(empty_issue_page()),
+            |_, _, _| Ok(empty_issue_page()),
         );
         assert_eq!(calls, MAX_API_REQUESTS);
         assert!(matches!(
@@ -637,7 +1008,7 @@ mod tests {
             &commits,
             repository(),
             Instant::now() + Duration::from_secs(1),
-            |_, _, _| {
+            |_, _, _, _| {
                 let page_number = page_index;
                 page_index += 1;
                 Ok(page(
@@ -646,7 +1017,7 @@ mod tests {
                         .collect(),
                 ))
             },
-            |_, _| Ok(empty_issue_page()),
+            |_, _, _| Ok(empty_issue_page()),
         );
         assert_eq!(page_index, 4);
         assert_eq!(links.pull_requests.len(), MAX_LINKED_OBJECTS);
@@ -660,14 +1031,15 @@ mod tests {
             &commits,
             repository(),
             Instant::now() + Duration::from_secs(1),
-            |_, _, _| {
+            |_, _, _, _| {
                 Ok(Page {
                     pull_requests: vec![pull_request(42)],
                     has_next_page: true,
+                    end_cursor: None,
                     partial: false,
                 })
             },
-            |_, _| Ok(empty_issue_page()),
+            |_, _, _| Ok(empty_issue_page()),
         );
 
         assert!(matches!(links.status, FetchStatus::Partial));
@@ -691,8 +1063,8 @@ mod tests {
             &commits,
             repository(),
             Instant::now() + Duration::from_secs(1),
-            |_, _, _| Ok(page(vec![pull_request(42), pull_request(43)])),
-            |pull_request, _| {
+            |_, _, _, _| Ok(page(vec![pull_request(42), pull_request(43)])),
+            |pull_request, _, _| {
                 issue_calls.push(pull_request.number);
                 if pull_request.number == 42 {
                     Ok(issue_page(vec![issue("acme/one", 1), issue("acme/two", 1)]))
@@ -740,11 +1112,11 @@ mod tests {
             &commits,
             repository(),
             Instant::now() + Duration::from_secs(1),
-            |_, _, _| {
+            |_, _, _, _| {
                 pull_request_calls += 1;
                 Ok(page(vec![pull_request(pull_request_calls as u64)]))
             },
-            |_, _| {
+            |_, _, _| {
                 issue_calls += 1;
                 Ok(empty_issue_page())
             },
@@ -777,12 +1149,13 @@ mod tests {
             &commits,
             repository(),
             Instant::now() + Duration::from_secs(1),
-            |_, _, _| Ok(page(vec![pull_request(42), pull_request(43)])),
-            |pull_request, _| {
+            |_, _, _, _| Ok(page(vec![pull_request(42), pull_request(43)])),
+            |pull_request, _, _| {
                 if pull_request.number == 42 {
                     Ok(IssuePage {
                         issues: vec![issue("acme/widget", 1)],
                         has_next_page: true,
+                        end_cursor: None,
                         partial: false,
                     })
                 } else {
@@ -802,13 +1175,7 @@ mod tests {
         ));
         assert!(links.pull_requests[1].issue_reason.is_some());
         assert!(matches!(links.issue_status, IssueStatus::Partial));
-        assert!(
-            links
-                .issue_reason
-                .as_deref()
-                .unwrap()
-                .contains("later pages")
-        );
+        assert!(links.issue_reason.as_deref().unwrap().contains("failed"));
         assert!(matches!(links.status, FetchStatus::Complete));
     }
     #[test]
@@ -818,8 +1185,8 @@ mod tests {
             &commits,
             repository(),
             Instant::now() + Duration::from_secs(1),
-            |_, _, _| Ok(page(Vec::new())),
-            |_, _| panic!("issue lookup must not run without pull requests"),
+            |_, _, _, _| Ok(page(Vec::new())),
+            |_, _, _| panic!("issue lookup must not run without pull requests"),
         );
 
         assert!(matches!(links.issue_status, IssueStatus::NotQueried));
@@ -833,13 +1200,14 @@ mod tests {
             &commits,
             repository(),
             Instant::now() + Duration::from_secs(1),
-            |_, _, _| Ok(page(vec![pull_request(42), pull_request(43)])),
-            |pull_request, _| {
+            |_, _, _, _| Ok(page(vec![pull_request(42), pull_request(43)])),
+            |pull_request, _, _| {
                 issue_calls.push(pull_request.number);
                 if pull_request.number == 42 {
                     Ok(IssuePage {
                         issues: Vec::new(),
                         has_next_page: false,
+                        end_cursor: None,
                         partial: true,
                     })
                 } else {

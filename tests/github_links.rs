@@ -781,7 +781,10 @@ mod unix {
         assert!(gh.log().contains("associatedPullRequests(first: 50)"));
         assert!(gh.log().contains("owner=acme"));
         assert!(gh.log().contains("name=widget"));
-        assert!(gh.log().contains("closingIssuesReferences(first: 50)"));
+        assert!(
+            gh.log()
+                .contains("closingIssuesReferences(first: 50, after: $after)")
+        );
         assert!(!gh.log().contains("userLinkedOnly"));
         let human = gh.run(
             &repo,
@@ -835,9 +838,37 @@ mod unix {
     }
 
     #[test]
-    fn remaining_pull_request_pages_are_marked_partial() {
+    fn later_pull_request_page_is_fetched_and_new_pr_gets_issue_homepage() {
         let repo = indexed_repo("PagedMarker");
-        let gh = FakeGh::new(&response(true, serde_json::json!([pull_request_node()])));
+        let mut first_page: serde_json::Value =
+            serde_json::from_str(&response(true, serde_json::json!([pull_request_node()])))
+                .unwrap();
+        first_page["data"]["repository"]["object"]["associatedPullRequests"]["pageInfo"]["endCursor"] =
+            serde_json::json!("pr-cursor");
+        let mut first_issue_page: serde_json::Value = serde_json::from_str(&issue_response(
+            true,
+            serde_json::json!([issue_node("ISSUE_7", "acme/widget", 7, "First Issue")]),
+        ))
+        .unwrap();
+        first_issue_page["data"]["node"]["closingIssuesReferences"]["pageInfo"]["endCursor"] =
+            serde_json::json!("issue-cursor");
+        let gh = FakeGh::with_responses(
+            vec![
+                first_page.to_string(),
+                response(
+                    false,
+                    serde_json::json!([pull_request_node_with("PR_43", 43, "Next PR")]),
+                ),
+            ],
+            vec![
+                first_issue_page.to_string(),
+                issue_response(
+                    false,
+                    serde_json::json!([issue_node("ISSUE_8", "acme/widget", 8, "Second Issue")]),
+                ),
+                issue_response(false, serde_json::json!([])),
+            ],
+        );
         let output = gh.run(
             &repo,
             &[
@@ -852,16 +883,125 @@ mod unix {
         assert_eq!(output.status.code(), Some(0));
         let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         let links = &value["github_links"];
-        assert_eq!(links["status"], "partial");
-        assert_eq!(links["pull_requests"].as_array().unwrap().len(), 1);
-        assert_eq!(links["commit_associations"][0]["status"], "partial");
+        assert_eq!(links["status"], "complete");
+        assert_eq!(links["pull_requests"].as_array().unwrap().len(), 2);
         assert!(
-            links["reason"]
-                .as_str()
+            links["pull_requests"]
+                .as_array()
                 .unwrap()
-                .contains("later pages were not fetched")
+                .iter()
+                .all(|pull_request| pull_request["issue_status"] == "complete")
         );
-        assert_eq!(gh.calls(), 2);
+        assert_eq!(
+            links["commit_associations"][0]["pull_request_urls"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(links["issue_status"], "complete");
+        assert_eq!(links["issues"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            links["pull_requests"][0]["issue_urls"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(gh.calls(), 5);
+        let calls = gh.log().lines().collect::<Vec<_>>();
+        assert!(calls[0].contains("associatedPullRequests"));
+        assert!(calls[1].contains("closingIssuesReferences"));
+        assert!(
+            calls[2].contains("associatedPullRequests") && calls[2].contains("after=pr-cursor")
+        );
+        assert!(calls[3].contains("closingIssuesReferences"));
+        assert!(
+            calls[4].contains("closingIssuesReferences") && calls[4].contains("after=issue-cursor")
+        );
+    }
+
+    #[test]
+    fn coverage_budget_fetches_every_homepage_before_paginating() {
+        let repo = TestRepo::new();
+        for index in 0..10 {
+            commit(
+                &repo,
+                &format!("CoverageBudgetMarker {index}"),
+                &format!("content {index}"),
+            );
+        }
+        repo.index();
+
+        let pull_request_responses = (1..=10_u64)
+            .map(|number| {
+                let mut page_response: serde_json::Value = serde_json::from_str(&response(
+                    true,
+                    serde_json::json!([pull_request_node_with(
+                        &format!("PR_{number}"),
+                        number,
+                        &format!("PR {number}"),
+                    )]),
+                ))
+                .unwrap();
+                page_response["data"]["repository"]["object"]["associatedPullRequests"]["pageInfo"]
+                    ["endCursor"] = serde_json::json!(format!("pr-cursor-{number}"));
+                page_response.to_string()
+            })
+            .collect();
+        let gh = FakeGh::with_responses(
+            pull_request_responses,
+            vec![issue_response(false, serde_json::json!([])); 10],
+        );
+        let output = gh.run(
+            &repo,
+            &[
+                "search",
+                "CoverageBudgetMarker",
+                "--limit",
+                "10",
+                "--github-links",
+                "--github-repo",
+                "acme/widget",
+                "--json",
+            ],
+        );
+
+        assert_eq!(output.status.code(), Some(0));
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let links = &value["github_links"];
+        assert_eq!(links["status"], "partial");
+        assert_eq!(links["issue_status"], "complete");
+        assert_eq!(links["commit_associations"].as_array().unwrap().len(), 10);
+        assert!(
+            links["commit_associations"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|association| association["status"] == "partial")
+        );
+        assert_eq!(links["pull_requests"].as_array().unwrap().len(), 10);
+        assert!(
+            links["pull_requests"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|pull_request| pull_request["issue_status"] == "complete")
+        );
+        assert!(links["reason"].as_str().unwrap().contains("request limit"));
+        assert_eq!(gh.calls(), 20);
+        let calls = gh.log().lines().collect::<Vec<_>>();
+        assert!(
+            calls[..10]
+                .iter()
+                .all(|call| call.contains("associatedPullRequests"))
+        );
+        assert!(
+            calls[10..]
+                .iter()
+                .all(|call| call.contains("closingIssuesReferences"))
+        );
+        assert!(calls.iter().all(|call| !call.contains("after=pr-cursor-")));
     }
 
     #[test]
