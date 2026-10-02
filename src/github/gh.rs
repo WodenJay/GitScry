@@ -139,7 +139,7 @@ fn parse_response(output: &[u8], command_failed: bool) -> Result<Page, FetchErro
     let response: ApiResponse =
         serde_json::from_slice(output).map_err(|_| FetchError::RequestFailed)?;
     let has_data = response.data.is_some();
-    if has_global_api_error(&response.errors) {
+    if has_global_api_error(&response.errors, has_data) {
         return Err(FetchError::RequestFailed);
     }
     let connection = response
@@ -148,7 +148,12 @@ fn parse_response(output: &[u8], command_failed: bool) -> Result<Page, FetchErro
         .and_then(|repository| repository.object)
         .and_then(|object| object.associated_pull_requests);
     let Some(connection) = connection else {
-        if has_data {
+        if has_data
+            || response
+                .errors
+                .iter()
+                .any(|error| error.get("path").is_some())
+        {
             return Ok(Page {
                 pull_requests: Vec::new(),
                 has_next_page: false,
@@ -213,7 +218,7 @@ fn parse_issue_response(output: &[u8], command_failed: bool) -> Result<IssuePage
     let response: ApiResponse =
         serde_json::from_slice(output).map_err(|_| FetchError::RequestFailed)?;
     let has_data = response.data.is_some();
-    if has_global_api_error(&response.errors) {
+    if has_global_api_error(&response.errors, has_data) {
         return Err(FetchError::RequestFailed);
     }
     let connection = response
@@ -221,7 +226,12 @@ fn parse_issue_response(output: &[u8], command_failed: bool) -> Result<IssuePage
         .and_then(|data| data.node)
         .and_then(|node| node.closing_issues_references);
     let Some(connection) = connection else {
-        if has_data {
+        if has_data
+            || response
+                .errors
+                .iter()
+                .any(|error| error.get("path").is_some())
+        {
             return Ok(IssuePage {
                 issues: Vec::new(),
                 has_next_page: false,
@@ -275,7 +285,7 @@ fn parse_issue_response(output: &[u8], command_failed: bool) -> Result<IssuePage
     })
 }
 
-fn has_global_api_error(errors: &[Value]) -> bool {
+fn has_global_api_error(errors: &[Value], has_data: bool) -> bool {
     errors.iter().any(|error| {
         let error_type = error.get("type").and_then(Value::as_str).or_else(|| {
             error
@@ -285,8 +295,18 @@ fn has_global_api_error(errors: &[Value]) -> bool {
         });
         let is_rate_limited =
             error_type.is_some_and(|error_type| error_type.eq_ignore_ascii_case("RATE_LIMITED"));
+        let is_authentication_error = error_type.is_some_and(|error_type| {
+            error_type.eq_ignore_ascii_case("UNAUTHORIZED")
+                || error_type.eq_ignore_ascii_case("UNAUTHENTICATED")
+                || error_type.eq_ignore_ascii_case("AUTHENTICATION_ERROR")
+                || error_type.eq_ignore_ascii_case("BAD_CREDENTIALS")
+                || (error_type.eq_ignore_ascii_case("FORBIDDEN") && error.get("path").is_none())
+        }) || error
+            .get("message")
+            .and_then(Value::as_str)
+            .is_some_and(|message| message.eq_ignore_ascii_case("Bad credentials"));
 
-        is_rate_limited || error.get("path").is_none()
+        is_rate_limited || is_authentication_error || (!has_data && error.get("path").is_none())
     })
 }
 
@@ -388,7 +408,7 @@ mod issue_response_tests {
 
     #[test]
     fn inaccessible_issue_field_is_partial_instead_of_empty_or_failed() {
-        let response = br#"{"data":{"node":null},"errors":[{"message":"Resource not accessible by integration","path":["node","closingIssuesReferences"]}]}"#;
+        let response = br#"{"data":{"node":null},"errors":[{"type":"FORBIDDEN","message":"Resource not accessible by integration","path":["node","closingIssuesReferences"]}]}"#;
         let page = parse_issue_response(response, true)
             .expect("partial issue data should not stop later pull requests");
 
@@ -405,6 +425,7 @@ mod issue_response_tests {
             Err(FetchError::RequestFailed)
         ));
     }
+
     #[test]
     fn both_graphql_connections_expose_the_opaque_end_cursor() {
         let pull_request_response = br#"{"data":{"repository":{"object":{"associatedPullRequests":{"nodes":[],"pageInfo":{"hasNextPage":true,"endCursor":"pr-cursor"}}}}}}"#;
@@ -423,11 +444,44 @@ mod issue_response_tests {
         assert!(page.partial);
         assert!(page.pull_requests.is_empty());
     }
+
     #[test]
     fn rate_limit_error_with_partial_data_remains_a_failure() {
         let response = br#"{"data":{"node":{"closingIssuesReferences":{"nodes":[],"pageInfo":{"hasNextPage":false}}}},"errors":[{"type":"RATE_LIMITED","path":["node"]}]}"#;
         assert!(matches!(
             parse_issue_response(response, true),
+            Err(FetchError::RequestFailed)
+        ));
+    }
+
+    #[test]
+    fn path_scoped_errors_without_data_remain_local() {
+        let pull_request_response = br#"{"data":null,"errors":[{"message":"Not accessible","path":["repository","object"]}]}"#;
+        let pull_request_page = super::parse_response(pull_request_response, false)
+            .expect("path-scoped errors should be local to this commit");
+        assert!(pull_request_page.partial);
+        assert!(pull_request_page.pull_requests.is_empty());
+
+        let issue_response = br#"{"data":null,"errors":[{"message":"Not accessible","path":["node","closingIssuesReferences"]}]}"#;
+        let issue_page = parse_issue_response(issue_response, false)
+            .expect("path-scoped errors should be local to this pull request");
+        assert!(issue_page.partial);
+        assert!(issue_page.issues.is_empty());
+    }
+
+    #[test]
+    fn partial_data_with_unscoped_errors_remains_usable() {
+        let response = br#"{"data":{"repository":{"object":{"associatedPullRequests":{"nodes":[],"pageInfo":{"hasNextPage":false}}}}},"errors":[{"message":"A field could not be resolved"}]}"#;
+        let page = super::parse_response(response, false)
+            .expect("partial data without error paths should remain usable");
+        assert!(page.partial);
+    }
+
+    #[test]
+    fn authentication_error_with_partial_data_stops_fetching() {
+        let response = br#"{"data":{"node":{"closingIssuesReferences":{"nodes":[],"pageInfo":{"hasNextPage":false}}}},"errors":[{"type":"UNAUTHORIZED","path":["node"]}]}"#;
+        assert!(matches!(
+            parse_issue_response(response, false),
             Err(FetchError::RequestFailed)
         ));
     }

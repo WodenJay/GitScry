@@ -778,7 +778,10 @@ mod unix {
                         .is_some_and(|sha| sha.len() == 40))
         );
         assert_eq!(gh.calls(), 3);
-        assert!(gh.log().contains("associatedPullRequests(first: 50)"));
+        assert!(
+            gh.log()
+                .contains("associatedPullRequests(first: 50, after: $after)")
+        );
         assert!(gh.log().contains("owner=acme"));
         assert!(gh.log().contains("name=widget"));
         assert!(
@@ -1005,6 +1008,160 @@ mod unix {
     }
 
     #[test]
+    fn object_limit_preserves_known_pr_links_from_later_commits() {
+        let repo = TestRepo::new();
+        for index in 0..5 {
+            commit(
+                &repo,
+                &format!("ObjectPullRequestBudgetMarker {index}"),
+                &format!("content {index}"),
+            );
+        }
+        repo.index();
+
+        let mut pull_request_responses = (0..4_u64)
+            .map(|page| {
+                let first_number = page * 50 + 1;
+                let pull_requests = (first_number..first_number + 50)
+                    .map(|number| {
+                        pull_request_node_with(
+                            &format!("PR_{number}"),
+                            number,
+                            &format!("PR {number}"),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                response(false, serde_json::json!(pull_requests))
+            })
+            .collect::<Vec<_>>();
+        pull_request_responses.push(response(
+            false,
+            serde_json::json!([
+                pull_request_node_with("PR_1", 1, "PR 1"),
+                pull_request_node_with("PR_201", 201, "PR 201"),
+            ]),
+        ));
+        let gh = FakeGh::with_responses(
+            pull_request_responses,
+            vec![issue_response(false, serde_json::json!([])); 15],
+        );
+        let output = gh.run(
+            &repo,
+            &[
+                "search",
+                "ObjectPullRequestBudgetMarker",
+                "--limit",
+                "5",
+                "--github-links",
+                "--github-repo",
+                "acme/widget",
+                "--json",
+            ],
+        );
+
+        assert_eq!(output.status.code(), Some(0));
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let links = &value["github_links"];
+        assert_eq!(links["pull_requests"].as_array().unwrap().len(), 200);
+        assert_eq!(links["commit_associations"].as_array().unwrap().len(), 5);
+        assert_eq!(
+            links["commit_associations"][4]["pull_request_urls"],
+            serde_json::json!(["https://github.com/acme/widget/pull/1"])
+        );
+        assert_eq!(links["commit_associations"][4]["status"], "partial");
+        assert!(links["reason"].as_str().unwrap().contains("object limit"));
+        assert!(
+            links["pull_requests"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|pull_request| pull_request["number"] != 201)
+        );
+        assert_eq!(gh.calls(), 20);
+        let calls = gh.log().lines().collect::<Vec<_>>();
+        assert!(
+            calls[..5]
+                .iter()
+                .all(|call| call.contains("associatedPullRequests"))
+        );
+        assert!(
+            calls[5..]
+                .iter()
+                .all(|call| call.contains("closingIssuesReferences"))
+        );
+    }
+
+    #[test]
+    fn object_limit_preserves_new_links_to_existing_issues() {
+        let repo = indexed_repo("ObjectBudgetMarker");
+        let pull_requests = (1..=5_u64)
+            .map(|number| {
+                pull_request_node_with(&format!("PR_{number}"), number, &format!("PR {number}"))
+            })
+            .collect::<Vec<_>>();
+        let mut issue_responses = (0..4_u64)
+            .map(|page| {
+                let first_issue = page * 49 + 1;
+                let issues = (first_issue..first_issue + 49)
+                    .map(|number| {
+                        issue_node(
+                            &format!("ISSUE_{number}"),
+                            "acme/widget",
+                            number,
+                            &format!("Issue {number}"),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                issue_response(false, serde_json::json!(issues))
+            })
+            .collect::<Vec<_>>();
+        issue_responses.push(issue_response(
+            false,
+            serde_json::json!([issue_node("ISSUE_1_FROM_PR_5", "acme/widget", 1, "Issue 1",)]),
+        ));
+        let gh = FakeGh::with_responses(
+            vec![response(false, serde_json::json!(pull_requests))],
+            issue_responses,
+        );
+        let output = gh.run(
+            &repo,
+            &[
+                "search",
+                "ObjectBudgetMarker",
+                "--github-links",
+                "--github-repo",
+                "acme/widget",
+                "--json",
+            ],
+        );
+
+        assert_eq!(output.status.code(), Some(0));
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let links = &value["github_links"];
+        assert_eq!(links["pull_requests"].as_array().unwrap().len(), 5);
+        assert_eq!(links["issues"].as_array().unwrap().len(), 195);
+        assert_eq!(
+            links["pull_requests"].as_array().unwrap().len()
+                + links["issues"].as_array().unwrap().len(),
+            200
+        );
+        assert_eq!(links["issue_status"], "partial");
+        assert!(
+            links["issue_reason"]
+                .as_str()
+                .unwrap()
+                .contains("object limit")
+        );
+        assert_eq!(links["pull_requests"][3]["issue_status"], "partial");
+        assert_eq!(links["pull_requests"][4]["issue_status"], "complete");
+        assert_eq!(
+            links["pull_requests"][4]["issue_urls"],
+            serde_json::json!(["https://github.com/acme/widget/issues/1"])
+        );
+        assert_eq!(gh.calls(), 6);
+    }
+
+    #[test]
     fn partial_graphql_data_keeps_usable_pull_requests() {
         let repo = indexed_repo("PartialMarker");
         let mut response: serde_json::Value =
@@ -1030,6 +1187,42 @@ mod unix {
         assert_eq!(links["pull_requests"].as_array().unwrap().len(), 1);
         assert_eq!(links["commit_associations"][0]["status"], "partial");
         assert!(links["reason"].as_str().unwrap().contains("partial data"));
+    }
+
+    #[test]
+    fn local_graphql_errors_do_not_stop_other_commits() {
+        let repo = TestRepo::new();
+        commit(&repo, "LocalErrorMarker first", "first");
+        commit(&repo, "LocalErrorMarker second", "second");
+        repo.index();
+        let local_error = r#"{"data":null,"errors":[{"message":"Resource not accessible","path":["repository","object"]}]}"#.to_owned();
+        let gh = FakeGh::with_responses(
+            vec![
+                local_error,
+                response(false, serde_json::json!([pull_request_node()])),
+            ],
+            vec![issue_response(false, serde_json::json!([]))],
+        );
+        let output = gh.run(
+            &repo,
+            &[
+                "search",
+                "LocalErrorMarker",
+                "--github-links",
+                "--github-repo",
+                "acme/widget",
+                "--json",
+            ],
+        );
+
+        assert_eq!(output.status.code(), Some(0));
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let links = &value["github_links"];
+        assert_eq!(links["commit_associations"][0]["status"], "partial");
+        assert_eq!(links["commit_associations"][1]["status"], "complete");
+        assert_eq!(links["pull_requests"].as_array().unwrap().len(), 1);
+        assert_eq!(links["pull_requests"][0]["issue_status"], "complete");
+        assert_eq!(gh.calls(), 3);
     }
 
     #[test]
