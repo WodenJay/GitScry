@@ -42,6 +42,30 @@ fn net_cancellation_succeeds_without_cache() {
 }
 
 #[test]
+fn clean_input_preserves_time_scope_validation_without_opening_cache() {
+    let repo = TestRepo::new();
+    for args in [
+        vec!["context", "--since", "not-a-date"],
+        vec!["context", "--until", "not-a-date"],
+        vec!["context", "--since", "2002-01-01", "--until", "2001-01-01"],
+    ] {
+        let output = repo.run(args);
+        assert!(!output.status.success());
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("gitscry index"));
+    }
+    let report = json(repo.run([
+        "context",
+        "--since",
+        "2000-01-01",
+        "--until",
+        "2001-01-01",
+        "--json",
+    ]));
+    assert_eq!(report["input"]["changes"], serde_json::json!([]));
+    assert!(!repo.dir.path().join(".gitscry").exists());
+}
+
+#[test]
 fn returns_cited_paths_once_and_excludes_selected_paths() {
     let repo = TestRepo::new();
     commit(

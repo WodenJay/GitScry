@@ -209,6 +209,7 @@ fn run_context(staged: bool, options: Options) -> Result<Outcome, AppError> {
     let repository = Repository::discover()?;
     let input = repository.current_change(staged)?;
     if input.changes.is_empty() {
+        scope::validate_time_bounds(&options.scope)?;
         return Ok(Outcome {
             progress: Vec::new(),
             warnings: Vec::new(),
