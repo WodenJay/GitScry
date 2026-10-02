@@ -45,6 +45,9 @@ pub(super) fn format_report(report: &ContextReport) -> String {
     }
     lines.push(format!("Showing {} of {} eligible context items; output truncated: {}; input paths omitted from retrieval: {}.", report.suggestions.len(), report.matched_count, report.truncated, report.omitted_input_paths));
     lines.push(format!("Content coverage: current truncated {}; omitted files {}; omitted local bases {}; omitted signals {}; historical scan truncated {}; oversized historical hunks omitted {}.", !report.input.content_omissions.is_empty(), report.input.content_omissions.len(), report.omitted_content_bases, report.omitted_content_signals, report.historical_content_truncated, report.omitted_historical_hunks));
+    if report.semantic_requested {
+        lines.push(format!("Local semantic coverage: {} eligible vector candidates (bounded to 64); omitted local bases {}; target content truncated {}.", report.semantic_candidates, report.omitted_semantic_bases, report.semantic_content_truncated));
+    }
     for item in &report.input.content_omissions {
         lines.push(format!(
             "  Content omitted: {} ({})",
@@ -157,6 +160,10 @@ pub(super) fn format_json_report(
         omitted_content_signals: report.omitted_content_signals,
         historical_content_truncated: report.historical_content_truncated,
         omitted_historical_hunks: report.omitted_historical_hunks,
+        semantic_requested: report.semantic_requested,
+        omitted_semantic_bases: report.omitted_semantic_bases,
+        semantic_candidates: report.semantic_candidates,
+        semantic_content_truncated: report.semantic_content_truncated,
         current_content_truncated: !report.input.content_omissions.is_empty(),
         omitted_current_files: report.input.content_omissions.len(),
         content_omissions: report
@@ -189,6 +196,10 @@ struct JsonReport<'a> {
     omitted_content_signals: usize,
     historical_content_truncated: bool,
     omitted_historical_hunks: usize,
+    semantic_requested: bool,
+    omitted_semantic_bases: usize,
+    semantic_candidates: usize,
+    semantic_content_truncated: bool,
     current_content_truncated: bool,
     omitted_current_files: usize,
     content_omissions: Vec<JsonContentOmission<'a>>,

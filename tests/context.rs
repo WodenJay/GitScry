@@ -35,6 +35,115 @@ fn hybrid_is_explicit_and_no_change_needs_no_semantic_resources() {
 }
 
 #[test]
+#[ignore = "requires the pinned CPU runtime and prepared MiniLM model assets"]
+fn hybrid_merges_verified_local_bases_and_rejects_semantic_only_matches() {
+    let repo = TestRepo::new();
+    let alpha = "fn route() { refreshSessionCache(\"session-expired\"); }\n";
+    commit(&repo, &[("history.rs", alpha)], "update");
+    let matched_oid = repo.head();
+    commit(
+        &repo,
+        &[("unrelated.rs", "fn value() { let status = \"success\"; }\n")],
+        "refresh session cache session expired",
+    );
+    let distractor_oid = repo.head();
+    let indexed = repo.run(["index", "--semantic"]);
+    assert!(
+        indexed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&indexed.stderr)
+    );
+    for path in ["a.rs", "b.rs"] {
+        fs::write(repo.dir.path().join(path), alpha).unwrap();
+    }
+    let report = json(repo.run(["context", "--hybrid", "--json"]));
+    let changes = historical(&report);
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0]["citations"][0]["oid"], matched_oid);
+    assert_eq!(
+        changes[0]["associated_current_paths"],
+        serde_json::json!(["a.rs", "b.rs"])
+    );
+    assert_eq!(
+        changes[0]["selection_routes"],
+        serde_json::json!(["changed_code", "local_semantic"])
+    );
+    assert_eq!(changes[0]["content_matches"].as_array().unwrap().len(), 2);
+    assert_eq!(changes[0]["content_matches"][0]["excerpt"], alpha.trim());
+    assert!(
+        !changes
+            .iter()
+            .any(|s| s["citations"][0]["oid"] == distractor_oid)
+    );
+    let text = repo.run(["context", "--hybrid"]);
+    assert!(text.status.success());
+    let text = String::from_utf8_lossy(&text.stdout);
+    assert!(
+        text.contains(&matched_oid)
+            && text.contains("local_semantic")
+            && text.contains(alpha.trim())
+    );
+    let excluded = json(repo.run(["context", "--hybrid", "--from-rev", &matched_oid, "--json"]));
+    assert!(historical(&excluded).is_empty());
+    git(repo.dir.path(), ["add", "a.rs", "b.rs"]);
+    for path in ["a.rs", "b.rs"] {
+        fs::write(repo.dir.path().join(path), "fn value() {}\n").unwrap();
+    }
+    let staged = json(repo.run(["context", "--staged", "--hybrid", "--json"]));
+    assert_eq!(staged["suggestions"], report["suggestions"]);
+    assert!(historical(&json(repo.run(["context", "--hybrid", "--json"]))).is_empty());
+}
+
+#[test]
+#[ignore = "requires the pinned CPU runtime and prepared MiniLM model assets"]
+fn hybrid_can_expand_beyond_the_ordinary_verified_commit_budget() {
+    let repo = TestRepo::new();
+    let alpha = "fn alpha() { refreshSessionCache(\"session-expired\"); }\n";
+    let beta = "fn beta() { rotateCredentialToken(\"credential-rotation\"); }\n";
+    // The existing ordinary ceiling is 128 verified commits. One small added
+    // line per commit exercises expansion without a huge patch/history fixture.
+    for n in 0..128 {
+        commit(
+            &repo,
+            &[("filler.rs", &alpha.repeat(n + 1))],
+            "Update documentation for cooking recipes, kitchen utensils, baking bread, gardening, watering flowers, bicycle maintenance, weather forecasts and vacation planning",
+        );
+    }
+    commit(
+        &repo,
+        &[("target.rs", &format!("{alpha}{beta}"))],
+        "\"credential-rotation\" rotateCredentialToken",
+    );
+    let target = repo.head();
+    let indexed = repo.run(["index", "--semantic"]);
+    assert!(
+        indexed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&indexed.stderr)
+    );
+    fs::write(repo.dir.path().join("alpha.rs"), alpha).unwrap();
+    fs::write(repo.dir.path().join("beta.rs"), beta).unwrap();
+    let ordinary = json(repo.run(["context", "--json"]));
+    assert!(
+        !historical(&ordinary)
+            .iter()
+            .any(|s| s["citations"][0]["oid"] == target)
+    );
+    let hybrid = json(repo.run(["context", "--hybrid", "--json"]));
+    let found = historical(&hybrid)
+        .into_iter()
+        .find(|s| s["citations"][0]["oid"] == target)
+        .unwrap_or_else(|| panic!("semantic route adds the additional verified commit: {hybrid}"));
+    assert_eq!(
+        found["associated_current_paths"],
+        serde_json::json!(["alpha.rs", "beta.rs"])
+    );
+    assert_eq!(found["content_matches"].as_array().unwrap().len(), 2);
+    assert_eq!(hybrid["semantic_candidates"], 64);
+    assert_eq!(hybrid["suggestions"].as_array().unwrap().len(), 3);
+}
+
+#[test]
 fn generic_descriptions_return_verified_local_historical_matches() {
     let repo = TestRepo::new();
     commit(

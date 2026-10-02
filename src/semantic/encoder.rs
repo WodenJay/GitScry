@@ -167,6 +167,10 @@ impl Encoder {
         self.preprocessor.prepare(document)
     }
 
+    pub(crate) fn prepare_query(&mut self, query: &str) -> Result<Vec<PreparedInput>, AppError> {
+        self.preprocessor.prepare_query(query)
+    }
+
     pub(crate) fn embed(&mut self, inputs: &[&PreparedInput]) -> Result<Vec<Vec<f32>>, AppError> {
         let pad_id = self
             .preprocessor
