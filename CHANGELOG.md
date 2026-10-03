@@ -1,3 +1,80 @@
+## [0.7.0] - 2026-10-03
+
+### 🚀 Features
+
+- *(why)* Track symbol name continuity
+- *(why)* Follow verified symbol relocations
+- *(why)* Merge symbol continuity tracking
+- *(context)* Discover co-changing paths
+- *(context)* Merge change-path discovery
+- *(context)* Verify changed-code history
+- *(context)* Merge changed-code history
+- *(search)* Add CJK lexical retrieval
+- *(search)* Add CJK lexical retrieval
+- *(why)* Integrate partial symbol history
+- *(search)* Prioritize complete CJK matches
+- *(context)* Attach recorded abandonments
+- *(context)* Merge recorded abandonments
+- Add bounded same-file followups
+- *(followups)* Merge bounded same-file query
+- Discover cached deletion events
+- Merge trace-removal discovery
+- *(context)* Gate explicit hybrid resources
+- *(context)* Merge verified local hybrid material
+- *(context)* Merge local hybrid retrieval
+- *(related)* Add concrete-path patterns
+- *(related)* Merge concrete-path patterns
+- *(hotspots)* Rank cached file incarnations
+- *(hotspots)* Merge cached file ranking
+- *(followups)* Follow detected renames
+- *(followups)* Merge rename continuity
+- *(followups)* Show revert references
+- *(followups)* Merge revert references
+- *(related)* Track file incarnations
+- *(related)* Merge file incarnations
+- *(trace-removal)* Add bounded patch context
+- *(trace-removal)* Merge bounded patch context
+- *(trace-removal)* Add same-commit navigation
+- *(trace-removal)* Merge same-commit navigation
+- *(hotspots)* Filter history and directories
+- *(hotspots)* Report textual churn
+- *(hotspots)* Merge textual churn
+- *(followups)* Track changed regions
+- *(followups)* Merge changed-region tracking
+
+### 🐛 Bug Fixes
+
+- *(why)* Reject uncertain symbol replacements
+- *(context)* Validate dates for clean input
+- *(context)* Enforce budgets and exact text
+- *(why)* Preserve partial symbol history
+- *(retrieval)* Require revert ancestry
+- *(retrieval)* Require follow-up ancestry
+- *(retrieval)* Reject parallel-branch history links
+- Bound retained deletion-event evidence
+- *(context)* Retain empty hybrid request flag
+- *(patterns)* Bound mining and disclose coverage
+- *(hotspots)* Join merge parents by incarnation
+- *(followups)* Accept unambiguous OID prefixes
+- *(trace-removal)* Correct excerpt starts
+- *(followups)* Preserve seams and cap work
+
+### ⚡ Performance
+
+- *(context)* Query matched commit positions
+
+### 🚜 Refactor
+
+- *(analysis)* Colocate feature workflows
+- *(cache)* Group reads by responsibility
+- *(git)* Group target preparation by feature
+- Colocate removal material assembly
+
+### 📚 Documentation
+
+- Avoid agent changing README
+- Add docs rule
+- Guide agents on code placement
 ## [0.6.0] - 2026-10-02
 
 ### 🚀 Features
