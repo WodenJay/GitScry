@@ -1,4 +1,6 @@
 //! Read path/status signals without reading file contents or concatenating patches.
+use std::path::PathBuf;
+
 use super::Repository;
 use crate::app::AppError;
 
@@ -63,8 +65,8 @@ impl Repository {
             })
             .transpose()?;
         // Compare HEAD with the actual worktree even when a path was removed
-        // from the real index. Overlay real index entries onto a private HEAD
-        // index, retaining HEAD-only identities; never modify the caller's index.
+        // from the real index. Merge HEAD into a private index copy to retain
+        // sparse-checkout flags without modifying the caller's index.
         let temporary = if !staged && head.is_some() {
             Some(tempfile::tempdir().map_err(|error| {
                 AppError::operational(format!("error: creating temporary change index: {error}"))
@@ -73,10 +75,36 @@ impl Repository {
             None
         };
         let git = if let Some(temporary) = &temporary {
-            let git = self.git.with_index(temporary.path().join("index"));
-            git.output(["read-tree", "HEAD"], &[])?;
-            let entries = self.git.output(["ls-files", "--stage", "-z"], &[])?;
-            git.output(["update-index", "-z", "--index-info"], &entries)?;
+            let index = temporary.path().join("index");
+            let source_index = PathBuf::from(
+                self.git
+                    .text(["rev-parse", "--path-format=absolute", "--git-path", "index"])?
+                    .trim(),
+            );
+            let git = self.git.with_index(index.clone());
+            match std::fs::copy(source_index, &index) {
+                Ok(_) => {
+                    git.output(
+                        [
+                            "-c",
+                            "core.splitIndex=false",
+                            "read-tree",
+                            "-m",
+                            "-i",
+                            "HEAD",
+                        ],
+                        &[],
+                    )?;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    git.output(["-c", "core.splitIndex=false", "read-tree", "HEAD"], &[])?;
+                }
+                Err(error) => {
+                    return Err(AppError::operational(format!(
+                        "error: copying temporary change index: {error}"
+                    )));
+                }
+            }
             git
         } else {
             self.git.clone()
