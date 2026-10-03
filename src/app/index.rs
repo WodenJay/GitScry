@@ -17,7 +17,7 @@ pub(super) fn run(
         (true, true) => unreachable!("clap prevents conflicting semantic options"),
     };
     if !matches!(preference, cache::SemanticPreference::Preserve) || semantic_enabled {
-        cache::maintain_semantic(&repository.root, preference, report)?;
+        cache::maintain_semantic(&repository.common_dir, preference, report)?;
     }
     report(IndexStage::Complete);
 

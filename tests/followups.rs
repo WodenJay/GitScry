@@ -847,7 +847,7 @@ fn followups_deletion_ends_identity_and_preserves_shallow_coverage_read_only() {
     )
     .unwrap();
     repo.index();
-    let cache_path = repo.dir.path().join(".gitscry/cache.sqlite");
+    let cache_path = repo.cache_dir().join("cache.sqlite");
     let before = fs::read(&cache_path).unwrap();
     let report = json(&repo, &["followups", &seed, "--json"]);
     assert_eq!(report["inspected_count"], 4);

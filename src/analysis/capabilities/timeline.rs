@@ -15,7 +15,7 @@ pub(in crate::analysis) fn execute(
     options: Options,
 ) -> Result<Outcome, AppError> {
     let repository = Repository::discover()?;
-    let session = cache::open_query(&repository.root)?;
+    let session = cache::open_query(&repository)?;
     let revision = match at {
         Some(revision) => revision,
         None => session.completed_tip()?,

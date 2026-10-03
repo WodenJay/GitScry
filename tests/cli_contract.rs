@@ -459,6 +459,18 @@ fn json_flag_is_available_only_for_query_commands() {
 }
 
 #[test]
+fn index_help_documents_shared_cache_scope() {
+    let repo = TestRepo::new();
+    let help = repo.run(["index", "--help"]);
+    assert_eq!(help.status.code(), Some(0));
+    let help = String::from_utf8_lossy(&help.stdout);
+    assert!(help.contains("linked worktrees"));
+    assert!(help.contains("Git common directory"));
+    assert!(help.contains("gitscry/"));
+    assert!(help.contains("current default branch tip"));
+}
+
+#[test]
 fn json_preserves_unclipped_paths_steps_and_complete_citations() {
     let repo = TestRepo::new();
     let paths = (0..9)

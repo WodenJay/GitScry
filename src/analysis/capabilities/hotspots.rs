@@ -37,7 +37,7 @@ pub(in crate::analysis) fn execute(
 ) -> Result<Outcome, AppError> {
     let path_prefix = normalize_hotspot_path_prefix(path_prefix)?;
     let repository = Repository::discover()?;
-    let session = cache::open_query(&repository.root)?;
+    let session = cache::open_query(&repository)?;
     let target = match options.scope.to_rev.as_deref() {
         Some(revision) => repository.resolve_commit(revision)?,
         None => session.completed_tip()?,

@@ -1029,7 +1029,7 @@ fn why_rejects_explicit_out_of_cache_targets() {
         String::from_utf8_lossy(&output.stderr).contains("outside the published cache generation")
     );
 
-    let cache = Connection::open(repo.dir.path().join(".gitscry/cache.sqlite")).unwrap();
+    let cache = Connection::open(repo.cache_dir().join("cache.sqlite")).unwrap();
     let indexed: i64 = cache
         .query_row(
             "SELECT COUNT(*) FROM commits WHERE oid = ?1",

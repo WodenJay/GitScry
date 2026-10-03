@@ -32,6 +32,7 @@ pub(crate) struct SymbolChange {
 }
 pub(crate) struct Repository {
     pub(crate) root: PathBuf,
+    pub(crate) common_dir: PathBuf,
     git: Git,
 }
 
@@ -64,9 +65,15 @@ impl Repository {
             ));
         }
         let root = PathBuf::from(probe.text(["rev-parse", "--show-toplevel"])?.trim());
+        let common_dir = PathBuf::from(
+            probe
+                .text(["rev-parse", "--path-format=absolute", "--git-common-dir"])?
+                .trim(),
+        );
         Ok(Self {
             git: Git::new(root.clone()),
             root,
+            common_dir,
         })
     }
 

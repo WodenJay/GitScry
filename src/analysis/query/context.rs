@@ -18,7 +18,7 @@ pub(in crate::analysis) struct Context {
 impl Context {
     pub(in crate::analysis) fn open(options: SearchScopeOptions) -> Result<Self, AppError> {
         let repository = Repository::discover()?;
-        let session = cache::open_query(&repository.root)?;
+        let session = cache::open_query(&repository)?;
         let scope = scope::resolve(&session, options)?;
         Ok(Self { session, scope })
     }

@@ -11,7 +11,7 @@ use std::{
 };
 use tempfile::TempDir;
 
-use support::{TestRepo, git, git_command, git_stdout};
+use support::{TestRepo, git, git_command, git_common_dir, git_stdout};
 
 use rusqlite::Connection;
 use sha2::Digest;
@@ -60,8 +60,8 @@ impl IsolatedExecutable {
 fn first_index_publishes_complete_cache() {
     let repo = TestRepo::new();
     repo.commit("hello.txt", b"hello\n", "initial commit");
-    fs::create_dir(repo.dir.path().join(".gitscry")).expect("create cache directory");
-    fs::write(repo.dir.path().join(".gitscry/.gitignore"), "keep-me\n").expect("seed ignore file");
+    fs::create_dir(repo.cache_dir()).expect("create cache directory");
+    fs::write(repo.cache_dir().join(".gitignore"), "keep-me\n").expect("seed ignore file");
 
     let output = repo.run(["index"]);
 
@@ -77,11 +77,11 @@ fn first_index_publishes_complete_cache() {
     );
     assert!(String::from_utf8_lossy(&output.stderr).contains("Indexing local history"));
     assert_eq!(
-        fs::read_to_string(repo.dir.path().join(".gitscry/.gitignore")).unwrap(),
+        fs::read_to_string(repo.cache_dir().join(".gitignore")).unwrap(),
         "keep-me\n*\n"
     );
 
-    let cache = Connection::open(repo.dir.path().join(".gitscry/cache.sqlite")).unwrap();
+    let cache = Connection::open(repo.cache_dir().join("cache.sqlite")).unwrap();
     assert_eq!(
         cache
             .query_row("SELECT COUNT(*) FROM commits", [], |row| row
@@ -120,7 +120,7 @@ fn failed_incremental_write_keeps_the_published_generation() {
     let published_tip = repo.head();
     repo.commit("hello.txt", b"hello again\n", "extend greeting");
 
-    let cache_path = repo.dir.path().join(".gitscry/cache.sqlite");
+    let cache_path = repo.cache_dir().join("cache.sqlite");
     let cache = Connection::open(&cache_path).unwrap();
     cache
         .execute_batch(
@@ -213,7 +213,7 @@ fn gitlink_entries_are_not_reported_as_missing_objects() {
         "{all_output}"
     );
 
-    let cache = Connection::open(repo.dir.path().join(".gitscry/cache.sqlite")).unwrap();
+    let cache = Connection::open(repo.cache_dir().join("cache.sqlite")).unwrap();
     assert_eq!(
         cache
             .query_row("SELECT COUNT(*) FROM missing_objects", [], |row| {
@@ -248,7 +248,7 @@ fn root_merge_and_binary_history_are_persisted() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let cache = Connection::open(repo.dir.path().join(".gitscry/cache.sqlite")).unwrap();
+    let cache = Connection::open(repo.cache_dir().join("cache.sqlite")).unwrap();
     assert_eq!(
         cache
             .query_row("SELECT COUNT(*) FROM commits", [], |row| row
@@ -337,7 +337,7 @@ fn ambiguous_default_branch_fails_without_publishing() {
 
     assert_eq!(output.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&output.stderr).contains("both main and master exist"));
-    assert!(!repo.dir.path().join(".gitscry/cache.sqlite").exists());
+    assert!(!repo.cache_dir().join("cache.sqlite").exists());
 }
 
 #[test]
@@ -386,7 +386,7 @@ fn sole_local_branch_is_used_as_default() {
         String::from_utf8_lossy(&output.stdout),
         "Indexed 1 commit.\n"
     );
-    assert!(repo.dir.path().join(".gitscry/cache.sqlite").exists());
+    assert!(repo.cache_dir().join("cache.sqlite").exists());
 }
 
 #[test]
@@ -402,19 +402,19 @@ fn bare_repository_is_rejected() {
 
     assert_eq!(output.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&output.stderr).contains("bare repositories"));
-    assert!(!dir.path().join(".gitscry/cache.sqlite").exists());
+    assert!(!dir.path().join("gitscry/cache.sqlite").exists());
 }
 
 #[test]
 fn preparation_failure_does_not_publish_a_cache() {
     let repo = TestRepo::new();
     repo.commit("file.txt", b"content\n", "initial");
-    fs::write(repo.dir.path().join(".gitscry"), "not a directory").unwrap();
+    fs::write(repo.cache_dir(), "not a directory").unwrap();
 
     let output = repo.run(["index"]);
 
     assert_eq!(output.status.code(), Some(1));
-    assert!(!repo.dir.path().join(".gitscry/cache.sqlite").exists());
+    assert!(!repo.cache_dir().join("cache.sqlite").exists());
 }
 
 #[test]
@@ -473,7 +473,7 @@ fn semantic_index_failure_preserves_history_until_explicitly_disabled() {
         "{error}"
     );
 
-    let cache_path = repo.dir.path().join(".gitscry/cache.sqlite");
+    let cache_path = repo.cache_dir().join("cache.sqlite");
     let cache = Connection::open(&cache_path).unwrap();
     let metadata = |key: &str| {
         cache
@@ -555,7 +555,7 @@ fn semantic_vectors_survive_rebuild_by_commit_identity() {
     let second = repo.head();
     assert!(repo.run(["index"]).status.success());
 
-    let cache_path = repo.dir.path().join(".gitscry/cache.sqlite");
+    let cache_path = repo.cache_dir().join("cache.sqlite");
     let cache = Connection::open(&cache_path).unwrap();
     let encoder_fingerprint = expected_encoder_fingerprint();
     cache
@@ -913,7 +913,7 @@ fn semantic_enablement_survives_cache_rebuild() {
             .code(),
         Some(1)
     );
-    let cache_path = repo.dir.path().join(".gitscry/cache.sqlite");
+    let cache_path = repo.cache_dir().join("cache.sqlite");
     let cache = Connection::open(&cache_path).unwrap();
     cache
         .execute(
@@ -956,7 +956,7 @@ fn damaged_cache_rebuild_preserves_semantic_enablement() {
             .code(),
         Some(1)
     );
-    let cache_path = repo.dir.path().join(".gitscry/cache.sqlite");
+    let cache_path = repo.cache_dir().join("cache.sqlite");
     let cache = Connection::open(&cache_path).unwrap();
     cache.execute_batch("DROP TABLE semantic_vectors").unwrap();
     drop(cache);
@@ -1039,7 +1039,7 @@ fn shallow_merge_keeps_parents_and_reindexes_after_deepening() {
         "{}",
         String::from_utf8_lossy(&first.stderr)
     );
-    let cache_path = clone.join(".gitscry/cache.sqlite");
+    let cache_path = git_common_dir(&clone).join("gitscry/cache.sqlite");
     let cache = Connection::open(&cache_path).unwrap();
     assert_eq!(
         cache
@@ -1131,7 +1131,7 @@ fn fast_forward_updates_one_completed_generation() {
     assert_eq!(second.status.code(), Some(0));
     assert!(String::from_utf8_lossy(&second.stderr).contains("Indexing local history"));
 
-    let cache = Connection::open(repo.dir.path().join(".gitscry/cache.sqlite")).unwrap();
+    let cache = Connection::open(repo.cache_dir().join("cache.sqlite")).unwrap();
     assert_eq!(
         cache
             .query_row("SELECT COUNT(*) FROM commits", [], |row| row
@@ -1207,7 +1207,7 @@ fn file_to_symlink_change_keeps_both_hunks_on_one_change() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let cache = Connection::open(repo.dir.path().join(".gitscry/cache.sqlite")).unwrap();
+    let cache = Connection::open(repo.cache_dir().join("cache.sqlite")).unwrap();
     assert_eq!(
         cache
             .query_row(
@@ -1262,7 +1262,7 @@ fn multiple_hunks_for_one_change_keep_one_change_id() {
     let target = repo.head();
     repo.index();
 
-    let cache = Connection::open(repo.dir.path().join(".gitscry/cache.sqlite")).unwrap();
+    let cache = Connection::open(repo.cache_dir().join("cache.sqlite")).unwrap();
     let change_ids: Vec<i64> = cache
         .prepare(
             "SELECT h.change_id
@@ -1297,7 +1297,7 @@ fn non_fast_forward_rebuild_removes_unreachable_commits() {
     assert_eq!(output.status.code(), Some(0));
     assert!(String::from_utf8_lossy(&output.stderr).contains("Indexing local history"));
 
-    let cache = Connection::open(repo.dir.path().join(".gitscry/cache.sqlite")).unwrap();
+    let cache = Connection::open(repo.cache_dir().join("cache.sqlite")).unwrap();
     assert_eq!(
         cache
             .query_row(
@@ -1373,7 +1373,7 @@ fn default_ref_change_rebuilds_the_pinned_generation() {
 
     let output = repo.run(["index"]);
     assert_eq!(output.status.code(), Some(0));
-    let cache = Connection::open(repo.dir.path().join(".gitscry/cache.sqlite")).unwrap();
+    let cache = Connection::open(repo.cache_dir().join("cache.sqlite")).unwrap();
     assert_eq!(
         cache
             .query_row(
@@ -1417,7 +1417,7 @@ fn restores_hunks_after_a_missing_blob_returns() {
 
     let first_index = repo.run(["index"]);
     assert_eq!(first_index.status.code(), Some(0));
-    let cache_path = repo.dir.path().join(".gitscry/cache.sqlite");
+    let cache_path = repo.cache_dir().join("cache.sqlite");
     let cache = Connection::open(&cache_path).unwrap();
     let incomplete_hunk_count: i64 = cache
         .query_row("SELECT COUNT(*) FROM hunks", [], |row| row.get(0))
@@ -1458,7 +1458,7 @@ fn missing_cached_commit_fails_the_next_preparation() {
     let missing_commit = repo.head();
     repo.commit("history.txt", b"two\n", "Second history");
     assert_eq!(repo.run(["index"]).status.code(), Some(0));
-    let cache_path = repo.dir.path().join(".gitscry/cache.sqlite");
+    let cache_path = repo.cache_dir().join("cache.sqlite");
     let completed_tip = repo.head();
 
     let object_path = repo
@@ -1504,9 +1504,34 @@ fn cache_lock_holder() {
         .write(true)
         .open(lock_path)
         .expect("open cache lock");
-    lock.lock().expect("lock cache");
+    if env::var("GITSCRY_LOCK_SHARED").ok().as_deref() == Some("1") {
+        lock.lock_shared().expect("shared cache lock");
+    } else {
+        lock.lock().expect("exclusive cache lock");
+    }
     fs::write(ready_path, b"ready").expect("signal lock holder");
     thread::sleep(Duration::from_secs(1));
+}
+
+fn spawn_cache_lock_holder(repo: &TestRepo, ready_name: &str, shared: bool) -> std::process::Child {
+    let ready_path = repo.dir.path().join(ready_name);
+    let mut command = Command::new(env::current_exe().unwrap());
+    command
+        .args(["--exact", "cache_lock_holder", "--nocapture"])
+        .current_dir(repo.dir.path())
+        .env("GITSCRY_LOCK_HOLDER", "1")
+        .env("GITSCRY_LOCK_SHARED", if shared { "1" } else { "0" })
+        .env("GITSCRY_LOCK_PATH", repo.cache_dir().join("cache.lock"))
+        .env("GITSCRY_LOCK_READY", &ready_path);
+    let holder = command.spawn().expect("spawn lock holder");
+    for _ in 0..200 {
+        if ready_path.exists() {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert!(ready_path.exists(), "lock holder did not start");
+    holder
 }
 
 #[test]
@@ -1520,10 +1545,8 @@ fn stale_observer_waits_once_for_an_existing_writer() {
         .args(["--exact", "cache_lock_holder", "--nocapture"])
         .current_dir(repo.dir.path())
         .env("GITSCRY_LOCK_HOLDER", "1")
-        .env(
-            "GITSCRY_LOCK_PATH",
-            repo.dir.path().join(".gitscry/cache.lock"),
-        )
+        .env("GITSCRY_LOCK_SHARED", "0")
+        .env("GITSCRY_LOCK_PATH", repo.cache_dir().join("cache.lock"))
         .env("GITSCRY_LOCK_READY", &ready_path)
         .spawn()
         .expect("spawn lock holder");
@@ -1553,8 +1576,8 @@ fn recovers_a_previous_generation_after_interrupted_replace() {
     repo.commit("history.txt", b"one\n", "Initial history");
     assert_eq!(repo.run(["index"]).status.code(), Some(0));
 
-    let cache = repo.dir.path().join(".gitscry/cache.sqlite");
-    let previous = repo.dir.path().join(".gitscry/cache.sqlite.previous");
+    let cache = repo.cache_dir().join("cache.sqlite");
+    let previous = repo.cache_dir().join("cache.sqlite.previous");
     fs::rename(&cache, &previous).expect("simulate interrupted replacement");
 
     let output = repo.run(["index"]);
@@ -1585,7 +1608,7 @@ fn concurrent_indexers_leave_one_complete_generation() {
 
     assert_eq!(first.status.code(), Some(0));
     assert_eq!(second.status.code(), Some(0));
-    let cache = Connection::open(repo.dir.path().join(".gitscry/cache.sqlite")).unwrap();
+    let cache = Connection::open(repo.cache_dir().join("cache.sqlite")).unwrap();
     assert_eq!(
         cache
             .query_row("SELECT COUNT(*) FROM commits", [], |row| row
@@ -1601,7 +1624,7 @@ fn plain_index_requires_explicit_semantic_encoder_migration() {
     repo.commit("one.txt", b"one\n", "initial commit");
     assert!(repo.run(["index"]).status.success());
 
-    let cache_path = repo.dir.path().join(".gitscry/cache.sqlite");
+    let cache_path = repo.cache_dir().join("cache.sqlite");
     let cache = Connection::open(&cache_path).unwrap();
     let (commit_id, oid): (i64, String) = cache
         .query_row("SELECT commit_id, oid FROM commits", [], |row| {
@@ -1731,7 +1754,7 @@ fn reduced_shallow_history_rebuilds_without_reusing_rows() {
         .output()
         .unwrap();
     assert_eq!(first.status.code(), Some(0));
-    let cache_path = clone.join(".gitscry/cache.sqlite");
+    let cache_path = git_common_dir(&clone).join("gitscry/cache.sqlite");
     let cache = Connection::open(&cache_path).unwrap();
     assert_eq!(
         cache
@@ -1769,7 +1792,7 @@ fn path_projection_preserves_rename_paths_and_commit_counts() {
     git(repo.dir.path(), ["commit", "-m", "rename"]);
     repo.index();
 
-    let cache = Connection::open(repo.dir.path().join(".gitscry/cache.sqlite")).unwrap();
+    let cache = Connection::open(repo.cache_dir().join("cache.sqlite")).unwrap();
     let rename_oid = repo.head();
     let paths: Vec<(String, Vec<u8>)> = cache
         .prepare(
@@ -1818,4 +1841,107 @@ fn path_projection_preserves_rename_paths_and_commit_counts() {
             .unwrap(),
         2
     );
+}
+
+#[test]
+fn linked_worktrees_share_the_repository_cache_and_lock() {
+    let repo = TestRepo::new();
+    repo.commit("history.txt", b"shared\n", "Initial shared worktree marker");
+    repo.index();
+
+    let linked = repo.dir.path().join("linked");
+    let linked_arg = linked.to_string_lossy().into_owned();
+    git(
+        repo.dir.path(),
+        ["worktree", "add", "--detach", &linked_arg, "HEAD"],
+    );
+    let cache_path = repo.cache_dir().join("cache.sqlite");
+    assert!(
+        cache_path.is_file(),
+        "cache belongs in the shared Git directory"
+    );
+    assert_eq!(
+        PathBuf::from(git_stdout(
+            &linked,
+            ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        )),
+        repo.common_dir()
+    );
+    assert!(!repo.dir.path().join(".gitscry").exists());
+    assert!(!repo.dir.path().join("gitscry").exists());
+    assert!(!linked.join(".gitscry").exists());
+    assert!(!linked.join("gitscry").exists());
+
+    let query = TestRepo::run_at(&linked, ["search", "shared", "worktree", "marker"]);
+    assert_eq!(
+        query.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&query.stderr)
+    );
+    assert!(String::from_utf8_lossy(&query.stdout).contains("Initial shared worktree marker"));
+
+    let exclusive_holder = spawn_cache_lock_holder(&repo, "exclusive-lock-ready", false);
+    let blocked_query = TestRepo::run_at(&linked, ["search", "shared", "worktree", "marker"]);
+    let _ = exclusive_holder
+        .wait_with_output()
+        .expect("wait for exclusive lock holder");
+    assert_eq!(blocked_query.status.code(), Some(0));
+    let query_output = format!(
+        "{}{}",
+        String::from_utf8_lossy(&blocked_query.stdout),
+        String::from_utf8_lossy(&blocked_query.stderr)
+    );
+    assert_eq!(
+        query_output
+            .matches("Waiting for another GitScry process...")
+            .count(),
+        1
+    );
+
+    let shared_holder = spawn_cache_lock_holder(&repo, "shared-lock-ready", true);
+    let shared_query = TestRepo::run_at(&linked, ["search", "shared", "worktree", "marker"]);
+    assert_eq!(shared_query.status.code(), Some(0));
+    let shared_query_output = format!(
+        "{}{}",
+        String::from_utf8_lossy(&shared_query.stdout),
+        String::from_utf8_lossy(&shared_query.stderr)
+    );
+    assert!(!shared_query_output.contains("Waiting for another GitScry process..."));
+    repo.commit(
+        "history.txt",
+        b"updated\n",
+        "Update shared worktree history",
+    );
+    let blocked_index = TestRepo::run_at(&linked, ["index"]);
+    let _ = shared_holder
+        .wait_with_output()
+        .expect("wait for shared lock holder");
+    assert_eq!(
+        blocked_index.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&blocked_index.stderr)
+    );
+    let index_output = format!(
+        "{}{}",
+        String::from_utf8_lossy(&blocked_index.stdout),
+        String::from_utf8_lossy(&blocked_index.stderr)
+    );
+    assert_eq!(
+        index_output
+            .matches("Waiting for another GitScry process...")
+            .count(),
+        1
+    );
+    let cache = Connection::open(&cache_path).unwrap();
+    assert_eq!(
+        cache
+            .query_row("SELECT COUNT(*) FROM commits", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    assert!(!repo.dir.path().join(".gitscry").exists());
+    assert!(!linked.join(".gitscry").exists());
 }

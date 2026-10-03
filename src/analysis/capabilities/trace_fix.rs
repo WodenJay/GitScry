@@ -19,7 +19,7 @@ pub(in crate::analysis) fn execute(
 ) -> Result<Outcome, AppError> {
     let repository = Repository::discover()?;
     let target = repository.pin_trace_fix(&revision, &paths)?;
-    let session = cache::open_query(&repository.root)?;
+    let session = cache::open_query(&repository)?;
     session.require_revision(&target.revision)?;
     let context = Context::for_target(session, options.scope, &target.revision)?;
     let mut reachable = context.session.ancestors(&target.revision)?;

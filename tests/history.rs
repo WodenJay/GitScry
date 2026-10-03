@@ -565,8 +565,8 @@ fn failures_does_not_link_parallel_branch_corrective_commit() {
     );
     repo.index();
 
-    let cache = rusqlite::Connection::open(repo.dir.path().join(".gitscry/cache.sqlite"))
-        .expect("open test cache");
+    let cache =
+        rusqlite::Connection::open(repo.cache_dir().join("cache.sqlite")).expect("open test cache");
     let position = |oid: &str| {
         cache
             .query_row(
@@ -913,7 +913,7 @@ fn missing_history_objects_fail_with_the_git_diagnosis_and_publish_nothing() {
         !message.contains("sending input to Git"),
         "Git's diagnosis was masked: {message}"
     );
-    assert!(!repo.dir.path().join(".gitscry/cache.sqlite").exists());
+    assert!(!repo.cache_dir().join("cache.sqlite").exists());
 }
 
 #[test]

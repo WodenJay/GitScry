@@ -814,7 +814,7 @@ fn net_cancellation_succeeds_without_cache() {
     assert_eq!(report["input"]["changes"], serde_json::json!([]));
     assert_eq!(report["suggestions"], serde_json::json!([]));
     assert!(report["cache_tip"].is_null());
-    assert!(!repo.dir.path().join(".gitscry").exists());
+    assert!(!repo.cache_dir().exists());
     let staged = repo.run(["context", "--staged"]);
     assert!(!staged.status.success());
     assert!(String::from_utf8_lossy(&staged.stderr).contains("gitscry index"));
@@ -841,7 +841,7 @@ fn clean_input_preserves_time_scope_validation_without_opening_cache() {
         "--json",
     ]));
     assert_eq!(report["input"]["changes"], serde_json::json!([]));
-    assert!(!repo.dir.path().join(".gitscry").exists());
+    assert!(!repo.cache_dir().exists());
 }
 
 #[test]
@@ -1120,7 +1120,7 @@ fn conflicts_fail_explicitly_without_cache() {
         assert!(!output.status.success());
         assert!(String::from_utf8_lossy(&output.stderr).contains("unresolved conflicts"));
     }
-    assert!(!repo.dir.path().join(".gitscry").exists());
+    assert!(!repo.cache_dir().exists());
 }
 
 #[test]
@@ -1315,7 +1315,7 @@ fn clean_unborn_and_untracked_inputs_do_not_initialize_cache() {
     let output = repo.run(["context"]);
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("gitscry index"));
-    assert!(!repo.dir.path().join(".gitscry").exists());
+    assert!(!repo.cache_dir().exists());
     let staged = json(repo.run(["context", "--staged", "--json"]));
     assert_eq!(staged["input"]["changes"], serde_json::json!([]));
 }

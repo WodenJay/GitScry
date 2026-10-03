@@ -18,7 +18,7 @@ pub(in crate::analysis) fn execute(
 ) -> Result<Outcome, AppError> {
     let intent = Intent::symptom(&words, &path)?;
     let repository = Repository::discover()?;
-    let session = cache::open_query(&repository.root)?;
+    let session = cache::open_query(&repository)?;
     let bad = match bad {
         Some(revision) => revision,
         None => session.completed_tip()?,

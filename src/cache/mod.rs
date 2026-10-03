@@ -13,7 +13,7 @@ mod scope;
 pub(crate) use scope::SearchFilter;
 mod semantic;
 mod write;
-use crate::app::AppError;
+use crate::{app::AppError, git::Repository};
 pub(crate) use generation::prepare;
 pub(crate) use history::HunkId;
 pub(crate) use history::{CodeHunk, HistoryCommit, HistoryHunk, OtherFileChange, PatchHistoryHunk};
@@ -105,8 +105,8 @@ impl Drop for ExclusiveLock {
     }
 }
 
-fn acquire_shared(root: &Path, progress: &mut Vec<String>) -> Result<SharedLock, AppError> {
-    let file = open_lock_file(root)?;
+fn acquire_shared(common_dir: &Path, progress: &mut Vec<String>) -> Result<SharedLock, AppError> {
+    let file = open_lock_file(common_dir)?;
     loop {
         match file.try_lock_shared() {
             Ok(()) => return Ok(SharedLock { file }),
@@ -121,8 +121,11 @@ fn acquire_shared(root: &Path, progress: &mut Vec<String>) -> Result<SharedLock,
     }
 }
 
-fn acquire_exclusive(root: &Path, progress: &mut Vec<String>) -> Result<ExclusiveLock, AppError> {
-    let file = open_lock_file(root)?;
+fn acquire_exclusive(
+    common_dir: &Path,
+    progress: &mut Vec<String>,
+) -> Result<ExclusiveLock, AppError> {
+    let file = open_lock_file(common_dir)?;
     loop {
         match file.try_lock() {
             Ok(()) => return Ok(ExclusiveLock { file }),
@@ -137,9 +140,10 @@ fn acquire_exclusive(root: &Path, progress: &mut Vec<String>) -> Result<Exclusiv
     }
 }
 
-fn open_lock_file(root: &Path) -> Result<File, AppError> {
-    let directory = root.join(".gitscry");
-    fs::create_dir_all(&directory).map_err(|error| cache_error("creating .gitscry", error))?;
+fn open_lock_file(common_dir: &Path) -> Result<File, AppError> {
+    let directory = common_dir.join("gitscry");
+    fs::create_dir_all(&directory)
+        .map_err(|error| cache_error("creating shared cache directory", error))?;
     ensure_ignored(&directory)?;
     OpenOptions::new()
         .create(true)
@@ -172,23 +176,23 @@ fn missing_warning(has_missing_objects: bool) -> Option<String> {
     )
 }
 
-pub(crate) fn open_query(root: &Path) -> Result<QuerySession, AppError> {
-    if !root.join(".gitscry/cache.sqlite").is_file() {
+pub(crate) fn open_query(repository: &Repository) -> Result<QuerySession, AppError> {
+    if !repository.common_dir.join("gitscry/cache.sqlite").is_file() {
         return Err(query_error(
             "no published cache found; run `gitscry index` first",
         ));
     }
     let mut progress = Vec::new();
-    let lock = acquire_query_shared(root, &mut progress)?;
+    let lock = acquire_query_shared(&repository.common_dir, &mut progress)?;
     let connection = Connection::open_with_flags(
-        root.join(".gitscry/cache.sqlite"),
+        repository.common_dir.join("gitscry/cache.sqlite"),
         OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .map_err(|error| query_error(format!("opening published cache: {error}")))?;
     validate_query_metadata(&connection)?;
     let warnings = query_warnings(&connection)?;
     Ok(QuerySession {
-        root: root.to_owned(),
+        root: repository.root.clone(),
         connection,
         _lock: lock,
         progress,
@@ -196,11 +200,14 @@ pub(crate) fn open_query(root: &Path) -> Result<QuerySession, AppError> {
     })
 }
 
-fn acquire_query_shared(root: &Path, progress: &mut Vec<String>) -> Result<SharedLock, AppError> {
+fn acquire_query_shared(
+    common_dir: &Path,
+    progress: &mut Vec<String>,
+) -> Result<SharedLock, AppError> {
     let file = OpenOptions::new()
         .read(true)
         .write(true)
-        .open(root.join(".gitscry/cache.lock"))
+        .open(common_dir.join("gitscry/cache.lock"))
         .map_err(|error| query_error(format!("opening published cache lock: {error}")))?;
     loop {
         match file.try_lock_shared() {
@@ -379,7 +386,7 @@ fn ensure_ignored(directory: &Path) -> Result<(), AppError> {
     let mut contents = match fs::read(&path) {
         Ok(contents) => contents,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-        Err(error) => return Err(cache_error("reading .gitscry/.gitignore", error)),
+        Err(error) => return Err(cache_error("reading gitscry/.gitignore", error)),
     };
     if contents
         .split(|byte| *byte == b'\n')
@@ -391,12 +398,12 @@ fn ensure_ignored(directory: &Path) -> Result<(), AppError> {
         contents.push(b'\n');
     }
     contents.extend_from_slice(b"*\n");
-    fs::write(path, contents).map_err(|error| cache_error("writing .gitscry/.gitignore", error))
+    fs::write(path, contents).map_err(|error| cache_error("writing gitscry/.gitignore", error))
 }
 
 fn cache_error(operation: &str, error: impl std::fmt::Display) -> AppError {
     AppError::operational(format!(
-        "error: {operation}: {error}; delete .gitscry and retry"
+        "error: {operation}: {error}; delete the shared cache and retry"
     ))
 }
 

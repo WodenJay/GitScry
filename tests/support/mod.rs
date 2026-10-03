@@ -1,6 +1,10 @@
 #![allow(dead_code)]
 
-use std::{ffi::OsStr, path::Path, process::Command};
+use std::{
+    ffi::OsStr,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use tempfile::TempDir;
 
@@ -22,6 +26,13 @@ impl TestRepo {
 
     pub(crate) fn head(&self) -> String {
         git_stdout(self.dir.path(), ["rev-parse", "HEAD"])
+    }
+
+    pub(crate) fn common_dir(&self) -> PathBuf {
+        git_common_dir(self.dir.path())
+    }
+    pub(crate) fn cache_dir(&self) -> PathBuf {
+        self.common_dir().join("gitscry")
     }
 
     pub(crate) fn run<I, S>(&self, args: I) -> std::process::Output
@@ -92,4 +103,11 @@ where
         .expect("git output is utf-8")
         .trim()
         .to_owned()
+}
+
+pub(crate) fn git_common_dir(cwd: &Path) -> PathBuf {
+    PathBuf::from(git_stdout(
+        cwd,
+        ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    ))
 }

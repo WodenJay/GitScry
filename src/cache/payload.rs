@@ -41,7 +41,7 @@ fn checked_length(length: i64, material: &str) -> Result<usize, AppError> {
 
 fn corruption(material: &str, reason: impl std::fmt::Display) -> AppError {
     AppError::operational(format!(
-        "error: cache corruption in hunk {material}: {reason}; delete .gitscry and retry"
+        "error: cache corruption in hunk {material}: {reason}; delete the shared cache and retry"
     ))
 }
 
