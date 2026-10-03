@@ -14,6 +14,7 @@ mod hotspots;
 mod patterns;
 mod timeline;
 mod trace_removal;
+mod usage;
 use crate::{
     analysis::query::QueryReport,
     app::{self, AppError, IndexStage, Outcome, Progress, UpdateStage},
@@ -207,6 +208,15 @@ fn write_outcome(outcome: Outcome, json_output: bool) -> io::Result<()> {
     let mut stderr = io::stderr().lock();
     for progress in &outcome.progress {
         writeln!(stderr, "{progress}")?;
+    }
+
+    if let Some(report) = &outcome.usage_report {
+        if json_output {
+            let json = usage::format_json(report)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            return writeln!(io::stdout().lock(), "{json}");
+        }
+        return writeln!(io::stdout().lock(), "{}", usage::format_text(report));
     }
 
     if json_output {

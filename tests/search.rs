@@ -1,7 +1,7 @@
 mod support;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use std::{fs, path::Path, process::Command};
+use std::{fs, path::Path};
 
 use rusqlite::{Connection, params};
 use support::{TestRepo, git, git_command, git_stdout};
@@ -952,7 +952,7 @@ fn search_refreshes_cache_after_shallow_history_deepens() {
         String::from_utf8_lossy(&indexed.stderr)
     );
 
-    let first = Command::new(env!("CARGO_BIN_EXE_gitscry"))
+    let first = support::isolated_gitscry_command(source.user_data_dir())
         .args(["search", "commit", "one"])
         .current_dir(&clone)
         .output()
@@ -974,7 +974,7 @@ fn search_refreshes_cache_after_shallow_history_deepens() {
         String::from_utf8_lossy(&refreshed.stderr)
     );
 
-    let second = Command::new(env!("CARGO_BIN_EXE_gitscry"))
+    let second = support::isolated_gitscry_command(source.user_data_dir())
         .args(["search", "commit", "one"])
         .current_dir(&clone)
         .output()

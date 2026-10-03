@@ -6,9 +6,10 @@ use crate::github;
 use crate::{
     analysis::{
         CodeDirection,
+        capabilities::usage::{self, GroupBy},
         query::{self, Options, Request, SearchScopeOptions},
     },
-    cli::{CodeChange, Command, HistoricalScopeArgs},
+    cli::{CodeChange, Command, HistoricalScopeArgs, StatsGroup},
     git::WhyAnchor,
 };
 
@@ -43,6 +44,7 @@ pub(crate) struct Outcome {
     pub(crate) message: String,
     pub(crate) notices: Vec<String>,
     pub(crate) report: Option<query::QueryReport>,
+    pub(crate) usage_report: Option<usage::Report>,
     pub(crate) github_links: Option<crate::github::LinksReport>,
 }
 
@@ -61,6 +63,38 @@ pub(crate) fn execute(
     command: Command,
     report: &mut dyn FnMut(Progress),
 ) -> Result<Outcome, AppError> {
+    let command = match command {
+        Command::Stats {
+            all,
+            since,
+            until,
+            group,
+            ..
+        } => {
+            let group = match group {
+                StatsGroup::Day => GroupBy::Day,
+                StatsGroup::Week => GroupBy::Week,
+                StatsGroup::Month => GroupBy::Month,
+            };
+            let usage_report = usage::report(all, since.as_deref(), until.as_deref(), group)
+                .map_err(|error| match error {
+                    usage::Error::Input(message) => AppError::input(format!("error: {message}")),
+                    usage::Error::Storage(message) => AppError::operational(format!(
+                        "error: reading local usage statistics: {message}"
+                    )),
+                })?;
+            return Ok(Outcome {
+                progress: Vec::new(),
+                warnings: Vec::new(),
+                message: String::new(),
+                notices: Vec::new(),
+                report: None,
+                usage_report: Some(usage_report),
+                github_links: None,
+            });
+        }
+        command => command,
+    };
     let github_link_request = match &command {
         Command::Search {
             github_links,
@@ -325,6 +359,7 @@ pub(crate) fn execute(
                 until,
             },
         ),
+        Command::Stats { .. } => unreachable!("stats command handled before query dispatch"),
     };
     let result = query::execute(
         request,
@@ -354,6 +389,7 @@ pub(crate) fn execute(
         message: String::new(),
         notices: result.report.notices().to_vec(),
         report: Some(result.report),
+        usage_report: None,
         github_links,
     })
 }

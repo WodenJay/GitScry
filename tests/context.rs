@@ -723,7 +723,7 @@ fn content_budget_stops_per_path_git_probes() {
     }
     let traces = tempfile::tempdir().unwrap();
     let trace_path = traces.path().join("git-trace.log");
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_gitscry"))
+    let output = support::isolated_gitscry_command(repo.user_data_dir())
         .args(["context", "--json"])
         .current_dir(repo.dir.path())
         .env("GIT_CONFIG_NOSYSTEM", "1")

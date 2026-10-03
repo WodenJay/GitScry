@@ -101,7 +101,7 @@ fn trace_fix_batches_deleted_ranges_without_losing_per_line_attribution() {
     repo.index();
 
     let trace_file = repo.dir.path().join("blame-trace.log");
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_gitscry"))
+    let output = support::isolated_gitscry_command(repo.user_data_dir())
         .args([
             "trace-fix",
             "HEAD",

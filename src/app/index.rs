@@ -30,6 +30,7 @@ pub(super) fn run(
         ),
         notices: Vec::new(),
         report: None,
+        usage_report: None,
         github_links: None,
     })
 }

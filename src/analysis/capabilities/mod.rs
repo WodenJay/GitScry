@@ -18,6 +18,7 @@ pub(in crate::analysis) mod search;
 pub(crate) mod timeline;
 pub(in crate::analysis) mod trace_fix;
 pub(crate) mod trace_removal;
+pub(crate) mod usage;
 pub(in crate::analysis) mod why;
 
 pub(crate) use examples::run as examples;

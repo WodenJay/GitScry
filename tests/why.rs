@@ -1,6 +1,6 @@
 mod support;
 
-use std::{fs, path::Path, process::Command};
+use std::{fs, path::Path};
 
 use rusqlite::Connection;
 use support::{TestRepo, git, git_command, git_stdout};
@@ -1358,13 +1358,13 @@ fn why_warns_for_shallow_history() {
         .expect("clone shallow repository");
     assert!(cloned.status.success());
 
-    let indexed = Command::new(env!("CARGO_BIN_EXE_gitscry"))
+    let indexed = support::isolated_gitscry_command(source.user_data_dir())
         .arg("index")
         .current_dir(&clone)
         .output()
         .expect("index shallow repository");
     assert!(indexed.status.success());
-    let output = Command::new(env!("CARGO_BIN_EXE_gitscry"))
+    let output = support::isolated_gitscry_command(source.user_data_dir())
         .args(["why", "target.txt", "--line", "1"])
         .current_dir(&clone)
         .output()
