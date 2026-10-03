@@ -237,7 +237,7 @@ fn symbol_span_end(content: &[u8], start: usize, rust_source: bool) -> usize {
         if line.is_empty() || leading_indent(line) > start_indent {
             continue;
         }
-        if is_symbol_declaration(line) {
+        if is_declaration_start(line) {
             return index.max(start_index);
         }
     }
@@ -422,27 +422,22 @@ fn is_rust_lifetime(line: &[u8], start: usize) -> bool {
         || matches!(line.get(end).copied(), Some(b'>' | b',' | b':'))
 }
 
-fn is_symbol_declaration(line: &[u8]) -> bool {
-    let line = String::from_utf8_lossy(line);
-    let trimmed = line.trim_start();
-    [
-        "fn ",
-        "pub fn ",
-        "pub(crate) fn ",
-        "async fn ",
-        "def ",
-        "async def ",
-        "class ",
-        "struct ",
-        "function ",
-    ]
-    .iter()
-    .any(|prefix| trimmed.starts_with(prefix))
+fn is_declaration_start(line: &[u8]) -> bool {
+    line.split(|byte| !is_symbol_byte(*byte))
+        .filter(|token| !token.is_empty())
+        .any(|token| is_declaration(line, token))
 }
 
 #[cfg(test)]
 mod tests {
     use super::locate;
+
+    #[test]
+    fn unbraced_declarations_end_before_the_next_declaration() {
+        let source = b"const FOO: usize = 1;\nconst BAR: usize = 2;";
+        let span = locate(source, "FOO", "source.rs").unwrap();
+        assert_eq!((span.start, span.end), (1, 1));
+    }
 
     #[test]
     fn symbol_span_end_ignores_javascript_object_string_braces() {
