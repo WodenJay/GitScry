@@ -17,6 +17,25 @@ pub(super) fn format_report(report: &Report) -> String {
     );
     for file in &report.files {
         writeln!(output, "\nPath: {}", display(&file.path)).unwrap();
+        writeln!(
+            output,
+            "  Conflict type: {}",
+            if file.file_level {
+                "File-level conflict"
+            } else if file.unsupported.is_some() {
+                "Unsupported conflict"
+            } else {
+                "Textual conflict"
+            }
+        )
+        .unwrap();
+        let index_stages = file
+            .index_stages
+            .iter()
+            .map(u8::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        writeln!(output, "  Index stages: {index_stages}").unwrap();
         if let Some(reason) = &file.unsupported {
             writeln!(output, "Unsupported: {}", display(reason)).unwrap();
         }
@@ -29,6 +48,33 @@ pub(super) fn format_report(report: &Report) -> String {
                 side.leads.len(),
                 side.total_leads,
                 if side.truncated { " (truncated)" } else { "" }
+            )
+            .unwrap();
+            let available_paths = side
+                .available_paths
+                .iter()
+                .map(|path| display(path))
+                .collect::<Vec<_>>()
+                .join(", ");
+            writeln!(
+                output,
+                "  Index stage {}: {}",
+                side.index_stage,
+                if side.index_stage_present {
+                    "present"
+                } else {
+                    "absent"
+                }
+            )
+            .unwrap();
+            writeln!(
+                output,
+                "  Available paths: {}",
+                if available_paths.is_empty() {
+                    "none"
+                } else {
+                    &available_paths
+                }
             )
             .unwrap();
             for lead in &side.leads {

@@ -94,7 +94,7 @@ Instead of manually stitching together `git log`, `blame`, old diffs, reverts, a
 - **Where was this remembered text deleted?** → `trace-removal`
 - **What history is relevant to this topic?** → `search`
 - **Which existing files were touched repeatedly?** → `hotspots`
-- **What direct historical material exists on each side of this text merge conflict?** → `conflicts`
+- **What direct historical material exists on each side of this merge conflict?** → `conflicts`
 
 Results stay traceable: GitScry shows the commits, paths, confidence, and evidence behind each finding.
 

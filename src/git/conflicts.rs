@@ -13,6 +13,8 @@ pub(crate) struct MergeConflict {
 
 pub(crate) struct ConflictFile {
     pub(crate) path: Vec<u8>,
+    pub(crate) index_stages: Vec<u8>,
+    pub(crate) file_level: bool,
     pub(crate) unsupported: Option<String>,
 }
 
@@ -98,13 +100,10 @@ pub(super) fn pin(repository: &Repository) -> Result<MergeConflict, AppError> {
     }
     let mut files = Vec::new();
     for (path, entries) in stages {
+        let index_stages = entries.keys().copied().collect::<Vec<_>>();
+        let file_level = !(1..=3).all(|stage| entries.contains_key(&stage));
         let mut unsupported = None;
-        if entries.len() != 3 || !(1..=3).all(|stage| entries.contains_key(&stage)) {
-            unsupported = Some(
-                "file-level conflict (addition, deletion or rename); not supported in this slice"
-                    .to_owned(),
-            );
-        } else if entries
+        if entries
             .values()
             .any(|(mode, _)| !matches!(mode.as_str(), "100644" | "100755"))
         {
@@ -129,7 +128,12 @@ pub(super) fn pin(repository: &Repository) -> Result<MergeConflict, AppError> {
                 }
             }
         }
-        files.push(ConflictFile { path, unsupported });
+        files.push(ConflictFile {
+            path,
+            index_stages,
+            file_level,
+            unsupported,
+        });
     }
     Ok(MergeConflict {
         ours,

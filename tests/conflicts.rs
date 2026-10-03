@@ -256,15 +256,29 @@ fn bounds_shared_history_per_conflicted_file() {
     assert_eq!(report["limits"]["related_history_per_file"], 3);
 }
 fn state(repo: &TestRepo) -> Vec<Vec<u8>> {
+    state_with_paths(repo, &["a.txt", "b.txt"])
+}
+
+fn state_with_paths(repo: &TestRepo, paths: &[&str]) -> Vec<Vec<u8>> {
     let root = repo.dir.path();
-    let mut state = vec![
-        fs::read(root.join("a.txt")).unwrap(),
-        fs::read(root.join("b.txt")).unwrap(),
-    ];
+    let mut state = Vec::new();
+    for path in paths {
+        state.push(path.as_bytes().to_vec());
+        match fs::read(root.join(path)) {
+            Ok(contents) => {
+                state.push(vec![1]);
+                state.push(contents);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => state.push(vec![0]),
+            Err(error) => panic!("reading working-tree path {path}: {error}"),
+        }
+    }
     for args in [
         vec!["ls-files", "--stage", "-z"],
-        vec!["show-ref"],
+        vec!["ls-files", "--unmerged", "-z"],
+        vec!["show-ref", "--head"],
         vec!["status", "--porcelain=v1", "-z"],
+        vec!["rev-parse", "HEAD"],
     ] {
         state.push(git_command(root).args(args).output().unwrap().stdout);
     }
@@ -527,7 +541,7 @@ fn reports_same_commit_callers_tests_and_bounded_matching_hunks() {
     let report = json(repo.run(["conflicts", "--json"]));
     let materials = report["associated_materials"].as_array().unwrap();
     assert_eq!(materials.len(), 2);
-    assert_eq!(report["schema_version"], 3);
+    assert_eq!(report["schema_version"], 4);
     assert_eq!(report["associated_materials_truncated"], false);
 
     let caller = materials
@@ -705,19 +719,38 @@ fn explicitly_reports_file_level_and_binary_conflicts() {
     git(repo.dir.path(), ["branch", "other"]);
     git(repo.dir.path(), ["rm", "a.txt"]);
     git(repo.dir.path(), ["commit", "-m", "delete"]);
+    let deletion = repo.head();
     commit(&repo, "binary", "ours\0\n", "binary ours");
     git(repo.dir.path(), ["checkout", "other"]);
-    commit(&repo, "a.txt", "theirs\n", "edit");
+    let modification = commit(&repo, "a.txt", "theirs\n", "edit");
     commit(&repo, "binary", "theirs\0\n", "binary theirs");
     git(repo.dir.path(), ["checkout", "main"]);
     merge(&repo, "other");
     let report = json(repo.run(["conflicts", "--json"]));
     assert_eq!(report["coverage_complete"], false);
+    let file = &report["files"][0];
+    assert_eq!(file["file_level"], true);
+    assert_eq!(file["index_stages"], serde_json::json!([1, 3]));
+    assert!(file["unsupported"].is_null());
+    let sides = file["sides"].as_array().unwrap();
+    assert_eq!(sides.len(), 2);
+    assert_eq!(sides[0]["name"], "ours");
+    assert_eq!(sides[0]["available_paths"], serde_json::json!([]));
+    assert_eq!(sides[1]["name"], "theirs");
+    assert_eq!(sides[1]["available_paths"], serde_json::json!(["a.txt"]));
     assert!(
-        report["files"][0]["unsupported"]
-            .as_str()
+        sides[0]["leads"]
+            .as_array()
             .unwrap()
-            .contains("file-level")
+            .iter()
+            .any(|lead| lead["commit"] == deletion)
+    );
+    assert!(
+        sides[1]["leads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|lead| lead["commit"] == modification)
     );
     assert!(
         report["files"][1]["unsupported"]
@@ -725,7 +758,100 @@ fn explicitly_reports_file_level_and_binary_conflicts() {
             .unwrap()
             .contains("binary")
     );
-    assert!(report["files"][0]["sides"].as_array().unwrap().is_empty());
+    assert!(report["files"][1]["sides"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn traces_rename_delete_conflicts_alongside_text_conflicts_without_git_changes() {
+    let repo = TestRepo::new();
+    commit(
+        &repo,
+        "src/old.rs",
+        "pub fn score(value: i32) -> i32 {\n    value\n}\n",
+        "base score implementation",
+    );
+    commit(&repo, "notes.txt", "value=base\n", "base notes");
+    git(repo.dir.path(), ["branch", "other"]);
+
+    git(repo.dir.path(), ["checkout", "other"]);
+    let historical = commit(
+        &repo,
+        "src/old.rs",
+        "pub fn score(value: i32) -> i32 {\n    value + 1\n}\n",
+        "increment score",
+    );
+    git(repo.dir.path(), ["mv", "src/old.rs", "src/new.rs"]);
+    git(repo.dir.path(), ["commit", "-m", "rename score file"]);
+    commit(&repo, "notes.txt", "value=theirs\n", "edit notes on theirs");
+
+    git(repo.dir.path(), ["checkout", "main"]);
+    git(repo.dir.path(), ["rm", "--", "src/old.rs"]);
+    git(repo.dir.path(), ["commit", "-m", "delete score file"]);
+    let deletion = repo.head();
+    commit(&repo, "notes.txt", "value=ours\n", "edit notes on ours");
+    merge(&repo, "other");
+
+    let paths = ["src/old.rs", "src/new.rs", "notes.txt"];
+    let before = state_with_paths(&repo, &paths);
+    let report = json(repo.run(["conflicts", "--json"]));
+    assert_eq!(report["coverage_complete"], true);
+    assert_eq!(report["files"].as_array().unwrap().len(), 2);
+
+    let files = report["files"].as_array().unwrap();
+    let renamed = files
+        .iter()
+        .find(|file| file["path"] == "src/new.rs")
+        .unwrap();
+    assert_eq!(renamed["file_level"], true);
+    assert_eq!(renamed["index_stages"], serde_json::json!([1, 3]));
+    assert!(renamed["unsupported"].is_null());
+    let sides = renamed["sides"].as_array().unwrap();
+    assert_eq!(sides.len(), 2);
+    assert_eq!(sides[0]["name"], "ours");
+    assert_eq!(sides[0]["index_stage_present"], false);
+    assert_eq!(sides[0]["available_paths"], serde_json::json!([]));
+    assert_eq!(sides[1]["name"], "theirs");
+    assert_eq!(sides[1]["index_stage_present"], true);
+    assert_eq!(
+        sides[1]["available_paths"],
+        serde_json::json!(["src/new.rs"])
+    );
+    let deletion_lead = sides[0]["leads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|lead| lead["commit"] == deletion)
+        .unwrap();
+    assert_eq!(deletion_lead["selection_basis"], "detected rename lineage");
+    assert_eq!(deletion_lead["path_changes"][0]["old_path"], "src/old.rs");
+    assert!(deletion_lead["path_changes"][0]["new_path"].is_null());
+    assert!(
+        sides[1]["leads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|lead| lead["commit"] == historical)
+    );
+
+    let text = files
+        .iter()
+        .find(|file| file["path"] == "notes.txt")
+        .unwrap();
+    assert_eq!(text["file_level"], false);
+    assert_eq!(text["index_stages"], serde_json::json!([1, 2, 3]));
+    assert_eq!(text["sides"].as_array().unwrap().len(), 2);
+
+    let filtered = json(repo.run(["conflicts", "--path", "src/new.rs", "--json"]));
+    assert_eq!(filtered["files"].as_array().unwrap().len(), 1);
+    assert_eq!(filtered["files"][0]["path"], "src/new.rs");
+    let rendered = repo.run(["conflicts", "--path", "src/new.rs"]);
+    assert!(rendered.status.success());
+    let rendered = String::from_utf8_lossy(&rendered.stdout);
+    assert!(rendered.contains("File-level conflict"));
+    assert!(rendered.contains("Index stages: 1, 3"));
+    assert!(rendered.contains(&deletion));
+    assert!(rendered.contains("Historical path: src/old.rs"));
+    assert_eq!(state_with_paths(&repo, &paths), before);
 }
 
 #[test]

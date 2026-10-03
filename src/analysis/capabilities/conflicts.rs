@@ -63,6 +63,8 @@ pub(crate) struct Limits {
 pub(crate) struct File {
     pub(crate) path: String,
     pub(crate) path_bytes: Vec<u8>,
+    pub(crate) file_level: bool,
+    pub(crate) index_stages: Vec<u8>,
     pub(crate) unsupported: Option<String>,
     pub(crate) sides: Vec<Side>,
     pub(crate) related_history: Vec<RelatedLead>,
@@ -73,6 +75,10 @@ pub(crate) struct File {
 pub(crate) struct Side {
     pub(crate) name: &'static str,
     pub(crate) endpoint: String,
+    pub(crate) index_stage: u8,
+    pub(crate) index_stage_present: bool,
+    pub(crate) available_paths: Vec<String>,
+    pub(crate) available_path_bytes: Vec<Vec<u8>>,
     pub(crate) leads: Vec<Lead>,
     pub(crate) total_leads: usize,
     pub(crate) truncated: bool,
@@ -194,6 +200,65 @@ fn change_belongs_to_incarnation(
             || change.new_path.as_deref() == Some(conflict_path)
     }
 }
+
+fn incarnation_paths(
+    incarnations: &cache::FileIncarnationHistory,
+    endpoint_paths: &BTreeSet<Vec<u8>>,
+    incarnation: Option<&cache::FileIncarnation>,
+    conflict_path: &[u8],
+) -> Vec<Vec<u8>> {
+    let mut paths = if let Some(incarnation) = incarnation {
+        incarnations
+            .aliases
+            .iter()
+            .filter(|(path, identities)| {
+                endpoint_paths.contains(*path) && identities.contains(incarnation)
+            })
+            .map(|(path, _)| path.clone())
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    if endpoint_paths.contains(conflict_path) && !paths.iter().any(|path| path == conflict_path) {
+        paths.push(conflict_path.to_vec());
+    }
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+fn history_anchor(
+    conflict_path: &[u8],
+    incarnation: Option<&cache::FileIncarnation>,
+    available_paths: &[Vec<u8>],
+    incarnations: &cache::FileIncarnationHistory,
+    base_paths: &BTreeSet<Vec<u8>>,
+    endpoint_paths: &BTreeSet<Vec<u8>>,
+) -> Option<Vec<u8>> {
+    if endpoint_paths.contains(conflict_path) {
+        return Some(conflict_path.to_vec());
+    }
+    if let Some(path) = available_paths.first() {
+        return Some(path.clone());
+    }
+    incarnation
+        .and_then(|incarnation| {
+            incarnations
+                .aliases
+                .iter()
+                .find(|(path, identities)| {
+                    base_paths.contains(*path) && identities.contains(incarnation)
+                })
+                .map(|(path, _)| path.clone())
+                .or_else(|| Some(incarnation.path.clone()))
+        })
+        .or_else(|| {
+            base_paths
+                .contains(conflict_path)
+                .then(|| conflict_path.to_vec())
+        })
+}
+
 fn associated_kind(path: &[u8]) -> Option<&'static str> {
     if super::relations::is_test_path(path) {
         return Some("test");
@@ -576,6 +641,9 @@ pub(crate) fn execute(paths: Vec<String>, limit: usize) -> Result<Outcome, AppEr
         .filter(|file| file.unsupported.is_none())
         .map(|file| file.path.clone())
         .collect::<Vec<_>>();
+    let target_revisions = [target.ours.clone(), target.theirs.clone()];
+    let incarnations = session.file_incarnations(&target_revisions, &current_paths)?;
+    let base_paths = repository.file_paths_at(&target.base)?;
     let mut histories = Vec::new();
     for (name, endpoint) in [("ours", &target.ours), ("theirs", &target.theirs)] {
         let mut reachable = session.ancestors(endpoint)?;
@@ -584,10 +652,8 @@ pub(crate) fn execute(paths: Vec<String>, limit: usize) -> Result<Outcome, AppEr
             warnings.push(format!("{name} endpoint {endpoint}: incomplete history coverage; {missing} known ancestor(s) unavailable in the prepared cache (for example, beyond a shallow boundary)"));
         }
         reachable.retain(|oid| cached.contains(oid) && !excluded.contains(oid));
-        let incarnations =
-            session.file_incarnations(std::slice::from_ref(endpoint), &current_paths)?;
         let endpoint_paths = repository.file_paths_at(endpoint)?;
-        histories.push((name, endpoint, reachable, incarnations, endpoint_paths));
+        histories.push((name, endpoint, reachable, endpoint_paths));
     }
     let mut associated_materials = AssociatedMaterialCollector::new(&session, &unmerged_paths);
     let shared_reachable = excluded
@@ -602,28 +668,53 @@ pub(crate) fn execute(paths: Vec<String>, limit: usize) -> Result<Outcome, AppEr
     for file in target.files {
         let mut sides = Vec::new();
         if file.unsupported.is_none() {
-            for (name, endpoint, reachable, incarnations, endpoint_paths) in &histories {
-                let incarnation = incarnations
+            for (name, endpoint, reachable, endpoint_paths) in &histories {
+                let (index_stage, counterpart) = match *name {
+                    "ours" => (2, &target.theirs),
+                    "theirs" => (3, &target.ours),
+                    _ => unreachable!("conflict history has exactly two sides"),
+                };
+                let own_incarnation = incarnations
                     .target_incarnations
                     .get(*endpoint)
                     .and_then(|paths| paths.get(&file.path));
+                let counterpart_incarnation = incarnations
+                    .target_incarnations
+                    .get(counterpart)
+                    .and_then(|paths| paths.get(&file.path));
+                let incarnation = if own_incarnation.is_some() {
+                    own_incarnation
+                } else if !endpoint_paths.contains(&file.path) {
+                    counterpart_incarnation
+                } else {
+                    None
+                };
                 if incarnation.is_none() {
                     warnings.push(format!(
-                        "{name} endpoint {endpoint}: no file incarnation established for conflict path {:?}; only exact conflict-path changes will be shown when the endpoint contains it",
+                        "{name} endpoint {endpoint}: no file incarnation established for conflict path {:?}; only exact-path changes can be shown when available",
                         String::from_utf8_lossy(&file.path)
                     ));
                 }
-                if incarnation.is_none() && !endpoint_paths.contains(&file.path) {
-                    sides.push(Side {
-                        name,
-                        endpoint: (*endpoint).clone(),
-                        leads: Vec::new(),
-                        total_leads: 0,
-                        truncated: false,
-                    });
-                    continue;
-                }
-                let history = session.path_history(&file.path, reachable)?;
+                let available_path_bytes =
+                    incarnation_paths(&incarnations, endpoint_paths, incarnation, &file.path);
+                let available_paths = available_path_bytes
+                    .iter()
+                    .map(|path| String::from_utf8_lossy(path).into_owned())
+                    .collect::<Vec<_>>();
+                let index_stage_present = file.index_stages.contains(&index_stage);
+                let history_path = history_anchor(
+                    &file.path,
+                    incarnation,
+                    &available_path_bytes,
+                    &incarnations,
+                    &base_paths,
+                    endpoint_paths,
+                );
+                let history = if let Some(path) = history_path {
+                    session.path_history(&path, reachable)?
+                } else {
+                    Vec::new()
+                };
                 let mut leads = Vec::new();
                 for commit in history {
                     let changes_by_ordinal = incarnations.changes_by_commit.get(&commit.oid);
@@ -745,6 +836,10 @@ pub(crate) fn execute(paths: Vec<String>, limit: usize) -> Result<Outcome, AppEr
                 sides.push(Side {
                     name,
                     endpoint: (*endpoint).clone(),
+                    index_stage,
+                    index_stage_present,
+                    available_paths,
+                    available_path_bytes,
                     leads,
                     total_leads,
                     truncated: total_leads > limit,
@@ -768,6 +863,8 @@ pub(crate) fn execute(paths: Vec<String>, limit: usize) -> Result<Outcome, AppEr
         files.push(File {
             path: String::from_utf8_lossy(&file.path).into_owned(),
             path_bytes: file.path,
+            file_level: file.file_level,
+            index_stages: file.index_stages,
             unsupported: file.unsupported,
             sides,
             related_history,
@@ -781,7 +878,7 @@ pub(crate) fn execute(paths: Vec<String>, limit: usize) -> Result<Outcome, AppEr
         && !files_truncated
         && files.iter().all(|file| file.unsupported.is_none());
     let report = Report {
-        schema_version: 3,
+        schema_version: 4,
         ours: target.ours,
         theirs: target.theirs,
         merge_base: target.base,

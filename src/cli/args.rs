@@ -84,9 +84,9 @@ pub(crate) struct GithubLinkArgs {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
-    /// Retrieve cached historical leads for an ordinary two-side text merge conflict.
+    /// Retrieve cached historical leads for an ordinary two-side merge conflict.
     #[command(
-        long_about = "Retrieve cached file-change leads for unmerged text files in an ordinary two-endpoint merge with one merge base. Automatically prepare both pinned endpoints without checkout or fetch. Repeat --path for exact repository-relative paths. Selection is same-path textual change evidence after the merge base, not a semantic association or resolution. Renames, binary and file-level conflicts are reported as unsupported. No LLM analysis or generated resolution is used."
+        long_about = "Retrieve cached file-change leads for unmerged text and regular file-level conflicts in an ordinary two-endpoint merge with one merge base. Automatically prepare both pinned endpoints without checkout or fetch. Repeat --path for exact repository-relative paths. Reports index stages and paths observed on each side. Detected Git rename lineage is used to navigate history; this does not assert semantic responsibility or cross-file migration. Binary and non-regular conflicts are reported as unsupported. No LLM analysis or generated resolution is used."
     )]
     Conflicts {
         #[arg(long = "path", value_name = "PATH")]
