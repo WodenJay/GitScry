@@ -1,12 +1,48 @@
 //! Select path-association material; no content-similarity or review conclusions.
-use super::super::{Citation, SearchScopeInfo, retrieval};
+mod abandonment;
+mod content;
+
 use super::relations::is_test_path;
+use crate::analysis::query::{Context, Options, Outcome, QueryReport, scope};
+use crate::analysis::{Citation, SearchScopeInfo, retrieval};
 use crate::{
     app::AppError,
     cache::{QuerySession, SearchFilter},
-    git::{CurrentChange, current_regular_file},
+    git::{CurrentChange, Repository, current_regular_file},
 };
 use std::{collections::HashSet, path::Path};
+
+pub(in crate::analysis) fn execute(
+    staged: bool,
+    hybrid: bool,
+    options: Options,
+) -> Result<Outcome, AppError> {
+    let repository = Repository::discover()?;
+    let input = repository.current_change(staged)?;
+    if input.changes.is_empty() {
+        scope::validate_time_bounds(&options.scope)?;
+        let mut report = Report::empty(input);
+        report.semantic_requested = hybrid;
+        return Ok(Outcome {
+            progress: Vec::new(),
+            warnings: Vec::new(),
+            report: QueryReport::Context(report),
+        });
+    }
+    let context = Context::open(options.scope)?;
+    if hybrid {
+        context.session.require_semantic_ready()?;
+    }
+    let report = run(
+        &context.session,
+        input,
+        &repository.root,
+        options.limit,
+        context.filter(),
+        hybrid,
+    )?;
+    Ok(context.finish(QueryReport::Context(report)))
+}
 
 const INPUT_PATH_LIMIT: usize = 256;
 const CITATION_LIMIT: usize = 3;
@@ -61,7 +97,7 @@ pub(crate) struct Suggestion {
     pub(crate) citations_truncated: bool,
     pub(crate) content_matches: Vec<ContentMatch>,
     pub(crate) content_matches_truncated: bool,
-    pub(crate) abandonment: Option<super::super::Failure>,
+    pub(crate) abandonment: Option<crate::analysis::Failure>,
 }
 
 pub(crate) struct ContentMatch {
@@ -97,7 +133,7 @@ impl Report {
     }
 }
 
-pub(crate) fn run(
+fn run(
     session: &QuerySession,
     input: CurrentChange,
     root: &Path,
@@ -202,10 +238,8 @@ pub(crate) fn run(
     if omitted_tests {
         report.warnings.push("warning: historical test paths absent as safe regular files in the current worktree were omitted; renames are not resolved".to_owned());
     }
-    let changes = super::context_content::discover(session, &mut report, scope, hybrid)?;
-    for (strength, time, suggestion) in
-        super::context_abandonment::compose(session, changes, scope)?
-    {
+    let changes = content::discover(session, &mut report, scope, hybrid)?;
+    for (strength, time, suggestion) in abandonment::compose(session, changes, scope)? {
         ranked.push((strength, time, suggestion, Vec::new()));
     }
     ranked.sort_by(|a, b| {

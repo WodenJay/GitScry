@@ -8,10 +8,90 @@ use crate::{
 
 use super::super::patch::{self, HunkPriorities};
 use super::super::retrieval;
-use super::super::{
-    Report, ReportKind, SearchScopeInfo, SymbolFact, SymbolSummary, WhyAttribution,
-    WhyAttributionCommit, WhyModification, WhySummary,
-};
+use super::super::{PatchExcerpt, Report, ReportKind, SearchScopeInfo};
+use crate::analysis::query::{Context, Options, Outcome, QueryReport};
+use crate::{cache, git::Repository};
+
+pub(in crate::analysis) fn execute(
+    revision: Option<String>,
+    path: String,
+    anchor: WhyAnchor,
+    options: Options,
+) -> Result<Outcome, AppError> {
+    let repository = Repository::discover()?;
+    let session = cache::open_query(&repository.root)?;
+    let revision = match revision {
+        Some(revision) => revision,
+        None => session.completed_tip()?,
+    };
+    let target = repository.pin_why_target(&revision, &path, anchor)?;
+    session.require_revision(&target.revision)?;
+    let context = Context::for_target(session, options.scope, &target.revision)?;
+    let reachable = context.session.ancestors(&target.revision)?;
+    let eligible = context.eligible_revisions(&target.revision)?;
+    let report = run(
+        &context.session,
+        &target,
+        &reachable,
+        eligible.as_ref(),
+        context.scope.as_ref().map(|scope| &scope.report),
+        options.limit,
+        options.patch,
+    )?;
+    Ok(context.finish(QueryReport::Analysis(report)))
+}
+
+/// The separate facts returned by a line or symbol `why` query.
+pub(crate) struct WhySummary {
+    pub(crate) anchor: String,
+    pub(crate) anchor_kind: &'static str,
+    pub(crate) anchor_line: Option<usize>,
+    pub(crate) symbol_end: Option<usize>,
+    pub(crate) attribution_scope: &'static str,
+    pub(crate) revision: String,
+    pub(crate) target_related_modifications: Vec<WhyModification>,
+    pub(crate) attribution: WhyAttribution,
+    pub(crate) standalone_target_related_modification_count: usize,
+    pub(crate) other_file_history_count: usize,
+    pub(crate) file_history_count: usize,
+    pub(crate) omitted_target_related_modifications: usize,
+    pub(crate) timeline_follow_up_args: Option<Vec<String>>,
+    pub(crate) limitations: Vec<String>,
+}
+
+pub(crate) struct WhyModification {
+    pub(crate) oid: String,
+    pub(crate) subject: String,
+    pub(crate) paths: Vec<Vec<u8>>,
+    pub(crate) basis: Vec<String>,
+    pub(crate) patch: Option<PatchExcerpt>,
+}
+
+pub(crate) enum WhyAttribution {
+    Available(WhyAttributionCommit),
+    OutsideHistoricalScope,
+    Unavailable { reason: String },
+}
+
+pub(crate) struct WhyAttributionCommit {
+    pub(crate) oid: String,
+    pub(crate) subject: String,
+    pub(crate) shallow_boundary: bool,
+    pub(crate) consolidated_target_modification: bool,
+    pub(crate) basis: Vec<String>,
+    pub(crate) patch: Option<PatchExcerpt>,
+}
+
+pub(crate) struct SymbolSummary {
+    pub(crate) target: String,
+    pub(crate) introduction: SymbolFact,
+    pub(crate) anchor_line_attribution: SymbolFact,
+}
+
+pub(crate) enum SymbolFact {
+    Known { commit_oid: String, subject: String },
+    Unknown { reason: String },
+}
 
 const REMOTE_CONTEXT_NOTICE: &str = "Remote context unavailable from local history.";
 
@@ -28,7 +108,7 @@ const EXPLANATION_MARKERS: &[&str] = &[
     "fixes",
     "caused",
 ];
-pub(crate) fn run(
+fn run(
     session: &QuerySession,
     target: &WhyTarget,
     reachable: &HashSet<String>,

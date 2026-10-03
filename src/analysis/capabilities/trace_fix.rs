@@ -8,9 +8,47 @@ use crate::{
 
 use super::super::provenance;
 use super::super::retrieval;
-use super::super::{
-    Citation, Confidence, Detail, Material, Report, ReportKind, TraceFixDetail, TraceFixPatchAnchor,
-};
+use super::super::{Citation, Confidence, Detail, Material, Report, ReportKind, patch};
+use crate::analysis::query::{Context, Options, Outcome, QueryReport};
+use crate::{cache, git::Repository};
+
+pub(in crate::analysis) fn execute(
+    revision: String,
+    paths: Vec<String>,
+    options: Options,
+) -> Result<Outcome, AppError> {
+    let repository = Repository::discover()?;
+    let target = repository.pin_trace_fix(&revision, &paths)?;
+    let session = cache::open_query(&repository.root)?;
+    session.require_revision(&target.revision)?;
+    let context = Context::for_target(session, options.scope, &target.revision)?;
+    let mut reachable = context.session.ancestors(&target.revision)?;
+    context.intersect(&target.revision, &mut reachable)?;
+    let mut report = run(
+        &context.session,
+        &target,
+        &reachable,
+        options.limit,
+        context.scope.is_some(),
+    )?;
+    if options.patch {
+        patch::attach_trace_fix_patch_excerpts(&context.session, &mut report)?;
+    }
+    Ok(context.finish(QueryReport::Analysis(report)))
+}
+
+pub(crate) struct TraceFixPatchAnchor {
+    pub(crate) line: usize,
+    pub(crate) paths: Vec<Vec<u8>>,
+}
+
+pub(crate) struct TraceFixDetail {
+    pub(crate) role: &'static str,
+    pub(crate) fix_revision: String,
+    pub(crate) parent_revision: Option<String>,
+    pub(crate) line: Option<usize>,
+    pub(crate) patch_anchors: Vec<TraceFixPatchAnchor>,
+}
 
 type PathHistories = HashMap<Vec<u8>, HashMap<String, retrieval::HistoryCommit>>;
 struct Evidence {
@@ -28,7 +66,7 @@ struct Evidence {
     patch_anchors: Vec<TraceFixPatchAnchor>,
 }
 
-pub(crate) fn run(
+fn run(
     session: &QuerySession,
     target: &TraceFixTarget,
     reachable: &HashSet<String>,

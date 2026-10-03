@@ -1,5 +1,5 @@
 //! Local exact-identity signals and one shared, bounded changed-code verification pass.
-use super::context::{Category, ContentMatch, Report, Suggestion};
+use super::{Category, ContentMatch, Report, Suggestion};
 use crate::{
     analysis::{Citation, retrieval},
     app::AppError,

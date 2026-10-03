@@ -1,11 +1,30 @@
 //! Closed file-incarnation combinations, independent of individual-path ranking.
 use super::super::SearchScopeInfo;
+use crate::analysis::Intent;
+use crate::analysis::query::{Context, Options, Outcome, QueryReport};
 use crate::{
     app::AppError,
     cache::{FileIncarnation, PatternIncarnations, QuerySession, SearchFilter},
     git::Repository,
 };
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+
+pub(in crate::analysis) fn execute(
+    paths: Vec<String>,
+    min_support: usize,
+    options: Options,
+) -> Result<Outcome, AppError> {
+    Intent::paths(&paths)?;
+    let context = Context::open(options.scope)?;
+    let report = run(
+        &context.session,
+        &paths,
+        context.filter(),
+        min_support,
+        options.limit,
+    )?;
+    Ok(context.finish(QueryReport::Patterns(report)))
+}
 
 pub(crate) struct Report {
     pub(crate) target_revision: String,
@@ -46,7 +65,7 @@ struct Observation {
     members: BTreeMap<FileIncarnation, BTreeSet<Vec<u8>>>,
 }
 
-pub(crate) fn run(
+fn run(
     session: &QuerySession,
     paths: &[String],
     scope: Option<&SearchFilter>,

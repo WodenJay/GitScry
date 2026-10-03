@@ -1,7 +1,7 @@
 use serde_json::json;
 
 use super::{escape, json::json_path};
-use crate::analysis::query::followups::{Entry, Report};
+use crate::analysis::capabilities::followups::{Entry, Report};
 
 pub(super) fn format_report(report: &Report) -> String {
     let scope = &report.scope;

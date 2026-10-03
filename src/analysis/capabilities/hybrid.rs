@@ -7,6 +7,33 @@ use crate::{
 
 use super::super::{Citation, Confidence, Intent, Material, Report, ReportKind, retrieval};
 use super::lexical_confidence;
+use crate::analysis::patch;
+use crate::analysis::query::{Context, Options, Outcome, QueryReport};
+use crate::semantic::Encoder;
+
+pub(in crate::analysis) fn execute(
+    words: Vec<String>,
+    options: Options,
+) -> Result<Outcome, AppError> {
+    let intent = Intent::parse(&words, &[])?;
+    let context = Context::open(options.scope)?;
+    context.session.require_semantic_ready()?;
+
+    let query = words.join(" ");
+    let (mut encoder, inputs) = Encoder::load_for_query(&query)?;
+    let query_vectors = encoder.embed_query_chunks(&inputs)?;
+    let mut report = run(
+        &context.session,
+        &intent,
+        options.limit,
+        context.filter(),
+        &query_vectors,
+    )?;
+    if options.patch {
+        patch::attach_patch_excerpts(&context.session, &intent, &mut report, false, &[])?;
+    }
+    Ok(context.finish(QueryReport::Analysis(report)))
+}
 
 const RRF_CONSTANT: usize = 60;
 const MINIMUM_CANDIDATE_DEPTH: usize = 100;
@@ -122,7 +149,7 @@ fn sort_candidates(candidates: impl IntoIterator<Item = FusedCandidate>) -> Vec<
     candidates
 }
 
-pub(crate) fn run(
+fn run(
     session: &QuerySession,
     intent: &Intent,
     limit: usize,

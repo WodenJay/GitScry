@@ -1,8 +1,45 @@
+use crate::analysis::patch;
+use crate::analysis::query::{Context, Options, Outcome, QueryReport};
 use crate::{
     analysis::{PatchExcerpt, SearchScopeInfo},
     cache::HistoryCommit,
 };
+use crate::{app::AppError, cache, git::Repository};
 use std::collections::HashSet;
+
+pub(in crate::analysis) fn execute(
+    path: String,
+    at: Option<String>,
+    offset: usize,
+    last: bool,
+    options: Options,
+) -> Result<Outcome, AppError> {
+    let repository = Repository::discover()?;
+    let session = cache::open_query(&repository.root)?;
+    let revision = match at {
+        Some(revision) => revision,
+        None => session.completed_tip()?,
+    };
+    let target = repository.pin_timeline_target(&revision, &path)?;
+    session.require_revision(&target.revision)?;
+    let context = Context::for_target(session, options.scope, &target.revision)?;
+    let reachable = context.session.ancestors(&target.revision)?;
+    let eligible = context.eligible_revisions(&target.revision)?;
+    let history = context.session.timeline_history(&target.path, &reachable)?;
+    let mut report = Report::from_history(
+        target.revision,
+        target.path,
+        history,
+        eligible.as_ref(),
+        options.limit,
+        offset,
+        last,
+    );
+    if options.patch {
+        patch::attach_timeline_patch_excerpts(&context.session, &mut report)?;
+    }
+    Ok(context.finish(QueryReport::Timeline(report)))
+}
 
 pub(crate) struct Report {
     pub(crate) target_revision: String,

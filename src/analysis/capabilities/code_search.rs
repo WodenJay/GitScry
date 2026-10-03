@@ -1,10 +1,38 @@
 use std::collections::BTreeSet;
 
+use crate::analysis::query::{Context, Options, Outcome, QueryReport};
 use crate::{
     analysis::{CodeDirection, CodeMatch, Report, ReportKind},
     app::AppError,
     cache::{CodeHunk, QuerySession, SearchFilter},
 };
+
+pub(in crate::analysis) fn execute(
+    query: String,
+    path: Option<String>,
+    direction: Option<CodeDirection>,
+    options: Options,
+) -> Result<Outcome, AppError> {
+    let context = Context::open(options.scope)?;
+    let report = match context.filter() {
+        Some(filter) => run_scoped(
+            &context.session,
+            &query,
+            path.as_deref(),
+            direction,
+            options.limit,
+            filter,
+        )?,
+        None => run(
+            &context.session,
+            &query,
+            path.as_deref(),
+            direction,
+            options.limit,
+        )?,
+    };
+    Ok(context.finish(QueryReport::Analysis(report)))
+}
 
 struct OrderedMatch {
     matched: CodeMatch,
@@ -106,7 +134,7 @@ impl CodeSearch<'_> {
     }
 }
 
-pub(crate) fn run(
+fn run(
     session: &QuerySession,
     query: &str,
     path: Option<&str>,
@@ -116,7 +144,7 @@ pub(crate) fn run(
     run_with_scope(session, query, path, direction, limit, None)
 }
 
-pub(crate) fn run_scoped(
+fn run_scoped(
     session: &QuerySession,
     query: &str,
     path: Option<&str>,

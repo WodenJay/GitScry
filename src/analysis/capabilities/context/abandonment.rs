@@ -1,5 +1,5 @@
 //! Attach recorded provenance only to changes already associated with current content.
-use super::context::{Category, Suggestion};
+use super::{Category, Suggestion};
 use crate::{
     analysis::{
         Citation, Failure,

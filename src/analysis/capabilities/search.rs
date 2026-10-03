@@ -6,16 +6,30 @@ use crate::{
 use super::super::retrieval;
 use super::super::{Citation, Intent, Material, Report, ReportKind};
 use super::lexical_confidence;
+use crate::analysis::patch;
+use crate::analysis::query::{Context, Options, Outcome, QueryReport};
 
-pub(crate) fn run(
-    session: &QuerySession,
-    intent: &Intent,
-    limit: usize,
-) -> Result<Report, AppError> {
+pub(in crate::analysis) fn execute(
+    words: Vec<String>,
+    options: Options,
+) -> Result<Outcome, AppError> {
+    let intent = Intent::parse(&words, &[])?;
+    let context = Context::open(options.scope)?;
+    let mut report = match context.filter() {
+        Some(filter) => run_scoped(&context.session, &intent, options.limit, filter)?,
+        None => run(&context.session, &intent, options.limit)?,
+    };
+    if options.patch {
+        patch::attach_patch_excerpts(&context.session, &intent, &mut report, false, &[])?;
+    }
+    Ok(context.finish(QueryReport::Analysis(report)))
+}
+
+fn run(session: &QuerySession, intent: &Intent, limit: usize) -> Result<Report, AppError> {
     run_with_scope(session, intent, limit, None)
 }
 
-pub(crate) fn run_scoped(
+fn run_scoped(
     session: &QuerySession,
     intent: &Intent,
     limit: usize,

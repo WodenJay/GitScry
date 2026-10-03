@@ -3,18 +3,17 @@
 //! Target pinning, scope semantics, material assembly and optional excerpts stay
 //! behind this interface. Display formats never participate in query execution.
 
-pub(crate) mod followups;
-mod scope;
+mod context;
+pub(in crate::analysis) mod scope;
 
-use std::collections::HashSet;
-
-use super::{CodeDirection, Intent, Report, TimelineReport, capabilities, patch};
+use super::{CodeDirection, Intent, Report, capabilities, patch};
 use crate::{
     app::AppError,
-    cache::{self, QuerySession, SearchFilter},
-    git::{Repository, WhyAnchor},
-    semantic::Encoder,
+    cache::{QuerySession, SearchFilter},
+    git::WhyAnchor,
 };
+
+pub(in crate::analysis) use context::Context;
 
 pub(crate) use scope::SearchScopeOptions;
 
@@ -91,11 +90,11 @@ pub(crate) struct Options {
 }
 
 pub(crate) enum QueryReport {
-    Followups(followups::Report),
+    Followups(capabilities::followups::Report),
     Context(super::ContextReport),
     Patterns(capabilities::patterns::Report),
     Analysis(Report),
-    Timeline(TimelineReport),
+    Timeline(super::TimelineReport),
     TraceRemoval(super::TraceRemovalReport),
     Hotspots(super::HotspotsReport),
 }
@@ -128,67 +127,6 @@ pub(crate) struct Outcome {
     pub(crate) report: QueryReport,
 }
 
-/// The cache generation and scope shared by material selection and excerpts.
-struct Context {
-    session: QuerySession,
-    scope: Option<scope::ResolvedSearchScope>,
-}
-
-impl Context {
-    fn open(options: SearchScopeOptions) -> Result<Self, AppError> {
-        let repository = Repository::discover()?;
-        let session = cache::open_query(&repository.root)?;
-        let scope = scope::resolve(&session, options)?;
-        Ok(Self { session, scope })
-    }
-
-    fn for_target(
-        session: QuerySession,
-        options: SearchScopeOptions,
-        revision: &str,
-    ) -> Result<Self, AppError> {
-        let scope = scope::resolve_for_target(&session, options, revision)?;
-        Ok(Self { session, scope })
-    }
-
-    fn filter(&self) -> Option<&SearchFilter> {
-        self.scope.as_ref().map(|scope| &scope.filter)
-    }
-
-    /// Eligibility is distinct from traversal: why and timeline must follow
-    /// the complete target history before filtering material or pagination.
-    fn eligible_revisions(&self, revision: &str) -> Result<Option<HashSet<String>>, AppError> {
-        self.filter()
-            .map(|filter| self.session.scoped_revisions(filter, revision))
-            .transpose()
-    }
-
-    fn intersect(&self, revision: &str, reachable: &mut HashSet<String>) -> Result<(), AppError> {
-        if let Some(eligible) = self.eligible_revisions(revision)? {
-            reachable.retain(|revision| eligible.contains(revision));
-        }
-        Ok(())
-    }
-
-    fn finish(self, mut report: QueryReport) -> Outcome {
-        let scope = self.scope.map(|scope| scope.report);
-        match &mut report {
-            QueryReport::Followups(_) => {}
-            QueryReport::Patterns(report) => report.scope = scope,
-            QueryReport::Context(report) => report.scope = scope,
-            QueryReport::Analysis(report) => report.scope = scope,
-            QueryReport::Timeline(report) => report.scope = scope,
-            QueryReport::TraceRemoval(report) => report.scope = scope,
-            QueryReport::Hotspots(report) => report.scope = scope,
-        }
-        Outcome {
-            progress: self.session.progress().to_vec(),
-            warnings: self.session.warnings().to_vec(),
-            report,
-        }
-    }
-}
-
 pub(crate) fn execute(request: Request, options: Options) -> Result<Outcome, AppError> {
     if options.limit == 0 {
         return Err(AppError::input("limit must be greater than zero"));
@@ -200,32 +138,25 @@ pub(crate) fn execute(request: Request, options: Options) -> Result<Outcome, App
             to_rev,
             days,
             max_commits,
-        } => followups::run(revision, paths, to_rev, days, max_commits, options),
-        Request::Context { staged, hybrid } => run_context(staged, hybrid, options),
-        Request::Hotspots { path_prefix } => run_hotspots(options, path_prefix),
+        } => capabilities::followups::run(revision, paths, to_rev, days, max_commits, options),
+        Request::Context { staged, hybrid } => {
+            capabilities::context::execute(staged, hybrid, options)
+        }
+        Request::Hotspots { path_prefix } => capabilities::hotspots::execute(options, path_prefix),
         Request::Search { words, hybrid } => {
             if hybrid {
-                run_hybrid_search(words, options)
+                capabilities::hybrid::execute(words, options)
             } else {
-                run_search(words, options)
+                capabilities::search::execute(words, options)
             }
         }
         Request::CodeSearch {
             query,
             path,
             direction,
-        } => run_code_search(query, path, direction, options),
+        } => capabilities::code_search::execute(query, path, direction, options),
         Request::TraceRemoval { query, path } => {
-            let context = Context::open(options.scope)?;
-            let mut report = capabilities::trace_removal::run(
-                &context.session,
-                &query,
-                path.as_deref(),
-                options.limit,
-                context.filter(),
-            )?;
-            patch::attach_trace_removal_patch_excerpts(&context.session, &mut report)?;
-            Ok(context.finish(QueryReport::TraceRemoval(report)))
+            capabilities::trace_removal::execute(query, path, options)
         }
         Request::Examples { words, paths } => {
             run_text(words, paths, options, capabilities::examples)
@@ -235,16 +166,7 @@ pub(crate) fn execute(request: Request, options: Options) -> Result<Outcome, App
         }
         Request::Related(paths) => run_paths(paths, options, capabilities::related),
         Request::Patterns { paths, min_support } => {
-            Intent::paths(&paths)?;
-            let context = Context::open(options.scope)?;
-            let report = capabilities::patterns::run(
-                &context.session,
-                &paths,
-                context.filter(),
-                min_support,
-                options.limit,
-            )?;
-            Ok(context.finish(QueryReport::Patterns(report)))
+            capabilities::patterns::execute(paths, min_support, options)
         }
         Request::Tests(paths) => run_paths(paths, options, capabilities::tests),
         Request::Regression {
@@ -253,49 +175,24 @@ pub(crate) fn execute(request: Request, options: Options) -> Result<Outcome, App
             symbol,
             good,
             bad,
-        } => run_regression(words, path, symbol, good, bad, options),
+        } => capabilities::regression::execute(words, path, symbol, good, bad, options),
         Request::Why {
             revision,
             path,
             anchor,
-        } => run_why(revision, path, anchor, options),
-        Request::TraceFix { revision, paths } => run_trace_fix(revision, paths, options),
+        } => capabilities::why::execute(revision, path, anchor, options),
+        Request::TraceFix { revision, paths } => {
+            capabilities::trace_fix::execute(revision, paths, options)
+        }
         Request::Timeline {
             path,
             at,
             offset,
             last,
-        } => run_timeline(path, at, offset, last, options),
+        } => capabilities::timeline::execute(path, at, offset, last, options),
     }
 }
 
-fn run_context(staged: bool, hybrid: bool, options: Options) -> Result<Outcome, AppError> {
-    let repository = Repository::discover()?;
-    let input = repository.current_change(staged)?;
-    if input.changes.is_empty() {
-        scope::validate_time_bounds(&options.scope)?;
-        let mut report = super::ContextReport::empty(input);
-        report.semantic_requested = hybrid;
-        return Ok(Outcome {
-            progress: Vec::new(),
-            warnings: Vec::new(),
-            report: QueryReport::Context(report),
-        });
-    }
-    let context = Context::open(options.scope)?;
-    if hybrid {
-        context.session.require_semantic_ready()?;
-    }
-    let report = capabilities::context::run(
-        &context.session,
-        input,
-        &repository.root,
-        options.limit,
-        context.filter(),
-        hybrid,
-    )?;
-    Ok(context.finish(QueryReport::Context(report)))
-}
 fn run_text(
     words: Vec<String>,
     paths: Vec<String>,
@@ -322,69 +219,6 @@ fn run_text(
     Ok(context.finish(QueryReport::Analysis(report)))
 }
 
-fn run_search(words: Vec<String>, options: Options) -> Result<Outcome, AppError> {
-    let intent = Intent::parse(&words, &[])?;
-    let context = Context::open(options.scope)?;
-    let mut report = match context.filter() {
-        Some(filter) => {
-            capabilities::search_scoped(&context.session, &intent, options.limit, filter)?
-        }
-        None => capabilities::search(&context.session, &intent, options.limit)?,
-    };
-    if options.patch {
-        patch::attach_patch_excerpts(&context.session, &intent, &mut report, false, &[])?;
-    }
-    Ok(context.finish(QueryReport::Analysis(report)))
-}
-
-fn run_hybrid_search(words: Vec<String>, options: Options) -> Result<Outcome, AppError> {
-    let intent = Intent::parse(&words, &[])?;
-    let context = Context::open(options.scope)?;
-    context.session.require_semantic_ready()?;
-
-    let query = words.join(" ");
-    let (mut encoder, inputs) = Encoder::load_for_query(&query)?;
-    let query_vectors = encoder.embed_query_chunks(&inputs)?;
-    let mut report = capabilities::hybrid_search(
-        &context.session,
-        &intent,
-        options.limit,
-        context.filter(),
-        &query_vectors,
-    )?;
-    if options.patch {
-        patch::attach_patch_excerpts(&context.session, &intent, &mut report, false, &[])?;
-    }
-    Ok(context.finish(QueryReport::Analysis(report)))
-}
-
-fn run_code_search(
-    query: String,
-    path: Option<String>,
-    direction: Option<CodeDirection>,
-    options: Options,
-) -> Result<Outcome, AppError> {
-    let context = Context::open(options.scope)?;
-    let report = match context.filter() {
-        Some(filter) => capabilities::code_search_scoped(
-            &context.session,
-            &query,
-            path.as_deref(),
-            direction,
-            options.limit,
-            filter,
-        )?,
-        None => capabilities::code_search(
-            &context.session,
-            &query,
-            path.as_deref(),
-            direction,
-            options.limit,
-        )?,
-    };
-    Ok(context.finish(QueryReport::Analysis(report)))
-}
-
 fn run_paths(
     paths: Vec<String>,
     options: Options,
@@ -406,183 +240,4 @@ fn run_paths(
         context.filter(),
     )?;
     Ok(context.finish(QueryReport::Analysis(report)))
-}
-
-fn run_regression(
-    words: Vec<String>,
-    path: String,
-    symbol: Option<String>,
-    good: Option<String>,
-    bad: Option<String>,
-    options: Options,
-) -> Result<Outcome, AppError> {
-    let intent = Intent::symptom(&words, &path)?;
-    let repository = Repository::discover()?;
-    let session = cache::open_query(&repository.root)?;
-    let bad = match bad {
-        Some(revision) => revision,
-        None => session.completed_tip()?,
-    };
-    let target =
-        repository.pin_regression_target(&bad, good.as_deref(), &path, symbol.as_deref())?;
-    session.require_revision(&target.bad_revision)?;
-    if let Some(good_revision) = &target.good_revision {
-        session.require_revision(good_revision)?;
-    }
-    let context = Context::for_target(session, options.scope, &target.bad_revision)?;
-    let bad_reachable = context.session.ancestors(&target.bad_revision)?;
-    let mut reachable = if let Some(good_revision) = &target.good_revision {
-        let good_reachable = context.session.ancestors(good_revision)?;
-        bad_reachable.difference(&good_reachable).cloned().collect()
-    } else {
-        bad_reachable
-    };
-    context.intersect(&target.bad_revision, &mut reachable)?;
-    let report = capabilities::regression(
-        &context.session,
-        &intent,
-        &target,
-        &reachable,
-        options.limit,
-        options.patch,
-    )?;
-    Ok(context.finish(QueryReport::Analysis(report)))
-}
-
-fn run_why(
-    revision: Option<String>,
-    path: String,
-    anchor: WhyAnchor,
-    options: Options,
-) -> Result<Outcome, AppError> {
-    let repository = Repository::discover()?;
-    let session = cache::open_query(&repository.root)?;
-    let revision = match revision {
-        Some(revision) => revision,
-        None => session.completed_tip()?,
-    };
-    let target = repository.pin_why_target(&revision, &path, anchor)?;
-    session.require_revision(&target.revision)?;
-    let context = Context::for_target(session, options.scope, &target.revision)?;
-    let reachable = context.session.ancestors(&target.revision)?;
-    let eligible = context.eligible_revisions(&target.revision)?;
-    let report = capabilities::why(
-        &context.session,
-        &target,
-        &reachable,
-        eligible.as_ref(),
-        context.scope.as_ref().map(|scope| &scope.report),
-        options.limit,
-        options.patch,
-    )?;
-    Ok(context.finish(QueryReport::Analysis(report)))
-}
-
-fn run_timeline(
-    path: String,
-    at: Option<String>,
-    offset: usize,
-    last: bool,
-    options: Options,
-) -> Result<Outcome, AppError> {
-    let repository = Repository::discover()?;
-    let session = cache::open_query(&repository.root)?;
-    let revision = match at {
-        Some(revision) => revision,
-        None => session.completed_tip()?,
-    };
-    let target = repository.pin_timeline_target(&revision, &path)?;
-    session.require_revision(&target.revision)?;
-    let context = Context::for_target(session, options.scope, &target.revision)?;
-    let reachable = context.session.ancestors(&target.revision)?;
-    let eligible = context.eligible_revisions(&target.revision)?;
-    let history = context.session.timeline_history(&target.path, &reachable)?;
-    let mut report = TimelineReport::from_history(
-        target.revision,
-        target.path,
-        history,
-        eligible.as_ref(),
-        options.limit,
-        offset,
-        last,
-    );
-    if options.patch {
-        patch::attach_timeline_patch_excerpts(&context.session, &mut report)?;
-    }
-    Ok(context.finish(QueryReport::Timeline(report)))
-}
-
-fn run_trace_fix(
-    revision: String,
-    paths: Vec<String>,
-    options: Options,
-) -> Result<Outcome, AppError> {
-    let repository = Repository::discover()?;
-    let target = repository.pin_trace_fix(&revision, &paths)?;
-    let session = cache::open_query(&repository.root)?;
-    session.require_revision(&target.revision)?;
-    let context = Context::for_target(session, options.scope, &target.revision)?;
-    let mut reachable = context.session.ancestors(&target.revision)?;
-    context.intersect(&target.revision, &mut reachable)?;
-    let mut report = capabilities::trace_fix(
-        &context.session,
-        &target,
-        &reachable,
-        options.limit,
-        context.scope.is_some(),
-    )?;
-    if options.patch {
-        patch::attach_trace_fix_patch_excerpts(&context.session, &mut report)?;
-    }
-    Ok(context.finish(QueryReport::Analysis(report)))
-}
-
-fn normalize_hotspot_path_prefix(prefix: Option<String>) -> Result<Option<String>, AppError> {
-    let Some(prefix) = prefix else {
-        return Ok(None);
-    };
-    let normalized = prefix.replace('\\', "/");
-    let normalized = normalized.trim_end_matches('/');
-    let bytes = normalized.as_bytes();
-    let is_windows_drive = bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
-    if normalized.is_empty()
-        || normalized.starts_with('/')
-        || is_windows_drive
-        || normalized.contains('\0')
-        || normalized
-            .split('/')
-            .any(|component| component.is_empty() || component == "." || component == "..")
-    {
-        return Err(AppError::input(
-            "--path-prefix must be a repository-relative directory without `.` or `..` components",
-        ));
-    }
-    Ok(Some(normalized.to_owned()))
-}
-
-fn run_hotspots(options: Options, path_prefix: Option<String>) -> Result<Outcome, AppError> {
-    let path_prefix = normalize_hotspot_path_prefix(path_prefix)?;
-    let repository = Repository::discover()?;
-    let session = cache::open_query(&repository.root)?;
-    let target = match options.scope.to_rev.as_deref() {
-        Some(revision) => repository.resolve_commit(revision)?,
-        None => session.completed_tip()?,
-    };
-    session.require_revision(&target)?;
-    let context = Context::for_target(session, options.scope, &target)?;
-    let eligible = context.eligible_revisions(&target)?;
-    let paths = repository
-        .tracked_files(&target)?
-        .into_iter()
-        .filter(|path| {
-            path_prefix.as_ref().is_none_or(|prefix| {
-                path.starts_with(prefix.as_bytes()) && path.get(prefix.len()) == Some(&b'/')
-            })
-        })
-        .collect();
-    let touches = context
-        .session
-        .hotspot_touches(&target, paths, eligible.as_ref())?;
-    let report = super::HotspotsReport::aggregate(target, touches, options.limit, path_prefix);
-    Ok(context.finish(QueryReport::Hotspots(report)))
 }

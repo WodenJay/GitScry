@@ -3,7 +3,7 @@ mod regions;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use super::{Options, Outcome, QueryReport};
+use crate::analysis::query::{Options, Outcome, QueryReport};
 use crate::{
     app::AppError,
     cache::{self, followups::ForwardCommit},
@@ -170,7 +170,7 @@ pub(crate) struct Entry {
     pub(crate) patch: Option<crate::analysis::PatchExcerpt>,
 }
 
-pub(super) fn run(
+pub(in crate::analysis) fn run(
     revision: String,
     paths: Vec<String>,
     to_rev: Option<String>,

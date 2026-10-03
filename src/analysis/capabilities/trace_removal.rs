@@ -90,7 +90,26 @@ impl EventSelection {
     }
 }
 
-pub(crate) fn run(
+pub(in crate::analysis) fn execute(
+    query: String,
+    path: Option<String>,
+    options: crate::analysis::query::Options,
+) -> Result<crate::analysis::query::Outcome, AppError> {
+    use crate::analysis::query::{Context, QueryReport};
+
+    let context = Context::open(options.scope)?;
+    let mut report = run(
+        &context.session,
+        &query,
+        path.as_deref(),
+        options.limit,
+        context.filter(),
+    )?;
+    crate::analysis::patch::attach_trace_removal_patch_excerpts(&context.session, &mut report)?;
+    Ok(context.finish(QueryReport::TraceRemoval(report)))
+}
+
+fn run(
     session: &QuerySession,
     query: &str,
     path: Option<&str>,

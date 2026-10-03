@@ -22,9 +22,9 @@ impl SearchScopeOptions {
     }
 }
 
-pub(super) struct ResolvedSearchScope {
-    pub(super) filter: SearchFilter,
-    pub(super) report: SearchScopeInfo,
+pub(in crate::analysis) struct ResolvedSearchScope {
+    pub(in crate::analysis) filter: SearchFilter,
+    pub(in crate::analysis) report: SearchScopeInfo,
 }
 
 struct TimeBound {
@@ -51,7 +51,9 @@ impl TimeBound {
     }
 }
 
-pub(super) fn validate_time_bounds(options: &SearchScopeOptions) -> Result<(), AppError> {
+pub(in crate::analysis) fn validate_time_bounds(
+    options: &SearchScopeOptions,
+) -> Result<(), AppError> {
     time_bounds(options).map(|_| ())
 }
 
