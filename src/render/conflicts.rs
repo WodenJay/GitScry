@@ -53,6 +53,9 @@ pub(super) fn format_report(report: &Report) -> String {
                     )
                     .unwrap();
                 }
+                if lead.message_lossy {
+                    writeln!(output, "    Message decoding: invalid UTF-8 bytes replaced").unwrap();
+                }
                 if lead.regions_truncated {
                     writeln!(output, "    Regions truncated").unwrap();
                 }

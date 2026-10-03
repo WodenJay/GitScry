@@ -53,6 +53,7 @@ pub(crate) struct Lead {
     pub(crate) recorded_reason: Option<String>,
     pub(crate) reason_source: &'static str,
     pub(crate) message_truncated: bool,
+    pub(crate) message_lossy: bool,
     pub(crate) regions: Vec<Region>,
     pub(crate) regions_truncated: bool,
 }
@@ -110,23 +111,26 @@ pub(crate) fn execute(paths: Vec<String>, limit: usize) -> Result<Outcome, AppEr
             .filter(|line| line.starts_with("warning:"))
             .cloned(),
     );
-    warnings.sort();
-    warnings.dedup();
     let cached = session.commit_oids()?;
     let excluded = session.ancestors(&target.base)?;
+    let mut histories = Vec::new();
+    for (name, endpoint) in [("ours", &target.ours), ("theirs", &target.theirs)] {
+        let mut reachable = session.ancestors(endpoint)?;
+        let missing = reachable.difference(&cached).count();
+        if missing > 0 {
+            warnings.push(format!("{name} endpoint {endpoint}: incomplete history coverage; {missing} known ancestor(s) unavailable in the prepared cache (for example, beyond a shallow boundary)"));
+        }
+        reachable.retain(|oid| cached.contains(oid) && !excluded.contains(oid));
+        histories.push((name, endpoint, reachable));
+    }
+    warnings.sort();
+    warnings.dedup();
     let mut files = Vec::new();
     for file in target.files {
         let mut sides = Vec::new();
         if file.unsupported.is_none() {
-            for (name, endpoint) in [("ours", &target.ours), ("theirs", &target.theirs)] {
-                let mut reachable = session.ancestors(endpoint)?;
-                if !reachable.is_subset(&cached) {
-                    return Err(AppError::operational(
-                        "error: conflict endpoint cache coverage is incomplete; history unavailable or preparation failed",
-                    ));
-                }
-                reachable.retain(|oid| !excluded.contains(oid));
-                let history = session.path_history(&file.path, &reachable)?;
+            for (name, endpoint, reachable) in &histories {
+                let history = session.path_history(&file.path, reachable)?;
                 let mut leads = Vec::new();
                 for commit in history {
                     let hunks = session.history_hunks(&commit.oid)?;
@@ -158,12 +162,16 @@ pub(crate) fn execute(paths: Vec<String>, limit: usize) -> Result<Outcome, AppEr
                         .collect();
                     let (subject, subject_truncated) = bounded(&commit.subject);
                     let (reason, reason_truncated) = bounded(&commit.body);
+                    let message_lossy = session
+                        .commit_message(&commit.oid)?
+                        .is_some_and(|message| std::str::from_utf8(&message).is_err());
                     leads.push(Lead {
                         commit: commit.oid, path: String::from_utf8_lossy(&file.path).into_owned(),
                         association: "same-path textual change after merge base (containing-file evolution; not conflict-region lineage)",
                         subject, recorded_reason: (!reason.trim().is_empty()).then_some(reason),
                         reason_source: "commit message body (recorded participant text; not inferred or verified)",
                         message_truncated: subject_truncated || reason_truncated,
+                        message_lossy,
                         regions, regions_truncated,
                     });
                 }
@@ -171,7 +179,7 @@ pub(crate) fn execute(paths: Vec<String>, limit: usize) -> Result<Outcome, AppEr
                 leads.truncate(limit);
                 sides.push(Side {
                     name,
-                    endpoint: endpoint.clone(),
+                    endpoint: (*endpoint).clone(),
                     leads,
                     total_leads,
                     truncated: total_leads > limit,
@@ -192,7 +200,7 @@ pub(crate) fn execute(paths: Vec<String>, limit: usize) -> Result<Outcome, AppEr
         schema_version: 1, ours: target.ours, theirs: target.theirs, merge_base: target.base,
         total_unmerged_paths, selected_paths, files, files_truncated, coverage_complete,
         limits: Limits { files: FILE_LIMIT, leads_per_file_side: limit, regions_per_lead: REGION_LIMIT, message_characters: MESSAGE_LIMIT },
-        limitations: vec!["Direct same-path textual changes since the merge base only; no rename lineage, older history, associated changes, semantic claims or generated resolution. Cached merge changes are first-parent diffs.".to_owned(), "Commit message bodies are reported verbatim as recorded reasons; absence does not establish that no reason existed.".to_owned()],
+        limitations: vec!["Direct same-path textual changes since the merge base only; no rename lineage, older history, associated changes, semantic claims or generated resolution. Cached merge changes are first-parent diffs.".to_owned(), "Commit message bodies are recorded participant reasons, bounded and decoded as UTF-8 with replacement for invalid bytes (message_lossy identifies affected leads); absence does not establish that no reason existed.".to_owned()],
         warnings,
     };
     Ok(Outcome {

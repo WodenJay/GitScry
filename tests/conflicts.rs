@@ -231,3 +231,50 @@ fn rejects_multiple_endpoints_and_reports_cache_preparation_failure() {
     assert!(output.stdout.is_empty());
     assert!(String::from_utf8_lossy(&output.stderr).contains("cache"));
 }
+
+#[test]
+fn shallow_history_returns_two_sides_with_explicit_incomplete_coverage() {
+    let (repo, _, ours, theirs, _) = fixture();
+    let base = git_stdout(repo.dir.path(), ["merge-base", "main", "other"]);
+    fs::write(repo.common_dir().join("shallow"), format!("{base}\n")).unwrap();
+    fs::remove_dir_all(repo.cache_dir()).unwrap();
+    let report = json(repo.run(["conflicts", "--json"]));
+    assert_eq!(report["coverage_complete"], false);
+    assert!(!report["warnings"].as_array().unwrap().is_empty());
+    assert_eq!(report["files"][0]["sides"][0]["leads"][0]["commit"], ours);
+    assert_eq!(report["files"][0]["sides"][1]["leads"][0]["commit"], theirs);
+}
+
+#[test]
+fn discloses_non_utf8_commit_message_decoding() {
+    let (repo, _, _, _, _) = fixture();
+    git(repo.dir.path(), ["merge", "--abort"]);
+    git(repo.dir.path(), ["checkout", "other"]);
+    fs::write(repo.dir.path().join("a.txt"), "latest theirs\n").unwrap();
+    git(repo.dir.path(), ["add", "a.txt"]);
+    fs::write(repo.dir.path().join("message"), b"latest\n\nReason: \xff\n").unwrap();
+    git(
+        repo.dir.path(),
+        [
+            "-c",
+            "i18n.commitEncoding=ISO-8859-1",
+            "commit",
+            "-F",
+            "message",
+        ],
+    );
+    git(repo.dir.path(), ["checkout", "main"]);
+    merge(&repo, "other");
+    let report = json(repo.run(["conflicts", "--json"]));
+    assert_eq!(
+        report["files"][0]["sides"][1]["leads"][0]["message_lossy"],
+        true
+    );
+    assert!(
+        report["limitations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value.as_str().unwrap().contains("UTF-8"))
+    );
+}
