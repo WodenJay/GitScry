@@ -36,7 +36,7 @@ fn json(repo: &TestRepo, args: &[&str]) -> Value {
 }
 
 #[test]
-fn followups_reports_only_inspected_same_file_material() {
+fn followups_reports_inspected_file_material_by_region_priority() {
     let repo = TestRepo::new();
     let seed = commit(&repo, "a", "seed\n", "Seed", "2020-01-01T00:00:00Z");
     commit(
@@ -57,7 +57,7 @@ fn followups_reports_only_inspected_same_file_material() {
     assert_eq!(report["entries"].as_array().unwrap().len(), 1);
     assert_eq!(report["entries"][0]["commit_id"], early);
     assert_eq!(report["entries"][0]["elapsed_seconds"], -86400);
-    assert_eq!(report["entries"][0]["basis"], "same_file");
+    assert_eq!(report["entries"][0]["basis"], "region_overlap");
     assert!(!report["warnings"].as_array().unwrap().is_empty());
     let report = json(&repo, &["followups", &seed, "--limit", "1", "--json"]);
     assert_eq!(report["inspected_count"], 3);
@@ -72,6 +72,154 @@ fn followups_reports_only_inspected_same_file_material() {
     let empty = json(&repo, &["followups", &seed, "--to-rev", &seed, "--json"]);
     assert_eq!(empty["inspected_count"], 0);
     assert!(empty["entries"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn followups_tracks_changed_regions_through_shifts_and_groups_them_first() {
+    let repo = TestRepo::new();
+    commit(
+        &repo,
+        "a",
+        "outside\ntarget-old\ntail\nother-old\n",
+        "Baseline",
+        "2020-01-01T00:00:00Z",
+    );
+    let seed = commit(
+        &repo,
+        "a",
+        "outside\ntarget-seed\ntail\nother-old\n",
+        "Seed",
+        "2020-01-02T00:00:00Z",
+    );
+    let shifted = commit(
+        &repo,
+        "a",
+        "preface\noutside\ntarget-seed\ntail\nother-old\n",
+        "Shift target line",
+        "2020-01-03T00:00:00Z",
+    );
+    let unrelated = commit(
+        &repo,
+        "a",
+        "preface\noutside\ntarget-seed\ntail\nother-new\n",
+        "Edit another region",
+        "2020-01-04T00:00:00Z",
+    );
+    let overlap = commit(
+        &repo,
+        "a",
+        "preface\noutside\ntarget-followup\ntail\nother-new\n",
+        "Edit seed region",
+        "2020-01-05T00:00:00Z",
+    );
+    repo.index();
+
+    let report = json(&repo, &["followups", &seed, "--json"]);
+    assert_eq!(report["schema_version"], 3);
+    let entries = report["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 3);
+    assert_eq!(entries[0]["commit_id"], overlap);
+    assert_eq!(entries[0]["basis"], "region_overlap");
+    assert_eq!(
+        entries[0]["association_bases"],
+        serde_json::json!(["region_overlap", "same_file"])
+    );
+    assert_eq!(entries[1]["commit_id"], shifted);
+    assert_eq!(entries[1]["basis"], "same_file");
+    assert!(
+        entries[1]["region_associations"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(entries[2]["commit_id"], unrelated);
+    assert_eq!(entries[2]["basis"], "same_file");
+    assert!(
+        entries[2]["region_associations"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+
+    let region = &entries[0]["region_associations"][0];
+    assert_eq!(region["seed_revision"], seed);
+    assert_eq!(region["commit_id"], overlap);
+    assert_eq!(region["seed_path"], "a");
+    assert_eq!(region["previous_path"], "a");
+    assert_eq!(region["current_path"], "a");
+    assert_eq!(
+        region["seed_position"],
+        serde_json::json!({"start_line": 2, "line_count": 1})
+    );
+    assert_eq!(
+        region["previous_position"],
+        serde_json::json!({"start_line": 3, "line_count": 1})
+    );
+    assert_eq!(
+        region["current_position"],
+        serde_json::json!({"start_line": 3, "line_count": 1})
+    );
+
+    let limited = json(&repo, &["followups", &seed, "--limit", "2", "--json"]);
+    assert_eq!(limited["entries"].as_array().unwrap().len(), 2);
+    assert_eq!(limited["entries"][0]["commit_id"], overlap);
+    assert_eq!(limited["entries"][1]["commit_id"], shifted);
+    assert_eq!(limited["matched_in_inspected_scope"], 3);
+    assert_eq!(limited["display_truncated"], true);
+
+    let patched = json(&repo, &["followups", &seed, "--patch", "--json"]);
+    assert_eq!(patched["entries"][0]["patch"]["status"], "available");
+    let text = String::from_utf8(repo.run(["followups", &seed]).stdout).unwrap();
+    assert!(text.contains("region_overlap"));
+    assert!(text.contains(&format!("{seed}@a:2+1")), "{text}");
+    assert!(text.contains(&format!("{overlap}@a:3+1")));
+}
+
+#[test]
+fn followups_tracks_seed_regions_across_renames() {
+    let repo = TestRepo::new();
+    commit(
+        &repo,
+        "old",
+        "outside\ntarget-old\ntail\n",
+        "Baseline",
+        "2020-01-01T00:00:00Z",
+    );
+    let seed = commit(
+        &repo,
+        "old",
+        "outside\ntarget-seed\ntail\n",
+        "Seed",
+        "2020-01-02T00:00:00Z",
+    );
+    git(repo.dir.path(), ["mv", "old", "new"]);
+    let rename = commit_all(&repo, "Rename tracked file", "2020-01-03T00:00:00Z");
+    let followup = commit(
+        &repo,
+        "new",
+        "outside\ntarget-followup\ntail\n",
+        "Edit tracked region after rename",
+        "2020-01-04T00:00:00Z",
+    );
+    repo.index();
+
+    let report = json(&repo, &["followups", &seed, "--json"]);
+    let entries = report["entries"].as_array().unwrap();
+    let rename_entry = entries
+        .iter()
+        .find(|entry| entry["commit_id"] == rename)
+        .unwrap();
+    assert_eq!(rename_entry["basis"], "same_file");
+    let followup_entry = entries
+        .iter()
+        .find(|entry| entry["commit_id"] == followup)
+        .unwrap();
+    assert_eq!(followup_entry["basis"], "region_overlap");
+    let region = &followup_entry["region_associations"][0];
+    assert_eq!(region["seed_path"], "old");
+    assert_eq!(region["previous_path"], "new");
+    assert_eq!(region["current_path"], "new");
+    assert_eq!(region["seed_position"]["start_line"], 2);
 }
 
 #[test]
@@ -166,6 +314,10 @@ fn followups_validates_inputs_and_explains_scope_in_help() {
         "positive",
         "inclusive",
         "ancestor",
+        "region-overlap",
+        "same-file-only",
+        "first parent",
+        "downgrade",
         "same-file",
         "rename",
         "--patch",
@@ -272,7 +424,7 @@ fn followups_tracks_multiple_renames_and_keeps_path_context() {
             "--json",
         ],
     );
-    assert_eq!(old["schema_version"], 2);
+    assert_eq!(old["schema_version"], 3);
     assert_eq!(old["entries"], new["entries"]);
     assert_eq!(old["entries"], both["entries"]);
     let entries = old["entries"].as_array().unwrap();
@@ -537,7 +689,7 @@ fn followups_warns_when_first_parent_deletes_a_surviving_incarnation() {
     assert!(
         report["warnings"]
             .to_string()
-            .contains("ambiguous merge correspondence")
+            .contains("ambiguous merge file correspondence")
     );
 
     let survivor_report = json(
@@ -717,7 +869,7 @@ fn followups_prioritizes_explicit_revert_references_and_keeps_bases_separate() {
     assert_eq!(report["display_truncated"], true);
     assert_eq!(
         report["scope"]["order"],
-        "explicit_revert_reference_then_same_file_then_forward_topological"
+        "explicit_revert_reference_then_region_overlap_then_same_file_then_forward_topological"
     );
     let entries = report["entries"].as_array().unwrap();
     assert_eq!(entries.len(), 3);
@@ -736,7 +888,7 @@ fn followups_prioritizes_explicit_revert_references_and_keeps_bases_separate() {
     assert_eq!(entries[2]["commit_id"], explicit_same_file);
     assert_eq!(
         entries[2]["association_bases"],
-        serde_json::json!(["explicit_revert_reference", "same_file"])
+        serde_json::json!(["explicit_revert_reference", "region_overlap", "same_file"])
     );
     assert_eq!(entries[2]["paths"], serde_json::json!(["a"]));
     assert_eq!(
@@ -768,7 +920,7 @@ fn followups_prioritizes_explicit_revert_references_and_keeps_bases_separate() {
     );
     assert_eq!(
         complete_entries[3]["association_bases"],
-        serde_json::json!(["same_file"])
+        serde_json::json!(["region_overlap", "same_file"])
     );
     assert!(complete_entries[3].get("revert_reference").is_none());
 

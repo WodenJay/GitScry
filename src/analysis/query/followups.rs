@@ -1,4 +1,6 @@
 //! Bounded same-file material. Identity is branch-local and never resumes after ending.
+mod regions;
+
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use super::{Options, Outcome, QueryReport};
@@ -26,11 +28,12 @@ fn descendants(graph: &[ForwardCommit], seed: &str) -> HashSet<String> {
 
 type Incarnations = BTreeMap<i64, FileIncarnation>;
 
-#[derive(Clone)]
+#[derive(Clone, Eq, PartialEq)]
 struct FileIncarnation {
     seed_old_path: Option<Vec<u8>>,
     seed_new_path: Option<Vec<u8>>,
     current_path: Option<Vec<u8>>,
+    regions: RegionTracking,
 }
 
 #[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
@@ -40,6 +43,89 @@ pub(crate) struct FileAssociation {
     pub(crate) previous_path: Vec<u8>,
     pub(crate) current_path: Option<Vec<u8>>,
     pub(crate) change_type: String,
+}
+
+#[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) struct LinePosition {
+    pub(crate) start_line: i64,
+    pub(crate) line_count: i64,
+}
+
+#[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) struct RegionAssociation {
+    pub(crate) seed_path: Vec<u8>,
+    pub(crate) previous_revision: String,
+    pub(crate) previous_path: Vec<u8>,
+    pub(crate) current_path: Option<Vec<u8>>,
+    pub(crate) seed_position: LinePosition,
+    pub(crate) previous_position: LinePosition,
+    pub(crate) current_position: LinePosition,
+}
+
+#[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) struct RegionDowngrade {
+    pub(crate) seed_old_path: Option<Vec<u8>>,
+    pub(crate) seed_new_path: Option<Vec<u8>>,
+    pub(crate) previous_path: Vec<u8>,
+    pub(crate) current_path: Option<Vec<u8>>,
+    pub(crate) reason: RegionTrackingReason,
+}
+
+#[derive(Clone, Copy, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) enum RegionTrackingReason {
+    MissingPatchMaterial,
+    TruncatedPatchMaterial,
+    TrackingBudgetExhausted,
+    NonTextualSeedChange,
+    NonTextualChange,
+    InvalidPatchMapping,
+    AmbiguousMerge,
+}
+
+impl RegionTrackingReason {
+    pub(crate) fn code(self) -> &'static str {
+        match self {
+            Self::MissingPatchMaterial => "missing_patch_material",
+            Self::TruncatedPatchMaterial => "truncated_patch_material",
+            Self::TrackingBudgetExhausted => "tracking_budget_exhausted",
+            Self::NonTextualSeedChange => "non_textual_seed_change",
+            Self::NonTextualChange => "non_textual_change",
+            Self::InvalidPatchMapping => "invalid_patch_mapping",
+            Self::AmbiguousMerge => "ambiguous_merge_correspondence",
+        }
+    }
+
+    pub(crate) fn description(self) -> &'static str {
+        match self {
+            Self::MissingPatchMaterial => {
+                "cached patch objects needed to trace this region are missing"
+            }
+            Self::TruncatedPatchMaterial => "cached patch text or hunk ranges are truncated",
+            Self::TrackingBudgetExhausted => {
+                "the bounded changed-region tracking budget was exhausted"
+            }
+            Self::NonTextualSeedChange => {
+                "the seed change has no cached textual hunk to establish added-line regions"
+            }
+            Self::NonTextualChange => {
+                "the later file change has no cached textual hunk to map tracked lines"
+            }
+            Self::InvalidPatchMapping => "cached patch hunk ranges could not be mapped reliably",
+            Self::AmbiguousMerge => "parent branches disagree on changed-region coordinates",
+        }
+    }
+}
+
+#[derive(Clone, Eq, PartialEq)]
+enum RegionTracking {
+    Available(Vec<TrackedRegion>),
+    Unavailable(RegionTrackingReason),
+}
+
+#[derive(Clone, Eq, PartialEq)]
+struct TrackedRegion {
+    seed_position: LinePosition,
+    current_positions: Vec<LinePosition>,
 }
 
 pub(crate) struct Report {
@@ -77,6 +163,8 @@ pub(crate) struct Entry {
     pub(crate) file_associations: Vec<FileAssociation>,
     pub(crate) revert_reference: Option<String>,
     pub(crate) same_file_association: bool,
+    pub(crate) region_associations: Vec<RegionAssociation>,
+    pub(crate) region_tracking_downgrades: Vec<RegionDowngrade>,
     pub(crate) parent_count: usize,
     pub(crate) patch: Option<crate::analysis::PatchExcerpt>,
 }
@@ -145,6 +233,7 @@ pub(super) fn run(
         }
     }
     let mut initial = Incarnations::new();
+    let mut region_budget = regions::Budget::new();
     let mut selected_paths = Vec::new();
     for change in &original {
         if !paths.is_empty()
@@ -171,6 +260,14 @@ pub(super) fn run(
                 } else {
                     change.new_path.clone().or_else(|| change.old_path.clone())
                 },
+                regions: regions::seed_tracking(
+                    &session,
+                    &seed,
+                    change.ordinal,
+                    change.old_blob != change.new_blob,
+                    change.status.starts_with('D'),
+                    &mut region_budget,
+                )?,
             },
         );
     }
@@ -182,8 +279,8 @@ pub(super) fn run(
         traversal_truncated: false, display_truncated: false, matched_in_inspected_scope: 0,
         entries: Vec::new(), warnings: vec![
             "Coverage is limited to endpoint-reachable published cache history, not all refs; no fetch or index was performed.".into(),
-            "Explicit revert references record commit-message declarations only; they do not verify patch inversion or selected-path reversal. Same-file associations follow detected subsequent renames; changed-region overlap is not supported. Copies and same-path recreation are not continuations. Neither association basis establishes causality or stability.".into(),
-            "Cached merge diffs are relative to the first parent; branch correspondence is conservative, not proof of fresh corrections.".into(),
+            "Explicit revert references are commit-message declarations only. Tracked regions begin at seed-added lines and continue only through complete cached text patches and detected renames; unrelated same-file edits remain same-file-only. Pure deletions establish no region; copies and same-path recreation do not continue an incarnation. Incomplete or ambiguous correspondence is downgraded. Neither association basis establishes causality or stability.".into(),
+            "Cached merge diffs are relative to the first parent; region coordinates must agree across parents or tracking downgrades, and merge-imported work is not described as a fresh correction.".into(),
         ],
     };
     let mut states: HashMap<String, Incarnations> = HashMap::from([(seed.clone(), initial)]);
@@ -200,6 +297,7 @@ pub(super) fn run(
         HashSet::new()
     };
     let mut explicit_reference_entries = Vec::new();
+    let mut region_overlap_entries = Vec::new();
     let mut same_file_entries = Vec::new();
     for (index, node) in candidates.iter().enumerate() {
         let eligible = node.commit_time <= time_ceiling;
@@ -262,11 +360,37 @@ pub(super) fn run(
                             .and_then(|incarnation| incarnation.current_path.clone())
                     })
                     .collect();
+                let parent_regions: Vec<_> = node
+                    .parents
+                    .iter()
+                    .map(|parent| {
+                        states
+                            .get(parent)
+                            .and_then(|parent_state| parent_state.get(&identity))
+                            .map(|incarnation| incarnation.regions.clone())
+                    })
+                    .collect();
                 if parent_paths
                     .iter()
                     .skip(1)
                     .all(|path| path == &parent_paths[0])
                 {
+                    if parent_paths[0].is_some()
+                        && parent_regions
+                            .iter()
+                            .skip(1)
+                            .any(|regions| regions != &parent_regions[0])
+                    {
+                        if let Some(incarnation) = state.get_mut(&identity) {
+                            incarnation.regions =
+                                RegionTracking::Unavailable(RegionTrackingReason::AmbiguousMerge);
+                        }
+                        report.warnings.push(format!(
+                            "{}: ambiguous merge region correspondence; changed-region tracking downgraded for {}.",
+                            node.oid,
+                            String::from_utf8_lossy(parent_paths[0].as_ref().expect("checked path"))
+                        ));
+                    }
                     continue;
                 }
                 let Some(path) = parent_paths.iter().find_map(|path| path.clone()) else {
@@ -274,9 +398,11 @@ pub(super) fn run(
                 };
                 if let Some(incarnation) = state.get_mut(&identity) {
                     incarnation.current_path = None;
+                    incarnation.regions =
+                        RegionTracking::Unavailable(RegionTrackingReason::AmbiguousMerge);
                 }
                 report.warnings.push(format!(
-                    "{}: ambiguous merge correspondence; tracking stopped for {}.",
+                    "{}: ambiguous merge file correspondence; file tracking stopped for {}.",
                     node.oid,
                     String::from_utf8_lossy(&path)
                 ));
@@ -284,7 +410,10 @@ pub(super) fn run(
         }
         let changes = session.forward_changes(&node.oid)?;
         let mut associated = Vec::new();
+        let mut region_associations = Vec::new();
+        let mut region_tracking_downgrades = Vec::new();
         let mut next_state = state.clone();
+        let previous_revision = node.parents.first().map(String::as_str).unwrap_or(&seed);
         for change in changes {
             if change.status.starts_with('C') {
                 continue;
@@ -305,27 +434,61 @@ pub(super) fn run(
                         .clone()
                         .or_else(|| Some(previous_path.clone()))
                 };
+                let advance = regions::advance(
+                    &session,
+                    &incarnation.regions,
+                    regions::ChangeContext {
+                        oid: &node.oid,
+                        change_ordinal: change.ordinal,
+                        content_changed: change.old_blob != change.new_blob,
+                        previous_revision,
+                        seed_path: incarnation
+                            .seed_new_path
+                            .as_deref()
+                            .or(incarnation.seed_old_path.as_deref()),
+                        previous_path: &previous_path,
+                        current_path: current_path.as_deref(),
+                    },
+                    eligible,
+                    &mut region_budget,
+                )?;
                 if eligible {
+                    region_associations.extend(advance.associations);
+                    if let Some(reason) = advance.downgrade_reason {
+                        region_tracking_downgrades.push(RegionDowngrade {
+                            seed_old_path: incarnation.seed_old_path.clone(),
+                            seed_new_path: incarnation.seed_new_path.clone(),
+                            previous_path: previous_path.clone(),
+                            current_path: current_path.clone(),
+                            reason,
+                        });
+                    }
                     associated.push(FileAssociation {
                         seed_old_path: incarnation.seed_old_path.clone(),
                         seed_new_path: incarnation.seed_new_path.clone(),
-                        previous_path,
+                        previous_path: previous_path.clone(),
                         current_path: current_path.clone(),
                         change_type: change.status.clone(),
                     });
                 }
                 if let Some(next_incarnation) = next_state.get_mut(identity) {
                     next_incarnation.current_path = current_path;
+                    next_incarnation.regions = advance.tracking;
                 }
             }
         }
         state = next_state;
         states.insert(node.oid.clone(), state);
         let has_same_file_association = !associated.is_empty();
+        let has_region_overlap = !region_associations.is_empty();
         if has_revert_reference || has_same_file_association {
             let mut file_associations = associated;
             file_associations.sort();
             file_associations.dedup();
+            region_associations.sort();
+            region_associations.dedup();
+            region_tracking_downgrades.sort();
+            region_tracking_downgrades.dedup();
             let mut paths: Vec<_> = file_associations
                 .iter()
                 .flat_map(|association| {
@@ -351,20 +514,26 @@ pub(super) fn run(
                 file_associations,
                 revert_reference: has_revert_reference.then(|| seed.clone()),
                 same_file_association: has_same_file_association,
+                region_associations,
+                region_tracking_downgrades,
                 parent_count: node.parents.len(),
                 patch: None,
             };
             if has_revert_reference {
                 explicit_reference_entries.push(entry);
+            } else if has_region_overlap {
+                region_overlap_entries.push(entry);
             } else {
                 same_file_entries.push(entry);
             }
         }
     }
-    report.matched_in_inspected_scope = explicit_reference_entries.len() + same_file_entries.len();
+    report.matched_in_inspected_scope =
+        explicit_reference_entries.len() + region_overlap_entries.len() + same_file_entries.len();
     report.display_truncated = report.matched_in_inspected_scope > options.limit;
     for mut entry in explicit_reference_entries
         .into_iter()
+        .chain(region_overlap_entries)
         .chain(same_file_entries)
         .take(options.limit)
     {
