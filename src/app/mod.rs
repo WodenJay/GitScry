@@ -244,6 +244,12 @@ pub(crate) fn execute(
             false,
             scope.into(),
         ),
+        Command::Conflicts { paths, limit, .. } => (
+            Request::Conflicts { paths },
+            limit,
+            false,
+            Default::default(),
+        ),
         Command::Context {
             staged,
             hybrid,
@@ -393,6 +399,7 @@ pub(crate) fn execute(
         },
     )?;
     let github_links = github_link_request.map(|explicit_repo| match &result.report {
+        query::QueryReport::Conflicts(_) => unreachable!("conflicts has no GitHub link option"),
         query::QueryReport::Context(_) | query::QueryReport::Followups(_) => {
             unreachable!("context has no GitHub link option")
         }

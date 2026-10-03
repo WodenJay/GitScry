@@ -18,7 +18,7 @@ mod semantic;
 mod write;
 use crate::{app::AppError, git::Repository};
 pub(crate) use clear::{ClearReport, clear};
-pub(crate) use generation::prepare;
+pub(crate) use generation::{prepare, prepare_at};
 pub(crate) use history::HunkId;
 pub(crate) use history::{CodeHunk, HistoryCommit, HistoryHunk, OtherFileChange, PatchHistoryHunk};
 use payload::HunkReader;

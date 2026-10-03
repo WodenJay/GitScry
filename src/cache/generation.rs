@@ -100,7 +100,7 @@ pub(crate) fn prepare(
     prepare_at(repository, tip, report)
 }
 
-fn prepare_at(
+pub(crate) fn prepare_at(
     repository: &Repository,
     tip: String,
     report: &mut dyn FnMut(IndexStage),

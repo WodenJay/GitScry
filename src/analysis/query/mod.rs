@@ -18,6 +18,9 @@ pub(in crate::analysis) use context::Context;
 pub(crate) use scope::SearchScopeOptions;
 
 pub(crate) enum Request {
+    Conflicts {
+        paths: Vec<String>,
+    },
     Followups {
         revision: String,
         paths: Vec<String>,
@@ -95,6 +98,7 @@ pub(crate) struct Options {
 }
 
 pub(crate) enum QueryReport {
+    Conflicts(capabilities::conflicts::Report),
     Followups(capabilities::followups::Report),
     Context(super::ContextReport),
     Patterns(capabilities::patterns::Report),
@@ -107,6 +111,7 @@ pub(crate) enum QueryReport {
 impl QueryReport {
     pub(crate) fn warnings(&self) -> &[String] {
         match self {
+            Self::Conflicts(report) => &report.warnings,
             Self::Followups(report) => &report.warnings,
             Self::Patterns(_) => &[],
             Self::Context(report) => &report.warnings,
@@ -117,6 +122,7 @@ impl QueryReport {
 
     pub(crate) fn notices(&self) -> &[String] {
         match self {
+            Self::Conflicts(_) => &[],
             Self::Followups(_) => &[],
             Self::Patterns(_) => &[],
             Self::Context(_) => &[],
@@ -137,6 +143,7 @@ pub(crate) fn execute(request: Request, options: Options) -> Result<Outcome, App
         return Err(AppError::input("limit must be greater than zero"));
     }
     match request {
+        Request::Conflicts { paths } => capabilities::conflicts::execute(paths, options.limit),
         Request::Followups {
             revision,
             paths,
