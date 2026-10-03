@@ -4,7 +4,7 @@ use super::{AppError, Outcome};
 
 pub(super) fn run(dry_run: bool) -> Result<Outcome, AppError> {
     let repository = git::Repository::discover()?;
-    let (progress, clear_report) = cache::clear(&repository, dry_run)?;
+    let (progress, prune_report) = cache::prune(&repository, dry_run)?;
     Ok(Outcome {
         progress,
         warnings: Vec::new(),
@@ -13,7 +13,7 @@ pub(super) fn run(dry_run: bool) -> Result<Outcome, AppError> {
         report: None,
         usage_report: None,
         github_links: None,
-        clear_report: Some(clear_report),
-        prune_report: None,
+        clear_report: None,
+        prune_report: Some(prune_report),
     })
 }

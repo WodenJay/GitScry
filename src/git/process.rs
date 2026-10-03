@@ -107,29 +107,19 @@ impl Git {
             .iter()
             .map(|oid| format!("{oid}\n"))
             .collect::<String>();
-        let output = self.output(["cat-file", "--batch-check"], input.as_bytes())?;
-        let mut missing = Vec::new();
-        for (expected, line) in object_ids.iter().zip(output.split(|byte| *byte == b'\n')) {
-            if line.is_empty() {
-                return Err(AppError::operational(
-                    "error: Git object check returned a truncated response",
-                ));
-            }
-            let fields = line.split(|byte| *byte == b' ').collect::<Vec<_>>();
-            if fields.first().copied() != Some(expected.as_bytes()) {
-                return Err(AppError::operational(
-                    "error: Git object check returned an unexpected object",
-                ));
-            }
-            if fields.get(1).copied() == Some(b"missing") {
-                missing.push(expected.clone());
-            } else if fields.len() < 3 {
-                return Err(AppError::operational(
-                    "error: Git object check returned an invalid response",
-                ));
-            }
+        let command = self.run(["cat-file", "--batch-check"], input.as_bytes())?;
+        if !command.status.success() || !command.stderr.is_empty() {
+            let detail = String::from_utf8_lossy(&command.stderr);
+            let reason = if detail.trim().is_empty() {
+                format!("exit status {}", command.status)
+            } else {
+                detail.trim().to_owned()
+            };
+            return Err(AppError::operational(format!(
+                "error: Git object check failed: {reason}"
+            )));
         }
-        Ok(missing)
+        parse_missing_objects(object_ids, &command.stdout)
     }
 
     pub(super) fn stream<I, S, F>(
@@ -267,6 +257,52 @@ impl Git {
         &self.root
     }
 }
+fn parse_missing_objects(object_ids: &[String], output: &[u8]) -> Result<Vec<String>, AppError> {
+    let response = output.strip_suffix(b"\n").ok_or_else(|| {
+        AppError::operational("error: Git object check returned a truncated response")
+    })?;
+    let lines = response.split(|byte| *byte == b'\n').collect::<Vec<_>>();
+    if lines.len() < object_ids.len() {
+        return Err(AppError::operational(
+            "error: Git object check returned a truncated response",
+        ));
+    }
+    if lines.len() > object_ids.len() {
+        return Err(AppError::operational(
+            "error: Git object check returned an unexpected number of responses",
+        ));
+    }
+
+    let mut missing = Vec::new();
+    for (expected, line) in object_ids.iter().zip(lines) {
+        let fields = line.split(|byte| *byte == b' ').collect::<Vec<_>>();
+        if fields.first().copied() != Some(expected.as_bytes()) {
+            return Err(AppError::operational(
+                "error: Git object check returned an unexpected object",
+            ));
+        }
+        if fields.len() == 2 && fields[1] == b"missing" {
+            missing.push(expected.clone());
+            continue;
+        }
+        let valid_object = fields.len() == 3
+            && ["blob", "tree", "commit", "tag"]
+                .iter()
+                .any(|object_type| fields[1] == object_type.as_bytes());
+        let valid_size = fields.len() == 3
+            && fields[2].iter().all(|byte| byte.is_ascii_digit())
+            && std::str::from_utf8(fields[2])
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .is_some();
+        if !valid_object || !valid_size {
+            return Err(AppError::operational(
+                "error: Git object check returned an invalid response",
+            ));
+        }
+    }
+    Ok(missing)
+}
 
 fn check_input_result(written: std::io::Result<()>) -> Result<(), AppError> {
     match written {
@@ -285,7 +321,39 @@ fn git_failure(stderr: &[u8]) -> AppError {
 
 #[cfg(test)]
 mod tests {
-    use super::Git;
+    use super::{Git, parse_missing_objects};
+
+    #[test]
+    fn missing_object_parser_accepts_exact_responses() {
+        let object_ids = vec!["present".to_owned(), "absent".to_owned()];
+        let missing =
+            parse_missing_objects(&object_ids, b"present commit 12\nabsent missing\n").unwrap();
+        assert_eq!(missing, vec!["absent".to_owned()]);
+    }
+
+    #[test]
+    fn missing_object_parser_rejects_malformed_and_extra_responses() {
+        let one_object = vec!["a".to_owned()];
+        for output in [
+            &b"a missing extra\n"[..],
+            b"a commit 1 extra\n",
+            b"a commit not-a-size\n",
+            b"a unknown 1\n",
+            b"a commit 1",
+            b"a commit 1\nb missing\n",
+        ] {
+            assert!(
+                parse_missing_objects(&one_object, output).is_err(),
+                "accepted malformed response: {output:?}"
+            );
+        }
+
+        let two_objects = vec!["a".to_owned(), "b".to_owned()];
+        assert!(
+            parse_missing_objects(&two_objects, b"a missing\n").is_err(),
+            "accepted a truncated response"
+        );
+    }
 
     #[test]
     fn stream_surfaces_an_early_child_failure() {

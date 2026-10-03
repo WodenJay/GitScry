@@ -451,7 +451,7 @@ fn json_flag_is_available_only_for_query_commands() {
     assert!(trace_help.contains("FIX_REVISION"));
     assert!(trace_help.contains("fix target"));
 
-    for name in ["index", "update", "clear"] {
+    for name in ["index", "update", "clear", "prune"] {
         let help = repo.run([name, "--help"]);
         assert_eq!(help.status.code(), Some(0), "{name}");
         assert!(!String::from_utf8_lossy(&help.stdout).contains("--json"));

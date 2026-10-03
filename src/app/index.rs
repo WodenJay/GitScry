@@ -37,5 +37,6 @@ pub(super) fn run(
         usage_report: None,
         github_links: None,
         clear_report: None,
+        prune_report: None,
     })
 }

@@ -125,7 +125,7 @@ impl QuerySession {
     }
 }
 
-fn collect_data_files(directory: &Path) -> Result<Vec<ClearDataFile>, AppError> {
+pub(super) fn collect_data_files(directory: &Path) -> Result<Vec<ClearDataFile>, AppError> {
     let entries =
         fs::read_dir(directory).map_err(|error| clear_error("reading cache directory", error))?;
     let mut files = Vec::new();
@@ -166,7 +166,7 @@ fn collect_data_files(directory: &Path) -> Result<Vec<ClearDataFile>, AppError> 
     Ok(files)
 }
 
-fn total_bytes(files: &[ClearDataFile]) -> Result<u64, AppError> {
+pub(super) fn total_bytes(files: &[ClearDataFile]) -> Result<u64, AppError> {
     files.iter().try_fold(0_u64, |total, file| {
         total
             .checked_add(file.size_bytes)
