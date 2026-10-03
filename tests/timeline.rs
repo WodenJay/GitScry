@@ -2,6 +2,7 @@ mod support;
 
 use std::{fs, path::Path};
 
+use rusqlite::Connection;
 use serde_json::Value;
 use support::{TestRepo, git, git_command, git_stdout};
 
@@ -899,6 +900,22 @@ fn timeline_orders_history_after_shallow_clone_is_deepened() {
         deepened_index.status.success(),
         "{}",
         String::from_utf8_lossy(&deepened_index.stderr)
+    );
+
+    let cache =
+        Connection::open(support::git_common_dir(&clone).join("gitscry/cache.sqlite")).unwrap();
+    let newest_change_count: i64 = cache
+        .query_row(
+            "SELECT COUNT(*) FROM changes AS ch
+             JOIN commits AS c ON c.commit_id = ch.commit_id
+             WHERE c.oid = ?1",
+            [&newest],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        newest_change_count, 1,
+        "newest commit must be refreshed after deepening"
     );
 
     let timeline = json(&TestRepo::run_at(

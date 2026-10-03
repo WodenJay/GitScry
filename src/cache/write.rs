@@ -5,7 +5,7 @@
 
 use std::{collections::HashMap, path::Path};
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
 
 use super::{
     SCHEMA_VERSION, cache_error,
@@ -27,6 +27,12 @@ pub(super) fn append(path: &Path, snapshot: &Snapshot) -> Result<usize, AppError
     let transaction = connection
         .transaction()
         .map_err(|error| cache_error("starting cache transaction", error))?;
+    transaction
+        .execute_batch(
+            "CREATE INDEX IF NOT EXISTS commit_parents_by_external_oid
+             ON commit_parents(external_oid, commit_id) WHERE external_oid IS NOT NULL",
+        )
+        .map_err(|error| cache_error("indexing unresolved commit parents", error))?;
     write_snapshot_rows(&transaction, snapshot, replace_commit)?;
     replace_metadata(&transaction, snapshot, None)?;
     transaction
@@ -127,6 +133,7 @@ fn write_snapshot_rows(
                     .unwrap_or(&[]),
             )?;
         }
+        relink_cached_parents(transaction, snapshot)?;
         let change_ids = insert_changes(transaction, &snapshot.changes)?;
         for commit in &snapshot.commits {
             insert_path_projection(
@@ -143,6 +150,30 @@ fn write_snapshot_rows(
     write_hunks(transaction, &snapshot.patches, &change_ids)
 }
 
+fn relink_cached_parents(connection: &Connection, snapshot: &Snapshot) -> Result<(), AppError> {
+    const CHUNK_SIZE: usize = 500;
+
+    for commits in snapshot.commits.chunks(CHUNK_SIZE) {
+        let placeholders = std::iter::repeat_n("?", commits.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let query = format!(
+            "UPDATE commit_parents
+             SET parent_id = (
+                 SELECT parent.commit_id FROM commits AS parent
+                 WHERE parent.oid = commit_parents.external_oid
+             ), external_oid = NULL
+             WHERE parent_id IS NULL AND external_oid IN ({placeholders})",
+        );
+        connection
+            .execute(
+                &query,
+                params_from_iter(commits.iter().map(|commit| commit.oid.as_str())),
+            )
+            .map_err(|error| cache_error("linking cached commit parents", error))?;
+    }
+    Ok(())
+}
 fn paths_by_commit(snapshot: &Snapshot) -> HashMap<String, Vec<Vec<u8>>> {
     let mut paths_by_commit = HashMap::<String, Vec<Vec<u8>>>::new();
     for change in &snapshot.changes {
@@ -199,7 +230,6 @@ fn replace_metadata(
     let mut metadata = vec![
         ("schema_version", SCHEMA_VERSION.to_owned()),
         ("object_format", snapshot.object_format.clone()),
-        ("default_ref", snapshot.default_ref.clone()),
         ("completed_tip", snapshot.tip.clone()),
         ("completed_commit_count", snapshot.commits.len().to_string()),
     ];

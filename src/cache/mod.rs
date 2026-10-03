@@ -248,18 +248,14 @@ fn validate_query_metadata(connection: &Connection) -> Result<(), AppError> {
     }
     let completed_tip = query_metadata(connection, "completed_tip")?;
     let completed_count = query_metadata(connection, "completed_commit_count")?;
-    let default_ref = query_metadata(connection, "default_ref")?;
     let object_format = query_metadata(connection, "object_format")?;
     let valid_tip = completed_tip.as_deref().is_some_and(valid_object_id);
     let valid_count = completed_count
         .as_deref()
         .and_then(|value| value.parse::<usize>().ok())
         .is_some_and(|count| count > 0);
-    let valid_default_ref = default_ref
-        .as_deref()
-        .is_some_and(|value| !value.is_empty());
     let valid_object_format = matches!(object_format.as_deref(), Some("sha1" | "sha256"));
-    if !valid_tip || !valid_count || !valid_default_ref || !valid_object_format {
+    if !valid_tip || !valid_count || !valid_object_format {
         return Err(query_error(
             "published cache completion metadata is invalid",
         ));

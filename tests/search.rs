@@ -1128,7 +1128,10 @@ fn search_refreshes_cache_after_shallow_history_deepens() {
         .expect("search deepened repository");
     assert_eq!(second.status.code(), Some(0));
     assert!(String::from_utf8_lossy(&second.stdout).contains("Commit one"));
-    assert!(!String::from_utf8_lossy(&second.stderr).contains("Indexing local history"));
+    assert!(
+        !String::from_utf8_lossy(&second.stderr)
+            .contains("Indexing history reachable from current HEAD")
+    );
 }
 
 #[test]

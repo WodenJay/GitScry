@@ -9,7 +9,7 @@ pub(super) fn run(
 ) -> Result<Outcome, AppError> {
     let repository = git::Repository::discover()?;
     let prepared = cache::prepare(&repository, report)?;
-    let (progress, commit_count, semantic_enabled) = prepared.release();
+    let (progress, current_head_commit_count, semantic_enabled) = prepared.release();
     let preference = match (semantic, no_semantic) {
         (true, false) => cache::SemanticPreference::Enable,
         (false, true) => cache::SemanticPreference::Disable,
@@ -25,8 +25,12 @@ pub(super) fn run(
         progress,
         warnings: Vec::new(),
         message: format!(
-            "Indexed {commit_count} commit{}.",
-            if commit_count == 1 { "" } else { "s" }
+            "Indexed {current_head_commit_count} commit{} reachable from current HEAD.",
+            if current_head_commit_count == 1 {
+                ""
+            } else {
+                "s"
+            }
         ),
         notices: Vec::new(),
         report: None,

@@ -136,7 +136,10 @@ impl<W: Write> IndexProgress<W> {
                 write!(self.output, "{line}").and_then(|()| self.output.flush())
             }
         } else if matches!(stage, IndexStage::ReadingCommits) {
-            writeln!(self.output, "Indexing local history...")
+            writeln!(
+                self.output,
+                "Indexing history reachable from current HEAD..."
+            )
         } else if matches!(stage, IndexStage::BuildingSemanticIndex) {
             writeln!(self.output, "Building semantic index...")
         } else {
@@ -296,6 +299,6 @@ mod tests {
         }
         progress.finish().unwrap();
 
-        assert_eq!(output, b"Indexing local history...\n");
+        assert_eq!(output, b"Indexing history reachable from current HEAD...\n");
     }
 }

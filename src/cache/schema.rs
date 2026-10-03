@@ -39,6 +39,8 @@ CREATE TABLE commit_parents (
     CHECK ((parent_id IS NULL) != (external_oid IS NULL))
 ) STRICT;
 CREATE INDEX commit_parents_by_parent ON commit_parents(parent_id, commit_id);
+CREATE INDEX commit_parents_by_external_oid
+    ON commit_parents(external_oid, commit_id) WHERE external_oid IS NOT NULL;
 CREATE TABLE changes (
     change_id INTEGER PRIMARY KEY,
     commit_id INTEGER NOT NULL REFERENCES commits(commit_id),
