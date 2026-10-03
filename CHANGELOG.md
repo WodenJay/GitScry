@@ -1,3 +1,26 @@
+## [0.8.0] - 2026-10-03
+
+### 🚀 Features
+
+- *(search)* Add regex code search
+- *(stats)* Add local usage stats
+- Add shared cache clear
+- *(index)* Index current HEAD history
+- *(index)* Merge current HEAD indexing
+- *(semantic)* Scope readiness to history views
+- *(cache)* Prune missing-object history
+- *(cache)* Merge missing-object pruning
+- *(cli)* Group query and management help
+
+### 🐛 Bug Fixes
+
+- *(cache)* Share cache across worktrees
+- *(cache)* Wait on cache publication
+- *(query)* Scope history to current HEAD
+- *(cache)* Batch missing-object lookup
+- Normalize Windows-style path filters
+- Preserve clear preview metadata
+- *(cache)* Combine merged test modules
 ## [0.7.0] - 2026-10-03
 
 ### 🚀 Features
