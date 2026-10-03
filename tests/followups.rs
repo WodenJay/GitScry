@@ -360,6 +360,42 @@ fn followups_paths_incarnations_and_bounded_patch() {
 }
 
 #[test]
+fn followups_accepts_windows_style_path_separators() {
+    let repo = TestRepo::new();
+    fs::create_dir_all(repo.dir.path().join("src")).unwrap();
+    let seed = commit(
+        &repo,
+        "src/foo.rs",
+        "seed\n",
+        "Seed",
+        "2020-01-01T00:00:00Z",
+    );
+    let changed = commit(
+        &repo,
+        "src/foo.rs",
+        "follow-up\n",
+        "Follow-up",
+        "2020-01-02T00:00:00Z",
+    );
+    repo.index();
+
+    let windows_path = json(
+        &repo,
+        &["followups", &seed, "--path", r"src\foo.rs", "--json"],
+    );
+    let git_path = json(
+        &repo,
+        &["followups", &seed, "--path", "src/foo.rs", "--json"],
+    );
+    assert_eq!(windows_path["entries"], git_path["entries"]);
+    assert_eq!(windows_path["entries"][0]["commit_id"], changed);
+    assert_eq!(
+        windows_path["scope"]["selected_paths"],
+        serde_json::json!(["src/foo.rs"])
+    );
+}
+
+#[test]
 fn followups_validates_inputs_and_explains_scope_in_help() {
     let repo = TestRepo::new();
     let seed = commit(&repo, "a", "seed\n", "Seed", "2020-01-01T00:00:00Z");

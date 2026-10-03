@@ -1690,6 +1690,38 @@ fn code_search_filters_historical_paths_and_limits_changed_lines() {
 }
 
 #[test]
+fn code_search_accepts_windows_style_path_separators() {
+    let repo = TestRepo::new();
+    repo.commit_at(
+        "src/foo.rs",
+        b"needle\n",
+        "Add needle",
+        "2020-01-01T00:00:00Z",
+    );
+    repo.index();
+
+    let output = repo.run([
+        "search",
+        "--code",
+        "needle",
+        "--change",
+        "added",
+        "--path",
+        r"src\foo.rs",
+        "--json",
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["matched_count"], 1);
+    assert_eq!(report["code_matches"][0]["path"], "src/foo.rs");
+}
+
+#[test]
 fn code_search_json_and_human_output_escape_arbitrary_line_bytes() {
     let repo = TestRepo::new();
     let invalid_line = b"prefix needle-\xff";

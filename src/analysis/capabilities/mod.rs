@@ -24,6 +24,12 @@ pub(in crate::analysis) mod why;
 pub(crate) use examples::run as examples;
 pub(crate) use failures::run as failures;
 pub(crate) use relations::{related, tests};
+
+/// Convert user-facing path separators to Git's canonical separator.
+fn normalize_path_separators(path: &str) -> String {
+    path.replace('\\', "/")
+}
+
 pub(super) fn lexical_confidence(signals: &super::retrieval::Signals) -> super::Confidence {
     if signals.strong() {
         super::Confidence::High
