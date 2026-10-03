@@ -202,7 +202,7 @@ fn run(
         .push("Remote context unavailable from local history.".to_owned());
     if !scope_applied && !target.deleted_lines.is_empty() && matched_count == 0 {
         report.notices.push(
-            "warning: no introducing commit is available in the default-branch cache.".to_owned(),
+            "warning: no introducing commit was found in cached history reachable from this fix; run `gitscry index` if relevant history is missing.".to_owned(),
         );
     }
     Ok(report)

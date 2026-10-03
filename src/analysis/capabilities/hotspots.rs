@@ -1,7 +1,7 @@
 //! Aggregation over eligible touches, independent of display and lineage traversal.
 use super::timeline::format_timestamp;
 use crate::analysis::SearchScopeInfo;
-use crate::analysis::query::{Context, Options, Outcome, QueryReport};
+use crate::analysis::query::{Context, Options, Outcome, QueryReport, scope};
 use crate::{
     app::AppError,
     cache::{self, FileTouches},
@@ -38,12 +38,24 @@ pub(in crate::analysis) fn execute(
     let path_prefix = normalize_hotspot_path_prefix(path_prefix)?;
     let repository = Repository::discover()?;
     let session = cache::open_query(&repository.root)?;
+    let implicit_target = options.scope.to_rev.is_none();
     let target = match options.scope.to_rev.as_deref() {
         Some(revision) => repository.resolve_commit(revision)?,
-        None => session.completed_tip()?,
+        None => repository.resolve_commit("HEAD")?,
     };
-    session.require_revision(&target)?;
-    let context = Context::for_target(session, options.scope, &target)?;
+    if !implicit_target {
+        session.require_revision(&target)?;
+    }
+    let context = if implicit_target {
+        Context::for_head_target(session, options.scope, &target)?
+    } else {
+        Context::for_target(session, options.scope, &target)?
+    };
+    let history_targets = if implicit_target {
+        scope::cached_head_history_frontier(&context.session, &repository)?
+    } else {
+        vec![target.clone()]
+    };
     let eligible = context.eligible_revisions(&target)?;
     let paths = repository
         .tracked_files(&target)?
@@ -56,7 +68,7 @@ pub(in crate::analysis) fn execute(
         .collect();
     let touches = context
         .session
-        .hotspot_touches(&target, paths, eligible.as_ref())?;
+        .hotspot_touches(&history_targets, paths, eligible.as_ref())?;
     let report = Report::aggregate(target, touches, options.limit, path_prefix);
     Ok(context.finish(QueryReport::Hotspots(report)))
 }

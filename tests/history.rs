@@ -187,10 +187,13 @@ fn examples_excludes_candidates_from_unmatched_paths() {
     let output = repo.run(["examples", "retire", "provider", "--path", "./SRC/a.rs"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     let text = stdout(&output);
-    assert!(text.starts_with("Historical examples (1 match):"), "{text}");
+    assert!(text.contains("Historical examples (1 match):"), "{text}");
     assert!(text.contains(&matching[..12]), "{text}");
     assert!(
-        !text.contains(&unrelated[..12]),
+        !text
+            .lines()
+            .skip(1)
+            .any(|line| line.contains(&unrelated[..12])),
         "candidate from an unmatched path was returned:\n{text}"
     );
 }
@@ -225,7 +228,7 @@ fn examples_filters_paths_before_candidate_limit() {
     ]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     let text = stdout(&output);
-    assert!(text.starts_with("Historical examples (1 match):"), "{text}");
+    assert!(text.contains("Historical examples (1 match):"), "{text}");
     assert!(
         text.contains(&matching[..12]),
         "path match fell outside lexical pool:\n{text}"
@@ -638,10 +641,13 @@ fn failures_excludes_candidates_from_unmatched_paths() {
     ]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     let text = stdout(&output);
-    assert!(text.starts_with("Failed approaches (2 matches):"), "{text}");
+    assert!(text.contains("Failed approaches (2 matches):"), "{text}");
     assert!(text.contains(&matching[..12]), "{text}");
     assert!(
-        !text.contains(&unrelated[..12]),
+        !text
+            .lines()
+            .skip(1)
+            .any(|line| line.contains(&unrelated[..12])),
         "candidate from an unmatched path was returned:\n{text}"
     );
 }
@@ -800,11 +806,11 @@ fn examples_and_failures_report_their_fixed_empty_results() {
     repo.index();
     let examples = repo.run(["examples", "term-that-does-not-exist"]);
     assert_eq!(examples.status.code(), Some(0));
-    assert_eq!(stdout(&examples), "No historical examples found.\n");
+    assert!(stdout(&examples).ends_with("No historical examples found.\n"));
 
     let failures = repo.run(["failures", "term-that-does-not-exist"]);
     assert_eq!(failures.status.code(), Some(0));
-    assert_eq!(stdout(&failures), "No failed approaches found.\n");
+    assert!(stdout(&failures).ends_with("No failed approaches found.\n"));
 }
 
 #[test]
@@ -1416,6 +1422,8 @@ fn examples_and_failures_share_scope_validation_and_empty_output() {
         let unscoped = repo.run([command, "provider", "--json"]);
         assert_eq!(unscoped.status.code(), Some(0), "{}", stderr(&unscoped));
         let unscoped: serde_json::Value = serde_json::from_slice(&unscoped.stdout).unwrap();
-        assert!(unscoped.get("scope").is_none(), "{unscoped}");
+        assert_eq!(unscoped["scope"]["to_rev"], tip);
+        assert_eq!(unscoped["scope"]["cache_tip"], tip);
+        assert_eq!(unscoped["scope"]["coverage_complete"], true);
     }
 }

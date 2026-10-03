@@ -9,7 +9,7 @@ use crate::{
 use super::super::patch::{self, HunkPriorities};
 use super::super::retrieval;
 use super::super::{PatchExcerpt, Report, ReportKind, SearchScopeInfo};
-use crate::analysis::query::{Context, Options, Outcome, QueryReport};
+use crate::analysis::query::{Context, Options, Outcome, QueryReport, scope};
 use crate::{cache, git::Repository};
 
 pub(in crate::analysis) fn execute(
@@ -20,14 +20,28 @@ pub(in crate::analysis) fn execute(
 ) -> Result<Outcome, AppError> {
     let repository = Repository::discover()?;
     let session = cache::open_query(&repository.root)?;
+    let implicit_target = revision.is_none();
     let revision = match revision {
         Some(revision) => revision,
-        None => session.completed_tip()?,
+        None => repository.resolve_commit("HEAD")?,
     };
     let target = repository.pin_why_target(&revision, &path, anchor)?;
-    session.require_revision(&target.revision)?;
-    let context = Context::for_target(session, options.scope, &target.revision)?;
-    let reachable = context.session.ancestors(&target.revision)?;
+    if !implicit_target {
+        session.require_revision(&target.revision)?;
+    }
+    let context = if implicit_target {
+        Context::for_head_target(session, options.scope, &target.revision)?
+    } else {
+        Context::for_target(session, options.scope, &target.revision)?
+    };
+    let reachable = if implicit_target {
+        scope::reachable_history(&context.session, &repository, &target.revision)?
+            .revisions
+            .into_iter()
+            .collect()
+    } else {
+        context.session.ancestors(&target.revision)?
+    };
     let eligible = context.eligible_revisions(&target.revision)?;
     let report = run(
         &context.session,

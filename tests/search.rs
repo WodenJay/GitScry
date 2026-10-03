@@ -323,7 +323,9 @@ fn search_revision_scope_is_lower_exclusive_and_shared_by_code_mode() {
     assert_eq!(value["scope"]["cache_tip"], upper);
     let unscoped = repo.run(["search", "ScopeMarker", "--json"]);
     let unscoped: serde_json::Value = serde_json::from_slice(&unscoped.stdout).unwrap();
-    assert!(unscoped.get("scope").is_none());
+    assert_eq!(unscoped["scope"]["to_rev"], repo.head());
+    assert_eq!(unscoped["scope"]["cache_tip"], upper);
+    assert_eq!(unscoped["scope"]["coverage_complete"], true);
 }
 
 #[test]
@@ -406,6 +408,137 @@ fn search_revision_scope_includes_merged_side_history_only() {
         String::from_utf8_lossy(&unrelated_range.stderr)
             .contains("--from-rev must be an ancestor of --to-rev")
     );
+}
+
+#[test]
+fn unscoped_search_follows_current_head_across_cached_and_uncached_history() {
+    let repo = TestRepo::new();
+    repo.commit_at(
+        "root.txt",
+        b"fn root_scope_marker() {}\n",
+        "ReachabilityMarker root",
+        "2000-01-01T00:00:00Z",
+    );
+    let root = repo.head();
+    repo.commit_at(
+        "main.txt",
+        b"fn main_scope_marker() {}\n",
+        "ReachabilityMarker main",
+        "2000-01-02T00:00:00Z",
+    );
+    let main = repo.head();
+    repo.index();
+
+    git(repo.dir.path(), ["switch", "--detach", root.as_str()]);
+    git(repo.dir.path(), ["switch", "-c", "topic"]);
+    repo.commit(
+        "topic.txt",
+        b"fn topic_scope_marker() {}\n",
+        "ReachabilityMarker topic",
+    );
+    let topic = repo.head();
+
+    let output = repo.run(["search", "ReachabilityMarker", "--json"]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let subjects = value["materials"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|material| material["subject"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(subjects, ["ReachabilityMarker root"], "{value}");
+    assert_eq!(value["scope"]["to_rev"], topic);
+    assert_eq!(value["scope"]["cache_tip"], main);
+    assert_eq!(value["scope"]["coverage_complete"], false);
+    assert!(value["warnings"].as_array().unwrap().iter().any(|warning| {
+        warning
+            .as_str()
+            .unwrap()
+            .contains("only cached reachable commits")
+    }));
+    let uncached_upper = repo.run(["search", "ReachabilityMarker", "--to-rev", topic.as_str()]);
+    assert_eq!(uncached_upper.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&uncached_upper.stderr)
+            .contains("outside the published cache generation; run `gitscry index` first")
+    );
+
+    git(repo.dir.path(), ["switch", "--detach", topic.as_str()]);
+
+    let detached = repo.run(["search", "ReachabilityMarker", "--json"]);
+    assert_eq!(detached.status.code(), Some(0));
+    let detached: serde_json::Value = serde_json::from_slice(&detached.stdout).unwrap();
+    let detached_subjects = detached["materials"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|material| material["subject"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(detached_subjects, ["ReachabilityMarker root"], "{detached}");
+    assert_eq!(detached["scope"]["to_rev"], topic);
+    assert_eq!(detached["scope"]["coverage_complete"], false);
+    let explicit = repo.run([
+        "search",
+        "ReachabilityMarker",
+        "--to-rev",
+        main.as_str(),
+        "--json",
+    ]);
+    assert_eq!(
+        explicit.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&explicit.stderr)
+    );
+    let explicit: serde_json::Value = serde_json::from_slice(&explicit.stdout).unwrap();
+    let explicit_subjects = explicit["materials"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|material| material["subject"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(
+        explicit_subjects.contains(&"ReachabilityMarker main"),
+        "{explicit}"
+    );
+    assert_eq!(explicit["scope"]["to_rev"], main);
+
+    git(repo.dir.path(), ["switch", "topic"]);
+    git(
+        repo.dir.path(),
+        [
+            "merge",
+            "--no-ff",
+            "main",
+            "-m",
+            "Merge cached main history",
+        ],
+    );
+    let merged = repo.head();
+    let output = repo.run(["search", "ReachabilityMarker", "--json"]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let subjects = value["materials"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|material| material["subject"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(subjects.contains(&"ReachabilityMarker main"), "{value}");
+    assert!(subjects.contains(&"ReachabilityMarker root"), "{value}");
+    assert_eq!(value["scope"]["to_rev"], merged);
+    assert_eq!(value["scope"]["coverage_complete"], false);
 }
 
 #[test]
@@ -914,8 +1047,13 @@ fn search_rebuilds_cache_when_default_tip_changes() {
     repo.commit("history.txt", b"second\n", "Second history");
     let stale = repo.run(["search", "second"]);
     assert_eq!(stale.status.code(), Some(0));
-    assert_eq!(stale.stdout, b"No relevant history found.\n");
-    assert!(stale.stderr.is_empty());
+    let stale_text = String::from_utf8_lossy(&stale.stdout);
+    assert!(
+        stale_text.contains("No relevant history found."),
+        "{stale_text}"
+    );
+    assert!(stale_text.contains("coverage incomplete"), "{stale_text}");
+    assert!(String::from_utf8_lossy(&stale.stderr).contains("incomplete history coverage"));
 
     repo.index();
     let refreshed = repo.run(["search", "second"]);
@@ -963,7 +1101,9 @@ fn search_refreshes_cache_after_shallow_history_deepens() {
     let code_first = TestRepo::run_at(&clone, ["search", "--code", "one"]);
     assert_eq!(code_first.status.code(), Some(0));
     assert!(String::from_utf8_lossy(&code_first.stderr).contains("local history is shallow"));
-    assert_eq!(code_first.stdout, b"No matching changed lines found.\n");
+    assert!(
+        String::from_utf8_lossy(&code_first.stdout).contains("No matching changed lines found.")
+    );
 
     git(&clone, ["fetch", "--deepen=2"]);
 
@@ -1231,7 +1371,7 @@ fn search_uses_damaged_fts_without_rebuilding_cache() {
 
     let second = repo.run(["search", "provider"]);
     assert_eq!(second.status.code(), Some(0));
-    assert_eq!(second.stdout, b"No relevant history found.\n");
+    assert!(String::from_utf8_lossy(&second.stdout).contains("No relevant history found."));
     assert!(second.stderr.is_empty());
     assert!(
         !fs::read_dir(repo.dir.path().join(".gitscry"))
@@ -1279,7 +1419,7 @@ fn search_accepts_quoted_query_and_reports_no_result() {
 
     let no_result = repo.run(["search", "term-that-does-not-exist"]);
     assert_eq!(no_result.status.code(), Some(0));
-    assert_eq!(no_result.stdout, b"No relevant history found.\n");
+    assert!(String::from_utf8_lossy(&no_result.stdout).contains("No relevant history found."));
     assert!(no_result.stderr.is_empty());
 }
 
@@ -1388,7 +1528,9 @@ fn code_search_matches_literal_changed_lines_but_not_unchanged_context() {
 
     let wrong_case = repo.run(["search", "--code", "needle[?]"]);
     assert_eq!(wrong_case.status.code(), Some(0));
-    assert_eq!(wrong_case.stdout, b"No matching changed lines found.\n");
+    assert!(
+        String::from_utf8_lossy(&wrong_case.stdout).contains("No matching changed lines found.")
+    );
     let quoted = repo.run(["search", "--code", "Needle[?] Needle"]);
     assert_eq!(quoted.status.code(), Some(0));
     let quoted_rows = String::from_utf8_lossy(&quoted.stdout)
@@ -1535,7 +1677,9 @@ fn code_search_filters_historical_paths_and_limits_changed_lines() {
 
     let prefix_path = repo.run(["search", "--code", "api(", "--path", "src/new"]);
     assert_eq!(prefix_path.status.code(), Some(0));
-    assert_eq!(prefix_path.stdout, b"No matching changed lines found.\n");
+    assert!(
+        String::from_utf8_lossy(&prefix_path.stdout).contains("No matching changed lines found.")
+    );
 }
 
 #[test]

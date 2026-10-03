@@ -38,17 +38,32 @@ fn report(repo: &TestRepo, args: &[&str]) -> Value {
     serde_json::from_slice(&output.stdout).unwrap()
 }
 #[test]
-fn ranks_repeated_touches_at_published_tip_and_limits_after_sorting() {
+fn ranks_repeated_touches_at_current_head_with_cached_ancestors() {
     let repo = TestRepo::new();
     commit(&repo, "often", "one\n");
     commit(&repo, "once", &"large rewrite\n".repeat(100));
     commit(&repo, "often", "two\n");
     repo.index();
-    let target = repo.head();
+    let cache_tip = repo.head();
     commit(&repo, "unindexed", "ignored\n");
+    let target = repo.head();
     fs::remove_file(repo.dir.path().join("often")).unwrap();
     let json = report(&repo, &["hotspots", "--json"]);
     assert_eq!(json["scope"]["target_rev"], target);
+    assert_eq!(json["scope"]["cache_tip"], cache_tip);
+    assert_eq!(json["scope"]["coverage_complete"], false);
+    assert!(
+        json["coverage"]["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|warning| {
+                warning
+                    .as_str()
+                    .unwrap()
+                    .contains("incomplete history coverage")
+            })
+    );
     assert_eq!(json["files"].as_array().unwrap().len(), 2);
     assert_eq!(json["files"][0]["path"], "often");
     assert_eq!(json["files"][0]["touching_commits"], 2);
@@ -416,9 +431,21 @@ fn empty_results_default_top_twenty_and_validation() {
             .contains("outside the published cache generation")
     );
     let after_uncached = report(&repo, &["hotspots", "--json"]);
+    assert_eq!(after_uncached["scope"]["target_rev"], uncached);
     assert_eq!(
-        after_uncached["scope"]["target_rev"],
-        json["scope"]["target_rev"]
+        after_uncached["scope"]["cache_tip"],
+        json["scope"]["cache_tip"]
+    );
+    assert_eq!(after_uncached["scope"]["coverage_complete"], false);
+    assert!(
+        after_uncached["coverage"]["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|warning| warning
+                .as_str()
+                .unwrap()
+                .contains("incomplete history coverage"))
     );
 }
 
@@ -616,4 +643,48 @@ fn directory_prefix_matching_is_case_sensitive() {
     repo.index();
     let json = report(&repo, &["hotspots", "--json", "--path-prefix", "src"]);
     assert!(json["files"].as_array().unwrap().is_empty(), "{json}");
+}
+
+#[test]
+fn includes_cached_histories_from_both_parents_of_uncached_head_merge() {
+    let repo = TestRepo::new();
+    commit_at(&repo, "root.rs", "root\n", "2020-01-01T00:00:00Z");
+    let base = repo.head();
+    git(
+        repo.dir.path(),
+        ["checkout", "-b", "feature", base.as_str()],
+    );
+    commit_at(
+        &repo,
+        "feature-only.rs",
+        "feature\n",
+        "2020-01-02T00:00:00Z",
+    );
+    let feature_tip = repo.head();
+    git(repo.dir.path(), ["checkout", "main"]);
+    commit_at(&repo, "main-only.rs", "main\n", "2020-01-03T00:00:00Z");
+    let main_tip = repo.head();
+    git(
+        repo.dir.path(),
+        ["merge", "--no-ff", "feature", "-m", "cached merge"],
+    );
+    repo.index();
+    let cache_tip = repo.head();
+
+    git(repo.dir.path(), ["checkout", "--detach", main_tip.as_str()]);
+    git(
+        repo.dir.path(),
+        ["merge", "--no-ff", "feature", "-m", "uncached merge"],
+    );
+    let head = repo.head();
+    assert_ne!(head, cache_tip);
+
+    let json = report(&repo, &["hotspots", "--json"]);
+    assert_eq!(json["scope"]["target_rev"], head);
+    assert_eq!(json["scope"]["cache_tip"], cache_tip);
+    assert_eq!(json["scope"]["coverage_complete"], false);
+    assert_eq!(count(&json, "feature-only.rs"), 1);
+    assert_eq!(count(&json, "main-only.rs"), 1);
+    assert_eq!(count(&json, "root.rs"), 1);
+    assert_ne!(feature_tip, main_tip);
 }

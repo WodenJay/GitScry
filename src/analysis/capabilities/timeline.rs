@@ -1,5 +1,5 @@
 use crate::analysis::patch;
-use crate::analysis::query::{Context, Options, Outcome, QueryReport};
+use crate::analysis::query::{Context, Options, Outcome, QueryReport, scope};
 use crate::{
     analysis::{PatchExcerpt, SearchScopeInfo},
     cache::HistoryCommit,
@@ -16,14 +16,28 @@ pub(in crate::analysis) fn execute(
 ) -> Result<Outcome, AppError> {
     let repository = Repository::discover()?;
     let session = cache::open_query(&repository.root)?;
+    let implicit_target = at.is_none();
     let revision = match at {
         Some(revision) => revision,
-        None => session.completed_tip()?,
+        None => repository.resolve_commit("HEAD")?,
     };
     let target = repository.pin_timeline_target(&revision, &path)?;
-    session.require_revision(&target.revision)?;
-    let context = Context::for_target(session, options.scope, &target.revision)?;
-    let reachable = context.session.ancestors(&target.revision)?;
+    if !implicit_target {
+        session.require_revision(&target.revision)?;
+    }
+    let context = if implicit_target {
+        Context::for_head_target(session, options.scope, &target.revision)?
+    } else {
+        Context::for_target(session, options.scope, &target.revision)?
+    };
+    let reachable = if implicit_target {
+        scope::reachable_history(&context.session, &repository, &target.revision)?
+            .revisions
+            .into_iter()
+            .collect()
+    } else {
+        context.session.ancestors(&target.revision)?
+    };
     let eligible = context.eligible_revisions(&target.revision)?;
     let history = context.session.timeline_history(&target.path, &reachable)?;
     let mut report = Report::from_history(

@@ -290,6 +290,13 @@ mod semantic_tests {
         let outside = unit_vector(1);
         insert_vector(&connection, 1, "target", &target);
         insert_vector(&connection, 2, "outside", &outside);
+        crate::cache::scope::set_scope_revisions(
+            &connection,
+            &["target".to_owned()],
+            &[],
+            &["target".to_owned()],
+        )
+        .unwrap();
         let scope = SearchFilter {
             from_oid: None,
             to_oid: "target".to_owned(),

@@ -8,7 +8,7 @@ mod symbol;
 mod symbol_history;
 mod target;
 
-use std::path::PathBuf;
+use std::{collections::HashMap, path::PathBuf};
 
 use crate::app::{AppError, IndexStage};
 
@@ -178,6 +178,31 @@ impl Repository {
             .collect()
     }
 
+    pub(crate) fn reachable_commit_parents(
+        &self,
+        tip: &str,
+    ) -> Result<HashMap<String, Vec<String>>, AppError> {
+        let output = self.git.text(["rev-list", "--parents", tip])?;
+        let parse_oid = |oid: &str| {
+            if matches!(oid.len(), 40 | 64) && oid.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                Ok(oid.to_owned())
+            } else {
+                Err(AppError::operational(
+                    "error: Git revision graph contained an invalid object ID",
+                ))
+            }
+        };
+        let mut graph = HashMap::new();
+        for line in output.lines() {
+            let mut fields = line.split_ascii_whitespace();
+            let oid = parse_oid(fields.next().ok_or_else(|| {
+                AppError::operational("error: Git revision graph contained an invalid object ID")
+            })?)?;
+            let parents = fields.map(parse_oid).collect::<Result<Vec<_>, _>>()?;
+            graph.insert(oid, parents);
+        }
+        Ok(graph)
+    }
     pub(crate) fn is_ancestor(&self, ancestor: &str, descendant: &str) -> Result<bool, AppError> {
         self.git
             .success(["merge-base", "--is-ancestor", ancestor, descendant])

@@ -5,7 +5,7 @@ use crate::{app::AppError, cache::QuerySession, git::RegressionTarget};
 use super::super::patch::{self, HunkPriorities};
 use super::super::retrieval;
 use super::super::{Citation, Confidence, Intent, Material, Report, ReportKind};
-use crate::analysis::query::{Context, Options, Outcome, QueryReport};
+use crate::analysis::query::{Context, Options, Outcome, QueryReport, scope};
 use crate::{cache, git::Repository};
 
 pub(in crate::analysis) fn execute(
@@ -19,29 +19,44 @@ pub(in crate::analysis) fn execute(
     let intent = Intent::symptom(&words, &path)?;
     let repository = Repository::discover()?;
     let session = cache::open_query(&repository.root)?;
+    let implicit_bad = bad.is_none();
     let bad = match bad {
         Some(revision) => revision,
-        None => session.completed_tip()?,
+        None => repository.resolve_commit("HEAD")?,
     };
     let target =
         repository.pin_regression_target(&bad, good.as_deref(), &path, symbol.as_deref())?;
-    session.require_revision(&target.bad_revision)?;
+    if !implicit_bad {
+        session.require_revision(&target.bad_revision)?;
+    }
     if let Some(good_revision) = &target.good_revision {
         session.require_revision(good_revision)?;
     }
-    let context = Context::for_target(session, options.scope, &target.bad_revision)?;
-    let bad_reachable = context.session.ancestors(&target.bad_revision)?;
+    let context = if implicit_bad {
+        Context::for_head_target(session, options.scope, &target.bad_revision)?
+    } else {
+        Context::for_target(session, options.scope, &target.bad_revision)?
+    };
+    let bad_reachable = if implicit_bad {
+        scope::reachable_history(&context.session, &repository, &target.bad_revision)?
+            .revisions
+            .into_iter()
+            .collect()
+    } else {
+        context.session.ancestors(&target.bad_revision)?
+    };
     let mut reachable = if let Some(good_revision) = &target.good_revision {
         let good_reachable = context.session.ancestors(good_revision)?;
         bad_reachable.difference(&good_reachable).cloned().collect()
     } else {
-        bad_reachable
+        bad_reachable.clone()
     };
     context.intersect(&target.bad_revision, &mut reachable)?;
     let report = run(
         &context.session,
         &intent,
         &target,
+        &bad_reachable,
         &reachable,
         options.limit,
         options.patch,
@@ -56,13 +71,14 @@ fn run(
     session: &QuerySession,
     intent: &Intent,
     target: &RegressionTarget,
+    pinned_reachable_revisions: &HashSet<String>,
     eligible_revisions: &HashSet<String>,
     limit: usize,
     with_patch: bool,
 ) -> Result<Report, AppError> {
     // Scope selects material, not the history needed to map the bad revision's coordinates.
     let reachable = if target.symbol_line.is_some() {
-        session.ancestors(&target.bad_revision)?
+        pinned_reachable_revisions.clone()
     } else {
         eligible_revisions.clone()
     };

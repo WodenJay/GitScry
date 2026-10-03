@@ -32,6 +32,15 @@ impl Context {
         Ok(Self { session, scope })
     }
 
+    pub(in crate::analysis) fn for_head_target(
+        session: QuerySession,
+        options: SearchScopeOptions,
+        revision: &str,
+    ) -> Result<Self, AppError> {
+        let scope = scope::resolve_for_head_target(&session, options, revision)?;
+        Ok(Self { session, scope })
+    }
+
     pub(in crate::analysis) fn filter(&self) -> Option<&SearchFilter> {
         self.scope.as_ref().map(|scope| &scope.filter)
     }
@@ -59,6 +68,15 @@ impl Context {
     }
 
     pub(in crate::analysis) fn finish(self, mut report: QueryReport) -> Outcome {
+        let mut warnings = self.session.warnings().to_vec();
+        if let Some(scope) = &self.scope
+            && !scope.report.coverage_complete
+        {
+            warnings.push(format!(
+                "incomplete history coverage for {}: results include only cached reachable commits; run `gitscry index` to index more history",
+                scope.report.to_rev
+            ));
+        }
         let scope = self.scope.map(|scope| scope.report);
         match &mut report {
             QueryReport::Followups(_) => {}
@@ -71,7 +89,7 @@ impl Context {
         }
         Outcome {
             progress: self.session.progress().to_vec(),
-            warnings: self.session.warnings().to_vec(),
+            warnings,
             report,
         }
     }

@@ -167,6 +167,8 @@ This is enough! GitScry intentionally uses a single lightweight instruction inst
 
 ## Commands
 
+Historical queries use current HEAD's reachable Git history intersected with the published cache. If reachable history is not fully cached, available commits are used and incomplete coverage is reported with `gitscry index` guidance. Explicit revision bounds must be cached; use `--to-rev` to investigate another cached branch.
+
 | Command | What it tells you | Example |
 |---|---|---|
 | **`search`** | General-purpose history search across commit subjects, bodies, and touched paths when no specialized query fits. | `gitscry search retry backoff` |
@@ -178,7 +180,7 @@ This is enough! GitScry intentionally uses a single lightweight instruction inst
 | **`why`** | Explains the history behind a specific line or symbol by tracing blame, diffs, path history, renames, and explanatory commit messages. | `gitscry why src/lib.rs --symbol provider` |
 | **`trace-fix`** | Starts from a known fix and traces deleted/replaced lines back to the change that introduced them. | `gitscry trace-fix HEAD --path src/lib.rs` |
 | **`trace-removal`** | Discovers literal deleted-text events grouped by commit and historical old path, with first-parent locators and complete commit messages. Limits events, not matching lines; does not infer retirement or replacement. | `gitscry trace-removal --code 'legacy()' --path src/lib.rs --json` |
-| **`hotspots`** | Ranks tracked files at the published cache tip by distinct non-merge touching commits and cached textual additions/deletions from those touches. JSON additions/deletions are null when no eligible diff is calculable; `churn_complete` is false if any eligible diff is unavailable. Human output marks partial counts with * and unavailable counts with —. | `gitscry hotspots --json --limit 20` |
+| **`hotspots`** | Ranks tracked files at current HEAD using distinct non-merge touching commits cached and reachable from HEAD; incomplete cached coverage is reported. Adds cached textual additions/deletions from those touches. JSON additions/deletions are null when no eligible diff is calculable; `churn_complete` is false if any eligible diff is unavailable. Human output marks partial counts with * and unavailable counts with —. | `gitscry hotspots --json --limit 20` |
 | **`index`** | Builds or refreshes the local cache from the repository's default-branch history. | `gitscry index` |
 | **`update`** | Updates GitScry to the latest stable release. | `gitscry update` |
 

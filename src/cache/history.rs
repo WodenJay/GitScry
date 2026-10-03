@@ -212,33 +212,26 @@ impl QuerySession {
         let mut statement = self
             .connection
             .prepare(
-                r#"WITH RECURSIVE scope_reachable(commit_id) AS (
-                    SELECT commit_id FROM commits WHERE oid = ?1
-                    UNION
-                    SELECT parent.parent_id
-                    FROM commit_parents AS parent
-                    JOIN scope_reachable ON scope_reachable.commit_id = parent.commit_id
-                    WHERE parent.parent_id IS NOT NULL
-                ), target_reachable(commit_id) AS (
-                    SELECT commit_id FROM commits WHERE oid = ?2
-                    UNION
-                    SELECT parent.parent_id
-                    FROM commit_parents AS parent
-                    JOIN target_reachable ON target_reachable.commit_id = parent.commit_id
-                    WHERE parent.parent_id IS NOT NULL
-                ), excluded(commit_id) AS (
-                    SELECT commit_id FROM commits WHERE oid = ?3
-                    UNION
-                    SELECT parent.parent_id
-                    FROM commit_parents AS parent
-                    JOIN excluded ON excluded.commit_id = parent.commit_id
-                    WHERE parent.parent_id IS NOT NULL
-                )
-                SELECT commits.oid
+                r#"SELECT commits.oid
                 FROM commits
-                WHERE commits.commit_id IN (SELECT commit_id FROM scope_reachable)
-                  AND commits.commit_id IN (SELECT commit_id FROM target_reachable)
-                  AND (?3 IS NULL OR commits.commit_id NOT IN (SELECT commit_id FROM excluded))
+                WHERE (commits.oid = ?1 OR EXISTS (
+                    SELECT 1
+                    FROM temp.query_scope_revisions AS reachable
+                    WHERE reachable.role = 'reachable' AND reachable.oid = commits.oid
+                ))
+                  AND (commits.oid = ?2 OR EXISTS (
+                    SELECT 1
+                    FROM temp.query_scope_revisions AS target
+                    WHERE target.role = 'target' AND target.oid = commits.oid
+                ))
+                  AND (?3 IS NULL OR (
+                      commits.oid <> ?3
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM temp.query_scope_revisions AS excluded
+                          WHERE excluded.role = 'excluded' AND excluded.oid = commits.oid
+                      )
+                  ))
                   AND (?4 IS NULL OR commits.commit_time >= ?4)
                   AND (?5 IS NULL OR commits.commit_time <= ?5)
                 ORDER BY commits.position DESC"#,

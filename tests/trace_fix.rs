@@ -763,7 +763,7 @@ fn trace_fix_scope_filters_material_without_retargeting_the_fix() {
             .all(|notice| {
                 notice.as_str()
                     != Some(
-                        "warning: no introducing commit is available in the default-branch cache.",
+                        "warning: no introducing commit was found in cached history reachable from this fix; run `gitscry index` if relevant history is missing.",
                     )
             }),
         "a scoped empty result must not claim the cache has no introducing commit: {empty_report}"

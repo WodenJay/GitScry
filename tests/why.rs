@@ -1041,13 +1041,15 @@ fn why_rejects_explicit_out_of_cache_targets() {
 }
 
 #[test]
-fn why_defaults_to_published_cache_tip_on_feature_branch() {
+fn why_defaults_to_current_head_with_cached_ancestors_on_feature_branch() {
     let repo = TestRepo::new();
     repo.commit("target.txt", b"main\n", "Main target", None);
     let cache_tip = repo.head();
     repo.index();
     git(repo.dir.path(), ["switch", "-c", "feature"]);
     repo.commit("target.txt", b"feature\n", "Feature target", None);
+    let head = repo.head();
+    assert_ne!(head, cache_tip);
 
     let output = repo.run(["why", "target.txt", "--line", "1"]);
     assert_eq!(
@@ -1058,7 +1060,11 @@ fn why_defaults_to_published_cache_tip_on_feature_branch() {
     );
     assert!(
         String::from_utf8_lossy(&output.stdout)
-            .contains(&format!("Why at line 1 at revision {cache_tip}"))
+            .contains(&format!("Why at line 1 at revision {head}"))
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains(&format!("incomplete history coverage for {head}"))
     );
 }
 

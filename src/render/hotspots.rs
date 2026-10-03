@@ -23,8 +23,13 @@ fn scope_description(report: &HotspotsReport) -> String {
                 }
                 (None, None) => "unbounded committer time".to_owned(),
             };
+            let coverage = if scope.coverage_complete {
+                "complete"
+            } else {
+                "incomplete; only cached reachable history is included"
+            };
             format!(
-                "reachable revisions {lower_revision} through {} inclusive; {committer_time}; published cache tip {}",
+                "reachable revisions {lower_revision} through {} inclusive; {committer_time}; published cache tip {}; coverage {coverage}",
                 scope.to_rev, scope.cache_tip
             )
         }
@@ -101,6 +106,7 @@ pub(super) fn format_json_report(
         "from_rev": scope.and_then(|scope| scope.from_rev.as_deref()),
         "since": scope.and_then(|scope| scope.since.as_deref()),
         "until": scope.and_then(|scope| scope.until.as_deref()),
+        "coverage_complete": scope.map(|scope| scope.coverage_complete),
         "path_prefix": report.path_prefix.as_deref(),
         "history": if scope.is_some() {
             "eligible contributions use revision and committer-time bounds; lineage follows full target history"
