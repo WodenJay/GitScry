@@ -1,5 +1,6 @@
 mod support;
 
+use rusqlite::Connection;
 use serde_json::Value;
 use std::fs;
 use support::{TestRepo, git, git_command, git_stdout};
@@ -653,4 +654,198 @@ fn excerpt_headers_track_both_sides_after_omitted_rows() {
     let deletion_text = deletion_hunk["text"].as_str().unwrap();
     assert_eq!(deletion_text.lines().next(), Some("@@ -5,5 +5,2 @@"));
     assert!(deletion_text.lines().nth(1).unwrap().starts_with('-'));
+}
+
+#[test]
+fn same_commit_navigation_is_per_event_and_lists_detected_changes() {
+    let repo = TestRepo::new();
+    commit(
+        &repo,
+        &[
+            ("a.rs", "old()\n"),
+            ("b.rs", "old()\n"),
+            ("modified.txt", "before\n"),
+            ("rename-old.txt", "rename body\n"),
+        ],
+        "Root",
+        "2000-01-01T00:00:00Z",
+    );
+    fs::remove_file(repo.dir.path().join("rename-old.txt")).unwrap();
+    let removal = commit(
+        &repo,
+        &[
+            ("a.rs", "new()\n"),
+            ("b.rs", "new()\n"),
+            ("modified.txt", "after\n"),
+            ("added.txt", "added\n"),
+            ("rename-new.txt", "rename body\n"),
+        ],
+        "Remove in several files",
+        "2000-01-02T00:00:00Z",
+    );
+    repo.index();
+
+    let report = query(&repo, &[]);
+    assert_eq!(report, query(&repo, &[]));
+    assert_eq!(report["events"].as_array().unwrap().len(), 2);
+    let a_files = &report["events"][0]["same_commit_files"];
+    assert_eq!(report["events"][0]["old_path"], "a.rs");
+    assert_eq!(report["events"][0]["commit_id"], removal);
+    assert_eq!(a_files["status"], "complete");
+    assert_eq!(
+        a_files["files"],
+        serde_json::json!([
+            {"status": "A", "old_path": null, "new_path": "added.txt"},
+            {"status": "M", "old_path": "b.rs", "new_path": "b.rs"},
+            {"status": "M", "old_path": "modified.txt", "new_path": "modified.txt"},
+            {"status": "R100", "old_path": "rename-old.txt", "new_path": "rename-new.txt"}
+        ])
+    );
+
+    let b_files = &report["events"][1]["same_commit_files"];
+    assert_eq!(report["events"][1]["old_path"], "b.rs");
+    assert_eq!(b_files["status"], "complete");
+    assert_eq!(
+        b_files["files"],
+        serde_json::json!([
+            {"status": "M", "old_path": "a.rs", "new_path": "a.rs"},
+            {"status": "A", "old_path": null, "new_path": "added.txt"},
+            {"status": "M", "old_path": "modified.txt", "new_path": "modified.txt"},
+            {"status": "R100", "old_path": "rename-old.txt", "new_path": "rename-new.txt"}
+        ])
+    );
+    assert_eq!(report["truncated"], false);
+    assert_eq!(
+        report["notices"][0],
+        "Same-commit co-changes are navigation only; they do not prove replacement, migration intent, causality, or cross-file identity."
+    );
+
+    let human = repo.run(["trace-removal", "--code", "old()"]);
+    assert!(human.status.success());
+    assert!(String::from_utf8_lossy(&human.stdout).contains("Same-commit file navigation"));
+    assert!(String::from_utf8_lossy(&human.stdout).contains("do not prove replacement"));
+}
+
+#[test]
+fn same_commit_navigation_distinguishes_empty_and_truncated_summaries() {
+    let empty_repo = TestRepo::new();
+    commit(
+        &empty_repo,
+        &[("gone.rs", "old()\n")],
+        "Root",
+        "2000-01-01T00:00:00Z",
+    );
+    fs::remove_file(empty_repo.dir.path().join("gone.rs")).unwrap();
+    commit(&empty_repo, &[], "Remove only file", "2000-01-02T00:00:00Z");
+    empty_repo.index();
+    let empty_report = query(&empty_repo, &[]);
+    assert_eq!(
+        empty_report["events"][0]["same_commit_files"]["status"],
+        "complete"
+    );
+    assert_eq!(
+        empty_report["events"][0]["same_commit_files"]["files"],
+        serde_json::json!([])
+    );
+
+    let human = empty_repo.run(["trace-removal", "--code", "old()"]);
+    assert!(human.status.success());
+    let text = String::from_utf8_lossy(&human.stdout);
+    assert!(text.contains("Same-commit file navigation: complete"));
+    assert!(text.contains("No other files changed."));
+
+    let repo = TestRepo::new();
+    commit(
+        &repo,
+        &[("gone.rs", "old()\n")],
+        "Root",
+        "2000-01-01T00:00:00Z",
+    );
+    fs::remove_file(repo.dir.path().join("gone.rs")).unwrap();
+    let files: Vec<_> = (0..13)
+        .map(|index| {
+            (
+                format!("other-{index:02}.txt"),
+                format!("content {index}\n"),
+            )
+        })
+        .collect();
+    let file_refs: Vec<_> = files
+        .iter()
+        .map(|(path, text)| (path.as_str(), text.as_str()))
+        .collect();
+    commit(
+        &repo,
+        &file_refs,
+        "Remove with many co-changes",
+        "2000-01-02T00:00:00Z",
+    );
+    repo.index();
+
+    let report = query(&repo, &[]);
+    let summary = &report["events"][0]["same_commit_files"];
+    assert_eq!(summary["status"], "truncated");
+    assert_eq!(summary["files"].as_array().unwrap().len(), 12);
+    assert_eq!(summary["files"][0]["new_path"], "other-00.txt");
+    assert_eq!(summary["files"][11]["new_path"], "other-11.txt");
+    assert_eq!(report["truncated"], false);
+    let human = repo.run(["trace-removal", "--code", "old()"]);
+    assert!(human.status.success());
+    assert!(
+        String::from_utf8_lossy(&human.stdout).contains("Same-commit file navigation: truncated")
+    );
+}
+
+#[test]
+fn supplemental_lookup_failure_preserves_the_event_and_reports_unavailable() {
+    let repo = TestRepo::new();
+    let root = commit(
+        &repo,
+        &[("gone.rs", "old()\n")],
+        "Root",
+        "2000-01-01T00:00:00Z",
+    );
+    fs::remove_file(repo.dir.path().join("gone.rs")).unwrap();
+    let removal = commit(
+        &repo,
+        &[("added.txt", "")],
+        "Remove with an empty co-change",
+        "2000-01-02T00:00:00Z",
+    );
+    repo.index();
+
+    // Make only the supplemental row's status unreadable; event discovery still works.
+    let connection = Connection::open(repo.dir.path().join(".gitscry/cache.sqlite")).unwrap();
+    connection
+        .execute_batch(
+            "ALTER TABLE changes RENAME TO cached_changes;
+             CREATE VIEW changes AS
+             SELECT change_id, commit_id, ordinal,
+                    CASE WHEN old_path IS NULL THEN 1 ELSE status END AS status,
+                    old_path, new_path, old_blob, new_blob, old_mode, new_mode
+             FROM cached_changes;",
+        )
+        .unwrap();
+    drop(connection);
+
+    let report = query(&repo, &[]);
+    assert_eq!(report["events"].as_array().unwrap().len(), 1);
+    let event = &report["events"][0];
+    assert_eq!(event["commit_id"], removal);
+    assert_eq!(event["first_parent_id"], root);
+    assert_eq!(event["old_path"], "gone.rs");
+    assert_eq!(event["same_commit_files"]["status"], "unavailable");
+    assert_eq!(
+        event["matches"],
+        serde_json::json!([{"line_number": 1, "line": "old()"}])
+    );
+    assert_eq!(event["same_commit_files"]["files"], serde_json::json!([]));
+    assert_eq!(report["truncated"], false);
+
+    let human = repo.run(["trace-removal", "--code", "old()"]);
+    assert!(human.status.success());
+    let text = String::from_utf8_lossy(&human.stdout);
+    assert!(text.contains(&removal));
+    assert!(text.contains(&format!("Preceding file locator: {root}:gone.rs")));
+    assert!(text.contains("Same-commit file navigation: unavailable"));
 }

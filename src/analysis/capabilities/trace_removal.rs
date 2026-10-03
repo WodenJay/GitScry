@@ -10,6 +10,34 @@ use crate::{
     cache::{QuerySession, SearchFilter},
 };
 
+const MAX_SAME_COMMIT_FILE_CHANGES: usize = 12;
+
+#[derive(Clone, Copy)]
+pub(crate) enum SameCommitFileStatus {
+    Complete,
+    Truncated,
+    Unavailable,
+}
+
+impl SameCommitFileStatus {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::Truncated => "truncated",
+            Self::Unavailable => "unavailable",
+        }
+    }
+
+    pub(crate) fn is_complete(self) -> bool {
+        matches!(self, Self::Complete)
+    }
+}
+
+pub(crate) struct SameCommitFiles {
+    pub(crate) status: SameCommitFileStatus,
+    pub(crate) files: Vec<crate::cache::OtherFileChange>,
+}
+
 pub(crate) struct Report {
     pub(crate) query: String,
     pub(crate) path: Option<Vec<u8>>,
@@ -32,6 +60,7 @@ pub(crate) struct Event {
     pub(crate) matches: Vec<CodeMatch>,
     pub(crate) change_ordinal: i64,
     pub(crate) patch: Option<PatchExcerpt>,
+    pub(crate) same_commit_files: SameCommitFiles,
 }
 
 // Only event identities are retained during discovery, never omitted source lines.
@@ -137,6 +166,27 @@ pub(crate) fn run(
                 .then_with(|| a.line.cmp(&b.line))
         });
         matches.dedup_by(|a, b| a.line_number == b.line_number && a.line == b.line);
+
+        let same_commit_files = match session.other_file_changes(
+            &commit_id,
+            change.change_ordinal,
+            &old_path,
+            change.new_path.as_deref(),
+            MAX_SAME_COMMIT_FILE_CHANGES,
+        ) {
+            Ok(summary) => SameCommitFiles {
+                status: if summary.truncated {
+                    SameCommitFileStatus::Truncated
+                } else {
+                    SameCommitFileStatus::Complete
+                },
+                files: summary.changes,
+            },
+            Err(_) => SameCommitFiles {
+                status: SameCommitFileStatus::Unavailable,
+                files: Vec::new(),
+            },
+        };
         events.push((
             change.commit_time,
             Event {
@@ -150,6 +200,7 @@ pub(crate) fn run(
                 matches,
                 change_ordinal: change.change_ordinal,
                 patch: None,
+                same_commit_files,
             },
         ));
     }
