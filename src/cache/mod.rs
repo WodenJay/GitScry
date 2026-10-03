@@ -30,6 +30,18 @@ use std::{
 const SCHEMA_VERSION: &str = "11";
 const WAITING_MESSAGE: &str = "Waiting for another GitScry process...";
 
+fn cache_directory(common_dir: &Path) -> PathBuf {
+    common_dir.join("gitscry")
+}
+
+fn cache_path(common_dir: &Path) -> PathBuf {
+    cache_directory(common_dir).join("cache.sqlite")
+}
+
+fn lock_path(common_dir: &Path) -> PathBuf {
+    cache_directory(common_dir).join("cache.lock")
+}
+
 struct SharedLock {
     file: File,
 }
@@ -141,7 +153,7 @@ fn acquire_exclusive(
 }
 
 fn open_lock_file(common_dir: &Path) -> Result<File, AppError> {
-    let directory = common_dir.join("gitscry");
+    let directory = cache_directory(common_dir);
     fs::create_dir_all(&directory)
         .map_err(|error| cache_error("creating shared cache directory", error))?;
     ensure_ignored(&directory)?;
@@ -150,7 +162,7 @@ fn open_lock_file(common_dir: &Path) -> Result<File, AppError> {
         .truncate(false)
         .read(true)
         .write(true)
-        .open(directory.join("cache.lock"))
+        .open(lock_path(common_dir))
         .map_err(|error| cache_error("opening cache lock", error))
 }
 
@@ -177,18 +189,21 @@ fn missing_warning(has_missing_objects: bool) -> Option<String> {
 }
 
 pub(crate) fn open_query(repository: &Repository) -> Result<QuerySession, AppError> {
-    if !repository.common_dir.join("gitscry/cache.sqlite").is_file() {
+    let cache_path = cache_path(&repository.common_dir);
+    if !lock_path(&repository.common_dir).is_file() && !cache_path.is_file() {
         return Err(query_error(
             "no published cache found; run `gitscry index` first",
         ));
     }
     let mut progress = Vec::new();
     let lock = acquire_query_shared(&repository.common_dir, &mut progress)?;
-    let connection = Connection::open_with_flags(
-        repository.common_dir.join("gitscry/cache.sqlite"),
-        OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .map_err(|error| query_error(format!("opening published cache: {error}")))?;
+    if !cache_path.is_file() {
+        return Err(query_error(
+            "no published cache found; run `gitscry index` first",
+        ));
+    }
+    let connection = Connection::open_with_flags(&cache_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|error| query_error(format!("opening published cache: {error}")))?;
     validate_query_metadata(&connection)?;
     let warnings = query_warnings(&connection)?;
     Ok(QuerySession {
@@ -207,7 +222,7 @@ fn acquire_query_shared(
     let file = OpenOptions::new()
         .read(true)
         .write(true)
-        .open(common_dir.join("gitscry/cache.lock"))
+        .open(lock_path(common_dir))
         .map_err(|error| query_error(format!("opening published cache lock: {error}")))?;
     loop {
         match file.try_lock_shared() {

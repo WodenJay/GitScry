@@ -37,7 +37,7 @@ pub(crate) fn maintain(
 ) -> Result<(), AppError> {
     let mut progress = Vec::new();
     let _lock = super::acquire_exclusive(common_dir, &mut progress)?;
-    let path = common_dir.join("gitscry/cache.sqlite");
+    let path = super::cache_path(common_dir);
     let mut connection = Connection::open(&path)
         .map_err(|error| cache_error("opening cache for semantic indexing", error))?;
     connection

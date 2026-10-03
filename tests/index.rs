@@ -1510,10 +1510,19 @@ fn cache_lock_holder() {
         lock.lock().expect("exclusive cache lock");
     }
     fs::write(ready_path, b"ready").expect("signal lock holder");
-    thread::sleep(Duration::from_secs(1));
+    let hold_millis = env::var("GITSCRY_LOCK_HOLD_MILLIS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(1_000);
+    thread::sleep(Duration::from_millis(hold_millis));
 }
 
-fn spawn_cache_lock_holder(repo: &TestRepo, ready_name: &str, shared: bool) -> std::process::Child {
+fn spawn_cache_lock_holder(
+    repo: &TestRepo,
+    ready_name: &str,
+    shared: bool,
+    hold_millis: u64,
+) -> std::process::Child {
     let ready_path = repo.dir.path().join(ready_name);
     let mut command = Command::new(env::current_exe().unwrap());
     command
@@ -1522,7 +1531,8 @@ fn spawn_cache_lock_holder(repo: &TestRepo, ready_name: &str, shared: bool) -> s
         .env("GITSCRY_LOCK_HOLDER", "1")
         .env("GITSCRY_LOCK_SHARED", if shared { "1" } else { "0" })
         .env("GITSCRY_LOCK_PATH", repo.cache_dir().join("cache.lock"))
-        .env("GITSCRY_LOCK_READY", &ready_path);
+        .env("GITSCRY_LOCK_READY", &ready_path)
+        .env("GITSCRY_LOCK_HOLD_MILLIS", hold_millis.to_string());
     let holder = command.spawn().expect("spawn lock holder");
     for _ in 0..200 {
         if ready_path.exists() {
@@ -1881,11 +1891,25 @@ fn linked_worktrees_share_the_repository_cache_and_lock() {
     );
     assert!(String::from_utf8_lossy(&query.stdout).contains("Initial shared worktree marker"));
 
-    let exclusive_holder = spawn_cache_lock_holder(&repo, "exclusive-lock-ready", false);
-    let blocked_query = TestRepo::run_at(&linked, ["search", "shared", "worktree", "marker"]);
+    let exclusive_holder = spawn_cache_lock_holder(&repo, "exclusive-lock-ready", false, 1_000);
+    let cache_path = repo.cache_dir().join("cache.sqlite");
+    let unpublished_cache_path = repo.cache_dir().join("cache.sqlite.unpublished");
+    fs::rename(&cache_path, &unpublished_cache_path).expect("temporarily unpublish cache");
+    let query_root = linked.clone();
+    let blocked_query = thread::spawn(move || {
+        TestRepo::run_at(&query_root, ["search", "shared", "worktree", "marker"])
+    });
+    thread::sleep(Duration::from_millis(250));
+    let query_returned_while_cache_was_unpublished = blocked_query.is_finished();
+    fs::rename(&unpublished_cache_path, &cache_path).expect("republish cache");
     let _ = exclusive_holder
         .wait_with_output()
         .expect("wait for exclusive lock holder");
+    let blocked_query = blocked_query.join().expect("wait for query");
+    assert!(
+        !query_returned_while_cache_was_unpublished,
+        "query must wait for the writer when publication temporarily unpublishes the cache"
+    );
     assert_eq!(blocked_query.status.code(), Some(0));
     let query_output = format!(
         "{}{}",
@@ -1899,7 +1923,13 @@ fn linked_worktrees_share_the_repository_cache_and_lock() {
         1
     );
 
-    let shared_holder = spawn_cache_lock_holder(&repo, "shared-lock-ready", true);
+    repo.commit(
+        "history.txt",
+        b"updated\n",
+        "Update shared worktree history",
+    );
+
+    let shared_holder = spawn_cache_lock_holder(&repo, "shared-lock-ready", true, 5_000);
     let shared_query = TestRepo::run_at(&linked, ["search", "shared", "worktree", "marker"]);
     assert_eq!(shared_query.status.code(), Some(0));
     let shared_query_output = format!(
@@ -1908,11 +1938,6 @@ fn linked_worktrees_share_the_repository_cache_and_lock() {
         String::from_utf8_lossy(&shared_query.stderr)
     );
     assert!(!shared_query_output.contains("Waiting for another GitScry process..."));
-    repo.commit(
-        "history.txt",
-        b"updated\n",
-        "Update shared worktree history",
-    );
     let blocked_index = TestRepo::run_at(&linked, ["index"]);
     let _ = shared_holder
         .wait_with_output()

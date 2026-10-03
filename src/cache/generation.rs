@@ -187,10 +187,7 @@ fn prepare_at(
                 report,
             )?;
             report(IndexStage::WritingCache);
-            write::append(
-                &repository.common_dir.join("gitscry/cache.sqlite"),
-                &snapshot,
-            )?
+            write::append(&super::cache_path(&repository.common_dir), &snapshot)?
         }
         Plan::Fresh { .. } => unreachable!("fresh plans return before publishing"),
     };
@@ -379,7 +376,7 @@ fn add_warnings(progress: &mut Vec<String>, expected: &Expected, missing_objects
 }
 
 fn inspect(common_dir: &Path) -> Inspection {
-    let path = common_dir.join("gitscry/cache.sqlite");
+    let path = super::cache_path(common_dir);
     if !path.is_file() {
         return Inspection::Missing;
     }
@@ -537,7 +534,7 @@ fn count(connection: &Connection, query: &str) -> Result<i64, ()> {
 }
 
 fn preserve_damaged(common_dir: &Path) -> Result<(), AppError> {
-    let directory = common_dir.join("gitscry");
+    let directory = super::cache_directory(common_dir);
     let path = directory.join("cache.sqlite");
     if !path.exists() {
         return Ok(());
@@ -555,7 +552,7 @@ fn preserve_damaged(common_dir: &Path) -> Result<(), AppError> {
 }
 
 fn recover_previous(common_dir: &Path) -> Result<(), AppError> {
-    let directory = common_dir.join("gitscry");
+    let directory = super::cache_directory(common_dir);
     let final_path = directory.join("cache.sqlite");
     let previous = directory.join("cache.sqlite.previous");
     if !final_path.exists() && previous.exists() {
@@ -566,7 +563,7 @@ fn recover_previous(common_dir: &Path) -> Result<(), AppError> {
 }
 
 fn publish(common_dir: &Path, snapshot: &Snapshot, semantic_enabled: bool) -> Result<(), AppError> {
-    let directory = common_dir.join("gitscry");
+    let directory = super::cache_directory(common_dir);
     fs::create_dir_all(&directory)
         .map_err(|error| cache_error("creating shared cache directory", error))?;
     super::ensure_ignored(&directory)?;
@@ -639,7 +636,7 @@ fn commits_for_objects(common_dir: &Path, objects: &[String]) -> Result<Vec<Stri
     );
     let values = objects.iter().chain(objects.iter());
     let connection = Connection::open_with_flags(
-        common_dir.join("gitscry/cache.sqlite"),
+        super::cache_path(common_dir),
         OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .map_err(|error| cache_error("opening cache", error))?;
@@ -655,7 +652,7 @@ fn commits_for_objects(common_dir: &Path, objects: &[String]) -> Result<Vec<Stri
 
 fn boundary_refreshes(common_dir: &Path) -> Result<Vec<String>, AppError> {
     let connection = Connection::open_with_flags(
-        common_dir.join("gitscry/cache.sqlite"),
+        super::cache_path(common_dir),
         OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .map_err(|error| cache_error("opening cache", error))?;
