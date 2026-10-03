@@ -183,18 +183,7 @@ Historical queries use current HEAD's reachable Git history intersected with the
 | **`hotspots`** | Ranks tracked files at current HEAD using distinct non-merge touching commits cached and reachable from HEAD; incomplete cached coverage is reported. Adds cached textual additions/deletions from those touches. JSON additions/deletions are null when no eligible diff is calculable; `churn_complete` is false if any eligible diff is unavailable. Human output marks partial counts with * and unavailable counts with —. | `gitscry hotspots --json --limit 20` |
 | **`index`** | Builds or refreshes the local cache from the repository's default-branch history. | `gitscry index` |
 | **`update`** | Updates GitScry to the latest stable release. | `gitscry update` |
-
-### Changed-code search
-
-`gitscry search --code TEXT` matches a case-sensitive literal substring; `--code-regex PATTERN` matches a Rust `regex` expression against each added or removed line independently. Regexes are Unicode-aware and case-sensitive by default, with inline flags such as `(?i)` and scoped raw-byte groups such as `(?-u:...)`. Grouping, alternation, character classes, repetition, and line anchors are supported; `^$` matches changed empty lines. Look-around, backreferences, and cross-line matching are not supported. Patterns must be non-empty, single-line, and no longer than 16,384 UTF-8 bytes; compiled size is capped at 10 MiB, nesting at 250, and the DFA cache at 2 MiB. These fixed safeguards are not a total query-memory guarantee.
-
-Each matching line is returned once with its existing changed-line metadata and JSON shape. Regex matching ignores LF and the CR directly before LF in CRLF lines, while output preserves the original line bytes. `--change`, exact `--path`, revision/time scope, `--json`, and GitHub associations work with either code mode. `--limit` bounds returned lines, not scanning cost; narrow the path or historical scope to reduce work.
-
-```sh
-gitscry search --code-regex 'Old[A-Z][A-Za-z0-9_]*' --change removed --path src/lib.rs
-gitscry search --code-regex '^$' --limit 5 --json
-```
-
+<!-- This file can only be edited by humans. Agents do NOT change this file -->
 Use `gitscry --help` to learn more.
 
 ## Feedback & Issues
