@@ -187,7 +187,7 @@ pub(in crate::analysis) fn run(
         validate_path(path)?;
     }
     let repository = Repository::discover()?;
-    let session = cache::open_query(&repository.root)?;
+    let session = cache::open_query(&repository)?;
     let seed = repository.resolve_commit(&revision)?;
     session.require_revision(&seed)?;
     let cache_tip = session.completed_tip()?;

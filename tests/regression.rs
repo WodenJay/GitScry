@@ -333,8 +333,8 @@ fn regression_rejects_out_of_cache_bad_revision() {
         String::from_utf8_lossy(&output.stderr).contains("outside the published cache generation")
     );
 
-    let cache = rusqlite::Connection::open(repo.dir.path().join(".gitscry/cache.sqlite"))
-        .expect("open cache");
+    let cache =
+        rusqlite::Connection::open(repo.cache_dir().join("cache.sqlite")).expect("open cache");
     let indexed: i64 = cache
         .query_row(
             "SELECT COUNT(*) FROM commits WHERE oid = ?1",

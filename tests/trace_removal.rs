@@ -165,7 +165,7 @@ fn rejects_invalid_queries_and_execution_errors_but_empty_results_succeed() {
             .code(),
         Some(2)
     );
-    fs::write(repo.dir.path().join(".gitscry/cache.sqlite"), b"damaged").unwrap();
+    fs::write(repo.cache_dir().join("cache.sqlite"), b"damaged").unwrap();
     assert_eq!(
         repo.run(["trace-removal", "--code", "a"]).status.code(),
         Some(1)
@@ -815,7 +815,7 @@ fn supplemental_lookup_failure_preserves_the_event_and_reports_unavailable() {
     repo.index();
 
     // Make only the supplemental row's status unreadable; event discovery still works.
-    let connection = Connection::open(repo.dir.path().join(".gitscry/cache.sqlite")).unwrap();
+    let connection = Connection::open(repo.cache_dir().join("cache.sqlite")).unwrap();
     connection
         .execute_batch(
             "ALTER TABLE changes RENAME TO cached_changes;

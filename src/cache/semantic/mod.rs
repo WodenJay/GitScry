@@ -31,13 +31,13 @@ pub(crate) enum SemanticPreference {
 }
 
 pub(crate) fn maintain(
-    root: &Path,
+    common_dir: &Path,
     preference: SemanticPreference,
     report: &mut dyn FnMut(IndexStage),
 ) -> Result<(), AppError> {
     let mut progress = Vec::new();
-    let _lock = super::acquire_exclusive(root, &mut progress)?;
-    let path = root.join(".gitscry/cache.sqlite");
+    let _lock = super::acquire_exclusive(common_dir, &mut progress)?;
+    let path = super::cache_path(common_dir);
     let mut connection = Connection::open(&path)
         .map_err(|error| cache_error("opening cache for semantic indexing", error))?;
     connection
@@ -665,7 +665,7 @@ mod tests {
     #[test]
     fn ready_semantic_index_validates_vectors_not_runtime_provenance() {
         let directory = tempfile::tempdir().unwrap();
-        let cache_directory = directory.path().join(".gitscry");
+        let cache_directory = directory.path().join("gitscry");
         std::fs::create_dir_all(&cache_directory).unwrap();
         let cache_path = cache_directory.join("cache.sqlite");
         let connection = Connection::open(&cache_path).unwrap();

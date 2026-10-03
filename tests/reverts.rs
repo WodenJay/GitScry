@@ -92,8 +92,8 @@ fn parallel_branch_revert_does_not_misclassify_candidate() {
     repo.index();
     // Keep the reverted change before the candidate and leave no path touch between the
     // candidate and revert, so the fixture exercises ancestry rather than touch suppression.
-    let cache = rusqlite::Connection::open(repo.dir.path().join(".gitscry/cache.sqlite"))
-        .expect("open test cache");
+    let cache =
+        rusqlite::Connection::open(repo.cache_dir().join("cache.sqlite")).expect("open test cache");
     let position = |oid: &str| {
         cache
             .query_row(

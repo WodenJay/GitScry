@@ -189,7 +189,7 @@ fn hybrid_search_mixes_reference_document_vectors_with_current_runtime_queries()
         String::from_utf8_lossy(&indexed.stderr)
     );
 
-    let cache = Connection::open(repo.dir.path().join(".gitscry/cache.sqlite")).unwrap();
+    let cache = Connection::open(repo.cache_dir().join("cache.sqlite")).unwrap();
     let replace_vector = |oid: &str, vector: &[u8]| {
         assert_eq!(
             cache
@@ -769,7 +769,7 @@ fn query_without_cache_reports_index_command_without_creating_artifacts() {
         String::from_utf8_lossy(&output.stderr)
             .contains("no published cache found; run `gitscry index` first")
     );
-    assert!(!repo.dir.path().join(".gitscry").exists());
+    assert!(!repo.cache_dir().exists());
 }
 
 #[test]
@@ -803,7 +803,7 @@ fn query_rejects_a_damaged_published_cache_without_repairing_it() {
     repo.commit("history.txt", b"history\n", "History");
     repo.index();
     fs::write(
-        repo.dir.path().join(".gitscry/cache.sqlite"),
+        repo.cache_dir().join("cache.sqlite"),
         b"not a sqlite database",
     )
     .expect("damage published cache");
@@ -813,7 +813,7 @@ fn query_rejects_a_damaged_published_cache_without_repairing_it() {
     assert_eq!(output.status.code(), Some(1));
     assert!(String::from_utf8_lossy(&output.stderr).contains("published cache"));
     assert!(
-        !fs::read_dir(repo.dir.path().join(".gitscry"))
+        !fs::read_dir(repo.cache_dir())
             .unwrap()
             .flatten()
             .any(|entry| entry
@@ -829,7 +829,7 @@ fn index_rebuilds_stale_schema_without_preserving_it_as_corrupt() {
     repo.commit("history.txt", b"history\n", "History");
     repo.index();
 
-    let cache = Connection::open(repo.dir.path().join(".gitscry/cache.sqlite")).unwrap();
+    let cache = Connection::open(repo.cache_dir().join("cache.sqlite")).unwrap();
     cache
         .execute(
             "UPDATE metadata SET value = '3' WHERE key = 'schema_version'",
@@ -841,7 +841,7 @@ fn index_rebuilds_stale_schema_without_preserving_it_as_corrupt() {
     let output = repo.run(["index"]);
     assert_eq!(output.status.code(), Some(0));
     assert!(
-        !fs::read_dir(repo.dir.path().join(".gitscry"))
+        !fs::read_dir(repo.cache_dir())
             .unwrap()
             .flatten()
             .any(|entry| {
@@ -862,7 +862,7 @@ fn query_rejects_a_stale_schema_with_index_instruction() {
     repo.commit("history.txt", b"history\n", "History");
     repo.index();
 
-    let cache = Connection::open(repo.dir.path().join(".gitscry/cache.sqlite")).unwrap();
+    let cache = Connection::open(repo.cache_dir().join("cache.sqlite")).unwrap();
     cache
         .execute(
             "UPDATE metadata SET value = '3' WHERE key = 'schema_version'",
@@ -882,8 +882,7 @@ fn query_rejects_missing_completion_metadata_without_repairing_it() {
     repo.commit("history.txt", b"history\n", "History");
     repo.index();
 
-    let connection =
-        Connection::open(repo.dir.path().join(".gitscry/cache.sqlite")).expect("open cache");
+    let connection = Connection::open(repo.cache_dir().join("cache.sqlite")).expect("open cache");
     connection
         .execute("DELETE FROM metadata WHERE key = 'completed_tip'", [])
         .expect("remove completion marker");
@@ -1228,7 +1227,7 @@ fn search_uses_damaged_fts_without_rebuilding_cache() {
     let first = repo.run(["search", "provider"]);
     assert_eq!(first.status.code(), Some(0));
 
-    let cache = Connection::open(repo.dir.path().join(".gitscry/cache.sqlite")).unwrap();
+    let cache = Connection::open(repo.cache_dir().join("cache.sqlite")).unwrap();
     cache
         .execute(
             "INSERT INTO search_fts(search_fts) VALUES ('delete-all')",
@@ -1242,7 +1241,7 @@ fn search_uses_damaged_fts_without_rebuilding_cache() {
     assert_eq!(second.stdout, b"No relevant history found.\n");
     assert!(second.stderr.is_empty());
     assert!(
-        !fs::read_dir(repo.dir.path().join(".gitscry"))
+        !fs::read_dir(repo.cache_dir())
             .unwrap()
             .flatten()
             .any(|entry| {

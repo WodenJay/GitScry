@@ -99,8 +99,8 @@ fn prepare_at(
         shallow_boundaries: repository.shallow_boundaries()?,
     };
     let mut progress = Vec::new();
-    let shared = super::acquire_shared(&repository.root, &mut progress)?;
-    let plan = evaluate(repository, &expected, inspect(&repository.root))?;
+    let shared = super::acquire_shared(&repository.common_dir, &mut progress)?;
+    let plan = evaluate(repository, &expected, inspect(&repository.common_dir))?;
     if let Plan::Fresh {
         state,
         missing_objects,
@@ -116,16 +116,16 @@ fn prepare_at(
     }
     drop(shared);
 
-    let exclusive = super::acquire_exclusive(&repository.root, &mut progress)?;
-    recover_previous(&repository.root)?;
-    let plan = evaluate(repository, &expected, inspect(&repository.root))?;
+    let exclusive = super::acquire_exclusive(&repository.common_dir, &mut progress)?;
+    recover_previous(&repository.common_dir)?;
+    let plan = evaluate(repository, &expected, inspect(&repository.common_dir))?;
     if let Plan::Fresh {
         state,
         missing_objects,
     } = plan
     {
         drop(exclusive);
-        let shared = super::acquire_shared(&repository.root, &mut progress)?;
+        let shared = super::acquire_shared(&repository.common_dir, &mut progress)?;
         add_warnings(&mut progress, &expected, &missing_objects);
         return Ok(PreparedCache {
             progress,
@@ -141,7 +141,7 @@ fn prepare_at(
             semantic_enabled,
         } => {
             if damaged {
-                preserve_damaged(&repository.root)?;
+                preserve_damaged(&repository.common_dir)?;
             }
             report(IndexStage::ReadingCommits);
             let snapshot = repository.read_default_history_at(
@@ -155,7 +155,7 @@ fn prepare_at(
             )?;
             let count = snapshot.commits.len();
             report(IndexStage::WritingCache);
-            publish(&repository.root, &snapshot, semantic_enabled)?;
+            publish(&repository.common_dir, &snapshot, semantic_enabled)?;
             count
         }
         Plan::Incremental {
@@ -166,9 +166,12 @@ fn prepare_at(
             report(IndexStage::ReadingCommits);
             let mut refresh = Vec::new();
             if state.shallow_boundaries != expected.shallow_boundaries {
-                refresh.extend(boundary_refreshes(&repository.root)?);
+                refresh.extend(boundary_refreshes(&repository.common_dir)?);
             }
-            refresh.extend(commits_for_objects(&repository.root, &newly_available)?);
+            refresh.extend(commits_for_objects(
+                &repository.common_dir,
+                &newly_available,
+            )?);
             refresh.sort();
             refresh.dedup();
             let snapshot = repository.read_incremental_history_at(
@@ -184,14 +187,14 @@ fn prepare_at(
                 report,
             )?;
             report(IndexStage::WritingCache);
-            write::append(&repository.root.join(".gitscry/cache.sqlite"), &snapshot)?
+            write::append(&super::cache_path(&repository.common_dir), &snapshot)?
         }
         Plan::Fresh { .. } => unreachable!("fresh plans return before publishing"),
     };
     drop(exclusive);
 
-    let shared = super::acquire_shared(&repository.root, &mut progress)?;
-    let state = match inspect(&repository.root) {
+    let shared = super::acquire_shared(&repository.common_dir, &mut progress)?;
+    let state = match inspect(&repository.common_dir) {
         Inspection::Ready(state)
             if state.default_ref == expected.default_ref
                 && state.tip == expected.tip
@@ -372,8 +375,8 @@ fn add_warnings(progress: &mut Vec<String>, expected: &Expected, missing_objects
     }
 }
 
-fn inspect(root: &Path) -> Inspection {
-    let path = root.join(".gitscry/cache.sqlite");
+fn inspect(common_dir: &Path) -> Inspection {
+    let path = super::cache_path(common_dir);
     if !path.is_file() {
         return Inspection::Missing;
     }
@@ -530,8 +533,8 @@ fn count(connection: &Connection, query: &str) -> Result<i64, ()> {
         .map_err(|_| ())
 }
 
-fn preserve_damaged(root: &Path) -> Result<(), AppError> {
-    let directory = root.join(".gitscry");
+fn preserve_damaged(common_dir: &Path) -> Result<(), AppError> {
+    let directory = super::cache_directory(common_dir);
     let path = directory.join("cache.sqlite");
     if !path.exists() {
         return Ok(());
@@ -548,8 +551,8 @@ fn preserve_damaged(root: &Path) -> Result<(), AppError> {
     Ok(())
 }
 
-fn recover_previous(root: &Path) -> Result<(), AppError> {
-    let directory = root.join(".gitscry");
+fn recover_previous(common_dir: &Path) -> Result<(), AppError> {
+    let directory = super::cache_directory(common_dir);
     let final_path = directory.join("cache.sqlite");
     let previous = directory.join("cache.sqlite.previous");
     if !final_path.exists() && previous.exists() {
@@ -559,9 +562,10 @@ fn recover_previous(root: &Path) -> Result<(), AppError> {
     Ok(())
 }
 
-fn publish(root: &Path, snapshot: &Snapshot, semantic_enabled: bool) -> Result<(), AppError> {
-    let directory = root.join(".gitscry");
-    fs::create_dir_all(&directory).map_err(|error| cache_error("creating .gitscry", error))?;
+fn publish(common_dir: &Path, snapshot: &Snapshot, semantic_enabled: bool) -> Result<(), AppError> {
+    let directory = super::cache_directory(common_dir);
+    fs::create_dir_all(&directory)
+        .map_err(|error| cache_error("creating shared cache directory", error))?;
     super::ensure_ignored(&directory)?;
 
     let final_path = directory.join("cache.sqlite");
@@ -616,7 +620,7 @@ fn atomic_replace(_directory: &Path, final_path: &Path, staging: &Path) -> Resul
     fs::rename(staging, final_path).map_err(|error| cache_error("publishing the cache", error))
 }
 
-fn commits_for_objects(root: &Path, objects: &[String]) -> Result<Vec<String>, AppError> {
+fn commits_for_objects(common_dir: &Path, objects: &[String]) -> Result<Vec<String>, AppError> {
     if objects.is_empty() {
         return Ok(Vec::new());
     }
@@ -632,7 +636,7 @@ fn commits_for_objects(root: &Path, objects: &[String]) -> Result<Vec<String>, A
     );
     let values = objects.iter().chain(objects.iter());
     let connection = Connection::open_with_flags(
-        root.join(".gitscry/cache.sqlite"),
+        super::cache_path(common_dir),
         OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .map_err(|error| cache_error("opening cache", error))?;
@@ -646,9 +650,9 @@ fn commits_for_objects(root: &Path, objects: &[String]) -> Result<Vec<String>, A
         .map_err(|error| cache_error("reading missing-object lookup", error))
 }
 
-fn boundary_refreshes(root: &Path) -> Result<Vec<String>, AppError> {
+fn boundary_refreshes(common_dir: &Path) -> Result<Vec<String>, AppError> {
     let connection = Connection::open_with_flags(
-        root.join(".gitscry/cache.sqlite"),
+        super::cache_path(common_dir),
         OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .map_err(|error| cache_error("opening cache", error))?;
