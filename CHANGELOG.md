@@ -21,6 +21,7 @@
 - Normalize Windows-style path filters
 - Preserve clear preview metadata
 - *(cache)* Combine merged test modules
+- *(test)* Import Unix shared command helper
 ## [0.7.0] - 2026-10-03
 
 ### 🚀 Features
