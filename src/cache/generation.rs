@@ -17,7 +17,6 @@ use crate::{
 use super::{SCHEMA_VERSION, SQL_PARAMETER_LIMIT, SharedLock, cache_error, write};
 
 struct CacheState {
-    default_ref: String,
     tip: String,
     object_format: String,
     shallow_boundaries: Vec<String>,
@@ -37,7 +36,7 @@ enum Inspection {
 
 pub(crate) struct PreparedCache {
     pub(crate) progress: Vec<String>,
-    pub(crate) commit_count: usize,
+    pub(crate) current_head_commit_count: usize,
     pub(crate) semantic_enabled: bool,
     _lock: SharedLock,
 }
@@ -46,31 +45,39 @@ impl PreparedCache {
     pub(crate) fn release(self) -> (Vec<String>, usize, bool) {
         let Self {
             progress,
-            commit_count,
+            current_head_commit_count,
             semantic_enabled,
             _lock,
         } = self;
         drop(_lock);
-        (progress, commit_count, semantic_enabled)
+        (progress, current_head_commit_count, semantic_enabled)
     }
 }
 
 struct Expected {
-    default_ref: String,
     tip: String,
     object_format: String,
     shallow_boundaries: Vec<String>,
+}
+
+fn publication_matches_target(state: &CacheState, expected: &Expected) -> bool {
+    // `tip` is the most recent publisher, not all cached HEADs.
+    state.commits.contains(&expected.tip)
+        && state.object_format == expected.object_format
+        && state.shallow_boundaries == expected.shallow_boundaries
 }
 
 enum Plan {
     Fresh {
         state: CacheState,
         missing_objects: Vec<String>,
+        current_head_commit_count: usize,
     },
     Incremental {
         state: CacheState,
         missing_objects: Vec<String>,
-        newly_available: Vec<String>,
+        changed_objects: Vec<String>,
+        reachable_commits: Vec<String>,
     },
     Rebuild {
         damaged: bool,
@@ -82,18 +89,16 @@ pub(crate) fn prepare(
     repository: &Repository,
     report: &mut dyn FnMut(IndexStage),
 ) -> Result<PreparedCache, AppError> {
-    let (default_ref, tip) = repository.default_target()?;
-    prepare_at(repository, default_ref, tip, report)
+    let tip = repository.resolve_commit("HEAD")?;
+    prepare_at(repository, tip, report)
 }
 
 fn prepare_at(
     repository: &Repository,
-    default_ref: String,
     tip: String,
     report: &mut dyn FnMut(IndexStage),
 ) -> Result<PreparedCache, AppError> {
     let expected = Expected {
-        default_ref,
         tip,
         object_format: repository.object_format()?,
         shallow_boundaries: repository.shallow_boundaries()?,
@@ -104,12 +109,13 @@ fn prepare_at(
     if let Plan::Fresh {
         state,
         missing_objects,
+        current_head_commit_count,
     } = plan
     {
         add_warnings(&mut progress, &expected, &missing_objects);
         return Ok(PreparedCache {
             progress,
-            commit_count: state.commit_count,
+            current_head_commit_count,
             semantic_enabled: state.semantic_enabled,
             _lock: shared,
         });
@@ -122,6 +128,7 @@ fn prepare_at(
     if let Plan::Fresh {
         state,
         missing_objects,
+        current_head_commit_count,
     } = plan
     {
         drop(exclusive);
@@ -129,13 +136,13 @@ fn prepare_at(
         add_warnings(&mut progress, &expected, &missing_objects);
         return Ok(PreparedCache {
             progress,
-            commit_count: state.commit_count,
+            current_head_commit_count,
             semantic_enabled: state.semantic_enabled,
             _lock: shared,
         });
     }
 
-    match plan {
+    let current_head_commit_count = match plan {
         Plan::Rebuild {
             damaged,
             semantic_enabled,
@@ -144,9 +151,8 @@ fn prepare_at(
                 preserve_damaged(&repository.common_dir)?;
             }
             report(IndexStage::ReadingCommits);
-            let snapshot = repository.read_default_history_at(
+            let snapshot = repository.read_history_at(
                 HistoryTarget {
-                    default_ref: expected.default_ref.clone(),
                     tip: expected.tip.clone(),
                     object_format: expected.object_format.clone(),
                     shallow_boundaries: expected.shallow_boundaries.clone(),
@@ -161,22 +167,22 @@ fn prepare_at(
         Plan::Incremental {
             state,
             missing_objects,
-            newly_available,
+            changed_objects,
+            reachable_commits,
         } => {
+            let current_head_commit_count = reachable_commits.len();
             report(IndexStage::ReadingCommits);
-            let mut refresh = Vec::new();
-            if state.shallow_boundaries != expected.shallow_boundaries {
-                refresh.extend(boundary_refreshes(&repository.common_dir)?);
-            }
-            refresh.extend(commits_for_objects(
+            let reachable = reachable_commits.iter().cloned().collect::<HashSet<_>>();
+            let mut refresh = commits_for_objects(&repository.common_dir, &changed_objects)?;
+            refresh.extend(commits_for_reachable_parents(
                 &repository.common_dir,
-                &newly_available,
+                &reachable_commits,
             )?);
+            refresh.retain(|commit| reachable.contains(commit));
             refresh.sort();
             refresh.dedup();
             let snapshot = repository.read_incremental_history_at(
                 HistoryTarget {
-                    default_ref: expected.default_ref.clone(),
                     tip: expected.tip.clone(),
                     object_format: expected.object_format.clone(),
                     shallow_boundaries: expected.shallow_boundaries.clone(),
@@ -187,7 +193,8 @@ fn prepare_at(
                 report,
             )?;
             report(IndexStage::WritingCache);
-            write::append(&super::cache_path(&repository.common_dir), &snapshot)?
+            write::append(&super::cache_path(&repository.common_dir), &snapshot)?;
+            current_head_commit_count
         }
         Plan::Fresh { .. } => unreachable!("fresh plans return before publishing"),
     };
@@ -195,14 +202,7 @@ fn prepare_at(
 
     let shared = super::acquire_shared(&repository.common_dir, &mut progress)?;
     let state = match inspect(&repository.common_dir) {
-        Inspection::Ready(state)
-            if state.default_ref == expected.default_ref
-                && state.tip == expected.tip
-                && state.object_format == expected.object_format
-                && state.shallow_boundaries == expected.shallow_boundaries =>
-        {
-            state
-        }
+        Inspection::Ready(state) if publication_matches_target(&state, &expected) => state,
         _ => {
             return Err(AppError::operational(
                 "error: cache publication did not produce the pinned generation; retry",
@@ -212,35 +212,10 @@ fn prepare_at(
     add_warnings(&mut progress, &expected, &state.missing_objects);
     Ok(PreparedCache {
         progress,
-        commit_count: state.commit_count,
+        current_head_commit_count,
         semantic_enabled: state.semantic_enabled,
         _lock: shared,
     })
-}
-
-fn shallow_history_expanded(
-    repository: &Repository,
-    previous_boundaries: &[String],
-    current_boundaries: &[String],
-) -> Result<bool, AppError> {
-    if previous_boundaries == current_boundaries {
-        return Ok(false);
-    }
-    if current_boundaries.is_empty() {
-        return Ok(true);
-    }
-
-    for previous_boundary in previous_boundaries {
-        for current_boundary in current_boundaries {
-            if previous_boundary != current_boundary
-                && repository.is_ancestor(current_boundary, previous_boundary)?
-            {
-                return Ok(true);
-            }
-        }
-    }
-
-    Ok(false)
 }
 
 fn evaluate(
@@ -261,103 +236,51 @@ fn evaluate(
         });
     };
 
-    if !repository.missing_objects(&state.commits)?.is_empty() {
+    if state.object_format != expected.object_format {
         return Ok(Plan::Rebuild {
             damaged: false,
             semantic_enabled: state.semantic_enabled,
         });
     }
+
+    let reachable_commits = repository.reachable_commits(&expected.tip)?;
     let current_missing = repository.missing_objects(&state.referenced_objects)?;
-    let previous_missing = state.missing_objects.iter().collect::<HashSet<_>>();
-    let current_missing_set = current_missing.iter().collect::<HashSet<_>>();
-    let disappeared = current_missing
-        .iter()
-        .any(|object| !previous_missing.contains(object));
-    let newly_available = state
+    let previous_missing = state
         .missing_objects
         .iter()
-        .filter(|object| !current_missing_set.contains(object))
+        .cloned()
+        .collect::<HashSet<_>>();
+    let current_missing_set = current_missing.iter().cloned().collect::<HashSet<_>>();
+    let mut changed_objects = current_missing
+        .iter()
+        .filter(|object| !previous_missing.contains(*object))
         .cloned()
         .collect::<Vec<_>>();
-
-    if disappeared
-        || state.default_ref != expected.default_ref
-        || state.object_format != expected.object_format
-    {
-        return Ok(Plan::Rebuild {
-            damaged: false,
-            semantic_enabled: state.semantic_enabled,
-        });
-    }
-
-    // Appending positions is unsafe when newly visible commits precede cached history.
-    if shallow_history_expanded(
-        repository,
-        &state.shallow_boundaries,
-        &expected.shallow_boundaries,
-    )? {
-        return Ok(Plan::Rebuild {
-            damaged: false,
-            semantic_enabled: state.semantic_enabled,
-        });
-    }
-
-    let shallow_is_usable = if state.shallow_boundaries == expected.shallow_boundaries {
-        true
-    } else if state.shallow_boundaries.is_empty() {
-        false
-    } else {
-        let missing_boundary = repository.missing_objects(&state.shallow_boundaries)?;
-        let reachable = repository.reachable_commits(&expected.tip)?;
-        let reachable = reachable.into_iter().collect::<HashSet<_>>();
-        missing_boundary.is_empty()
-            && state
-                .commits
-                .iter()
-                .all(|commit| reachable.contains(commit))
-            && state.shallow_boundaries.iter().all(|boundary| {
-                repository
-                    .is_ancestor(boundary, &expected.tip)
-                    .unwrap_or(false)
-            })
-    };
-    if !shallow_is_usable {
-        return Ok(Plan::Rebuild {
-            damaged: false,
-            semantic_enabled: state.semantic_enabled,
-        });
-    }
-
-    let tip_is_forward = if state.tip == expected.tip {
-        true
-    } else if repository
-        .missing_objects(std::slice::from_ref(&state.tip))?
-        .is_empty()
-    {
-        repository.is_ancestor(&state.tip, &expected.tip)?
-    } else {
-        false
-    };
-    if !tip_is_forward {
-        return Ok(Plan::Rebuild {
-            damaged: false,
-            semantic_enabled: state.semantic_enabled,
-        });
-    }
+    changed_objects.extend(
+        state
+            .missing_objects
+            .iter()
+            .filter(|object| !current_missing_set.contains(*object))
+            .cloned(),
+    );
+    changed_objects.sort();
+    changed_objects.dedup();
 
     if state.tip == expected.tip
         && state.shallow_boundaries == expected.shallow_boundaries
-        && newly_available.is_empty()
+        && changed_objects.is_empty()
     {
         Ok(Plan::Fresh {
             state,
             missing_objects: current_missing,
+            current_head_commit_count: reachable_commits.len(),
         })
     } else {
         Ok(Plan::Incremental {
             state,
             missing_objects: current_missing,
-            newly_available,
+            changed_objects,
+            reachable_commits,
         })
     }
 }
@@ -455,7 +378,6 @@ fn inspect_connection(connection: &Connection) -> Result<CacheState, ()> {
         return Err(());
     }
     let object_format = metadata(connection, "object_format")?.ok_or(())?;
-    let default_ref = metadata(connection, "default_ref")?.ok_or(())?;
     let tip = metadata(connection, "completed_tip")?.ok_or(())?;
     let completed_count = metadata(connection, "completed_commit_count")?
         .ok_or(())?
@@ -497,7 +419,6 @@ fn inspect_connection(connection: &Connection) -> Result<CacheState, ()> {
         return Err(());
     }
     Ok(CacheState {
-        default_ref,
         tip,
         object_format,
         shallow_boundaries,
@@ -660,40 +581,73 @@ fn commits_for_objects(common_dir: &Path, objects: &[String]) -> Result<Vec<Stri
     Ok(commits)
 }
 
-fn boundary_refreshes(common_dir: &Path) -> Result<Vec<String>, AppError> {
+fn commits_for_reachable_parents(
+    common_dir: &Path,
+    reachable_commits: &[String],
+) -> Result<Vec<String>, AppError> {
+    const CHUNK_SIZE: usize = 500;
+    if reachable_commits.is_empty() {
+        return Ok(Vec::new());
+    }
+
     let connection = Connection::open_with_flags(
         super::cache_path(common_dir),
         OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .map_err(|error| cache_error("opening cache", error))?;
-    let cached = string_rows(&connection, "SELECT oid FROM commits")
-        .map_err(|()| AppError::operational("error: reading cached commits; retry"))?
-        .into_iter()
-        .collect::<HashSet<_>>();
-    let mut statement = connection
-        .prepare(
-            "SELECT c.oid, COALESCE(parent.oid, p.external_oid)
-             FROM commits AS c
-             LEFT JOIN commit_parents AS p
-               ON p.commit_id = c.commit_id AND p.position = 0
-             LEFT JOIN commits AS parent ON parent.commit_id = p.parent_id",
-        )
-        .map_err(|error| cache_error("preparing boundary lookup", error))?;
-    let mut refresh = statement
-        .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
-        })
-        .map_err(|error| cache_error("reading boundary lookup", error))?
-        .filter_map(|row| match row {
-            Ok((commit, Some(parent))) if !cached.contains(&parent) => Some(Ok(commit)),
-            Ok(_) => None,
-            Err(error) => Some(Err(error)),
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| cache_error("reading boundary lookup", error))?;
-    refresh.sort();
-    refresh.dedup();
-    Ok(refresh)
+    let mut commits = Vec::new();
+    for parent_oids in reachable_commits.chunks(CHUNK_SIZE) {
+        let placeholders = std::iter::repeat_n("?", parent_oids.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let query = format!(
+            "SELECT DISTINCT child.oid
+             FROM commit_parents AS parent_link
+             JOIN commits AS child ON child.commit_id = parent_link.commit_id
+             WHERE parent_link.parent_id IS NULL
+               AND parent_link.external_oid IN ({placeholders})
+             ORDER BY child.oid"
+        );
+        let mut statement = connection
+            .prepare(&query)
+            .map_err(|error| cache_error("preparing unresolved-parent lookup", error))?;
+        let rows = statement
+            .query_map(params_from_iter(parent_oids), |row| row.get(0))
+            .map_err(|error| cache_error("reading unresolved-parent lookup", error))?;
+        commits.extend(
+            rows.collect::<Result<Vec<String>, _>>()
+                .map_err(|error| cache_error("reading unresolved-parent lookup", error))?,
+        );
+    }
+    commits.sort();
+    commits.dedup();
+    Ok(commits)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CacheState, Expected, publication_matches_target};
+
+    #[test]
+    fn publication_accepts_a_pinned_head_cached_before_another_head() {
+        let expected = Expected {
+            tip: "pinned-tip".to_owned(),
+            object_format: "sha1".to_owned(),
+            shallow_boundaries: Vec::new(),
+        };
+        let state = CacheState {
+            tip: "other-tip".to_owned(),
+            object_format: "sha1".to_owned(),
+            shallow_boundaries: Vec::new(),
+            missing_objects: Vec::new(),
+            referenced_objects: Vec::new(),
+            commits: vec!["pinned-tip".to_owned()],
+            commit_count: 1,
+            semantic_enabled: false,
+        };
+
+        assert!(publication_matches_target(&state, &expected));
+    }
 }
 
 #[cfg(test)]

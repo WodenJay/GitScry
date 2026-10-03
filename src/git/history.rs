@@ -9,7 +9,6 @@ use crate::app::{AppError, IndexStage};
 use super::process::Git;
 
 pub(crate) struct Snapshot {
-    pub(crate) default_ref: String,
     pub(crate) tip: String,
     pub(crate) object_format: String,
     pub(crate) shallow_boundaries: Vec<String>,
@@ -20,7 +19,6 @@ pub(crate) struct Snapshot {
 }
 
 pub(crate) struct HistoryTarget {
-    pub(crate) default_ref: String,
     pub(crate) tip: String,
     pub(crate) object_format: String,
     pub(crate) shallow_boundaries: Vec<String>,
@@ -297,7 +295,6 @@ fn read_selected(
         type_change_ordinals,
     };
     Ok(Snapshot {
-        default_ref: target.default_ref,
         tip: target.tip,
         object_format: target.object_format,
         shallow_boundaries: target.shallow_boundaries,

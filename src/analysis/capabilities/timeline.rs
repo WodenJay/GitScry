@@ -1,11 +1,15 @@
 use crate::analysis::patch;
-use crate::analysis::query::{Context, Options, Outcome, QueryReport, scope};
+use crate::analysis::query::{Context, Options, Outcome, QueryReport};
 use crate::{
     analysis::{PatchExcerpt, SearchScopeInfo},
     cache::HistoryCommit,
 };
-use crate::{app::AppError, cache, git::Repository};
-use std::collections::HashSet;
+use crate::{
+    app::AppError,
+    cache,
+    git::{Repository, TimelineTarget},
+};
+use std::collections::{HashMap, HashSet};
 
 pub(in crate::analysis) fn execute(
     path: String,
@@ -30,20 +34,14 @@ pub(in crate::analysis) fn execute(
     } else {
         Context::for_target(session, options.scope, &target.revision)?
     };
-    let reachable = if implicit_target {
-        scope::reachable_history(&context.session, &repository, &target.revision)?
-            .revisions
-            .into_iter()
-            .collect()
-    } else {
-        context.session.ancestors(&target.revision)?
-    };
+    let reachable_order = repository.reachable_commits_in_history_order(&target.revision)?;
+    let reachable = reachable_order.iter().cloned().collect();
     let eligible = context.eligible_revisions(&target.revision)?;
     let history = context.session.timeline_history(&target.path, &reachable)?;
     let mut report = Report::from_history(
-        target.revision,
-        target.path,
+        target,
         history,
+        &reachable_order,
         eligible.as_ref(),
         options.limit,
         offset,
@@ -83,35 +81,43 @@ pub(crate) struct Entry {
 
 impl Report {
     pub(crate) fn from_history(
-        target_revision: String,
-        path: Vec<u8>,
+        target: TimelineTarget,
         history: Vec<HistoryCommit>,
+        reachable_order: &[String],
         eligible_revisions: Option<&HashSet<String>>,
         limit: usize,
         requested_offset: usize,
         last: bool,
     ) -> Self {
+        let order_by_oid = reachable_order
+            .iter()
+            .enumerate()
+            .map(|(position, oid)| (oid.as_str(), position))
+            .collect::<HashMap<_, _>>();
         let latest_origin = history
             .iter()
-            .flat_map(|commit| {
-                commit.changes.iter().filter_map(|change| {
+            .filter_map(|commit| {
+                let position = *order_by_oid.get(commit.oid.as_str())?;
+                let is_origin = commit.changes.iter().any(|change| {
                     let is_copy = change.status.starts_with('C');
                     // A merge's first-parent diff can say A for a file added by another parent.
                     let is_first_parent_addition =
                         change.status.starts_with('A') && commit.parent_count <= 1;
-                    (commit.anchored_ordinals.contains(&change.ordinal)
-                        && (is_copy || is_first_parent_addition))
-                        .then_some(commit.position)
-                })
+                    commit.anchored_ordinals.contains(&change.ordinal)
+                        && (is_copy || is_first_parent_addition)
+                });
+                is_origin.then_some(position)
             })
             .max();
         let mut entries = history
             .iter()
-            .filter(|commit| latest_origin.is_none_or(|origin| commit.position >= origin))
-            .filter(|commit| {
-                eligible_revisions.is_none_or(|eligible| eligible.contains(&commit.oid))
-            })
             .filter_map(|commit| {
+                let position = *order_by_oid.get(commit.oid.as_str())?;
+                if latest_origin.is_some_and(|origin| position < origin)
+                    || !eligible_revisions.is_none_or(|eligible| eligible.contains(&commit.oid))
+                {
+                    return None;
+                }
                 let change = commit
                     .changes
                     .iter()
@@ -122,7 +128,7 @@ impl Report {
                     .or(change.old_path.as_ref())?
                     .clone();
                 Some((
-                    commit.position,
+                    position,
                     Entry {
                         commit_id: commit.oid.clone(),
                         change_ordinal: change.ordinal,
@@ -169,8 +175,8 @@ impl Report {
         };
 
         Self {
-            target_revision,
-            path,
+            target_revision: target.revision,
+            path: target.path,
             patch_mode: false,
             total,
             scope: None,

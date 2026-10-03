@@ -5,7 +5,7 @@ use std::{
     env,
     fs::{self, OpenOptions},
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
     thread,
     time::Duration,
 };
@@ -78,9 +78,12 @@ fn first_index_publishes_complete_cache() {
     );
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "Indexed 1 commit.\n"
+        "Indexed 1 commit reachable from current HEAD.\n"
     );
-    assert!(String::from_utf8_lossy(&output.stderr).contains("Indexing local history"));
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains("Indexing history reachable from current HEAD")
+    );
     assert_eq!(
         fs::read_to_string(repo.cache_dir().join(".gitignore")).unwrap(),
         "keep-me\n*\n"
@@ -333,35 +336,11 @@ fn root_merge_and_binary_history_are_persisted() {
 }
 
 #[test]
-fn ambiguous_default_branch_fails_without_publishing() {
+fn index_uses_current_head_when_default_branch_is_ambiguous() {
     let repo = TestRepo::new();
     repo.commit("file.txt", b"content\n", "initial");
+    let head = repo.head();
     git(repo.dir.path(), ["branch", "master"]);
-
-    let output = repo.run(["index"]);
-
-    assert_eq!(output.status.code(), Some(1));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("both main and master exist"));
-    assert!(!repo.cache_dir().join("cache.sqlite").exists());
-}
-
-#[test]
-fn origin_head_wins_over_ambiguous_local_defaults() {
-    let repo = TestRepo::new();
-    repo.commit("file.txt", b"content\n", "initial");
-    git(repo.dir.path(), ["branch", "master"]);
-    git(
-        repo.dir.path(),
-        ["update-ref", "refs/remotes/origin/main", "main"],
-    );
-    git(
-        repo.dir.path(),
-        [
-            "symbolic-ref",
-            "refs/remotes/origin/HEAD",
-            "refs/remotes/origin/main",
-        ],
-    );
 
     let output = repo.run(["index"]);
 
@@ -370,6 +349,67 @@ fn origin_head_wins_over_ambiguous_local_defaults() {
         Some(0),
         "{}",
         String::from_utf8_lossy(&output.stderr)
+    );
+    let cache = Connection::open(repo.cache_dir().join("cache.sqlite")).unwrap();
+    let cached_head: String = cache
+        .query_row("SELECT oid FROM commits", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(cached_head, head);
+}
+
+#[test]
+fn indexing_uses_current_head_instead_of_remote_default() {
+    let repo = TestRepo::new();
+    repo.commit("head.txt", b"head\n", "current HEAD");
+    let head_tip = repo.head();
+    git(repo.dir.path(), ["branch", "master"]);
+
+    git(repo.dir.path(), ["checkout", "--orphan", "remote-default"]);
+    git(repo.dir.path(), ["rm", "-rf", "."]);
+    repo.commit("default.txt", b"default\n", "remote default");
+    let default_tip = repo.head();
+    git(
+        repo.dir.path(),
+        ["update-ref", "refs/remotes/origin/default", &default_tip],
+    );
+    git(
+        repo.dir.path(),
+        [
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/default",
+        ],
+    );
+    git(repo.dir.path(), ["checkout", "main"]);
+
+    let output = repo.run(["index"]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let cache = Connection::open(repo.cache_dir().join("cache.sqlite")).unwrap();
+    assert_eq!(
+        cache
+            .query_row(
+                "SELECT COUNT(*) FROM commits WHERE oid = ?1",
+                [&head_tip],
+                |row| { row.get::<_, i64>(0) }
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        cache
+            .query_row(
+                "SELECT COUNT(*) FROM commits WHERE oid = ?1",
+                [&default_tip],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0,
+        "index must use current HEAD rather than remote/HEAD"
     );
 }
 
@@ -389,7 +429,7 @@ fn sole_local_branch_is_used_as_default() {
     );
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        "Indexed 1 commit.\n"
+        "Indexed 1 commit reachable from current HEAD.\n"
     );
     assert!(repo.cache_dir().join("cache.sqlite").exists());
 }
@@ -1123,7 +1163,10 @@ fn fresh_index_is_quiet_and_reports_completed_count() {
     assert_eq!(first.status.code(), Some(0));
     let second = repo.run(["index"]);
     assert_eq!(second.status.code(), Some(0));
-    assert_eq!(second.stdout, b"Indexed 1 commit.\n");
+    assert_eq!(
+        second.stdout,
+        b"Indexed 1 commit reachable from current HEAD.\n"
+    );
     assert!(second.stderr.is_empty());
 }
 
@@ -1138,7 +1181,10 @@ fn fast_forward_updates_one_completed_generation() {
     let second_tip = repo.head();
     let second = repo.run(["index"]);
     assert_eq!(second.status.code(), Some(0));
-    assert!(String::from_utf8_lossy(&second.stderr).contains("Indexing local history"));
+    assert!(
+        String::from_utf8_lossy(&second.stderr)
+            .contains("Indexing history reachable from current HEAD")
+    );
 
     let cache = Connection::open(repo.cache_dir().join("cache.sqlite")).unwrap();
     assert_eq!(
@@ -1291,82 +1337,15 @@ fn multiple_hunks_for_one_change_keep_one_change_id() {
 }
 
 #[test]
-fn non_fast_forward_rebuild_removes_unreachable_commits() {
+fn indexing_only_current_head_and_reuses_cached_ancestors_across_branches() {
     let repo = TestRepo::new();
-    repo.commit("history.txt", b"one\n", "Initial history");
+    repo.commit("history.txt", b"base\n", "Shared ancestor marker");
     let base = repo.head();
-    repo.commit("history.txt", b"two\n", "Old second history");
-    let old_tip = repo.head();
-    assert_eq!(repo.run(["index"]).status.code(), Some(0));
+    git(repo.dir.path(), ["branch", "feature"]);
 
-    git(repo.dir.path(), ["reset", "--hard", &base]);
-    repo.commit("history.txt", b"replacement\n", "Replacement history");
-    let new_tip = repo.head();
-    let output = repo.run(["index"]);
-    assert_eq!(output.status.code(), Some(0));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("Indexing local history"));
-
-    let cache = Connection::open(repo.cache_dir().join("cache.sqlite")).unwrap();
-    assert_eq!(
-        cache
-            .query_row(
-                "SELECT COUNT(*) FROM commits WHERE oid = ?1",
-                [&old_tip],
-                |row| row.get::<_, i64>(0),
-            )
-            .unwrap(),
-        0
-    );
-    assert_eq!(
-        cache
-            .query_row(
-                "SELECT COUNT(*) FROM commits WHERE oid = ?1",
-                [&new_tip],
-                |row| row.get::<_, i64>(0),
-            )
-            .unwrap(),
-        1
-    );
-    assert_eq!(
-        cache
-            .query_row(
-                "SELECT COUNT(*)
-                 FROM hunks AS h
-                 JOIN changes AS ch ON ch.change_id = h.change_id
-                 JOIN commits AS c ON c.commit_id = ch.commit_id
-                 WHERE c.oid = ?1",
-                [&old_tip],
-                |row| row.get::<_, i64>(0),
-            )
-            .unwrap(),
-        0
-    );
-    assert_eq!(
-        cache
-            .query_row(
-                "SELECT COUNT(*)
-                 FROM hunks AS h
-                 JOIN changes AS ch ON ch.change_id = h.change_id
-                 JOIN commits AS c ON c.commit_id = ch.commit_id
-                 WHERE c.oid = ?1",
-                [&new_tip],
-                |row| row.get::<_, i64>(0),
-            )
-            .unwrap(),
-        1
-    );
-}
-
-#[test]
-fn default_ref_change_rebuilds_the_pinned_generation() {
-    let repo = TestRepo::new();
-    repo.commit("history.txt", b"main\n", "Main history");
-    assert_eq!(repo.run(["index"]).status.code(), Some(0));
-
-    git(repo.dir.path(), ["checkout", "-b", "feature"]);
-    repo.commit("feature.txt", b"feature\n", "Feature history");
+    git(repo.dir.path(), ["checkout", "feature"]);
+    repo.commit("feature.txt", b"feature\n", "Feature branch only marker");
     let feature_tip = repo.head();
-    git(repo.dir.path(), ["checkout", "main"]);
     git(
         repo.dir.path(),
         ["update-ref", "refs/remotes/origin/feature", &feature_tip],
@@ -1380,29 +1359,294 @@ fn default_ref_change_rebuilds_the_pinned_generation() {
         ],
     );
 
+    git(repo.dir.path(), ["checkout", "main"]);
+    repo.commit("main.txt", b"main\n", "Main branch only marker");
+    let main_tip = repo.head();
+    let main_index = repo.run(["index"]);
+    assert_eq!(
+        main_index.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&main_index.stderr)
+    );
+
+    let cache_path = repo.cache_dir().join("cache.sqlite");
+    let cache = Connection::open(&cache_path).unwrap();
+    assert_eq!(
+        cache
+            .query_row("SELECT COUNT(*) FROM commits", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        2
+    );
+    assert_eq!(
+        cache
+            .query_row(
+                "SELECT COUNT(*) FROM commits WHERE oid = ?1",
+                [&feature_tip],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        0,
+        "index must ignore the configured default branch when HEAD differs"
+    );
+    assert_eq!(
+        cache
+            .query_row(
+                "SELECT COUNT(*) FROM commits WHERE oid IN (?1, ?2, ?3)",
+                [&base, &main_tip, &feature_tip],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        2
+    );
+    drop(cache);
+
+    git(repo.dir.path(), ["checkout", "feature"]);
+    let feature_index = repo.run(["index"]);
+    assert_eq!(
+        feature_index.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&feature_index.stderr)
+    );
+    let progress_output = format!(
+        "{}{}",
+        String::from_utf8_lossy(&feature_index.stdout),
+        String::from_utf8_lossy(&feature_index.stderr)
+    );
+    assert_eq!(
+        progress_output
+            .matches("Indexing history reachable from current HEAD...")
+            .count(),
+        1
+    );
+    let cache = Connection::open(&cache_path).unwrap();
+    assert_eq!(
+        cache
+            .query_row("SELECT COUNT(*) FROM commits", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        3,
+        "indexing the other HEAD should add only its exclusive commit"
+    );
+    assert_eq!(
+        cache
+            .query_row(
+                "SELECT COUNT(*) FROM commits WHERE oid = ?1",
+                [&base],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1,
+        "the common ancestor must not be duplicated"
+    );
+    drop(cache);
+
+    let repeated = repo.run(["index"]);
+    assert_eq!(repeated.status.code(), Some(0));
+    let cache = Connection::open(&cache_path).unwrap();
+    assert_eq!(
+        cache
+            .query_row("SELECT COUNT(*) FROM commits", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        3,
+        "re-indexing must not duplicate shared material"
+    );
+    drop(cache);
+    let feature_present_search = repo.run(["search", "Feature branch only marker"]);
+    assert_eq!(feature_present_search.status.code(), Some(0));
+    assert!(
+        String::from_utf8_lossy(&feature_present_search.stdout)
+            .contains("Feature branch only marker")
+    );
+
+    git(repo.dir.path(), ["checkout", "main"]);
+    let feature_search = repo.run(["search", "Feature branch only marker"]);
+    assert_eq!(feature_search.status.code(), Some(0));
+    assert!(
+        !String::from_utf8_lossy(&feature_search.stdout).contains("Feature branch only marker")
+    );
+    let main_search = repo.run(["search", "Main branch only marker"]);
+    assert_eq!(main_search.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&main_search.stdout).contains("Main branch only marker"));
+    git(repo.dir.path(), ["checkout", "--detach", &base]);
+    let detached_index = repo.run(["index"]);
+    assert_eq!(
+        detached_index.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&detached_index.stderr)
+    );
+    let cache = Connection::open(&cache_path).unwrap();
+    let completed_tip: String = cache
+        .query_row(
+            "SELECT value FROM metadata WHERE key = 'completed_tip'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(completed_tip, base);
+    assert_eq!(
+        cache
+            .query_row("SELECT COUNT(*) FROM commits", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        3,
+        "detached indexing must reuse the same shared material"
+    );
+    drop(cache);
+    let detached_search = repo.run(["search", "Shared ancestor marker"]);
+    assert_eq!(detached_search.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&detached_search.stdout).contains("Shared ancestor marker"));
+    let excluded_search = repo.run(["search", "Main branch only marker"]);
+    assert_eq!(excluded_search.status.code(), Some(0));
+    assert!(!String::from_utf8_lossy(&excluded_search.stdout).contains("Main branch only marker"));
+}
+
+#[test]
+fn indexing_after_rewrite_preserves_previously_cached_history() {
+    let repo = TestRepo::new();
+    repo.commit("history.txt", b"one\n", "Initial history");
+    let base = repo.head();
+    repo.commit("history.txt", b"two\n", "Old second history");
+    let old_tip = repo.head();
+    git(repo.dir.path(), ["branch", "old-history"]);
+    assert_eq!(repo.run(["index"]).status.code(), Some(0));
+
+    git(repo.dir.path(), ["reset", "--hard", &base]);
+    repo.commit("history.txt", b"replacement\n", "Replacement history");
+    let new_tip = repo.head();
     let output = repo.run(["index"]);
-    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    git(repo.dir.path(), ["branch", "-D", "old-history"]);
+    assert_eq!(repo.run(["index"]).status.code(), Some(0));
+
+    let cache = Connection::open(repo.cache_dir().join("cache.sqlite")).unwrap();
+    for oid in [&base, &old_tip, &new_tip] {
+        assert_eq!(
+            cache
+                .query_row(
+                    "SELECT COUNT(*) FROM commits WHERE oid = ?1",
+                    [oid],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1,
+            "cached commit {oid} must survive a history rewrite and branch deletion"
+        );
+    }
+    let total: i64 = cache
+        .query_row("SELECT COUNT(*) FROM commits", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(total, 3);
+    let old_hunks: i64 = cache
+        .query_row(
+            "SELECT COUNT(*) FROM hunks AS h
+             JOIN changes AS ch ON ch.change_id = h.change_id
+             JOIN commits AS c ON c.commit_id = ch.commit_id
+             WHERE c.oid = ?1",
+            [&old_tip],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(old_hunks, 1);
+}
+
+#[test]
+fn indexing_expanded_shallow_history_links_new_ancestors_without_rebuilding() {
+    let repo = TestRepo::new();
+    repo.commit("history.txt", b"one\n", "Shallow ancestor marker");
+    let ancestor = repo.head();
+    repo.commit("history.txt", b"two\n", "Shallow boundary marker");
+    let boundary = repo.head();
+    fs::write(
+        repo.dir.path().join(".git/shallow"),
+        format!("{boundary}\n"),
+    )
+    .expect("make the repository shallow at its tip");
+    git(repo.dir.path(), ["checkout", "-b", "feature"]);
+    repo.commit("feature.txt", b"feature\n", "Shallow feature marker");
+    let feature_tip = repo.head();
+    git(
+        repo.dir.path(),
+        ["update-ref", "refs/remotes/origin/feature", &feature_tip],
+    );
+    git(
+        repo.dir.path(),
+        [
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/feature",
+        ],
+    );
+    let shallow_index = repo.run(["index"]);
+    assert_eq!(
+        shallow_index.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&shallow_index.stderr)
+    );
+
+    git(repo.dir.path(), ["checkout", "main"]);
+    fs::remove_file(repo.dir.path().join(".git/shallow")).expect("unshallow the repository");
+    git(
+        repo.dir.path(),
+        ["update-ref", "refs/remotes/origin/main", &boundary],
+    );
+    git(
+        repo.dir.path(),
+        [
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+        ],
+    );
+    let expanded_index = repo.run(["index"]);
+    assert_eq!(
+        expanded_index.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&expanded_index.stderr)
+    );
+
     let cache = Connection::open(repo.cache_dir().join("cache.sqlite")).unwrap();
     assert_eq!(
         cache
             .query_row(
-                "SELECT value FROM metadata WHERE key = 'default_ref'",
-                [],
-                |row| row.get::<_, String>(0),
+                "SELECT COUNT(*) FROM commits WHERE oid = ?1",
+                [&feature_tip],
+                |row| row.get::<_, i64>(0),
             )
             .unwrap(),
-        "refs/remotes/origin/feature"
+        1,
+        "expanding history must preserve material indexed from another HEAD"
     );
-    assert_eq!(
-        cache
-            .query_row(
-                "SELECT value FROM metadata WHERE key = 'completed_tip'",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .unwrap(),
-        feature_tip
-    );
+    let linked_parent: (Option<String>, Option<String>) = cache
+        .query_row(
+            "SELECT parent.oid, p.external_oid
+             FROM commit_parents AS p
+             JOIN commits AS child ON child.commit_id = p.commit_id
+             LEFT JOIN commits AS parent ON parent.commit_id = p.parent_id
+             WHERE child.oid = ?1 AND p.position = 0",
+            [&boundary],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(linked_parent, (Some(ancestor), None));
+
+    let ancestor_search = repo.run(["search", "Shallow ancestor marker"]);
+    assert_eq!(ancestor_search.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&ancestor_search.stdout).contains("Shallow ancestor marker"));
+    let other_head_search = repo.run(["search", "Shallow feature marker"]);
+    assert_eq!(other_head_search.status.code(), Some(0));
+    assert!(!String::from_utf8_lossy(&other_head_search.stdout).contains("Shallow feature marker"));
 }
 
 #[test]
@@ -1601,39 +1845,106 @@ fn recovers_a_previous_generation_after_interrupted_replace() {
 
     let output = repo.run(["index"]);
     assert_eq!(output.status.code(), Some(0));
-    assert_eq!(output.stdout, b"Indexed 1 commit.\n");
+    assert_eq!(
+        output.stdout,
+        b"Indexed 1 commit reachable from current HEAD.\n"
+    );
     assert!(output.stderr.is_empty());
     assert!(cache.is_file());
     assert!(!previous.exists());
 }
 
 #[test]
-fn concurrent_indexers_leave_one_complete_generation() {
+fn concurrent_indexers_on_distinct_heads_preserve_both_histories() {
     let repo = TestRepo::new();
-    repo.commit("history.txt", b"one\n", "Initial history");
+    repo.commit("base.txt", b"base\n", "Shared ancestor");
+    let base = repo.head();
+    let linked_root = tempfile::tempdir().expect("create linked worktree parent");
+    let linked = linked_root.path().join("feature");
+    git(
+        repo.dir.path(),
+        [
+            "worktree",
+            "add",
+            "--detach",
+            linked.to_str().expect("linked worktree path"),
+            &base,
+        ],
+    );
+
+    for index in 0..12 {
+        let contents = format!("main {index}\n");
+        let message = format!("main commit {index}");
+        repo.commit("main.txt", contents.as_bytes(), &message);
+
+        let contents = format!("feature {index}\n");
+        let message = format!("feature commit {index}");
+        fs::write(linked.join("feature.txt"), contents).expect("write feature history");
+        git(&linked, ["add", "feature.txt"]);
+        git(&linked, ["commit", "-m", &message]);
+    }
+    let main_tip = repo.head();
+    let feature_tip = git_stdout(&linked, ["rev-parse", "HEAD"]);
 
     let first = support::isolated_gitscry_command(repo.user_data_dir())
         .arg("index")
         .current_dir(repo.dir.path())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap();
     let second = support::isolated_gitscry_command(repo.user_data_dir())
         .arg("index")
-        .current_dir(repo.dir.path())
+        .current_dir(&linked)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap();
     let first = first.wait_with_output().unwrap();
     let second = second.wait_with_output().unwrap();
 
-    assert_eq!(first.status.code(), Some(0));
-    assert_eq!(second.status.code(), Some(0));
+    assert_eq!(
+        first.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert_eq!(
+        second.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&first.stdout),
+        "Indexed 13 commits reachable from current HEAD.\n",
+        "stderr: {}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&second.stdout),
+        "Indexed 13 commits reachable from current HEAD.\n",
+        "stderr: {}",
+        String::from_utf8_lossy(&second.stderr)
+    );
     let cache = Connection::open(repo.cache_dir().join("cache.sqlite")).unwrap();
     assert_eq!(
         cache
             .query_row("SELECT COUNT(*) FROM commits", [], |row| row
                 .get::<_, i64>(0))
             .unwrap(),
-        1
+        25,
+        "the cache should retain the shared base and both branch histories"
+    );
+    assert_eq!(
+        cache
+            .query_row(
+                "SELECT COUNT(*) FROM commits WHERE oid IN (?1, ?2)",
+                [&main_tip, &feature_tip],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        2
     );
 }
 
@@ -1746,7 +2057,7 @@ fn concurrent_readers_return_identical_material() {
 }
 
 #[test]
-fn reduced_shallow_history_rebuilds_without_reusing_rows() {
+fn reduced_shallow_history_retains_cached_rows() {
     let source = TestRepo::new();
     for (index, contents) in [
         (1, &b"one\n"[..]),
@@ -1797,7 +2108,7 @@ fn reduced_shallow_history_rebuilds_without_reusing_rows() {
             .query_row("SELECT COUNT(*) FROM commits", [], |row| row
                 .get::<_, i64>(0))
             .unwrap(),
-        1
+        2
     );
 }
 
@@ -1932,11 +2243,9 @@ fn linked_worktrees_share_the_repository_cache_and_lock() {
         1
     );
 
-    repo.commit(
-        "history.txt",
-        b"updated\n",
-        "Update shared worktree history",
-    );
+    fs::write(linked.join("history.txt"), b"updated\n").unwrap();
+    git(&linked, ["add", "history.txt"]);
+    git(&linked, ["commit", "-m", "Update shared worktree history"]);
 
     let shared_holder = spawn_cache_lock_holder(&repo, "shared-lock-ready", true, 5_000);
     let shared_query = TestRepo::run_at(&linked, ["search", "shared", "worktree", "marker"]);

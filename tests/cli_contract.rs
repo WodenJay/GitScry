@@ -471,7 +471,9 @@ fn index_help_documents_shared_cache_scope() {
     assert!(help.contains("linked worktrees"));
     assert!(help.contains("Git common directory"));
     assert!(help.contains("gitscry/"));
-    assert!(help.contains("current default branch tip"));
+    assert!(help.contains("current HEAD"));
+    assert!(help.contains("Shared ancestors are stored once"));
+    assert!(help.contains("without collecting commits that were cached earlier"));
 }
 
 #[test]
