@@ -126,6 +126,195 @@ fn retrieves_both_sides_prepares_uncached_branch_and_reuses_history_without_git_
 }
 
 #[test]
+fn exposes_earlier_behavior_and_refactor_across_a_detected_rename() {
+    let repo = TestRepo::new();
+    commit(
+        &repo,
+        "lib.rs",
+        "pub fn score(input: i32) -> i32 {\n    input\n}\n\nfn adjust(input: i32) -> i32 {\n    input\n}\n",
+        "base score",
+    );
+    git(repo.dir.path(), ["branch", "other"]);
+    git(repo.dir.path(), ["checkout", "other"]);
+    let earlier = commit(
+        &repo,
+        "lib.rs",
+        "pub fn score(input: i32) -> i32 {\n    input\n}\n\nfn adjust(input: i32) -> i32 {\n    input + 1\n}\n",
+        "fix score behavior\n\nPreserve the special score adjustment.",
+    );
+    git(repo.dir.path(), ["mv", "lib.rs", "score.rs"]);
+    let refactor = commit(
+        &repo,
+        "score.rs",
+        "pub fn score(input: i32) -> i32 {\n    adjust(input)\n}\n\nfn adjust(input: i32) -> i32 {\n    input + 1\n}\n",
+        "refactor score calculation",
+    );
+    let unrelated = commit(
+        &repo,
+        "unrelated.txt",
+        "unrelated\n",
+        "unrelated distraction",
+    );
+    git(repo.dir.path(), ["checkout", "main"]);
+    git(repo.dir.path(), ["mv", "lib.rs", "score.rs"]);
+    commit(
+        &repo,
+        "score.rs",
+        "pub fn score(input: i32) -> i32 {\n    input + 2\n}\n\nfn adjust(input: i32) -> i32 {\n    input\n}\n",
+        "change score on ours",
+    );
+    merge(&repo, "other");
+
+    let report = json(repo.run(["conflicts", "--json"]));
+    let file = &report["files"][0];
+    assert_eq!(file["path"], "score.rs");
+    let sides = file["sides"].as_array().unwrap();
+    let theirs = sides.iter().find(|side| side["name"] == "theirs").unwrap();
+    let leads = theirs["leads"].as_array().unwrap();
+    let commits = leads
+        .iter()
+        .map(|lead| lead["commit"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(commits.contains(&earlier.as_str()));
+    assert!(commits.contains(&refactor.as_str()));
+    assert!(!commits.contains(&unrelated.as_str()));
+
+    let earlier_lead = leads.iter().find(|lead| lead["commit"] == earlier).unwrap();
+    assert_eq!(earlier_lead["selection_basis"], "detected rename lineage");
+    assert_eq!(earlier_lead["conflict_path"], "score.rs");
+    assert_eq!(earlier_lead["path_changes"][0]["old_path"], "lib.rs");
+    assert_eq!(earlier_lead["regions"][0]["new_path"], "lib.rs");
+
+    let text = String::from_utf8_lossy(&repo.run(["conflicts"]).stdout).to_string();
+    assert!(text.contains("Selection basis: detected rename lineage"));
+    assert!(text.contains("Historical path: lib.rs"));
+}
+
+#[test]
+fn does_not_join_a_reintroduced_path_to_an_older_incarnation() {
+    let repo = TestRepo::new();
+    commit(
+        &repo,
+        "lib.rs",
+        "pub fn score() -> i32 { 0 }\n",
+        "base score",
+    );
+    git(repo.dir.path(), ["branch", "other"]);
+    git(repo.dir.path(), ["checkout", "other"]);
+    let earlier_incarnation = commit(
+        &repo,
+        "lib.rs",
+        "pub fn score() -> i32 { 1 }\n",
+        "fix original score behavior\n\nKeep the original scoring rule.",
+    );
+    git(repo.dir.path(), ["rm", "lib.rs"]);
+    git(
+        repo.dir.path(),
+        ["commit", "-m", "remove original score file"],
+    );
+    let reintroduced = commit(
+        &repo,
+        "lib.rs",
+        "pub fn score() -> i32 { 100 }\n",
+        "introduce new score file",
+    );
+    let current = commit(
+        &repo,
+        "lib.rs",
+        "pub fn score() -> i32 { 101 }\n",
+        "adjust new score behavior",
+    );
+    git(repo.dir.path(), ["checkout", "main"]);
+    commit(
+        &repo,
+        "lib.rs",
+        "pub fn score() -> i32 { 2 }\n",
+        "change score on ours",
+    );
+    merge(&repo, "other");
+
+    let report = json(repo.run(["conflicts", "--json"]));
+    assert_eq!(report["coverage_complete"], true);
+    let theirs = report["files"][0]["sides"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|side| side["name"] == "theirs")
+        .unwrap();
+    let commits = theirs["leads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|lead| lead["commit"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(commits.contains(&reintroduced.as_str()));
+    assert!(commits.contains(&current.as_str()));
+    assert!(!commits.contains(&earlier_incarnation.as_str()));
+}
+
+#[test]
+fn rename_does_not_claim_same_commit_reintroduction() {
+    let repo = TestRepo::new();
+    let original = "pub fn score() -> i32 {\n    0\n}\n\n// Original scoring implementation.\n";
+    commit(&repo, "lib.rs", original, "base score");
+    git(repo.dir.path(), ["mv", "lib.rs", "score.rs"]);
+    commit(&repo, "score.rs", original, "rename lib.rs to score.rs");
+    git(repo.dir.path(), ["branch", "other"]);
+    git(repo.dir.path(), ["checkout", "other"]);
+    fs::write(
+        repo.dir.path().join("score.rs"),
+        "pub fn score() -> i32 {\n    1\n}\n\n// Original scoring implementation.\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.dir.path().join("lib.rs"),
+        "pub fn unrelated() -> i32 { 100 }\n",
+    )
+    .unwrap();
+    git(repo.dir.path(), ["add", "--all"]);
+    git(
+        repo.dir.path(),
+        ["commit", "-m", "change score and reintroduce lib.rs"],
+    );
+    let reintroduced = repo.head();
+
+    git(repo.dir.path(), ["checkout", "main"]);
+    commit(
+        &repo,
+        "score.rs",
+        "pub fn score() -> i32 {\n    2\n}\n\n// Original scoring implementation.\n",
+        "change score on ours",
+    );
+    merge(&repo, "other");
+
+    let report = json(repo.run(["conflicts", "--json"]));
+    assert_eq!(report["coverage_complete"], true);
+    let file = report["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|file| file["path"] == "score.rs")
+        .unwrap();
+    let theirs = file["sides"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|side| side["name"] == "theirs")
+        .unwrap();
+    let lead = theirs["leads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|lead| lead["commit"] == reintroduced)
+        .unwrap();
+    let path_changes = lead["path_changes"].as_array().unwrap();
+    assert_eq!(path_changes.len(), 1);
+    assert_eq!(path_changes[0]["status"], "M");
+    assert_eq!(path_changes[0]["old_path"], "score.rs");
+    assert_eq!(path_changes[0]["new_path"], "score.rs");
+}
+
+#[test]
 fn reports_output_bounds_and_absent_reasons() {
     let (repo, _, _, _, _) = fixture();
     git(repo.dir.path(), ["merge", "--abort"]);

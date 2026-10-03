@@ -23,6 +23,7 @@ fn cache_error(error: rusqlite::Error) -> AppError {
 }
 struct Change {
     id: i64,
+    ordinal: i64,
     status: String,
     old: Option<Vec<u8>>,
     new: Option<Vec<u8>>,
@@ -46,10 +47,12 @@ pub(crate) struct FileIncarnation {
     pub(crate) path: Vec<u8>,
 }
 
-pub(crate) struct PatternIncarnations {
+pub(crate) struct FileIncarnationHistory {
     pub(crate) by_commit: HashMap<String, BTreeMap<FileIncarnation, BTreeSet<Vec<u8>>>>,
+    pub(crate) changes_by_commit: HashMap<String, BTreeMap<i64, BTreeSet<FileIncarnation>>>,
     pub(crate) aliases: BTreeMap<Vec<u8>, BTreeSet<FileIncarnation>>,
     pub(crate) target_paths: BTreeMap<FileIncarnation, BTreeSet<Vec<u8>>>,
+    pub(crate) target_incarnations: BTreeMap<String, BTreeMap<Vec<u8>, FileIncarnation>>,
 }
 
 struct HistoryGraph {
@@ -126,7 +129,7 @@ fn load_history(
 
     let mut statement = connection
         .prepare(&format!(
-            "{reachable}SELECT c.commit_id, c.change_id, c.status, c.old_path, c.new_path, c.old_blob, c.new_blob, c.old_mode, c.new_mode FROM changes c JOIN reachable USING(commit_id) ORDER BY c.commit_id, c.ordinal"
+            "{reachable}SELECT c.commit_id, c.change_id, c.ordinal, c.status, c.old_path, c.new_path, c.old_blob, c.new_blob, c.old_mode, c.new_mode FROM changes c JOIN reachable USING(commit_id) ORDER BY c.commit_id, c.ordinal"
         ))
         .map_err(cache_error)?;
     let rows = statement
@@ -135,13 +138,14 @@ fn load_history(
                 row.get::<_, i64>(0)?,
                 Change {
                     id: row.get(1)?,
-                    status: row.get(2)?,
-                    old: row.get(3)?,
-                    new: row.get(4)?,
-                    old_blob: row.get(5)?,
-                    new_blob: row.get(6)?,
-                    old_mode: row.get(7)?,
-                    new_mode: row.get(8)?,
+                    ordinal: row.get(2)?,
+                    status: row.get(3)?,
+                    old: row.get(4)?,
+                    new: row.get(5)?,
+                    old_blob: row.get(6)?,
+                    new_blob: row.get(7)?,
+                    old_mode: row.get(8)?,
+                    new_mode: row.get(9)?,
                 },
             ))
         })
@@ -244,54 +248,19 @@ impl QuerySession {
         &self,
         target_revisions: &[String],
         current_paths: &[Vec<u8>],
-    ) -> Result<PatternIncarnations, AppError> {
+    ) -> Result<FileIncarnationHistory, AppError> {
         let HistoryGraph { nodes, .. } = load_history(&self.connection, None, None)?;
-        let mut history = PatternIncarnations {
-            by_commit: HashMap::new(),
-            aliases: BTreeMap::new(),
-            target_paths: BTreeMap::new(),
-        };
-        let mut origins = HashMap::new();
+        file_incarnation_history(&nodes, target_revisions, current_paths)
+    }
 
-        for (&id, node) in &nodes {
-            let mut members: BTreeMap<FileIncarnation, BTreeSet<Vec<u8>>> = BTreeMap::new();
-            for change in &node.changes {
-                for (path, origin) in change_members(&nodes, id, change, &mut origins) {
-                    let incarnation = file_incarnation(&nodes, &origin);
-                    members
-                        .entry(incarnation.clone())
-                        .or_default()
-                        .insert(path.clone());
-                    history.aliases.entry(path).or_default().insert(incarnation);
-                }
-            }
-            if !members.is_empty() {
-                history.by_commit.insert(node.oid.clone(), members);
-            }
-        }
-
-        for target in target_revisions {
-            let target_id = nodes
-                .iter()
-                .find_map(|(&id, node)| (node.oid == *target).then_some(id))
-                .ok_or_else(|| cache_error(rusqlite::Error::QueryReturnedNoRows))?;
-            for path in current_paths {
-                if let Some(origin) = origin(&nodes, target_id, path, &mut origins) {
-                    let incarnation = file_incarnation(&nodes, &origin);
-                    history
-                        .target_paths
-                        .entry(incarnation.clone())
-                        .or_default()
-                        .insert(path.clone());
-                    history
-                        .aliases
-                        .entry(path.clone())
-                        .or_default()
-                        .insert(incarnation);
-                }
-            }
-        }
-        Ok(history)
+    pub(crate) fn file_incarnations(
+        &self,
+        target_revisions: &[String],
+        current_paths: &[Vec<u8>],
+    ) -> Result<FileIncarnationHistory, AppError> {
+        let HistoryGraph { nodes, .. } =
+            load_history(&self.connection, None, Some(target_revisions))?;
+        file_incarnation_history(&nodes, target_revisions, current_paths)
     }
 
     pub(crate) fn hotspot_touches(
@@ -439,6 +408,75 @@ impl QuerySession {
     }
 }
 
+fn file_incarnation_history(
+    nodes: &HashMap<i64, Node>,
+    target_revisions: &[String],
+    current_paths: &[Vec<u8>],
+) -> Result<FileIncarnationHistory, AppError> {
+    let mut history = FileIncarnationHistory {
+        by_commit: HashMap::new(),
+        changes_by_commit: HashMap::new(),
+        aliases: BTreeMap::new(),
+        target_paths: BTreeMap::new(),
+        target_incarnations: BTreeMap::new(),
+    };
+    let mut origins = HashMap::new();
+
+    for (&id, node) in nodes {
+        let mut members: BTreeMap<FileIncarnation, BTreeSet<Vec<u8>>> = BTreeMap::new();
+        let mut changes = BTreeMap::new();
+        for change in &node.changes {
+            let mut change_incarnations = BTreeSet::new();
+            for (path, origin) in change_members(nodes, id, change, &mut origins) {
+                let incarnation = file_incarnation(nodes, &origin);
+                change_incarnations.insert(incarnation.clone());
+                members
+                    .entry(incarnation.clone())
+                    .or_default()
+                    .insert(path.clone());
+                history.aliases.entry(path).or_default().insert(incarnation);
+            }
+            if !change_incarnations.is_empty() {
+                changes.insert(change.ordinal, change_incarnations);
+            }
+        }
+        if !members.is_empty() {
+            history.by_commit.insert(node.oid.clone(), members);
+        }
+        if !changes.is_empty() {
+            history.changes_by_commit.insert(node.oid.clone(), changes);
+        }
+    }
+
+    for target in target_revisions {
+        let target_id = nodes
+            .iter()
+            .find_map(|(&id, node)| (node.oid == *target).then_some(id))
+            .ok_or_else(|| cache_error(rusqlite::Error::QueryReturnedNoRows))?;
+        for path in current_paths {
+            if let Some(origin) = origin(nodes, target_id, path, &mut origins) {
+                let incarnation = file_incarnation(nodes, &origin);
+                history
+                    .target_paths
+                    .entry(incarnation.clone())
+                    .or_default()
+                    .insert(path.clone());
+                history
+                    .target_incarnations
+                    .entry(target.clone())
+                    .or_default()
+                    .insert(path.clone(), incarnation.clone());
+                history
+                    .aliases
+                    .entry(path.clone())
+                    .or_default()
+                    .insert(incarnation);
+            }
+        }
+    }
+    Ok(history)
+}
+
 fn file_incarnation(nodes: &HashMap<i64, Node>, origin: &Incarnation) -> FileIncarnation {
     FileIncarnation {
         introduced_in: nodes[&origin.0].oid.clone(),
@@ -566,4 +604,70 @@ fn origin(
         memo.insert(key, result.clone());
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn change(
+        id: i64,
+        ordinal: i64,
+        status: &str,
+        old: Option<&[u8]>,
+        new: Option<&[u8]>,
+    ) -> Change {
+        Change {
+            id,
+            ordinal,
+            status: status.to_owned(),
+            old: old.map(<[u8]>::to_vec),
+            new: new.map(<[u8]>::to_vec),
+            old_blob: None,
+            new_blob: None,
+            old_mode: "100644".to_owned(),
+            new_mode: "100644".to_owned(),
+        }
+    }
+
+    #[test]
+    fn records_each_change_under_its_own_file_incarnation() {
+        let old_path = b"lib.rs";
+        let new_path = b"score.rs";
+        let nodes = HashMap::from([
+            (
+                1,
+                Node {
+                    oid: "base".to_owned(),
+                    time: 0,
+                    parents: Vec::new(),
+                    changes: vec![change(1, 0, "A", None, Some(old_path))],
+                },
+            ),
+            (
+                2,
+                Node {
+                    oid: "head".to_owned(),
+                    time: 1,
+                    parents: vec![Some(1)],
+                    changes: vec![
+                        change(2, 0, "R100", Some(old_path), Some(new_path)),
+                        change(3, 1, "A", None, Some(old_path)),
+                    ],
+                },
+            ),
+        ]);
+
+        let history =
+            file_incarnation_history(&nodes, &["head".to_owned()], &[new_path.to_vec()]).unwrap();
+        let original = &history.target_incarnations["head"][new_path.as_slice()];
+        let changes = &history.changes_by_commit["head"];
+        assert!(changes[&0].contains(original));
+        assert!(!changes[&1].contains(original));
+        assert!(
+            changes[&1]
+                .iter()
+                .any(|incarnation| incarnation.introduced_in == "head")
+        );
+    }
 }

@@ -4,7 +4,7 @@ use crate::analysis::Intent;
 use crate::analysis::query::{Context, Options, Outcome, QueryReport, scope};
 use crate::{
     app::AppError,
-    cache::{FileIncarnation, PatternIncarnations, QuerySession, SearchFilter},
+    cache::{FileIncarnation, FileIncarnationHistory, QuerySession, SearchFilter},
     git::Repository,
 };
 use std::collections::{BTreeMap, BTreeSet, HashSet};
@@ -95,7 +95,7 @@ fn run(
     let target_revision = target_revision.to_owned();
     let current_paths = Repository::discover()?.file_paths_at(&target_revision)?;
     let current_paths = current_paths.into_iter().collect::<Vec<_>>();
-    let incarnations: PatternIncarnations =
+    let incarnations: FileIncarnationHistory =
         session.pattern_incarnations(cached_targets, &current_paths)?;
     let seed_incarnations = seeds
         .iter()

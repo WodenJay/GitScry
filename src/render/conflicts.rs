@@ -25,7 +25,15 @@ pub(super) fn format_report(report: &Report) -> String {
             .unwrap();
             for lead in &side.leads {
                 writeln!(output, "  {} {}", lead.commit, display(&lead.subject)).unwrap();
+                writeln!(output, "    Side: {}", lead.side).unwrap();
+                writeln!(
+                    output,
+                    "    Conflict path: {}",
+                    display(&lead.conflict_path)
+                )
+                .unwrap();
                 writeln!(output, "    Association: {}", lead.association).unwrap();
+                writeln!(output, "    Selection basis: {}", lead.selection_basis).unwrap();
                 writeln!(
                     output,
                     "    Recorded reason [{}]: {}",
@@ -39,13 +47,59 @@ pub(super) fn format_report(report: &Report) -> String {
                 if lead.message_truncated {
                     writeln!(output, "    Message truncated").unwrap();
                 }
-                for region in &lead.regions {
+                for change in &lead.path_changes {
+                    let old_path = change
+                        .old_path
+                        .as_deref()
+                        .map(display)
+                        .unwrap_or_else(|| "(absent)".to_owned());
+                    let new_path = change
+                        .new_path
+                        .as_deref()
+                        .map(display)
+                        .unwrap_or_else(|| "(absent)".to_owned());
                     writeln!(
                         output,
-                        "    {} change {} hunk {}: old {}+{}, new {}+{}",
-                        display(&lead.path),
+                        "    Path change {} [{}]: {} -> {}",
+                        change.change_ordinal, change.status, old_path, new_path
+                    )
+                    .unwrap();
+                    let historical_path = change
+                        .old_path
+                        .as_deref()
+                        .filter(|path| *path != lead.conflict_path.as_str())
+                        .or_else(|| {
+                            change
+                                .new_path
+                                .as_deref()
+                                .filter(|path| *path != lead.conflict_path.as_str())
+                        });
+                    if let Some(path) = historical_path {
+                        writeln!(output, "    Historical path: {}", display(path)).unwrap();
+                    }
+                }
+                if lead.path_changes_truncated {
+                    writeln!(output, "    Path changes truncated").unwrap();
+                }
+                for region in &lead.regions {
+                    let old_path = region
+                        .old_path
+                        .as_deref()
+                        .map(display)
+                        .unwrap_or_else(|| "(absent)".to_owned());
+                    let new_path = region
+                        .new_path
+                        .as_deref()
+                        .map(display)
+                        .unwrap_or_else(|| "(absent)".to_owned());
+                    writeln!(
+                        output,
+                        "    {} change {} hunk {}: {} -> {}; old {}+{}, new {}+{}",
+                        display(&lead.conflict_path),
                         region.change_ordinal,
                         region.hunk_ordinal,
+                        old_path,
+                        new_path,
                         region.old_start,
                         region.old_lines,
                         region.new_start,
