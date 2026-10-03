@@ -215,13 +215,14 @@ pub(crate) fn execute(request: Request, options: Options) -> Result<Outcome, App
         } => run_code_search(query, path, direction, options),
         Request::TraceRemoval { query, path } => {
             let context = Context::open(options.scope)?;
-            let report = capabilities::trace_removal::run(
+            let mut report = capabilities::trace_removal::run(
                 &context.session,
                 &query,
                 path.as_deref(),
                 options.limit,
                 context.filter(),
             )?;
+            patch::attach_trace_removal_patch_excerpts(&context.session, &mut report)?;
             Ok(context.finish(QueryReport::TraceRemoval(report)))
         }
         Request::Examples { words, paths } => {

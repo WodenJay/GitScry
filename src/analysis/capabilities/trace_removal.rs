@@ -5,7 +5,7 @@ use std::{
 };
 
 use crate::{
-    analysis::{CodeDirection, CodeMatch, SearchScopeInfo},
+    analysis::{CodeDirection, CodeMatch, PatchExcerpt, SearchScopeInfo},
     app::AppError,
     cache::{QuerySession, SearchFilter},
 };
@@ -30,6 +30,8 @@ pub(crate) struct Event {
     pub(crate) status: String,
     pub(crate) new_path: Option<Vec<u8>>,
     pub(crate) matches: Vec<CodeMatch>,
+    pub(crate) change_ordinal: i64,
+    pub(crate) patch: Option<PatchExcerpt>,
 }
 
 // Only event identities are retained during discovery, never omitted source lines.
@@ -146,6 +148,8 @@ pub(crate) fn run(
                 status: change.status,
                 new_path: change.new_path,
                 matches,
+                change_ordinal: change.change_ordinal,
+                patch: None,
             },
         ));
     }

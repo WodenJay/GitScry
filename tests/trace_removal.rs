@@ -2,7 +2,7 @@ mod support;
 
 use serde_json::Value;
 use std::fs;
-use support::{TestRepo, git, git_command};
+use support::{TestRepo, git, git_command, git_stdout};
 
 fn commit(repo: &TestRepo, files: &[(&str, &str)], message: &str, date: &str) -> String {
     for (path, text) in files {
@@ -307,10 +307,26 @@ fn reports_detected_rename_old_paths_and_whole_file_deletions_not_pure_moves() {
     assert!(change["status"].as_str().unwrap().starts_with('R'));
     assert_eq!(change["old_path"], "old.rs");
     assert_eq!(change["new_path"], "new.rs");
+    let rename_patch = &report["events"][0]["patch"];
+    assert_eq!(rename_patch["status"], "available");
+    let rename_hunk = &rename_patch["hunks"][0];
+    assert_eq!(rename_hunk["old_path"], "old.rs");
+    assert_eq!(rename_hunk["new_path"], "new.rs");
+    assert!(rename_hunk["text"].as_str().unwrap().contains("-old()"));
+    assert!(rename_hunk["text"].as_str().unwrap().contains("+new()"));
     assert_eq!(query(&repo, &["--path", "new.rs"])["matched_count"], 0);
+    let deleted = query(&repo, &["--path", "deleted.rs"]);
+    assert_eq!(deleted["events"][0]["file_change"]["status"], "D");
+    assert_eq!(deleted["events"][0]["patch"]["status"], "available");
     assert_eq!(
-        query(&repo, &["--path", "deleted.rs"])["events"][0]["file_change"]["status"],
-        "D"
+        deleted["events"][0]["patch"]["hunks"][0]["old_path"],
+        "deleted.rs"
+    );
+    assert!(
+        deleted["events"][0]["patch"]["hunks"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("-old()")
     );
     assert_eq!(query(&repo, &[])["matched_count"], 2);
 }
@@ -440,4 +456,201 @@ fn command_help_and_json_contract_are_explicit_and_extensible() {
     assert!(report["warnings"].is_array());
     assert!(report["notices"].is_array());
     assert_eq!(report["truncated"], false);
+}
+
+#[test]
+fn returns_bounded_patch_fragments_around_matching_deleted_lines() {
+    let repo = TestRepo::new();
+    let mut before = String::from("anchor\nkeep1\nkeep2\nold()\nnear\nold()\n");
+    let mut after = String::from("anchor\nkeep1\n");
+    for index in 0..600 {
+        after.push_str(&format!("added_{index:04}_padding_value\n"));
+    }
+    after.push_str("keep2\nnear\n");
+    for index in 0..40 {
+        let line = format!("padding_{index}\n");
+        before.push_str(&line);
+        after.push_str(&line);
+    }
+    before.push_str("old()\nend\n");
+    after.push_str("end\n");
+    commit(
+        &repo,
+        &[("a.rs", &before)],
+        "Introduce old lines",
+        "2000-01-01T00:00:00Z",
+    );
+    commit(
+        &repo,
+        &[("a.rs", &after)],
+        "Remove old lines after large addition",
+        "2000-01-02T00:00:00Z",
+    );
+    repo.index();
+
+    let report = query(&repo, &[]);
+    let event = &report["events"][0];
+    assert_eq!(event["matches"].as_array().unwrap().len(), 3);
+    let patch = &event["patch"];
+    assert_eq!(patch["status"], "available");
+    assert_eq!(patch["truncated"], false);
+    let hunks = patch["hunks"].as_array().unwrap();
+    assert_eq!(hunks.len(), 2);
+    let first = hunks[0]["text"].as_str().unwrap();
+    assert!(first.contains("-old()"));
+    assert!(first.contains("+added_0599_padding_value"));
+    assert!(!first.contains("+added_0000_padding_value"));
+    assert!(hunks[1]["text"].as_str().unwrap().contains("-old()"));
+
+    let human = repo.run(["trace-removal", "--code", "old()"]).stdout;
+    let human = String::from_utf8(human).unwrap();
+    assert!(human.contains("patch excerpt: available"));
+    assert!(human.contains("+added_0599_padding_value"));
+    assert!(human.contains("-old()"));
+}
+
+#[test]
+fn prioritizes_matching_hunk_after_unrelated_cached_hunks() {
+    let repo = TestRepo::new();
+    let mut before = String::new();
+    let mut after = String::new();
+    for index in 0..70 {
+        before.push_str(&format!("removed_{index}\n"));
+        after.push_str(&format!("replacement_{index}\n"));
+        for context in 0..10 {
+            let line = format!("context_{index}_{context}\n");
+            before.push_str(&line);
+            after.push_str(&line);
+        }
+    }
+    before.push_str("old()\nend\n");
+    after.push_str("end\n");
+    commit(
+        &repo,
+        &[("a.rs", &before)],
+        "Introduce old line",
+        "2000-01-01T00:00:00Z",
+    );
+    commit(
+        &repo,
+        &[("a.rs", &after)],
+        "Remove after many unrelated hunks",
+        "2000-01-02T00:00:00Z",
+    );
+    repo.index();
+
+    let old_blob = git_stdout(repo.dir.path(), ["rev-parse", "HEAD~1:a.rs"]);
+    let loose_blob = repo
+        .dir
+        .path()
+        .join(".git/objects")
+        .join(&old_blob[..2])
+        .join(&old_blob[2..]);
+    fs::remove_file(loose_blob).unwrap();
+
+    let report = query(&repo, &[]);
+    let event = &report["events"][0];
+    assert_eq!(event["matches"].as_array().unwrap().len(), 1);
+    let patch = &event["patch"];
+    assert_eq!(patch["status"], "available");
+    assert_eq!(patch["truncated"], false);
+    let hunks = patch["hunks"].as_array().unwrap();
+    assert_eq!(hunks.len(), 1);
+    let text = hunks[0]["text"].as_str().unwrap();
+    assert!(text.contains("-old()"));
+    assert!(!text.contains("replacement_0\n"));
+    assert!(!text.contains("replacement_69\n"));
+}
+
+#[test]
+fn keeps_event_matches_when_cached_patch_text_exceeds_the_budget() {
+    let repo = TestRepo::new();
+    let parent = commit(
+        &repo,
+        &[("a.rs", "old()\nend\n")],
+        "Introduce old line",
+        "2000-01-01T00:00:00Z",
+    );
+    let mut after = String::new();
+    for index in 0..3000 {
+        after.push_str(&format!("added_{index:04}_padding_value\n"));
+    }
+    after.push_str("end\n");
+    commit(
+        &repo,
+        &[("a.rs", &after)],
+        "Remove with oversized patch",
+        "2000-01-02T00:00:00Z",
+    );
+    repo.index();
+
+    let report = query(&repo, &[]);
+    let event = &report["events"][0];
+    assert_eq!(event["first_parent_id"], parent);
+    assert_eq!(event["matches"].as_array().unwrap().len(), 1);
+    assert_eq!(event["old_path"], "a.rs");
+    assert_eq!(event["patch"]["status"], "unavailable");
+    assert_eq!(event["patch"]["truncated"], true);
+    let human = repo.run(["trace-removal", "--code", "old()"]).stdout;
+    let human = String::from_utf8(human).unwrap();
+    assert!(human.contains("Text hunk unavailable."));
+    assert!(human.contains("patch excerpt truncated by safety limits."));
+}
+
+#[test]
+fn excerpt_headers_track_both_sides_after_omitted_rows() {
+    let repo = TestRepo::new();
+    let prefix = "prefix_1\nprefix_2\nprefix_3\nprefix_4\n";
+    let addition_first_before = format!("{prefix}anchor\nold()\ntail\n");
+    let addition_first_after = format!("{prefix}added_1\nadded_2\nadded_3\nanchor\ntail\n");
+    let deletion_first_before = format!("{prefix}remove_1\nremove_2\nremove_3\nold()\ntail\n");
+    let deletion_first_after = format!("{prefix}added\ntail\n");
+    commit(
+        &repo,
+        &[
+            ("addition_first.rs", &addition_first_before),
+            ("deletion_first.rs", &deletion_first_before),
+        ],
+        "Introduce old lines",
+        "2000-01-01T00:00:00Z",
+    );
+    commit(
+        &repo,
+        &[
+            ("addition_first.rs", &addition_first_after),
+            ("deletion_first.rs", &deletion_first_after),
+        ],
+        "Remove old lines",
+        "2000-01-02T00:00:00Z",
+    );
+    repo.index();
+
+    let report = query(&repo, &[]);
+    let events = report["events"].as_array().unwrap();
+    assert_eq!(events.len(), 2);
+    let addition_first = events
+        .iter()
+        .find(|event| event["old_path"] == "addition_first.rs")
+        .unwrap();
+    let addition_hunk = &addition_first["patch"]["hunks"][0];
+    assert_eq!(addition_hunk["old_start"], 5);
+    assert_eq!(addition_hunk["old_lines"], 3);
+    assert_eq!(addition_hunk["new_start"], 6);
+    assert_eq!(addition_hunk["new_lines"], 4);
+    let addition_text = addition_hunk["text"].as_str().unwrap();
+    assert_eq!(addition_text.lines().next(), Some("@@ -5,3 +6,4 @@"));
+    assert!(addition_text.lines().nth(1).unwrap().starts_with('+'));
+
+    let deletion_first = events
+        .iter()
+        .find(|event| event["old_path"] == "deletion_first.rs")
+        .unwrap();
+    let deletion_hunk = &deletion_first["patch"]["hunks"][0];
+    assert_eq!(deletion_hunk["old_start"], 5);
+    assert_eq!(deletion_hunk["old_lines"], 5);
+    assert_eq!(deletion_hunk["new_start"], 5);
+    assert_eq!(deletion_hunk["new_lines"], 2);
+    let deletion_text = deletion_hunk["text"].as_str().unwrap();
+    assert_eq!(deletion_text.lines().next(), Some("@@ -5,5 +5,2 @@"));
+    assert!(deletion_text.lines().nth(1).unwrap().starts_with('-'));
 }

@@ -57,6 +57,7 @@ pub(super) fn format_report(report: &Report) -> String {
                     escape::code_line(&matched.line)
                 ));
             }
+            material::render_patch(&mut lines, event.patch.as_ref(), "    ");
         }
     }
     lines.join("\n")
@@ -100,6 +101,7 @@ pub(super) fn format_json_report(
                         line: json::json_path(&matched.line),
                     })
                     .collect(),
+                patch: event.patch.as_ref().map(json::json_patch),
             })
             .collect(),
         warnings,
@@ -139,6 +141,7 @@ struct JsonEvent<'a> {
     old_path: JsonPath<'a>,
     file_change: JsonFileChange<'a>,
     matches: Vec<JsonMatch<'a>>,
+    patch: Option<json::JsonPatch<'a>>,
 }
 
 #[derive(Serialize)]
