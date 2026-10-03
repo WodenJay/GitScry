@@ -1,6 +1,7 @@
 //! Published query sessions and shared cache infrastructure.
 //! Generation planning/publication lives in `generation`; row writes in `write`.
 
+mod clear;
 pub(crate) mod followups;
 mod generation;
 mod history;
@@ -15,6 +16,7 @@ pub(crate) use scope::SearchFilter;
 mod semantic;
 mod write;
 use crate::{app::AppError, git::Repository};
+pub(crate) use clear::{ClearReport, clear};
 pub(crate) use generation::prepare;
 pub(crate) use history::HunkId;
 pub(crate) use history::{CodeHunk, HistoryCommit, HistoryHunk, OtherFileChange, PatchHistoryHunk};
@@ -58,12 +60,18 @@ impl Drop for SharedLock {
     }
 }
 
+enum QueryLock {
+    Shared { _guard: SharedLock },
+    Exclusive { _guard: ExclusiveLock },
+}
+
 pub(crate) struct QuerySession {
     root: PathBuf,
     connection: Connection,
-    _lock: SharedLock,
+    _lock: QueryLock,
     progress: Vec<String>,
     warnings: Vec<String>,
+    has_published_cache: bool,
 }
 
 impl QuerySession {
@@ -120,7 +128,7 @@ impl Drop for ExclusiveLock {
 }
 
 fn acquire_shared(common_dir: &Path, progress: &mut Vec<String>) -> Result<SharedLock, AppError> {
-    let file = open_lock_file(common_dir)?;
+    let file = open_lock_file(common_dir, true)?;
     loop {
         match file.try_lock_shared() {
             Ok(()) => return Ok(SharedLock { file }),
@@ -138,8 +146,9 @@ fn acquire_shared(common_dir: &Path, progress: &mut Vec<String>) -> Result<Share
 fn acquire_exclusive(
     common_dir: &Path,
     progress: &mut Vec<String>,
+    ensure_ignore: bool,
 ) -> Result<ExclusiveLock, AppError> {
-    let file = open_lock_file(common_dir)?;
+    let file = open_lock_file(common_dir, ensure_ignore)?;
     loop {
         match file.try_lock() {
             Ok(()) => return Ok(ExclusiveLock { file }),
@@ -154,11 +163,13 @@ fn acquire_exclusive(
     }
 }
 
-fn open_lock_file(common_dir: &Path) -> Result<File, AppError> {
+fn open_lock_file(common_dir: &Path, ensure_ignore: bool) -> Result<File, AppError> {
     let directory = cache_directory(common_dir);
     fs::create_dir_all(&directory)
         .map_err(|error| cache_error("creating shared cache directory", error))?;
-    ensure_ignored(&directory)?;
+    if ensure_ignore {
+        ensure_ignored(&directory)?;
+    }
     OpenOptions::new()
         .create(true)
         .truncate(false)
@@ -211,9 +222,10 @@ pub(crate) fn open_query(repository: &Repository) -> Result<QuerySession, AppErr
     Ok(QuerySession {
         root: repository.root.clone(),
         connection,
-        _lock: lock,
+        _lock: QueryLock::Shared { _guard: lock },
         progress,
         warnings,
+        has_published_cache: true,
     })
 }
 

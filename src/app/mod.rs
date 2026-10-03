@@ -1,3 +1,4 @@
+mod clear;
 mod error;
 mod index;
 mod update;
@@ -46,6 +47,7 @@ pub(crate) struct Outcome {
     pub(crate) report: Option<query::QueryReport>,
     pub(crate) usage_report: Option<usage::Report>,
     pub(crate) github_links: Option<crate::github::LinksReport>,
+    pub(crate) clear_report: Option<crate::cache::ClearReport>,
 }
 
 impl From<HistoricalScopeArgs> for SearchScopeOptions {
@@ -91,6 +93,7 @@ pub(crate) fn execute(
                 report: None,
                 usage_report: Some(usage_report),
                 github_links: None,
+                clear_report: None,
             });
         }
         command => command,
@@ -147,6 +150,7 @@ pub(crate) fn execute(
                 report(Progress::Index(stage))
             });
         }
+        Command::Clear { dry_run } => return clear::run(dry_run),
         Command::Update => return update::run(&mut |stage| report(Progress::Update(stage))),
         Command::Hotspots {
             limit,
@@ -398,5 +402,6 @@ pub(crate) fn execute(
         report: Some(result.report),
         usage_report: None,
         github_links,
+        clear_report: None,
     })
 }

@@ -228,6 +228,24 @@ Examples:
     },
 
     #[command(
+        about = "Clear the repository-wide GitScry cache",
+        long_about = r#"Clear all GitScry-owned data and settings from the repository-wide GitScry cache.
+
+The cache lives under `gitscry/` in the repository's Git common directory, so all linked worktrees share it. This command acquires the shared cache's exclusive lock and waits for active readers or writers. It reports cached commits, changes, path records, hunks and semantic vectors, lists each affected data file with its measured file size, and reports measured before/after file sizes.
+
+`--dry-run` inspects the same locked cache and lists planned deletions and projected file-size savings without deleting or compacting cache data. Clear preserves `gitscry/cache.lock`, `gitscry/.gitignore`, Git history, user-scoped usage statistics and globally shared model/runtime resources. Reported file sizes may differ from physical filesystem allocation. Clearing cannot be undone; rebuild repository cache data with `gitscry index`.
+
+Examples:
+  gitscry clear
+  gitscry clear --dry-run"#
+    )]
+    Clear {
+        /// Preview planned deletions without changing cache data.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    #[command(
         group(
             ArgGroup::new("search-mode")
                 .required(true)
@@ -620,6 +638,7 @@ impl Command {
             | Self::Hotspots { json, .. }
             | Self::Timeline { json, .. }
             | Self::Stats { json, .. } => *json,
+            Self::Clear { .. } => false,
             Self::Update | Self::Index { .. } => false,
         }
     }
@@ -633,6 +652,7 @@ impl Command {
             Self::Update => Some("update"),
             Self::TraceRemoval { .. } => Some("trace-removal"),
             Self::Index { .. } => Some("index"),
+            Self::Clear { .. } => Some("clear"),
             Self::Search { .. } => Some("search"),
             Self::Examples { .. } => Some("examples"),
             Self::Failures { .. } => Some("failures"),
