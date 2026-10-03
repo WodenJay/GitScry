@@ -10,6 +10,7 @@ mod followups;
 mod github_links;
 mod json;
 mod material;
+mod prune;
 
 mod hotspots;
 mod patterns;
@@ -246,6 +247,9 @@ fn write_outcome(outcome: Outcome, json_output: bool) -> io::Result<()> {
     }
     if let Some(report) = &outcome.index_report {
         return writeln!(io::stdout().lock(), "{}", format_index_report(report));
+    }
+    if let Some(report) = &outcome.prune_report {
+        return writeln!(io::stdout().lock(), "{}", prune::format_report(report));
     }
     if json_output {
         let report = outcome.report.as_ref().ok_or_else(|| {

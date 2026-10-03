@@ -246,6 +246,22 @@ Examples:
     },
 
     #[command(
+        about = "Prune material for Git objects that no longer exist",
+        long_about = r#"Prune repository-wide GitScry cache material only for commits whose Git objects are no longer available locally. If Git still retains an object, prune preserves its history even when its branch was deleted, rebased, or is unreachable from current HEAD. Git remains the source of truth; prune does not run Git GC or modify Git objects, refs, or retention policy.
+
+Use `--dry-run` to inspect candidate counts and current cache usage under the shared repository lock. A preview does not change cache data and does not estimate reclaimed bytes because that requires compaction. Execution reports deleted commits, changes, path records, hunks and semantic vectors, measured before/after cache data-file sizes, and bytes actually released. File sizes may differ from physical filesystem allocation. Execution rechecks Git object availability; a preview does not reserve a deletion plan.
+
+Examples:
+  gitscry prune
+  gitscry prune --dry-run"#
+    )]
+    Prune {
+        /// Preview eligible deletions without changing cache data.
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    #[command(
         group(
             ArgGroup::new("search-mode")
                 .required(true)
@@ -638,7 +654,7 @@ impl Command {
             | Self::Hotspots { json, .. }
             | Self::Timeline { json, .. }
             | Self::Stats { json, .. } => *json,
-            Self::Clear { .. } => false,
+            Self::Clear { .. } | Self::Prune { .. } => false,
             Self::Update | Self::Index { .. } => false,
         }
     }
@@ -653,6 +669,7 @@ impl Command {
             Self::TraceRemoval { .. } => Some("trace-removal"),
             Self::Index { .. } => Some("index"),
             Self::Clear { .. } => Some("clear"),
+            Self::Prune { .. } => Some("prune"),
             Self::Search { .. } => Some("search"),
             Self::Examples { .. } => Some("examples"),
             Self::Failures { .. } => Some("failures"),

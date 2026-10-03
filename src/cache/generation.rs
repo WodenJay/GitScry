@@ -516,7 +516,7 @@ fn publish(common_dir: &Path, snapshot: &Snapshot, semantic_enabled: bool) -> Re
     atomic_replace(&directory, &final_path, &staging)
 }
 
-fn validate(path: &Path, expected_commits: usize) -> Result<(), AppError> {
+pub(super) fn validate(path: &Path, expected_commits: usize) -> Result<(), AppError> {
     let state = inspect_path(path)?;
     if state.commit_count != expected_commits {
         return Err(AppError::operational(
@@ -527,7 +527,11 @@ fn validate(path: &Path, expected_commits: usize) -> Result<(), AppError> {
 }
 
 #[cfg(windows)]
-fn atomic_replace(directory: &Path, final_path: &Path, staging: &Path) -> Result<(), AppError> {
+pub(super) fn atomic_replace(
+    directory: &Path,
+    final_path: &Path,
+    staging: &Path,
+) -> Result<(), AppError> {
     if final_path.exists() {
         let previous = directory.join("cache.sqlite.previous");
         let _ = fs::remove_file(&previous);
@@ -547,7 +551,11 @@ fn atomic_replace(directory: &Path, final_path: &Path, staging: &Path) -> Result
 }
 
 #[cfg(not(windows))]
-fn atomic_replace(_directory: &Path, final_path: &Path, staging: &Path) -> Result<(), AppError> {
+pub(super) fn atomic_replace(
+    _directory: &Path,
+    final_path: &Path,
+    staging: &Path,
+) -> Result<(), AppError> {
     fs::rename(staging, final_path).map_err(|error| cache_error("publishing the cache", error))
 }
 

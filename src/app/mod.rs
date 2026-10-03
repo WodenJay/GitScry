@@ -1,6 +1,7 @@
 mod clear;
 mod error;
 mod index;
+mod prune;
 mod update;
 
 use crate::github;
@@ -55,6 +56,7 @@ pub(crate) struct Outcome {
     pub(crate) github_links: Option<crate::github::LinksReport>,
     pub(crate) clear_report: Option<crate::cache::ClearReport>,
     pub(crate) index_report: Option<IndexReport>,
+    pub(crate) prune_report: Option<crate::cache::PruneReport>,
 }
 
 impl From<HistoricalScopeArgs> for SearchScopeOptions {
@@ -102,6 +104,7 @@ pub(crate) fn execute(
                 github_links: None,
                 clear_report: None,
                 index_report: None,
+                prune_report: None,
             });
         }
         command => command,
@@ -159,6 +162,7 @@ pub(crate) fn execute(
             });
         }
         Command::Clear { dry_run } => return clear::run(dry_run),
+        Command::Prune { dry_run } => return prune::run(dry_run),
         Command::Update => return update::run(&mut |stage| report(Progress::Update(stage))),
         Command::Hotspots {
             limit,
@@ -412,5 +416,6 @@ pub(crate) fn execute(
         github_links,
         clear_report: None,
         index_report: None,
+        prune_report: None,
     })
 }

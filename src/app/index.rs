@@ -34,5 +34,6 @@ pub(super) fn run(
             current_head_commit_count,
             semantic_disabled: no_semantic,
         }),
+        prune_report: None,
     })
 }
