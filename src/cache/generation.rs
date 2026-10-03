@@ -116,7 +116,7 @@ fn prepare_at(
     }
     drop(shared);
 
-    let exclusive = super::acquire_exclusive(&repository.common_dir, &mut progress)?;
+    let exclusive = super::acquire_exclusive(&repository.common_dir, &mut progress, true)?;
     recover_previous(&repository.common_dir)?;
     let plan = evaluate(repository, &expected, inspect(&repository.common_dir))?;
     if let Plan::Fresh {

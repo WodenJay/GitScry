@@ -4,7 +4,7 @@ use super::{AppError, Outcome};
 
 pub(super) fn run(dry_run: bool) -> Result<Outcome, AppError> {
     let repository = git::Repository::discover()?;
-    let (progress, clear_report) = cache::clear(&repository.common_dir, dry_run)?;
+    let (progress, clear_report) = cache::clear(&repository, dry_run)?;
     Ok(Outcome {
         progress,
         warnings: Vec::new(),

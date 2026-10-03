@@ -88,6 +88,9 @@ fn clear_dry_run_reports_and_preserves_repository_cache() {
     repo.index();
     add_semantic_vector(&repo);
 
+    let ignore_file = repo.cache_dir().join(".gitignore");
+    let ignore_contents = b"# clear preview must preserve this file\n";
+    fs::write(&ignore_file, ignore_contents).unwrap();
     let previous = repo.cache_dir().join("cache.sqlite.previous");
     let staging = repo.cache_dir().join("cache.sqlite.staging-abandoned");
     fs::write(&previous, b"previous generation").unwrap();
@@ -134,6 +137,7 @@ fn clear_dry_run_reports_and_preserves_repository_cache() {
     assert!(!stdout.contains("  gitscry/cache.lock ("));
     assert!(!stdout.contains("  gitscry/.gitignore ("));
 
+    assert_eq!(fs::read(&ignore_file).unwrap(), ignore_contents);
     assert_eq!(cache_snapshot(&repo.cache_dir()), before);
     assert_eq!(repo.head(), head);
     assert_eq!(git_stdout(repo.dir.path(), ["show-ref"]), refs);

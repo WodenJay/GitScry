@@ -6,9 +6,9 @@ use std::{
 
 use rusqlite::{Connection, OpenFlags};
 
-use crate::app::AppError;
+use crate::{app::AppError, git::Repository};
 
-use super::{acquire_exclusive, cache_directory, cache_path};
+use super::{QueryLock, QuerySession, acquire_exclusive, cache_directory, cache_path};
 
 pub(crate) struct ClearDataFile {
     pub(crate) name: String,
@@ -35,19 +35,18 @@ pub(crate) struct ClearReport {
 }
 
 pub(crate) fn clear(
-    common_dir: &Path,
+    repository: &Repository,
     dry_run: bool,
 ) -> Result<(Vec<String>, ClearReport), AppError> {
-    let mut progress = Vec::new();
-    let _lock = acquire_exclusive(common_dir, &mut progress)?;
-    let directory = cache_directory(common_dir);
+    let mut session = QuerySession::open_for_clear(repository)?;
+    let directory = cache_directory(&repository.common_dir);
     let data_files = collect_data_files(&directory)?;
     let before_bytes = total_bytes(&data_files)?;
-    let counts = read_counts(&cache_path(common_dir));
+    let counts = session.clear_counts();
 
     if dry_run {
         return Ok((
-            progress,
+            session.progress().to_vec(),
             ClearReport {
                 dry_run,
                 counts,
@@ -59,6 +58,7 @@ pub(crate) fn clear(
         ));
     }
 
+    session.close_database()?;
     for data_file in &data_files {
         fs::remove_file(&data_file.path)
             .map_err(|error| clear_error("deleting cache data", error))?;
@@ -67,7 +67,7 @@ pub(crate) fn clear(
     let released_bytes = before_bytes.saturating_sub(after_bytes);
 
     Ok((
-        progress,
+        session.progress().to_vec(),
         ClearReport {
             dry_run,
             counts,
@@ -77,6 +77,52 @@ pub(crate) fn clear(
             released_bytes,
         },
     ))
+}
+
+impl QuerySession {
+    fn open_for_clear(repository: &Repository) -> Result<Self, AppError> {
+        let mut progress = Vec::new();
+        let lock = acquire_exclusive(&repository.common_dir, &mut progress, false)?;
+        let path = cache_path(&repository.common_dir);
+        let has_published_cache = path.is_file();
+        let connection = if has_published_cache {
+            Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .or_else(|_| Connection::open_in_memory())
+        } else {
+            Connection::open_in_memory()
+        }
+        .map_err(|error| super::cache_error("opening cache for clear", error))?;
+
+        Ok(Self {
+            root: repository.root.clone(),
+            connection,
+            _lock: QueryLock::Exclusive { _guard: lock },
+            progress,
+            warnings: Vec::new(),
+            has_published_cache,
+        })
+    }
+
+    fn clear_counts(&self) -> Option<ClearCounts> {
+        if !self.has_published_cache {
+            return Some(ClearCounts::default());
+        }
+        Some(ClearCounts {
+            commits: table_count(&self.connection, "commits").ok()?,
+            changes: table_count(&self.connection, "changes").ok()?,
+            path_records: table_count(&self.connection, "commit_paths").ok()?,
+            hunks: table_count(&self.connection, "hunks").ok()?,
+            semantic_vectors: table_count(&self.connection, "semantic_vectors").ok()?,
+        })
+    }
+
+    fn close_database(&mut self) -> Result<(), AppError> {
+        let replacement = Connection::open_in_memory()
+            .map_err(|error| super::cache_error("opening empty cache session", error))?;
+        std::mem::replace(&mut self.connection, replacement)
+            .close()
+            .map_err(|(_, error)| super::cache_error("closing cache before clear", error))
+    }
 }
 
 fn collect_data_files(directory: &Path) -> Result<Vec<ClearDataFile>, AppError> {
@@ -125,20 +171,6 @@ fn total_bytes(files: &[ClearDataFile]) -> Result<u64, AppError> {
         total
             .checked_add(file.size_bytes)
             .ok_or_else(|| clear_error("summing cache data sizes", "byte count overflow"))
-    })
-}
-
-fn read_counts(path: &Path) -> Option<ClearCounts> {
-    if !path.is_file() {
-        return Some(ClearCounts::default());
-    }
-    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
-    Some(ClearCounts {
-        commits: table_count(&connection, "commits").ok()?,
-        changes: table_count(&connection, "changes").ok()?,
-        path_records: table_count(&connection, "commit_paths").ok()?,
-        hunks: table_count(&connection, "hunks").ok()?,
-        semantic_vectors: table_count(&connection, "semantic_vectors").ok()?,
     })
 }
 
