@@ -183,9 +183,14 @@ pub(in crate::analysis) fn run(
         .and_then(|days| days.checked_mul(86400))
         .filter(|_| days > 0 && max_commits > 0)
         .ok_or_else(|| AppError::input("followups bounds must be positive and representable"))?;
-    for path in &paths {
-        validate_path(path)?;
-    }
+    let paths = paths
+        .into_iter()
+        .map(|path| {
+            let path = super::normalize_path_separators(&path);
+            validate_path(&path)?;
+            Ok(path)
+        })
+        .collect::<Result<Vec<_>, AppError>>()?;
     let repository = Repository::discover()?;
     let session = cache::open_query(&repository)?;
     let seed = repository.resolve_commit(&revision)?;
