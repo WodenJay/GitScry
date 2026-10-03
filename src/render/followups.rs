@@ -83,6 +83,40 @@ pub(super) fn format_report(report: &Report) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ));
+        for region in &entry.region_associations {
+            let current_path = region
+                .current_path
+                .as_deref()
+                .map(escape::path)
+                .unwrap_or_else(|| "<deleted>".into());
+            lines.push(format!(
+                "    Region overlap: seed {}@{}:{}+{}; parent {}@{}:{}+{} -> {}@{}:{}+{}.",
+                report.scope.seed,
+                escape::path(&region.seed_path),
+                region.seed_position.start_line,
+                region.seed_position.line_count,
+                region.previous_revision,
+                escape::path(&region.previous_path),
+                region.previous_position.start_line,
+                region.previous_position.line_count,
+                entry.commit_id,
+                current_path,
+                region.current_position.start_line,
+                region.current_position.line_count
+            ));
+        }
+        for downgrade in &entry.region_tracking_downgrades {
+            let path = downgrade
+                .current_path
+                .as_deref()
+                .unwrap_or(&downgrade.previous_path);
+            lines.push(format!(
+                "    Region tracking downgrade for {}: {} ({}).",
+                escape::path(path),
+                downgrade.reason.description(),
+                downgrade.reason.code()
+            ));
+        }
         if let Some(reference) = &entry.revert_reference {
             lines.push(format!(
                 "    Revert reference: commit-level declaration targeting {reference}; not path-specific and not proof of path reversal."
@@ -103,6 +137,7 @@ fn association_bases(entry: &Entry) -> impl Iterator<Item = &'static str> {
             .revert_reference
             .as_ref()
             .map(|_| "explicit_revert_reference"),
+        (!entry.region_associations.is_empty()).then_some("region_overlap"),
         entry.same_file_association.then_some("same_file"),
     ]
     .into_iter()
@@ -139,6 +174,25 @@ pub(super) fn format_json_report(
                     "current_path": association.current_path.as_ref().map(|path| json_path(path)),
                     "change_type": association.change_type,
                 })).collect::<Vec<_>>(),
+                "region_associations": entry.region_associations.iter().map(|region| json!({
+                    "seed_revision": &scope.seed,
+                    "seed_path": json_path(&region.seed_path),
+                    "commit_id": &entry.commit_id,
+                    "previous_revision": region.previous_revision,
+                    "previous_path": json_path(&region.previous_path),
+                    "current_path": region.current_path.as_ref().map(|path| json_path(path)),
+                    "seed_position": {"start_line": region.seed_position.start_line, "line_count": region.seed_position.line_count},
+                    "previous_position": {"start_line": region.previous_position.start_line, "line_count": region.previous_position.line_count},
+                    "current_position": {"start_line": region.current_position.start_line, "line_count": region.current_position.line_count},
+                })).collect::<Vec<_>>(),
+                "region_tracking_downgrades": entry.region_tracking_downgrades.iter().map(|downgrade| json!({
+                    "seed_old_path": downgrade.seed_old_path.as_ref().map(|path| json_path(path)),
+                    "seed_new_path": downgrade.seed_new_path.as_ref().map(|path| json_path(path)),
+                    "previous_path": json_path(&downgrade.previous_path),
+                    "current_path": downgrade.current_path.as_ref().map(|path| json_path(path)),
+                    "reason": downgrade.reason.code(),
+                    "explanation": downgrade.reason.description(),
+                })).collect::<Vec<_>>(),
                 "parent_count": entry.parent_count,
                 "diff_comparison": if entry.parent_count > 1 { Some("first_parent") } else { None },
                 "inspect_command": format!("git show {}", entry.commit_id),
@@ -157,16 +211,16 @@ pub(super) fn format_json_report(
         })
         .collect::<Result<_, serde_json::Error>>()?;
     serde_json::to_string(&json!({
-        "schema_version": 2,
+        "schema_version": 3,
         "kind": "followups",
         "scope": {
             "seed": scope.seed, "endpoint": scope.endpoint, "cache_tip": scope.cache_tip,
             "seed_time": scope.seed_time, "time_ceiling": scope.time_ceiling,
             "days": scope.days, "max_commits": scope.max_commits, "limit": scope.limit,
             "selected_paths": scope.selected_paths.iter().map(|p| json_path(p)).collect::<Vec<_>>(),
-            "order": "explicit_revert_reference_then_same_file_then_forward_topological",
+            "order": "explicit_revert_reference_then_region_overlap_then_same_file_then_forward_topological",
             "coverage": "endpoint_reachable_published_cache",
-            "association": "explicit_revert_reference_or_same_file",
+            "association": "explicit_revert_reference_or_region_overlap_or_same_file",
         },
         "inspected_count": report.inspected_count,
         "lineage_inspected_count": report.lineage_inspected_count,
