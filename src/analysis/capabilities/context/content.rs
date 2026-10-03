@@ -22,62 +22,6 @@ const SEMANTIC_CANDIDATE_LIMIT: usize = 64;
 const SEMANTIC_HUNK_LIMIT: usize = 64;
 const SEMANTIC_HUNK_BYTES: usize = 16 * 1024;
 
-// Identity is kept whole and case-sensitive. Normalized pieces only decide whether
-// an identifier is distinctive; they never establish the historical match.
-fn signals(text: &[u8]) -> BTreeSet<String> {
-    let Ok(text) = std::str::from_utf8(text) else {
-        return BTreeSet::new();
-    };
-    let mut signals = BTreeSet::new();
-    for identity in text.split(|c: char| !c.is_alphanumeric() && c != '_') {
-        let normalized = retrieval::tokenize(identity);
-        if identity.len() >= 8
-            && identity.len() <= 96
-            && (normalized.len() >= 2 || identity.contains('_'))
-            && !matches!(
-                identity,
-                "to_string"
-                    | "to_owned"
-                    | "is_empty"
-                    | "Some"
-                    | "unwrap_or_default"
-                    | "assert_eq"
-                    | "assert_ne"
-            )
-        {
-            signals.insert(identity.to_owned());
-        }
-    }
-    // Quoted nontrivial literals remain intact, including punctuation and case.
-    for quote in ['\"', '\''] {
-        let mut pieces = text.split(quote);
-        pieces.next();
-        while let Some(literal) = pieces.next() {
-            if literal.len() >= 6
-                && literal.len() <= 96
-                && literal.chars().any(char::is_alphabetic)
-                && !literal.chars().any(char::is_whitespace)
-                && !matches!(
-                    literal,
-                    "string"
-                        | "default"
-                        | "true"
-                        | "false"
-                        | "success"
-                        | "message"
-                        | "result"
-                        | "status"
-                        | "error"
-                )
-            {
-                signals.insert(format!("{quote}{literal}{quote}"));
-            }
-            pieces.next();
-        }
-    }
-    signals
-}
-
 pub(super) fn discover(
     session: &QuerySession,
     report: &mut Report,
@@ -99,7 +43,7 @@ pub(super) fn discover(
             report.omitted_content_bases += 1;
             continue;
         }
-        let mut extracted = signals(&hunk.text);
+        let mut extracted = retrieval::distinctive_signals(&hunk.text);
         if extracted.len() > SIGNAL_LIMIT {
             report.omitted_content_signals += extracted.len() - SIGNAL_LIMIT;
             extracted = extracted.into_iter().take(SIGNAL_LIMIT).collect();
@@ -179,7 +123,7 @@ pub(super) fn discover(
             };
             let text = &raw[1..];
             let mut hits: BTreeMap<usize, Vec<String>> = BTreeMap::new();
-            for signal in signals(text) {
+            for signal in retrieval::distinctive_signals(text) {
                 if let Some(indices) = lookup.get(signal.as_str()) {
                     for index in indices {
                         hits.entry(*index).or_default().push(signal.clone());

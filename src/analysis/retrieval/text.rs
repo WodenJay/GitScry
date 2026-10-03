@@ -1,6 +1,62 @@
 //! Normalizing text and paths the way retrieval and display both need.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
+
+/// Identity stays whole and case-sensitive; normalized pieces only decide whether
+/// a changed identity is distinctive enough to use as a historical association.
+pub(in crate::analysis) fn distinctive_signals(text: &[u8]) -> BTreeSet<String> {
+    let Ok(text) = std::str::from_utf8(text) else {
+        return BTreeSet::new();
+    };
+    let mut signals = BTreeSet::new();
+    for identity in text.split(|c: char| !c.is_alphanumeric() && c != '_') {
+        let normalized = tokenize(identity);
+        if identity.len() >= 8
+            && identity.len() <= 96
+            && (normalized.len() >= 2 || identity.contains('_'))
+            && !matches!(
+                identity,
+                "to_string"
+                    | "to_owned"
+                    | "is_empty"
+                    | "Some"
+                    | "unwrap_or_default"
+                    | "assert_eq"
+                    | "assert_ne"
+            )
+        {
+            signals.insert(identity.to_owned());
+        }
+    }
+    // Quoted nontrivial literals remain intact, including punctuation and case.
+    for quote in ['"', '\''] {
+        let mut pieces = text.split(quote);
+        pieces.next();
+        while let Some(literal) = pieces.next() {
+            if literal.len() >= 6
+                && literal.len() <= 96
+                && literal.chars().any(char::is_alphabetic)
+                && !literal.chars().any(char::is_whitespace)
+                && !matches!(
+                    literal,
+                    "string"
+                        | "default"
+                        | "true"
+                        | "false"
+                        | "success"
+                        | "message"
+                        | "result"
+                        | "status"
+                        | "error"
+                )
+            {
+                signals.insert(format!("{quote}{literal}{quote}"));
+            }
+            pieces.next();
+        }
+    }
+    signals
+}
 
 /// Prose plus the identifier terms it contains, so `MATCH` can reach inside identifiers.
 pub(crate) fn searchable_text(value: &str) -> String {

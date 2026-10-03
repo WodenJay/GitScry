@@ -53,6 +53,18 @@ pub(super) fn format_report(report: &Report) -> String {
                     )
                     .unwrap();
                 }
+                if !lead.associated_material_ids.is_empty() {
+                    let ids = lead
+                        .associated_material_ids
+                        .iter()
+                        .map(|id| format!("#{id}"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    writeln!(output, "    Associated material: {ids}").unwrap();
+                }
+                if lead.associated_materials_truncated {
+                    writeln!(output, "    Associated material selection truncated").unwrap();
+                }
                 if lead.message_lossy {
                     writeln!(output, "    Message decoding: invalid UTF-8 bytes replaced").unwrap();
                 }
@@ -61,6 +73,71 @@ pub(super) fn format_report(report: &Report) -> String {
                 }
             }
         }
+    }
+    if !report.associated_materials.is_empty() {
+        writeln!(
+            output,
+            "\nAssociated material (same-commit historical associations; not dependency claims)"
+        )
+        .unwrap();
+        for material in &report.associated_materials {
+            writeln!(
+                output,
+                "  #{} {} [{}] in {}",
+                material.id,
+                display(&material.path),
+                material.kind,
+                material.commit
+            )
+            .unwrap();
+            writeln!(output, "    Association: {}", material.association).unwrap();
+            writeln!(
+                output,
+                "    Shared identities: {}",
+                material.shared_identities.join(", ")
+            )
+            .unwrap();
+            for association in &material.associated_with {
+                writeln!(
+                    output,
+                    "    Linked from {} {} lead {} via {}",
+                    display(&association.conflict_path),
+                    association.side,
+                    association.lead_commit,
+                    association.shared_identities.join(", ")
+                )
+                .unwrap();
+            }
+            for hunk in &material.hunks {
+                writeln!(
+                    output,
+                    "    Change {} hunk {} (old {}+{}, new {}+{}): {}",
+                    hunk.change_ordinal,
+                    hunk.hunk_ordinal,
+                    hunk.old_start,
+                    hunk.old_lines,
+                    hunk.new_start,
+                    hunk.new_lines,
+                    hunk.shared_identities.join(", ")
+                )
+                .unwrap();
+                for line in &hunk.lines {
+                    writeln!(output, "      {}", display(line)).unwrap();
+                }
+                if hunk.excerpt_truncated {
+                    writeln!(output, "      [excerpt truncated]").unwrap();
+                }
+            }
+            if material.hunks_truncated {
+                writeln!(output, "    Associated hunks truncated").unwrap();
+            }
+            if material.associations_truncated {
+                writeln!(output, "    Lead references truncated").unwrap();
+            }
+        }
+    }
+    if report.associated_materials_truncated {
+        writeln!(output, "Associated material selection truncated").unwrap();
     }
     writeln!(
         output,
