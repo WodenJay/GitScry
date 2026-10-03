@@ -4,7 +4,9 @@ use std::{fs, process::Output};
 use support::{TestRepo, git, git_command, git_stdout};
 
 fn commit(repo: &TestRepo, path: &str, text: &str, message: &str) -> String {
-    fs::write(repo.dir.path().join(path), text).unwrap();
+    let file_path = repo.dir.path().join(path);
+    fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+    fs::write(file_path, text).unwrap();
     git(repo.dir.path(), ["add", path]);
     git(repo.dir.path(), ["commit", "-m", message]);
     repo.head()
@@ -47,6 +49,94 @@ fn fixture() -> (TestRepo, String, String, String, String) {
     git(repo.dir.path(), ["checkout", "main"]);
     merge(&repo, "other");
     (repo, base, ours, theirs, unrelated)
+}
+
+fn commit_files(repo: &TestRepo, files: &[(&str, &str)], message: &str) -> String {
+    for (path, text) in files {
+        let file_path = repo.dir.path().join(path);
+        fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+        fs::write(file_path, text).unwrap();
+        git(repo.dir.path(), ["add", path]);
+    }
+    git(repo.dir.path(), ["commit", "-m", message]);
+    repo.head()
+}
+
+fn associated_fixture() -> TestRepo {
+    let repo = TestRepo::new();
+    commit_files(
+        &repo,
+        &[
+            (
+                "src/service.rs",
+                "pub fn service_identity(name: &str) -> String {\n    normalize_identity(name)\n}\n",
+            ),
+            (
+                "src/identity.rs",
+                "pub fn identity_key(name: &str) -> String {\n    normalize_identity(name)\n}\n",
+            ),
+            (
+                "src/caller.rs",
+                "pub fn caller(name: &str) -> String {\n    normalize_identity(name)\n}\n",
+            ),
+            (
+                "tests/identity_regression.rs",
+                "fn identity_regression() {\n    assert_eq!(normalize_identity(\"before\"), \"before\");\n}\n",
+            ),
+            ("src/unrelated.rs", "fn unrelated_before() {}\n"),
+        ],
+        "base identity behavior",
+    );
+    git(repo.dir.path(), ["branch", "other"]);
+    commit_files(
+        &repo,
+        &[
+            (
+                "src/service.rs",
+                "pub fn service_identity(name: &str) -> String {\n    const LABEL: &str = \"secret\x1btag\";\n    normalize_identity(name, Owner::Service)\n}\n",
+            ),
+            (
+                "src/identity.rs",
+                "pub fn identity_key(name: &str) -> String {\n    normalize_identity(name, Owner::Identity)\n}\n",
+            ),
+            (
+                "src/caller.rs",
+                "pub fn caller(name: &str) -> String {\n    let label = \"secret\x1btag\";\n    let value = normalize_identity(name, Owner::Service);\n    log_identity(normalize_identity(name, Owner::Service));\n    audit_identity(normalize_identity(name, Owner::Service));\n    publish_identity(normalize_identity(name, Owner::Service));\n    export_identity(normalize_identity(name, Owner::Service));\n    value\n}\n",
+            ),
+            ("src/unrelated.rs", "fn unrelated_ours() {}\n"),
+        ],
+        "assign identity ownership and update callers",
+    );
+    commit(
+        &repo,
+        "docs/branch_only.md",
+        "unrelated branch-only change\n",
+        "unrelated branch commit",
+    );
+    repo.index();
+    git(repo.dir.path(), ["checkout", "other"]);
+    commit_files(
+        &repo,
+        &[
+            (
+                "src/service.rs",
+                "pub fn service_identity(name: &str) -> String {\n    normalize_identity(name, IdentityKey::Canonical)\n}\n",
+            ),
+            (
+                "src/identity.rs",
+                "pub fn identity_key(name: &str) -> String {\n    normalize_identity(name, IdentityKey::Canonical)\n}\n",
+            ),
+            (
+                "tests/identity_regression.rs",
+                "fn identity_regression() {\n    assert_eq!(normalize_identity(\"ID-42\"), \"id-42\");\n}\n",
+            ),
+            ("docs/same_commit_noise.md", "unrelated same-commit note\n"),
+        ],
+        "fix identity handling and add regression coverage",
+    );
+    git(repo.dir.path(), ["checkout", "main"]);
+    merge(&repo, "other");
+    repo
 }
 fn state(repo: &TestRepo) -> Vec<Vec<u8>> {
     let root = repo.dir.path();
@@ -312,6 +402,124 @@ fn rename_does_not_claim_same_commit_reintroduction() {
     assert_eq!(path_changes[0]["status"], "M");
     assert_eq!(path_changes[0]["old_path"], "score.rs");
     assert_eq!(path_changes[0]["new_path"], "score.rs");
+}
+
+#[test]
+fn reports_same_commit_callers_tests_and_bounded_matching_hunks() {
+    let repo = associated_fixture();
+    let report = json(repo.run(["conflicts", "--json"]));
+    let materials = report["associated_materials"].as_array().unwrap();
+    assert_eq!(materials.len(), 2);
+    assert_eq!(report["schema_version"], 2);
+    assert_eq!(report["associated_materials_truncated"], false);
+
+    let caller = materials
+        .iter()
+        .find(|material| material["path"] == "src/caller.rs")
+        .unwrap();
+    assert_eq!(caller["kind"], "changed_code");
+    let caller_identities = caller["shared_identities"].as_array().unwrap();
+    assert!(caller_identities.contains(&serde_json::json!("normalize_identity")));
+    assert!(
+        caller_identities
+            .iter()
+            .any(|identity| identity.as_str().unwrap().contains('\x1b'))
+    );
+    assert_eq!(caller["associated_with"].as_array().unwrap().len(), 2);
+    assert!(
+        caller["associated_with"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|association| association["side"] == "ours")
+    );
+    assert_eq!(caller["hunks"][0]["lines"].as_array().unwrap().len(), 4);
+    assert_eq!(caller["hunks"][0]["excerpt_truncated"], true);
+    assert_eq!(caller["hunks_truncated"], true);
+
+    let test = materials
+        .iter()
+        .find(|material| material["path"] == "tests/identity_regression.rs")
+        .unwrap();
+    assert_eq!(test["kind"], "test");
+    assert_eq!(
+        test["shared_identities"],
+        serde_json::json!(["normalize_identity"])
+    );
+    assert_eq!(test["associated_with"].as_array().unwrap().len(), 2);
+    assert!(
+        test["associated_with"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|association| association["side"] == "theirs")
+    );
+    assert!(materials.iter().all(|material| {
+        !material["path"].as_str().unwrap().contains("unrelated")
+            && material["hunks"].as_array().unwrap().len() <= 3
+    }));
+    for material in materials {
+        let associations = material["associated_with"].as_array().unwrap();
+        let mut conflict_paths = associations
+            .iter()
+            .map(|association| association["conflict_path"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        conflict_paths.sort_unstable();
+        assert_eq!(conflict_paths, ["src/identity.rs", "src/service.rs"]);
+        for association in associations {
+            assert_eq!(association["lead_commit"], material["commit"]);
+            let file = report["files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|file| file["path"] == association["conflict_path"])
+                .unwrap();
+            let side = file["sides"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|side| side["name"] == association["side"])
+                .unwrap();
+            let lead = side["leads"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|lead| lead["commit"] == association["lead_commit"])
+                .unwrap();
+            assert!(
+                lead["associated_material_ids"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&material["id"])
+            );
+            assert_eq!(lead["associated_materials_truncated"], false);
+        }
+    }
+
+    let selected = json(repo.run(["conflicts", "--path", "src/service.rs", "--json"]));
+    assert_eq!(selected["files"].as_array().unwrap().len(), 1);
+    assert_eq!(selected["files"][0]["path"], "src/service.rs");
+    assert!(
+        selected["associated_materials"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(
+                |material| material["associated_with"].as_array().unwrap().len() == 1
+                    && material["associated_with"][0]["conflict_path"] == "src/service.rs"
+            )
+    );
+
+    let text = repo.run(["conflicts"]);
+    assert!(text.status.success());
+    let text = String::from_utf8_lossy(&text.stdout);
+    assert!(text.contains("Associated material"));
+    assert!(text.contains("src/caller.rs"));
+    assert!(text.contains("tests/identity_regression.rs"));
+    assert!(text.contains("normalize_identity"));
+    assert!(!text.contains('\x1b'));
+    assert!(text.contains("\\u{1b}"));
+    assert!(text.contains("excerpt truncated"));
 }
 
 #[test]
