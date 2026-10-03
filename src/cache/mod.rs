@@ -1,6 +1,7 @@
 //! Published query sessions and shared cache infrastructure.
 //! Generation planning/publication lives in `generation`; row writes in `write`.
 
+mod clear;
 pub(crate) mod followups;
 mod generation;
 mod history;
@@ -15,6 +16,7 @@ pub(crate) use scope::SearchFilter;
 mod semantic;
 mod write;
 use crate::{app::AppError, git::Repository};
+pub(crate) use clear::{ClearReport, clear};
 pub(crate) use generation::prepare;
 pub(crate) use history::HunkId;
 pub(crate) use history::{CodeHunk, HistoryCommit, HistoryHunk, OtherFileChange, PatchHistoryHunk};

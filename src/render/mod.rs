@@ -3,6 +3,7 @@
 //! One reason to change: user-visible output formats. Process progress and warnings stay on
 //! stderr; query reports go to stdout as either human-readable English or schema-versioned JSON.
 
+mod clear;
 mod context;
 mod escape;
 mod followups;
@@ -219,6 +220,9 @@ fn write_outcome(outcome: Outcome, json_output: bool) -> io::Result<()> {
         return writeln!(io::stdout().lock(), "{}", usage::format_text(report));
     }
 
+    if let Some(report) = &outcome.clear_report {
+        return writeln!(io::stdout().lock(), "{}", clear::format_report(report));
+    }
     if json_output {
         let report = outcome.report.as_ref().ok_or_else(|| {
             io::Error::new(

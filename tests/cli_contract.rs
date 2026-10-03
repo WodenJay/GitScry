@@ -451,7 +451,7 @@ fn json_flag_is_available_only_for_query_commands() {
     assert!(trace_help.contains("FIX_REVISION"));
     assert!(trace_help.contains("fix target"));
 
-    for name in ["index", "update"] {
+    for name in ["index", "update", "clear"] {
         let help = repo.run([name, "--help"]);
         assert_eq!(help.status.code(), Some(0), "{name}");
         assert!(!String::from_utf8_lossy(&help.stdout).contains("--json"));
@@ -474,6 +474,24 @@ fn index_help_documents_shared_cache_scope() {
     assert!(help.contains("current default branch tip"));
 }
 
+#[test]
+fn clear_help_documents_repository_wide_effects_and_preview() {
+    let repo = TestRepo::new();
+    let help = repo.run(["clear", "--help"]);
+    assert_eq!(help.status.code(), Some(0));
+    let help = String::from_utf8_lossy(&help.stdout);
+    for requirement in [
+        "repository-wide",
+        "linked worktrees",
+        "--dry-run",
+        "cache.lock",
+        "Git history",
+        "model/runtime resources",
+        "file sizes",
+    ] {
+        assert!(help.contains(requirement), "missing {requirement}:\n{help}");
+    }
+}
 #[test]
 fn json_preserves_unclipped_paths_steps_and_complete_citations() {
     let repo = TestRepo::new();

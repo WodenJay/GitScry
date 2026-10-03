@@ -76,6 +76,7 @@ fn run_with<S: ReleaseSource>(
                 report: None,
                 usage_report: None,
                 github_links: None,
+                clear_report: None,
             });
         }
         std::cmp::Ordering::Greater => {}
@@ -104,6 +105,7 @@ fn run_with<S: ReleaseSource>(
         report: None,
         usage_report: None,
         github_links: None,
+        clear_report: None,
     })
 }
 
