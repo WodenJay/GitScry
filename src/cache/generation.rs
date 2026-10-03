@@ -276,9 +276,18 @@ fn evaluate(
     changed_objects.sort();
     changed_objects.dedup();
 
+    let cached_commits = state
+        .commits
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+
     if state.tip == expected.tip
         && state.shallow_boundaries == expected.shallow_boundaries
         && changed_objects.is_empty()
+        && reachable_commits
+            .iter()
+            .all(|commit| cached_commits.contains(commit.as_str()))
     {
         Ok(Plan::Fresh {
             state,

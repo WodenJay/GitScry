@@ -461,3 +461,129 @@ fn prune_lock_holder() {
         .unwrap_or(1000);
     thread::sleep(Duration::from_millis(millis));
 }
+
+#[test]
+fn indexing_restores_pruned_commit_objects_in_history_order() {
+    let repo = TestRepo::new();
+    commit(&repo, "first state\n", "First history commit");
+    let first = repo.head();
+    repo.index();
+    commit(&repo, "second state\n", "Second history commit");
+    let restored = repo.head();
+    repo.index();
+    git(
+        repo.dir.path(),
+        ["switch", "-c", "unrelated", first.as_str()],
+    );
+    commit(&repo, "unrelated state\n", "Unrelated branch history");
+    let unrelated = repo.head();
+    repo.index();
+    git(repo.dir.path(), ["switch", "main"]);
+    commit(&repo, "third state\n", "Third history commit");
+    let tip = repo.head();
+    repo.index();
+    let object_path = repo
+        .common_dir()
+        .join("objects")
+        .join(&restored[..2])
+        .join(&restored[2..]);
+    let object = fs::read(&object_path).expect("read commit object before removal");
+    fs::remove_file(&object_path).expect("remove commit object before prune");
+
+    let pruned = repo.run(["prune"]);
+    assert_eq!(
+        pruned.status.code(),
+        Some(0),
+        "prune failed: {}",
+        String::from_utf8_lossy(&pruned.stderr)
+    );
+    assert!(String::from_utf8_lossy(&pruned.stdout).contains("deleted commits: 1"));
+
+    let cache_path = repo.cache_dir().join("cache.sqlite");
+    let cache = rusqlite::Connection::open(&cache_path).expect("open pruned cache");
+    let restored_commit_is_absent: bool = cache
+        .query_row(
+            "SELECT NOT EXISTS(SELECT 1 FROM commits WHERE oid = ?1)",
+            [&restored],
+            |row| row.get(0),
+        )
+        .expect("check pruned commit");
+    assert!(
+        restored_commit_is_absent,
+        "prune retained unavailable commit"
+    );
+    let pruned_child_parent: (Option<i64>, Option<String>) = cache
+        .query_row(
+            "SELECT parent.parent_id, parent.external_oid
+             FROM commit_parents AS parent
+             JOIN commits AS child ON child.commit_id = parent.commit_id
+             WHERE child.oid = ?1 AND parent.position = 0",
+            [&tip],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read surviving child's unresolved parent");
+    assert_eq!(pruned_child_parent, (None, Some(restored.clone())));
+    drop(cache);
+
+    fs::create_dir_all(object_path.parent().unwrap()).expect("restore object directory");
+    fs::write(&object_path, object).expect("restore exact commit object");
+    let indexed = repo.run(["index"]);
+    assert_eq!(
+        indexed.status.code(),
+        Some(0),
+        "index failed: {}",
+        String::from_utf8_lossy(&indexed.stderr)
+    );
+
+    let cache = rusqlite::Connection::open(cache_path).expect("open repaired cache");
+    let unrelated_commit_is_cached: bool = cache
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM commits WHERE oid = ?1)",
+            [&unrelated],
+            |row| row.get(0),
+        )
+        .expect("check unrelated branch history");
+    assert!(
+        unrelated_commit_is_cached,
+        "index discarded unrelated cached history"
+    );
+    let restored_parent: (Option<i64>, Option<String>) = cache
+        .query_row(
+            "SELECT parent.parent_id, parent.external_oid
+             FROM commit_parents AS parent
+             JOIN commits AS child ON child.commit_id = parent.commit_id
+             WHERE child.oid = ?1 AND parent.position = 0",
+            [&tip],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read restored parent link");
+    let restored_id: i64 = cache
+        .query_row(
+            "SELECT commit_id FROM commits WHERE oid = ?1",
+            [&restored],
+            |row| row.get(0),
+        )
+        .expect("read restored commit ID");
+    assert_eq!(restored_parent, (Some(restored_id), None));
+    let ordered: Vec<(String, i64)> = cache
+        .prepare(
+            "SELECT oid, position FROM commits
+             WHERE oid IN (?1, ?2, ?3) ORDER BY position",
+        )
+        .expect("prepare commit ordering query")
+        .query_map([&first, &restored, &tip], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .expect("query restored history")
+        .collect::<Result<_, _>>()
+        .expect("read restored history");
+    assert_eq!(
+        ordered
+            .iter()
+            .map(|(oid, _)| oid.as_str())
+            .collect::<Vec<_>>(),
+        [first.as_str(), restored.as_str(), tip.as_str()],
+        "index must restore every reachable commit in history order"
+    );
+    assert!(ordered.windows(2).all(|pair| pair[0].1 < pair[1].1));
+}
