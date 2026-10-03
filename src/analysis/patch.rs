@@ -1,18 +1,17 @@
 use std::collections::{HashMap, HashSet};
 
-use super::{CodeDirection, Detail, Intent, Material, Report, anchors_overlap};
+use super::{Detail, Intent, Material, Report, anchors_overlap};
 use crate::{
     app::AppError,
     cache::{HunkId, PatchHistoryHunk, QuerySession},
 };
 
-const MAX_SCANNED_HUNKS: usize = 64;
-const MAX_EXCERPTS: usize = 16;
+pub(super) const MAX_SCANNED_HUNKS: usize = 64;
+pub(super) const MAX_EXCERPTS: usize = 16;
 const MAX_EXCERPT_FILES: usize = 8;
-const MAX_CACHED_HUNK_BYTES: usize = 64 * 1024;
-const MAX_EXCERPT_BYTES: usize = 8 * 1024;
-const TRACE_CONTEXT_LINES: usize = 3;
-const MAX_RESULT_EXCERPT_BYTES: usize = 32 * 1024;
+pub(super) const MAX_CACHED_HUNK_BYTES: usize = 64 * 1024;
+pub(super) const MAX_EXCERPT_BYTES: usize = 8 * 1024;
+pub(super) const MAX_RESULT_EXCERPT_BYTES: usize = 32 * 1024;
 
 pub(crate) struct PatchExcerpt {
     pub(crate) commit_oid: String,
@@ -280,249 +279,10 @@ pub(crate) fn attach_timeline_patch_excerpts(
     Ok(())
 }
 
-pub(crate) fn attach_trace_removal_patch_excerpts(
-    session: &QuerySession,
-    report: &mut super::TraceRemovalReport,
-) -> Result<(), AppError> {
-    for event in &mut report.events {
-        let matching_lines = event
-            .matches
-            .iter()
-            .filter(|matched| {
-                matched.direction == CodeDirection::Removed
-                    && matched.path.as_slice() == event.old_path.as_slice()
-            })
-            .filter_map(|matched| i64::try_from(matched.line_number).ok())
-            .collect::<HashSet<_>>();
-        let history = session.patch_history_for_change_at_lines(
-            &event.commit_id,
-            event.change_ordinal,
-            &matching_lines,
-            MAX_SCANNED_HUNKS,
-            MAX_CACHED_HUNK_BYTES,
-        )?;
-        let mut truncated = history.truncated;
-        let mut remaining_bytes = MAX_RESULT_EXCERPT_BYTES;
-        let mut hunks = Vec::new();
-        'cached: for cached in history.hunks {
-            if cached.old_path.as_deref() != Some(event.old_path.as_slice()) {
-                continue;
-            }
-            let Some(text) = cached.text.as_deref() else {
-                continue;
-            };
-            for fragment in trace_removal_fragments(&cached, text, &matching_lines) {
-                if hunks.len() == MAX_EXCERPTS || remaining_bytes == 0 {
-                    truncated = true;
-                    break 'cached;
-                }
-                let excerpt = bounded_patch_hunk(fragment, &mut remaining_bytes);
-                truncated |= excerpt.truncated;
-                hunks.push(excerpt);
-            }
-        }
-        event.patch = Some(PatchExcerpt {
-            commit_oid: event.commit_id.clone(),
-            status: if hunks.is_empty() {
-                PatchStatus::Unavailable
-            } else {
-                PatchStatus::Available
-            },
-            hunks,
-            truncated,
-        });
-    }
-    Ok(())
-}
-
-struct PatchDiffRow {
-    text: Vec<u8>,
-    old_before: i64,
-    new_before: i64,
-    old_line: Option<i64>,
-    consumes_old: bool,
-    consumes_new: bool,
-}
-
-fn trace_removal_fragments(
-    cached: &PatchHistoryHunk,
-    text: &[u8],
-    matching_lines: &HashSet<i64>,
-) -> Vec<PatchHistoryHunk> {
-    let mut old_cursor = cached.old_start;
-    let mut new_cursor = cached.new_start;
-    let mut rows = Vec::new();
-    for raw in text.split_inclusive(|byte| *byte == b'\n') {
-        let line = raw.strip_suffix(b"\n").unwrap_or(raw);
-        let Some(&kind) = line.first() else {
-            continue;
-        };
-        if line.starts_with(b"@@") {
-            continue;
-        }
-        let (consumes_old, consumes_new) = match kind {
-            b'-' => (true, false),
-            b'+' => (false, true),
-            b' ' => (true, true),
-            b'\\' => (false, false),
-            _ => continue,
-        };
-        rows.push(PatchDiffRow {
-            text: raw.to_vec(),
-            old_before: old_cursor,
-            new_before: new_cursor,
-            old_line: (kind == b'-').then_some(old_cursor),
-            consumes_old,
-            consumes_new,
-        });
-        if consumes_old {
-            old_cursor = old_cursor.saturating_add(1);
-        }
-        if consumes_new {
-            new_cursor = new_cursor.saturating_add(1);
-        }
-    }
-    if rows.is_empty() {
-        return Vec::new();
-    }
-    let matching_rows = rows
-        .iter()
-        .enumerate()
-        .filter_map(|(index, row)| {
-            row.old_line
-                .filter(|line| matching_lines.contains(line))
-                .map(|_| index)
-        })
-        .collect::<Vec<_>>();
-    let mut windows: Vec<(usize, usize, Vec<usize>)> = Vec::new();
-    for &matched in &matching_rows {
-        let start = matched.saturating_sub(TRACE_CONTEXT_LINES);
-        let end = matched
-            .saturating_add(TRACE_CONTEXT_LINES)
-            .min(rows.len() - 1);
-        if let Some((_, previous_end, previous_matches)) = windows.last_mut()
-            && start <= previous_end.saturating_add(1)
-        {
-            *previous_end = end;
-            previous_matches.push(matched);
-            continue;
-        }
-        windows.push((start, end, vec![matched]));
-    }
-
-    let mut fragments = Vec::new();
-    for (start, end, anchors) in windows {
-        if let Some((start, end)) = fit_trace_window(&rows, &anchors, start, end) {
-            fragments.push(trace_patch_hunk(cached, &rows, start, end));
-            continue;
-        }
-        for (index, &anchor) in anchors.iter().enumerate() {
-            let mut start = anchor.saturating_sub(TRACE_CONTEXT_LINES);
-            let mut end = anchor
-                .saturating_add(TRACE_CONTEXT_LINES)
-                .min(rows.len() - 1);
-            if let Some(&previous) = index.checked_sub(1).and_then(|i| anchors.get(i)) {
-                start = start.max(previous + (anchor - previous) / 2 + 1);
-            }
-            if let Some(&next) = anchors.get(index + 1) {
-                end = end.min(anchor + (next - anchor) / 2);
-            }
-            let range = fit_trace_window(&rows, &[anchor], start, end).unwrap_or((anchor, anchor));
-            fragments.push(trace_patch_hunk(cached, &rows, range.0, range.1));
-        }
-    }
-    fragments
-}
-
-fn fit_trace_window(
-    rows: &[PatchDiffRow],
-    anchors: &[usize],
-    mut start: usize,
-    mut end: usize,
-) -> Option<(usize, usize)> {
-    let first_anchor = *anchors.first()?;
-    let last_anchor = *anchors.last()?;
-    while trace_fragment_size(rows, start, end) > MAX_EXCERPT_BYTES {
-        let can_trim_start = start < first_anchor;
-        let can_trim_end = end > last_anchor;
-        if !can_trim_start && !can_trim_end {
-            return None;
-        }
-        let trim_start =
-            can_trim_start && (!can_trim_end || first_anchor - start >= end - last_anchor);
-        if trim_start {
-            start += 1;
-        } else {
-            end -= 1;
-        }
-    }
-    Some((start, end))
-}
-
-fn trace_fragment_size(rows: &[PatchDiffRow], start: usize, end: usize) -> usize {
-    let header_len = trace_fragment_metadata(rows, start, end);
-    let header = format!(
-        "@@ -{},{} +{},{} @@\n",
-        header_len.0, header_len.1, header_len.2, header_len.3
-    );
-    rows[start..=end].iter().fold(header.len(), |size, row| {
-        size.saturating_add(row.text.len())
-    })
-}
-
-fn trace_fragment_metadata(
-    rows: &[PatchDiffRow],
-    start: usize,
-    end: usize,
-) -> (i64, i64, i64, i64) {
-    let first = &rows[start];
-    let old_lines = rows[start..=end]
-        .iter()
-        .filter(|row| row.consumes_old)
-        .count() as i64;
-    let new_lines = rows[start..=end]
-        .iter()
-        .filter(|row| row.consumes_new)
-        .count() as i64;
-    let old_start = if old_lines == 0 {
-        first.old_before.saturating_sub(1)
-    } else {
-        first.old_before
-    };
-    let new_start = if new_lines == 0 {
-        first.new_before.saturating_sub(1)
-    } else {
-        first.new_before
-    };
-    (old_start, old_lines, new_start, new_lines)
-}
-
-fn trace_patch_hunk(
-    cached: &PatchHistoryHunk,
-    rows: &[PatchDiffRow],
-    start: usize,
-    end: usize,
-) -> PatchHistoryHunk {
-    let (old_start, old_lines, new_start, new_lines) = trace_fragment_metadata(rows, start, end);
-    let mut text =
-        format!("@@ -{old_start},{old_lines} +{new_start},{new_lines} @@\n").into_bytes();
-    for row in &rows[start..=end] {
-        text.extend_from_slice(&row.text);
-    }
-    PatchHistoryHunk {
-        change_ordinal: cached.change_ordinal,
-        old_path: cached.old_path.clone(),
-        new_path: cached.new_path.clone(),
-        old_start,
-        old_lines,
-        new_start,
-        new_lines,
-        hunk_ordinal: cached.hunk_ordinal,
-        text: Some(text),
-    }
-}
-
-fn bounded_patch_hunk(cached: PatchHistoryHunk, remaining_bytes: &mut usize) -> PatchHunk {
+pub(super) fn bounded_patch_hunk(
+    cached: PatchHistoryHunk,
+    remaining_bytes: &mut usize,
+) -> PatchHunk {
     let (text, truncated) = match cached.text {
         Some(mut text) => {
             let allowed = MAX_EXCERPT_BYTES.min(*remaining_bytes);
