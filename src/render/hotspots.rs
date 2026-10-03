@@ -38,6 +38,13 @@ fn scope_description(report: &HotspotsReport) -> String {
         });
     format!("Hotspots at {} ({description}{path_prefix})", report.target)
 }
+fn format_churn(amount: Option<u64>, complete: bool) -> String {
+    match amount {
+        Some(amount) if complete => amount.to_string(),
+        Some(amount) => format!("{amount}*"),
+        None => "—".into(),
+    }
+}
 
 pub(super) fn format_report(report: &HotspotsReport) -> String {
     let mut lines = vec![
@@ -48,10 +55,14 @@ pub(super) fn format_report(report: &HotspotsReport) -> String {
         "Last changed: maximum eligible committer timestamp (UTC). Coverage: published cache and available local objects only; coverage warnings are reported separately.".into(),
         format!("Showing {} of {} files.", report.files.len(), report.total),
     ];
+    lines.push("Touches  +lines  -lines  Last changed  Path".into());
+    lines.push("Textual churn counts cached added/removed lines; * marks incomplete totals, — means none are calculable.".into());
     for file in &report.files {
         lines.push(format!(
-            "{}  {}  {}",
+            "{}  {}  {}  {}  {}",
             file.touching_commits,
+            format_churn(file.additions, file.churn_complete),
+            format_churn(file.deletions, file.churn_complete),
             file.last_changed,
             super::escape::path(&file.path)
         ));
@@ -74,6 +85,9 @@ pub(super) fn format_json_report(
                 "path": json_path(&file.path),
                 "touching_commits": file.touching_commits,
                 "last_changed": file.last_changed,
+                "additions": file.additions,
+                "deletions": file.deletions,
+                "churn_complete": file.churn_complete,
             })
         })
         .collect();
@@ -103,6 +117,7 @@ pub(super) fn format_json_report(
             "merge": MERGE,
             "identity": IDENTITY,
             "last_changed": "maximum eligible committer timestamp in UTC",
+            "textual_churn": "Sum cached textual diff lines for eligible touches; additions/deletions are null when none are calculable, and churn_complete is false when any eligible diff is unavailable",
             "exclusions": "no implicit path or large-commit exclusions",
             "ordering": "touching_commits descending, target path bytes ascending",
         },

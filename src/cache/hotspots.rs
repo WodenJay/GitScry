@@ -13,9 +13,14 @@ fn cache_error(error: rusqlite::Error) -> AppError {
     super::cache_error("reading cached file history", error)
 }
 struct Change {
+    id: i64,
     status: String,
     old: Option<Vec<u8>>,
     new: Option<Vec<u8>>,
+    old_blob: Option<String>,
+    new_blob: Option<String>,
+    old_mode: String,
+    new_mode: String,
 }
 struct Node {
     oid: String,
@@ -92,7 +97,7 @@ fn load_history(
 
     let mut statement = connection
         .prepare(&format!(
-            "{REACHABLE}SELECT c.commit_id, c.status, c.old_path, c.new_path FROM changes c JOIN reachable USING(commit_id) ORDER BY c.commit_id, c.ordinal"
+            "{REACHABLE}SELECT c.commit_id, c.change_id, c.status, c.old_path, c.new_path, c.old_blob, c.new_blob, c.old_mode, c.new_mode FROM changes c JOIN reachable USING(commit_id) ORDER BY c.commit_id, c.ordinal"
         ))
         .map_err(cache_error)?;
     let rows = statement
@@ -100,9 +105,14 @@ fn load_history(
             Ok((
                 row.get::<_, i64>(0)?,
                 Change {
-                    status: row.get(1)?,
-                    old: row.get(2)?,
-                    new: row.get(3)?,
+                    id: row.get(1)?,
+                    status: row.get(2)?,
+                    old: row.get(3)?,
+                    new: row.get(4)?,
+                    old_blob: row.get(5)?,
+                    new_blob: row.get(6)?,
+                    old_mode: row.get(7)?,
+                    new_mode: row.get(8)?,
                 },
             ))
         })
@@ -121,9 +131,84 @@ fn load_history(
     Ok(HistoryGraph { nodes, renames })
 }
 
+#[derive(Default)]
+struct TextChurn {
+    additions: u64,
+    deletions: u64,
+}
+
+// SHA-1 and SHA-256 object IDs for an empty Git blob.
+const EMPTY_BLOB_OIDS: [&str; 2] = [
+    "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+    "473a0f4c3be8a93681a267e3b1e9a7dcda1185436fe1419a30e160b89fdb5a34",
+];
+
+// Gitlink modes have no text blobs, so absent IDs never prove equality.
+fn is_gitlink_change(change: &Change) -> bool {
+    change.old_mode == "160000" || change.new_mode == "160000"
+}
+
+fn known_zero_churn(old_blob: Option<&str>, new_blob: Option<&str>) -> bool {
+    old_blob.is_some() && old_blob == new_blob
+        || (old_blob.is_none() && new_blob.is_some_and(|blob| EMPTY_BLOB_OIDS.contains(&blob)))
+}
+
+fn load_text_churn(
+    connection: &rusqlite::Connection,
+    change_ids: &HashSet<i64>,
+) -> Result<HashMap<i64, TextChurn>, AppError> {
+    let mut churn = HashMap::new();
+    if change_ids.is_empty() {
+        return Ok(churn);
+    }
+
+    let mut reader = super::HunkReader::new(connection)?;
+    let change_ids = change_ids.iter().copied().collect::<Vec<_>>();
+    for batch in change_ids.chunks(400) {
+        let placeholders = vec!["?"; batch.len()].join(", ");
+        let mut statement = connection
+            .prepare(&format!(
+                "SELECT change_id, payload_id FROM hunks WHERE change_id IN ({placeholders}) ORDER BY change_id, ordinal"
+            ))
+            .map_err(cache_error)?;
+        let rows = statement
+            .query_map(rusqlite::params_from_iter(batch.iter()), |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?))
+            })
+            .map_err(cache_error)?;
+        for row in rows {
+            let (change_id, payload_id) = row.map_err(cache_error)?;
+            let text = reader.decode_payload(payload_id, &format!("change {change_id}"))?;
+            for line in text.split_inclusive(|byte| *byte == b'\n') {
+                let totals = churn.entry(change_id).or_default();
+                let total = match line.first() {
+                    Some(b'+') => &mut totals.additions,
+                    Some(b'-') => &mut totals.deletions,
+                    _ => continue,
+                };
+                *total = total
+                    .checked_add(1)
+                    .ok_or_else(|| AppError::operational("error: textual churn count overflow"))?;
+            }
+            reader.clear_decoded_blocks();
+        }
+    }
+    Ok(churn)
+}
+
+fn add_lines(total: &mut u64, amount: u64) -> Result<(), AppError> {
+    *total = total
+        .checked_add(amount)
+        .ok_or_else(|| AppError::operational("error: textual churn total overflow"))?;
+    Ok(())
+}
+
 pub(crate) struct FileTouches {
     pub(crate) path: Vec<u8>,
     pub(crate) times: Vec<i64>,
+    pub(crate) additions: Option<u64>,
+    pub(crate) deletions: Option<u64>,
+    pub(crate) churn_complete: bool,
 }
 impl QuerySession {
     pub(crate) fn pattern_incarnations(
@@ -194,7 +279,12 @@ impl QuerySession {
             )
             .map_err(cache_error)?;
         let mut origins = HashMap::new();
-        Ok(paths
+        let changes_by_id = nodes
+            .values()
+            .flat_map(|node| &node.changes)
+            .map(|change| (change.id, change))
+            .collect::<HashMap<_, _>>();
+        let histories = paths
             .into_iter()
             .map(|path| {
                 // Only detected-rename-connected paths can name this incarnation in another parent.
@@ -210,6 +300,7 @@ impl QuerySession {
                 let mut pending = vec![(target_id, path.clone())];
                 let mut visited = HashSet::new();
                 let mut touches = HashSet::new();
+                let mut change_ids = HashSet::new();
                 while let Some((id, alias)) = pending.pop() {
                     if !visited.insert((id, alias.clone())) {
                         continue;
@@ -220,16 +311,17 @@ impl QuerySession {
                     let change = node
                         .changes
                         .iter()
-                        .find(|c| c.new.as_deref() == Some(&alias));
+                        .find(|change| change.new.as_deref() == Some(&alias));
                     if node.parents.len() <= 1
-                        && change.is_some()
+                        && let Some(change) = change
                         && eligible_revisions.is_none_or(|eligible| eligible.contains(&node.oid))
                     {
                         touches.insert(id);
+                        change_ids.insert(change.id);
                     }
                     let previous = match change {
-                        Some(c) if c.status.starts_with(['A', 'C']) => None,
-                        Some(c) if c.status.starts_with('R') => c.old.as_ref(),
+                        Some(change) if change.status.starts_with(['A', 'C']) => None,
+                        Some(change) if change.status.starts_with('R') => change.old.as_ref(),
                         _ => Some(&alias),
                     };
                     let identity = if node.parents.len() > 1 {
@@ -256,12 +348,58 @@ impl QuerySession {
                         }
                     }
                 }
-                FileTouches {
-                    path,
-                    times: touches.into_iter().map(|id| nodes[&id].time).collect(),
-                }
+                (
+                    FileTouches {
+                        path,
+                        times: touches.into_iter().map(|id| nodes[&id].time).collect(),
+                        additions: None,
+                        deletions: None,
+                        churn_complete: false,
+                    },
+                    change_ids,
+                )
             })
-            .collect())
+            .collect::<Vec<_>>();
+        let change_ids = histories
+            .iter()
+            .flat_map(|(_, change_ids)| change_ids.iter().copied())
+            .collect::<HashSet<_>>();
+        let churn_change_ids = change_ids
+            .iter()
+            .copied()
+            .filter(|change_id| {
+                !changes_by_id
+                    .get(change_id)
+                    .is_some_and(|change| is_gitlink_change(change))
+            })
+            .collect::<HashSet<_>>();
+        let churn = load_text_churn(&self.connection, &churn_change_ids)?;
+        let mut files = Vec::with_capacity(histories.len());
+        for (mut file, change_ids) in histories {
+            let (mut additions, mut deletions, mut has_metrics, mut complete) = (0, 0, false, true);
+            for change_id in change_ids {
+                let Some(change) = changes_by_id.get(&change_id) else {
+                    complete = false;
+                    continue;
+                };
+                if is_gitlink_change(change) {
+                    complete = false;
+                } else if let Some(change_churn) = churn.get(&change_id) {
+                    add_lines(&mut additions, change_churn.additions)?;
+                    add_lines(&mut deletions, change_churn.deletions)?;
+                    has_metrics = true;
+                } else if known_zero_churn(change.old_blob.as_deref(), change.new_blob.as_deref()) {
+                    has_metrics = true;
+                } else {
+                    complete = false;
+                }
+            }
+            file.additions = has_metrics.then_some(additions);
+            file.deletions = has_metrics.then_some(deletions);
+            file.churn_complete = has_metrics && complete;
+            files.push(file);
+        }
+        Ok(files)
     }
 }
 
