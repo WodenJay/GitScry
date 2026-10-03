@@ -84,6 +84,19 @@ pub(crate) struct GithubLinkArgs {
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
+    /// Retrieve cached historical leads for an ordinary two-side text merge conflict.
+    #[command(
+        long_about = "Retrieve cached file-change leads for unmerged text files in an ordinary two-endpoint merge with one merge base. Automatically prepare both pinned endpoints without checkout or fetch. Repeat --path for exact repository-relative paths. Selection is same-path textual change evidence after the merge base, not a semantic association or resolution. Renames, binary and file-level conflicts are reported as unsupported. No LLM analysis or generated resolution is used."
+    )]
+    Conflicts {
+        #[arg(long = "path", value_name = "PATH")]
+        paths: Vec<String>,
+        /// Maximum historical leads per file and side.
+        #[arg(long, default_value_t = 5, value_parser = parse_limit)]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
     #[command(
         about = "Inspect bounded later follow-up material",
         long_about = r#"Inspect bounded follow-up material after a cached seed commit.
@@ -676,6 +689,7 @@ impl Command {
     pub(crate) fn uses_json(&self) -> bool {
         match self {
             Self::Context { json, .. }
+            | Self::Conflicts { json, .. }
             | Self::Search { json, .. }
             | Self::Examples { json, .. }
             | Self::Failures { json, .. }
@@ -700,6 +714,7 @@ impl Command {
             Self::Followups { .. } => Some("followups"),
             Self::Hotspots { .. } => Some("hotspots"),
             Self::Context { .. } => Some("context"),
+            Self::Conflicts { .. } => Some("conflicts"),
             Self::Update => Some("update"),
             Self::TraceRemoval { .. } => Some("trace-removal"),
             Self::Index { .. } => Some("index"),

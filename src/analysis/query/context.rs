@@ -79,7 +79,7 @@ impl Context {
         }
         let scope = self.scope.map(|scope| scope.report);
         match &mut report {
-            QueryReport::Followups(_) => {}
+            QueryReport::Conflicts(_) | QueryReport::Followups(_) => {}
             QueryReport::Patterns(report) => report.scope = scope,
             QueryReport::Context(report) => report.scope = scope,
             QueryReport::Analysis(report) => report.scope = scope,

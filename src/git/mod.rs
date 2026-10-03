@@ -1,3 +1,5 @@
+mod conflicts;
+pub(crate) use conflicts::MergeConflict;
 mod current;
 mod current_content;
 pub(crate) use current::CurrentHunk;
@@ -37,6 +39,9 @@ pub(crate) struct Repository {
 }
 
 impl Repository {
+    pub(crate) fn merge_conflict(&self) -> Result<MergeConflict, AppError> {
+        conflicts::pin(self)
+    }
     pub(crate) fn tracked_files(&self, revision: &str) -> Result<Vec<Vec<u8>>, AppError> {
         let tree = self.git.output(["ls-tree", "-r", "-z", revision], &[])?;
         let mut paths = Vec::new();

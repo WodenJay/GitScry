@@ -5,6 +5,7 @@
 //! reading and scoring live in retrieval; wording lives in render.
 
 pub(in crate::analysis) mod code_search;
+pub(crate) mod conflicts;
 pub(crate) mod context;
 mod examples;
 mod failures;
