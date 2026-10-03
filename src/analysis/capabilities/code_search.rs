@@ -1,3 +1,4 @@
+use regex::bytes::{Regex, RegexBuilder};
 use std::collections::BTreeSet;
 
 use crate::analysis::query::{Context, Options, Outcome, QueryReport};
@@ -7,17 +8,72 @@ use crate::{
     cache::{CodeHunk, QuerySession, SearchFilter},
 };
 
+const MAX_REGEX_PATTERN_BYTES: usize = 16_384;
+const REGEX_SIZE_LIMIT_BYTES: usize = 10_485_760;
+const REGEX_DFA_SIZE_LIMIT_BYTES: usize = 2_097_152;
+const REGEX_NEST_LIMIT: u32 = 250;
+
+#[derive(Clone, Copy)]
+enum CodeMatcher<'a> {
+    Literal(&'a [u8]),
+    Regex(&'a Regex),
+}
+
+impl CodeMatcher<'_> {
+    fn matches(&self, line: &[u8], crlf_terminated: bool) -> bool {
+        match self {
+            Self::Literal(query) => line.windows(query.len()).any(|window| window == *query),
+            Self::Regex(regex) => {
+                let subject = if crlf_terminated {
+                    line.strip_suffix(b"\r").unwrap_or(line)
+                } else {
+                    line
+                };
+                regex.is_match(subject)
+            }
+        }
+    }
+}
+
 pub(in crate::analysis) fn execute(
     query: String,
     path: Option<String>,
     direction: Option<CodeDirection>,
     options: Options,
 ) -> Result<Outcome, AppError> {
+    execute_with_matcher(
+        CodeMatcher::Literal(query.as_bytes()),
+        path,
+        direction,
+        options,
+    )
+}
+
+pub(in crate::analysis) fn execute_regex(
+    pattern: String,
+    path: Option<String>,
+    direction: Option<CodeDirection>,
+    options: Options,
+) -> Result<Outcome, AppError> {
+    let regex = compile_regex(&pattern)?;
+    execute_with_matcher(CodeMatcher::Regex(&regex), path, direction, options)
+}
+
+fn execute_with_matcher(
+    matcher: CodeMatcher<'_>,
+    path: Option<String>,
+    direction: Option<CodeDirection>,
+    options: Options,
+) -> Result<Outcome, AppError> {
     let context = Context::open(options.scope)?;
+    if let CodeMatcher::Literal(query) = matcher {
+        let query = std::str::from_utf8(query).expect("literal code query is valid UTF-8");
+        validate_query(query)?;
+    }
     let report = match context.filter() {
         Some(filter) => run_scoped(
             &context.session,
-            &query,
+            matcher,
             path.as_deref(),
             direction,
             options.limit,
@@ -25,7 +81,7 @@ pub(in crate::analysis) fn execute(
         )?,
         None => run(
             &context.session,
-            &query,
+            matcher,
             path.as_deref(),
             direction,
             options.limit,
@@ -33,7 +89,6 @@ pub(in crate::analysis) fn execute(
     };
     Ok(context.finish(QueryReport::Analysis(report)))
 }
-
 struct OrderedMatch {
     matched: CodeMatch,
     commit_time: i64,
@@ -73,7 +128,7 @@ impl PartialEq for OrderedMatch {
 impl Eq for OrderedMatch {}
 
 struct CodeSearch<'a> {
-    query: &'a [u8],
+    matcher: CodeMatcher<'a>,
     path_filter: Option<&'a [u8]>,
     direction_filter: Option<CodeDirection>,
     limit: usize,
@@ -85,7 +140,7 @@ impl CodeSearch<'_> {
     fn scan_hunk(&mut self, hunk: CodeHunk) -> Result<(), AppError> {
         visit_hunk_matches(
             &hunk,
-            self.query,
+            self.matcher,
             self.path_filter,
             self.direction_filter,
             |direction, line_number, line_order, line| {
@@ -136,37 +191,35 @@ impl CodeSearch<'_> {
 
 fn run(
     session: &QuerySession,
-    query: &str,
+    matcher: CodeMatcher<'_>,
     path: Option<&str>,
     direction: Option<CodeDirection>,
     limit: usize,
 ) -> Result<Report, AppError> {
-    run_with_scope(session, query, path, direction, limit, None)
+    run_with_scope(session, matcher, path, direction, limit, None)
 }
 
 fn run_scoped(
     session: &QuerySession,
-    query: &str,
+    matcher: CodeMatcher<'_>,
     path: Option<&str>,
     direction: Option<CodeDirection>,
     limit: usize,
     scope: &SearchFilter,
 ) -> Result<Report, AppError> {
-    run_with_scope(session, query, path, direction, limit, Some(scope))
+    run_with_scope(session, matcher, path, direction, limit, Some(scope))
 }
 
 fn run_with_scope(
     session: &QuerySession,
-    query: &str,
+    matcher: CodeMatcher<'_>,
     path: Option<&str>,
     direction: Option<CodeDirection>,
     limit: usize,
     scope: Option<&SearchFilter>,
 ) -> Result<Report, AppError> {
-    validate_query(query)?;
-
     let mut search = CodeSearch {
-        query: query.as_bytes(),
+        matcher,
         path_filter: path.map(str::as_bytes),
         direction_filter: direction,
         limit,
@@ -207,10 +260,11 @@ pub(crate) fn visit_matches(
     mut visit: impl FnMut(&CodeHunk, usize, &[u8]) -> Result<(), AppError>,
 ) -> Result<(), AppError> {
     validate_query(query)?;
+    let matcher = CodeMatcher::Literal(query.as_bytes());
     let scan = |hunk: CodeHunk| {
         visit_hunk_matches(
             &hunk,
-            query.as_bytes(),
+            matcher,
             path.map(str::as_bytes),
             Some(direction),
             |_, number, _, line| visit(&hunk, number, line),
@@ -224,7 +278,7 @@ pub(crate) fn visit_matches(
 
 fn visit_hunk_matches(
     hunk: &CodeHunk,
-    query: &[u8],
+    matcher: CodeMatcher<'_>,
     path_filter: Option<&[u8]>,
     direction_filter: Option<CodeDirection>,
     mut visit: impl FnMut(CodeDirection, usize, usize, &[u8]) -> Result<(), AppError>,
@@ -259,13 +313,34 @@ fn visit_hunk_matches(
         };
         if direction_filter.is_some_and(|filter| filter != direction)
             || path_filter.is_some_and(|filter| filter != path)
-            || !line[1..].windows(query.len()).any(|window| window == query)
+            || !matcher.matches(&line[1..], raw.ends_with(b"\r\n"))
         {
             continue;
         }
         visit(direction, number, order, &line[1..])?;
     }
     Ok(())
+}
+
+fn compile_regex(pattern: &str) -> Result<Regex, AppError> {
+    if pattern.is_empty() || pattern.bytes().any(|byte| matches!(byte, b'\n' | b'\r')) {
+        return Err(AppError::input(
+            "code regex must be a non-empty single-line pattern",
+        ));
+    }
+    if pattern.len() > MAX_REGEX_PATTERN_BYTES {
+        return Err(AppError::input(format!(
+            "code regex exceeds the {MAX_REGEX_PATTERN_BYTES}-byte source limit"
+        )));
+    }
+
+    RegexBuilder::new(pattern)
+        .unicode(true)
+        .size_limit(REGEX_SIZE_LIMIT_BYTES)
+        .dfa_size_limit(REGEX_DFA_SIZE_LIMIT_BYTES)
+        .nest_limit(REGEX_NEST_LIMIT)
+        .build()
+        .map_err(|error| AppError::input(format!("invalid or unsupported code regex: {error}")))
 }
 
 fn validate_query(query: &str) -> Result<(), AppError> {

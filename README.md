@@ -169,7 +169,7 @@ This is enough! GitScry intentionally uses a single lightweight instruction inst
 
 | Command | What it tells you | Example |
 |---|---|---|
-| **`search`** | General-purpose history search across commit subjects, bodies, and touched paths when no specialized query fits. | `gitscry search retry backoff` |
+| **`search`** | General-purpose history search across commit subjects, bodies, and touched paths; also supports literal `--code` and regex `--code-regex` searches over changed lines. | `gitscry search --code-regex 'Old[A-Z][A-Za-z0-9_]*' --change removed --path src/lib.rs` |
 | **`examples`** | Finds previous implementations of a similar change or migration and reconstructs the files and change steps involved. Changes that were later reverted are demoted rather than presented as good precedents. | `gitscry examples retire provider --path src/lib.rs` |
 | **`failures`** | Finds approaches that were abandoned or reverted, together with the recorded reason and retry conditions when history contains them. | `gitscry failures provider normalization` |
 | **`related`** | Finds files that historically changed together with the files you are editing. Candidates are ranked from actual co-change history rather than filename similarity. Add `--patterns` for closed file-incarnation combinations supported by commits containing every seed (default minimum support 3; `--min-support 2` allows pairs of supporting commits). Groups contain at least three incarnations, include exact support/proportions and capped path-specific citations, and retain deleted history. Detected renames connect paths; deletion ends an incarnation, while recreation and copies start new ones. Pattern mode is local-only. | `gitscry related src/cli.rs src/render.rs` |
@@ -181,6 +181,17 @@ This is enough! GitScry intentionally uses a single lightweight instruction inst
 | **`hotspots`** | Ranks tracked files at the published cache tip by distinct non-merge touching commits and cached textual additions/deletions from those touches. JSON additions/deletions are null when no eligible diff is calculable; `churn_complete` is false if any eligible diff is unavailable. Human output marks partial counts with * and unavailable counts with —. | `gitscry hotspots --json --limit 20` |
 | **`index`** | Builds or refreshes the local cache from the repository's default-branch history. | `gitscry index` |
 | **`update`** | Updates GitScry to the latest stable release. | `gitscry update` |
+
+### Changed-code search
+
+`gitscry search --code TEXT` matches a case-sensitive literal substring; `--code-regex PATTERN` matches a Rust `regex` expression against each added or removed line independently. Regexes are Unicode-aware and case-sensitive by default, with inline flags such as `(?i)` and scoped raw-byte groups such as `(?-u:...)`. Grouping, alternation, character classes, repetition, and line anchors are supported; `^$` matches changed empty lines. Look-around, backreferences, and cross-line matching are not supported. Patterns must be non-empty, single-line, and no longer than 16,384 UTF-8 bytes; compiled size is capped at 10 MiB, nesting at 250, and the DFA cache at 2 MiB. These fixed safeguards are not a total query-memory guarantee.
+
+Each matching line is returned once with its existing changed-line metadata and JSON shape. Regex matching ignores LF and the CR directly before LF in CRLF lines, while output preserves the original line bytes. `--change`, exact `--path`, revision/time scope, `--json`, and GitHub associations work with either code mode. `--limit` bounds returned lines, not scanning cost; narrow the path or historical scope to reduce work.
+
+```sh
+gitscry search --code-regex 'Old[A-Z][A-Za-z0-9_]*' --change removed --path src/lib.rs
+gitscry search --code-regex '^$' --limit 5 --json
+```
 
 Use `gitscry --help` to learn more.
 

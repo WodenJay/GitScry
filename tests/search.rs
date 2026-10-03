@@ -62,6 +62,14 @@ fn search_help_documents_historical_scope() {
         "UTC calendar day",
         "offset",
         "cache tip",
+        "--code-regex",
+        "Unicode-aware",
+        "16,384 UTF-8 bytes",
+        "10 MiB",
+        "2 MiB DFA cache",
+        "Look-around",
+        "backreferences",
+        "scan work",
     ] {
         assert!(help.contains(expected), "missing {expected:?} in:\n{help}");
     }
@@ -1665,6 +1673,9 @@ fn code_search_uses_first_parent_for_merge_changes() {
 
     let output = repo.run(["search", "--code", "merge-marker"]);
     assert_eq!(output.status.code(), Some(0));
+    let regex_output = repo.run(["search", "--code-regex", "^merge-marker$"]);
+    assert_eq!(regex_output.status.code(), Some(0));
+    assert_eq!(regex_output.stdout, output.stdout);
     let rows = String::from_utf8_lossy(&output.stdout)
         .lines()
         .filter(|line| line.starts_with("- "))
@@ -1674,6 +1685,203 @@ fn code_search_uses_first_parent_for_merge_changes() {
         rows,
         [format!("- {merge_oid} merge.txt:4 added: merge-marker")],
     );
+}
+
+#[test]
+fn code_regex_search_matches_identifier_families_and_counts_lines_once() {
+    let repo = TestRepo::new();
+    repo.commit_at(
+        "src/lib.rs",
+        b"pub fn OldWidget() { OldWidget(); }\n",
+        "Introduce old API",
+        "2000-01-01T00:00:00+0000",
+    );
+    let introduction = repo.head();
+    repo.commit_at(
+        "src/lib.rs",
+        b"pub fn NewWidget() { OldWidget(); }\n",
+        "Rename old API",
+        "2000-01-02T00:00:00+0000",
+    );
+    let replacement = repo.head();
+    repo.index();
+
+    let output = repo.run(["search", "--code-regex", "Old[A-Z][A-Za-z0-9_]*", "--json"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert!(output.stderr.is_empty());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["kind"], "code-search");
+    assert_eq!(value["matched_count"], 3);
+    let matches = value["code_matches"].as_array().unwrap();
+    assert_eq!(matches.len(), 3);
+
+    let introduced = matches
+        .iter()
+        .filter(|matched| matched["commit_id"] == introduction)
+        .collect::<Vec<_>>();
+    assert_eq!(introduced.len(), 1);
+    assert_eq!(introduced[0]["direction"], "added");
+    assert_eq!(introduced[0]["line"], "pub fn OldWidget() { OldWidget(); }");
+
+    let removed = matches
+        .iter()
+        .find(|matched| matched["commit_id"] == replacement && matched["direction"] == "removed")
+        .unwrap();
+    assert_eq!(removed["path"], "src/lib.rs");
+    assert_eq!(removed["line_number"], 1);
+    assert_eq!(removed["line"], "pub fn OldWidget() { OldWidget(); }");
+}
+
+#[test]
+fn code_regex_search_is_line_oriented_unicode_aware_and_preserves_bytes() {
+    let repo = TestRepo::new();
+    let contents =
+        b"CaseWord\ncaf\xC3\xA9 \xC3\x89lan\ngreek \xCE\xB1\xCE\xB2\ncrlf\r\n\nraw \xff byte\n";
+    repo.commit("src/regex.rs", contents, "Add regex fixtures");
+    repo.index();
+
+    let search = |pattern: &str| {
+        let output = repo.run(["search", "--code-regex", pattern, "--json"]);
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(output.stderr.is_empty());
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap()
+    };
+
+    assert_eq!(search(r"^CaseWord$")["matched_count"], 1);
+    assert_eq!(search(r"^caseword$")["matched_count"], 0);
+    assert_eq!(search(r"(?i)^caseword$")["matched_count"], 1);
+    assert_eq!(search(r"(?i)^café élan$")["matched_count"], 1);
+    assert_eq!(search(r"\p{Greek}+")["matched_count"], 1);
+    assert_eq!(search(r"^(CaseWord|crlf)$")["matched_count"], 2);
+    assert_eq!(search(r"^$")["matched_count"], 1);
+
+    let crlf = search(r"^crlf$");
+    assert_eq!(crlf["code_matches"][0]["line"], "crlf\r");
+
+    let literal_crlf = repo.run(["search", "--code", "crlf", "--json"]);
+    assert_eq!(literal_crlf.status.code(), Some(0));
+    let literal_value: serde_json::Value = serde_json::from_slice(&literal_crlf.stdout).unwrap();
+    assert_eq!(literal_value["matched_count"], 1);
+    assert_eq!(literal_value["code_matches"][0]["line"], "crlf\r");
+    let raw_byte = search(r"(?-u:\xff)");
+    assert_eq!(raw_byte["matched_count"], 1);
+    assert_eq!(
+        raw_byte["code_matches"][0]["line"]["base64"],
+        STANDARD.encode(b"raw \xff byte")
+    );
+
+    let zero_width = repo.run(["search", "--code-regex", "^", "--limit", "2", "--json"]);
+    assert_eq!(zero_width.status.code(), Some(0));
+    let repeated = repo.run(["search", "--code-regex", "^", "--limit", "2", "--json"]);
+    assert_eq!(zero_width.stdout, repeated.stdout);
+    let value: serde_json::Value = serde_json::from_slice(&zero_width.stdout).unwrap();
+    assert_eq!(value["matched_count"], 6);
+    assert_eq!(value["code_matches"].as_array().unwrap().len(), 2);
+    assert!(value["truncated"].as_bool().unwrap());
+}
+
+#[test]
+fn code_regex_search_honors_path_direction_and_revision_scope() {
+    let repo = TestRepo::new();
+    repo.commit_at(
+        "src/lib.rs",
+        b"OldApi\n",
+        "Introduce old API",
+        "2000-01-01T00:00:00+0000",
+    );
+    let old_revision = repo.head();
+    repo.commit_at(
+        "src/lib.rs",
+        b"NewApi\n",
+        "Replace old API",
+        "2000-01-02T00:00:00+0000",
+    );
+    let replacement_revision = repo.head();
+    repo.commit("src/other.rs", b"OldApi\n", "Add a second path");
+    repo.index();
+
+    let removed = repo.run([
+        "search",
+        "--code-regex",
+        "Old|New",
+        "--change",
+        "removed",
+        "--path",
+        "src/lib.rs",
+        "--json",
+    ]);
+    assert_eq!(removed.status.code(), Some(0));
+    let value: serde_json::Value = serde_json::from_slice(&removed.stdout).unwrap();
+    assert_eq!(value["matched_count"], 1);
+    assert_eq!(value["code_matches"][0]["path"], "src/lib.rs");
+    assert_eq!(value["code_matches"][0]["direction"], "removed");
+    assert_eq!(value["code_matches"][0]["line"], "OldApi");
+
+    let scoped = repo.run(vec![
+        "search",
+        "--code-regex",
+        "Old|New",
+        "--change",
+        "added",
+        "--path",
+        "src/lib.rs",
+        "--from-rev",
+        old_revision.as_str(),
+        "--to-rev",
+        replacement_revision.as_str(),
+        "--json",
+    ]);
+    assert_eq!(scoped.status.code(), Some(0));
+    let value: serde_json::Value = serde_json::from_slice(&scoped.stdout).unwrap();
+    assert_eq!(value["matched_count"], 1);
+    assert_eq!(value["code_matches"][0]["commit_id"], replacement_revision);
+    assert_eq!(value["code_matches"][0]["direction"], "added");
+    assert_eq!(value["code_matches"][0]["line"], "NewApi");
+}
+
+#[test]
+fn code_regex_search_rejects_invalid_unsupported_and_over_limit_patterns() {
+    let repo = TestRepo::new();
+    let rejected = |pattern: &str| {
+        let output = repo.run(["search", "--code-regex", pattern]);
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert_eq!(output.status.code(), Some(2), "{pattern:?}: {stderr}");
+        assert!(stderr.contains("code regex"), "{pattern:?}: {stderr}");
+        stderr
+    };
+
+    for pattern in ["", "first\nsecond", "(", "(?=a)", r"(a)\1"] {
+        rejected(pattern);
+    }
+
+    let overlong = "é".repeat(8_193);
+    assert!(rejected(&overlong).contains("source limit"));
+
+    let over_nested = format!("{}a{}", "(".repeat(251), ")".repeat(251));
+    assert!(rejected(&over_nested).contains("250"));
+
+    assert!(rejected("(?:ab){1000000}").contains("size limit"));
+}
+
+#[test]
+fn code_regex_search_rejects_mixed_and_text_only_modes() {
+    let repo = TestRepo::new();
+    repo.commit("src/lib.rs", b"marker\n", "Add marker");
+    repo.index();
+    for args in [
+        vec!["search", "ordinary", "--code-regex", "marker"],
+        vec!["search", "--code", "marker", "--code-regex", "marker"],
+        vec!["search", "--code-regex", "marker", "--hybrid"],
+        vec!["search", "--code-regex", "marker", "--patch"],
+    ] {
+        let output = repo.run(args.clone());
+        assert_eq!(output.status.code(), Some(2), "{args:?}");
+    }
 }
 
 fn commit_staged_at(repo: &TestRepo, message: &str, date: &str) {

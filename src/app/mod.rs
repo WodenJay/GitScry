@@ -128,6 +128,7 @@ pub(crate) fn execute(
         Command::Search {
             query,
             code,
+            code_regex,
             hybrid,
             change,
             path,
@@ -136,15 +137,21 @@ pub(crate) fn execute(
             scope,
             ..
         } => {
-            let request = match (query, code) {
-                (Some(words), None) => Request::Search { words, hybrid },
-                (None, Some(query)) => Request::CodeSearch {
+            let direction = change.map(|change| match change {
+                CodeChange::Added => CodeDirection::Added,
+                CodeChange::Removed => CodeDirection::Removed,
+            });
+            let request = match (query, code, code_regex) {
+                (Some(words), None, None) => Request::Search { words, hybrid },
+                (None, Some(query), None) => Request::CodeSearch {
                     query,
                     path,
-                    direction: change.map(|change| match change {
-                        CodeChange::Added => CodeDirection::Added,
-                        CodeChange::Removed => CodeDirection::Removed,
-                    }),
+                    direction,
+                },
+                (None, None, Some(pattern)) => Request::CodeRegexSearch {
+                    pattern,
+                    path,
+                    direction,
                 },
                 _ => unreachable!("clap enforces exactly one search mode"),
             };

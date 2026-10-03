@@ -191,50 +191,68 @@ Examples:
     },
 
     #[command(
-        group(ArgGroup::new("search-mode").required(true).args(["query", "code"])),
-        about = "Search history or literal changed-code lines",
-        long_about = r#"Search the published cache's default branch history for relevant commits or literal changed-code lines.
+        group(
+            ArgGroup::new("search-mode")
+                .required(true)
+                .multiple(false)
+                .args(["query", "code", "code_regex"]),
+        ),
+        group(
+            ArgGroup::new("code-mode")
+                .multiple(false)
+                .args(["code", "code_regex"]),
+        ),
+        about = "Search history or changed-code lines",
+        long_about = r#"Search the published cache's default branch history for relevant commits or changed-code lines.
 
 Use `gitscry search QUERY...` to search commit subjects, bodies, and touched paths. Use `--code TEXT` to find a case-sensitive literal substring in added or removed lines from cached diffs. Code queries are non-empty, single-line text; punctuation and spaces are matched literally. Unchanged context lines are not searched.
+Use `--code-regex PATTERN` for a Rust `regex`-syntax expression matched independently against each added or removed line. The default is Unicode-aware and case-sensitive; inline flags such as `(?i)` and explicit byte-mode groups such as `(?-u:...)` are supported. Anchors address one changed line (`^$` finds a changed empty line); no expression crosses lines. Look-around and backreferences are unsupported. Patterns must be non-empty, single-line, and at most 16,384 UTF-8 bytes; compilation is limited to 10 MiB with a nesting limit of 250 and a 2 MiB DFA cache budget. Invalid, unsupported, and over-limit patterns are rejected. Each matching line appears once, and output uses the same report fields as `--code`. Matching ignores LF and the CR immediately before LF in CRLF lines without changing displayed content. `--limit` bounds returned lines, not scan work; use exact paths or historical scope to reduce work. `--hybrid` and `--patch` are text-search-only.
 
 Use `--hybrid` with text queries to merge lexical ranking with exact semantic cosine retrieval. It requires a ready semantic index; search never downloads or repairs model resources. Run `gitscry index --semantic` to enable or repair semantic coverage while online. The short-query limit is 256 total tokens, including special tokens `[CLS]` and `[SEP]`; longer queries are tokenized once into chunks of 220 content tokens with 40 tokens of overlap (180-token stride). Chunks are embedded in batches of up to 8. Each commit receives its maximum cosine similarity across chunks for one semantic ranking, fused once with the lexical ranking; the complete original query still goes to lexical search. Queries requiring more than 32 chunks are rejected before inference or semantic retrieval; shorten the query or rerun ordinary lexical search without `--hybrid`. Chunking does not guarantee that procedural context is retained or that instructions are followed. Long-query quality is not guaranteed to match concise queries. Hybrid search scans eligible vectors once and keeps `max(100, --limit)` candidates per branch. In JSON, `matched_count` is the deduplicated union of those bounded branch lists, not a corpus-wide match count; a notice reports the candidate depth.
 
-In code mode, `--change added|removed` selects one direction and `--path PATH` matches an exact historical path: additions use the new path and removals use the old path. Rename history is not followed. No file-type filter is applied.
+In either code mode, `--change added|removed` selects one direction and `--path PATH` matches an exact historical path: additions use the new path and removals use the old path. Rename history is not followed. No file-type filter is applied.
 
-Scope applies to both search modes and is limited to the published cache. `--from-rev REV` excludes that commit and its ancestors; `--to-rev REV` includes that commit and its ancestors. The lower revision must be an ancestor of the upper revision. Revisions must exist in the published cache. If `--to-rev` is omitted, the effective upper revision is the cache tip.
+Scope applies to all search modes and is limited to the published cache. `--from-rev REV` excludes that commit and its ancestors; `--to-rev REV` includes that commit and its ancestors. The lower revision must be an ancestor of the upper revision. Revisions must exist in the published cache. If `--to-rev` is omitted, the effective upper revision is the cache tip.
 
 `--since` and `--until` filter committer time. Use `YYYY-MM-DD` for an inclusive UTC calendar day, or an RFC 3339 timestamp with `Z` or an explicit UTC offset for an inclusive instant. Timezone-free timestamps are rejected. Bounds combine with revision scope, and filtering happens before ranking and `--limit`. Scoped results show the normalized bounds, resolved revisions, and effective cache tip in human and JSON output.
 
-Run `gitscry index` to refresh the cache; incomplete or shallow history is reported as a warning. `--limit` limits matching commits in ordinary mode and matching lines in code mode. `--json` returns structured output.
+Run `gitscry index` to refresh the cache; incomplete or shallow history is reported as a warning. `--limit` limits matching commits in ordinary mode and matching lines in either code mode. `--json` returns structured output.
 
 `--github-links` fetches explicit `Commit.associatedPullRequests` and `PullRequest.closingIssuesReferences` for distinct complete commit IDs represented in returned text or code results. It reads PR number, title, URL, repository identity, plus issue number, title, URL, and repository identity, using the `gh` CLI's existing GitHub login; GitScry does not audit or claim a minimum permission set. Coverage comes first: request every returned commit's PR homepage, then every discovered PR's issue homepage, then continuation pages; PRs discovered later still get an issue homepage before further pagination. Both connections use opaque cursors within a shared 15-second timeout, 20-request, 50-results-per-page, 200-deduplicated-PR+issue-object budget. These fixed limits are conservative starting values, not empirically optimized. Each commit's PR layer and each PR's issue layer reports complete, partial, not queried, or failed, with a stop reason where relevant. Missing data or permissions do not prove that no association exists; GitScry cannot guarantee every PR containing a commit or every issue association, and the limited lookup may omit many issue mentions. Partial GraphQL data and local object/field errors preserve usable associations and continue other lookups; global authentication, rate-limit, network, or timeout failures stop link fetching but preserve Git materials and command success. No automatic retries. These links are navigation evidence, not proof of closure or causality, intent, or runtime call chains; in code mode, a match identifies changed lines, not a proven runtime call chain. Issue links cover explicit associations, not arbitrary mentions; the lookup does not fetch PR bodies or commits outside returned results. `--github-repo OWNER/REPO` alone does not contact GitHub; if omitted, a repository is inferred only from one unique local github.com remote. Without `--github-links`, search does not contact GitHub. JSON `schema_version` is 1 by default, 2 for `--patch` alone, and 4 whenever `--github-links` is enabled, except `why` reports use version 5. Version 4 may also include the optional `patch` field; inspect optional fields instead of inferring enabled options from the version.
 
-Required input: choose one mode—one or more QUERY words, or `--code TEXT`.
+Required input: choose exactly one mode—one or more QUERY words, `--code TEXT`, or `--code-regex PATTERN`.
 
 Examples:
 
   gitscry search retry backoff --from-rev <base> --to-rev release
 
-  gitscry search --code 'unwrap()?' --since 2025-01-01 --until 2025-01-31 --limit 5"#
+  gitscry search --code 'unwrap()?' --since 2025-01-01 --until 2025-01-31 --limit 5
+
+  gitscry search --code-regex 'Old[A-Z][A-Za-z0-9_]*' --change removed --path src/lib.rs
+
+  gitscry search --code-regex '^$' --limit 5"#
     )]
     Search {
         /// Query words matched against commit subjects, bodies, and touched paths.
         #[arg(num_args = 1..)]
         query: Option<Vec<String>>,
         /// Combine lexical ranking with exact semantic retrieval.
-        #[arg(long, requires = "query", conflicts_with = "code")]
+        #[arg(long, requires = "query", conflicts_with_all = ["code", "code_regex"])]
         hybrid: bool,
         /// Case-sensitive literal substring matched on changed lines.
         #[arg(long, value_name = "TEXT", value_parser = parse_code_query)]
         code: Option<String>,
+        /// Regex matched independently against each changed line.
+        #[arg(long, value_name = "PATTERN")]
+        code_regex: Option<String>,
         /// Restrict code matches to added or removed lines.
-        #[arg(long, value_enum, requires = "code", conflicts_with = "query")]
+        #[arg(long, value_enum, requires = "code-mode", conflicts_with = "query")]
         change: Option<CodeChange>,
         /// Exact historical path; additions use the new path, removals the old path.
         #[arg(
             long = "path",
             value_name = "PATH",
-            requires = "code",
+            requires = "code-mode",
             conflicts_with = "query"
         )]
         path: Option<String>,
@@ -247,7 +265,7 @@ Examples:
         #[arg(long)]
         json: bool,
         /// Include bounded relevant cached text hunks; unavailable history is reported.
-        #[arg(long, requires = "query", conflicts_with = "code")]
+        #[arg(long, requires = "query", conflicts_with_all = ["code", "code_regex"])]
         patch: bool,
         /// Fetch coverage-first GitHub PR and issue associations for returned commits; requires an authenticated gh CLI.
         #[arg(long)]

@@ -566,6 +566,7 @@ dependencies = [
  "lz4_flex",
  "lzma-rs",
  "ort",
+ "regex",
  "rusqlite",
  "semver",
  "serde",

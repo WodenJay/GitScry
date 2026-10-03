@@ -41,6 +41,11 @@ pub(crate) enum Request {
         path: Option<String>,
         direction: Option<CodeDirection>,
     },
+    CodeRegexSearch {
+        pattern: String,
+        path: Option<String>,
+        direction: Option<CodeDirection>,
+    },
     TraceRemoval {
         query: String,
         path: Option<String>,
@@ -155,6 +160,11 @@ pub(crate) fn execute(request: Request, options: Options) -> Result<Outcome, App
             path,
             direction,
         } => capabilities::code_search::execute(query, path, direction, options),
+        Request::CodeRegexSearch {
+            pattern,
+            path,
+            direction,
+        } => capabilities::code_search::execute_regex(pattern, path, direction, options),
         Request::TraceRemoval { query, path } => {
             capabilities::trace_removal::execute(query, path, options)
         }

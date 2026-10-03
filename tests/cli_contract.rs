@@ -373,7 +373,11 @@ fn json_flag_is_available_only_for_query_commands() {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
-    assert!(search_help.contains("literal changed-code lines"));
+    assert!(search_help.contains("case-sensitive literal substring in added or removed lines"));
+    assert!(search_help.contains("--code-regex <PATTERN>"));
+    assert!(search_help.contains("Look-around and backreferences are unsupported"));
+    assert!(search_help.contains("16,384 UTF-8 bytes"));
+    assert!(search_help.contains("bounds returned lines, not scan work"));
     assert!(search_help.contains("--code <TEXT>"));
     assert!(search_help.contains("--change <CHANGE>"));
     assert!(search_help.contains("--path <PATH>"));
