@@ -1,4 +1,3 @@
-<!-- DO NOT EDIT THE CONTENT BELOW -->
 # GitScry Dogfooding
 
 Record a case only when GitScry did **not meaningfully help** with the intended task, such as: 
