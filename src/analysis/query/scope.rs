@@ -1,3 +1,5 @@
+use std::collections::{BTreeSet, HashSet};
+
 use crate::{
     analysis::SearchScopeInfo,
     app::AppError,
@@ -25,6 +27,11 @@ impl SearchScopeOptions {
 pub(in crate::analysis) struct ResolvedSearchScope {
     pub(in crate::analysis) filter: SearchFilter,
     pub(in crate::analysis) report: SearchScopeInfo,
+}
+
+pub(in crate::analysis) struct ReachableHistory {
+    pub(in crate::analysis) revisions: Vec<String>,
+    pub(in crate::analysis) coverage_complete: bool,
 }
 
 struct TimeBound {
@@ -87,7 +94,7 @@ pub(super) fn resolve(
     session: &QuerySession,
     options: SearchScopeOptions,
 ) -> Result<Option<ResolvedSearchScope>, AppError> {
-    resolve_with_target(session, options, None)
+    resolve_with_target(session, options, None, false)
 }
 
 pub(super) fn resolve_for_target(
@@ -95,15 +102,76 @@ pub(super) fn resolve_for_target(
     options: SearchScopeOptions,
     target_revision: &str,
 ) -> Result<Option<ResolvedSearchScope>, AppError> {
-    resolve_with_target(session, options, Some(target_revision))
+    resolve_with_target(session, options, Some(target_revision), false)
+}
+
+pub(in crate::analysis) fn resolve_for_head_target(
+    session: &QuerySession,
+    options: SearchScopeOptions,
+    target_revision: &str,
+) -> Result<Option<ResolvedSearchScope>, AppError> {
+    resolve_with_target(session, options, Some(target_revision), true)
+}
+pub(in crate::analysis) fn reachable_history(
+    session: &QuerySession,
+    repository: &Repository,
+    revision: &str,
+) -> Result<ReachableHistory, AppError> {
+    let available = repository.reachable_commits(revision)?;
+    let shallow_boundaries = repository.shallow_boundaries()?;
+    let shallow_reachable = shallow_boundaries
+        .iter()
+        .any(|boundary| available.contains(boundary));
+    let cached_oids = session.commit_oids()?;
+    let coverage_complete =
+        !shallow_reachable && available.iter().all(|oid| cached_oids.contains(oid));
+    let revisions = available
+        .into_iter()
+        .filter(|oid| cached_oids.contains(oid))
+        .collect();
+    Ok(ReachableHistory {
+        revisions,
+        coverage_complete,
+    })
+}
+
+pub(in crate::analysis) fn cached_head_history_frontier(
+    session: &QuerySession,
+    repository: &Repository,
+) -> Result<Vec<String>, AppError> {
+    let head = repository.resolve_commit("HEAD")?;
+    let graph = repository.reachable_commit_parents(&head)?;
+    let cached_oids = session.commit_oids()?;
+    let mut pending = vec![head];
+    let mut visited = HashSet::new();
+    let mut frontier = BTreeSet::new();
+    while let Some(oid) = pending.pop() {
+        if !visited.insert(oid.clone()) {
+            continue;
+        }
+        if cached_oids.contains(&oid) {
+            frontier.insert(oid);
+            continue;
+        }
+        if let Some(parents) = graph.get(&oid) {
+            pending.extend(parents.iter().cloned());
+        }
+    }
+    if frontier.is_empty() {
+        return Err(AppError::input(
+            "no commits reachable from current HEAD are present in the published cache; run `gitscry index` first",
+        ));
+    }
+    Ok(frontier.into_iter().collect())
 }
 
 fn resolve_with_target(
     session: &QuerySession,
     options: SearchScopeOptions,
     target_revision: Option<&str>,
+    default_to_head: bool,
 ) -> Result<Option<ResolvedSearchScope>, AppError> {
-    if options.is_empty() {
+    if options.is_empty() && target_revision.is_some() && !default_to_head {
         return Ok(None);
     }
 
@@ -116,9 +184,10 @@ fn resolve_with_target(
             require_cached_revision(session, requested, &revision)?;
             revision
         }
-        None => target_revision
-            .map(str::to_owned)
-            .unwrap_or_else(|| cache_tip.clone()),
+        None => match (default_to_head, target_revision) {
+            (false, Some(revision)) => revision.to_owned(),
+            _ => repository.resolve_commit("HEAD")?,
+        },
     };
     let from_rev = options
         .from_rev
@@ -131,21 +200,40 @@ fn resolve_with_target(
         .transpose()?;
 
     if let Some(from_rev) = &from_rev {
-        let scope_reachable = session.ancestors(&to_rev)?;
-        if !scope_reachable.contains(from_rev) {
+        if !repository.is_ancestor(from_rev, &to_rev)? {
             return Err(AppError::input(
                 "--from-rev must be an ancestor of --to-rev (or the effective upper revision)",
             ));
         }
-        if let Some(target_revision) = target_revision {
-            let target_reachable = session.ancestors(target_revision)?;
-            if !target_reachable.contains(from_rev) {
-                return Err(AppError::input(
-                    "--from-rev must be an ancestor of both the scope upper revision and target revision",
-                ));
-            }
+        if let Some(target_revision) = target_revision
+            && !repository.is_ancestor(from_rev, target_revision)?
+        {
+            return Err(AppError::input(
+                "--from-rev must be an ancestor of both the scope upper revision and target revision",
+            ));
         }
     }
+
+    let to_history = reachable_history(session, &repository, &to_rev)?;
+    let coverage_complete = to_history.coverage_complete;
+    let reachable_oids = to_history.revisions;
+    let cached_oids = session.commit_oids()?;
+    let excluded_oids = from_rev
+        .as_deref()
+        .map(|revision| repository.reachable_commits(revision))
+        .transpose()?
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|oid| cached_oids.contains(oid))
+        .collect::<Vec<_>>();
+    let target_oids = target_revision
+        .map(|revision| repository.reachable_commits(revision))
+        .transpose()?
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|oid| cached_oids.contains(oid))
+        .collect::<Vec<_>>();
+    session.set_scope_revisions(&reachable_oids, &excluded_oids, &target_oids)?;
 
     let filter = SearchFilter {
         from_oid: from_rev.clone(),
@@ -160,6 +248,7 @@ fn resolve_with_target(
         since: since.map(|bound| bound.normalized),
         until: until.map(|bound| bound.normalized),
         cache_tip,
+        coverage_complete,
     };
     Ok(Some(ResolvedSearchScope { filter, report }))
 }
@@ -173,7 +262,7 @@ fn require_cached_revision(
         Ok(())
     } else {
         Err(AppError::input(format!(
-            "revision {requested} is outside the published cache generation"
+            "revision {requested} is outside the published cache generation; run `gitscry index` first"
         )))
     }
 }

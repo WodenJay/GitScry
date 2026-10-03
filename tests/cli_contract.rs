@@ -382,7 +382,7 @@ fn json_flag_is_available_only_for_query_commands() {
     assert!(search_help.contains("--change <CHANGE>"));
     assert!(search_help.contains("--path <PATH>"));
     assert!(search_help.contains("case-sensitive literal substring"));
-    assert!(search_help.contains("default branch"));
+    assert!(search_help.contains("current HEAD"));
     assert!(search_help.contains("--github-links"));
     assert!(search_help.contains("--github-repo <OWNER/REPO>"));
     assert!(search_help.contains("Commit.associatedPullRequests"));
@@ -700,6 +700,7 @@ fn json_surfaces_cache_completeness_warnings_without_stderr_duplication() {
         String::from_utf8_lossy(&output.stderr)
     );
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(!value["scope"]["coverage_complete"].as_bool().unwrap());
     let warning = "warning: local history is shallow; cache material is incomplete.";
     assert!(
         value["warnings"]

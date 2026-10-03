@@ -1,7 +1,7 @@
 //! Closed file-incarnation combinations, independent of individual-path ranking.
 use super::super::SearchScopeInfo;
 use crate::analysis::Intent;
-use crate::analysis::query::{Context, Options, Outcome, QueryReport};
+use crate::analysis::query::{Context, Options, Outcome, QueryReport, scope};
 use crate::{
     app::AppError,
     cache::{FileIncarnation, PatternIncarnations, QuerySession, SearchFilter},
@@ -16,10 +16,15 @@ pub(in crate::analysis) fn execute(
 ) -> Result<Outcome, AppError> {
     Intent::paths(&paths)?;
     let context = Context::open(options.scope)?;
+    let repository = Repository::discover()?;
+    let target_revision = repository.resolve_commit("HEAD")?;
+    let cached_targets = scope::cached_head_history_frontier(&context.session, &repository)?;
     let report = run(
         &context.session,
         &paths,
         context.filter(),
+        &target_revision,
+        &cached_targets,
         min_support,
         options.limit,
     )?;
@@ -69,6 +74,8 @@ fn run(
     session: &QuerySession,
     paths: &[String],
     scope: Option<&SearchFilter>,
+    target_revision: &str,
+    cached_targets: &[String],
     min_support: usize,
     limit: usize,
 ) -> Result<Report, AppError> {
@@ -85,11 +92,11 @@ fn run(
             path.trim_end_matches('/').as_bytes().to_vec()
         })
         .collect::<BTreeSet<_>>();
-    let target_revision = session.completed_tip()?;
+    let target_revision = target_revision.to_owned();
     let current_paths = Repository::discover()?.file_paths_at(&target_revision)?;
     let current_paths = current_paths.into_iter().collect::<Vec<_>>();
     let incarnations: PatternIncarnations =
-        session.pattern_incarnations(&target_revision, &current_paths)?;
+        session.pattern_incarnations(cached_targets, &current_paths)?;
     let seed_incarnations = seeds
         .iter()
         .filter_map(|seed| incarnations.aliases.get(seed))

@@ -208,7 +208,9 @@ fn timeline_json_pages_topologically_and_follows_renames() {
         "2023-01-01T00:00:00+0000",
     );
     let default_target = json(&repo.run(["timeline", "src/new.rs", "--json"]));
-    assert_eq!(default_target["target_revision"], changed);
+    assert_eq!(default_target["target_revision"], unindexed);
+    assert_eq!(default_target["scope"]["to_rev"], unindexed);
+    assert_eq!(default_target["scope"]["coverage_complete"], false);
     assert_eq!(default_target["total"], 4);
     assert!(
         !default_target["entries"]

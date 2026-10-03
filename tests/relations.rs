@@ -423,11 +423,24 @@ fn relation_commands_have_fixed_empty_results() {
 
     let related = repo.run(["related", "src/only.rs"]);
     assert_eq!(related.status.code(), Some(0));
-    assert_eq!(stdout(&related), "No historical relations found.\n");
+    let head = repo.head();
+    let related_text = stdout(&related);
+    assert!(
+        related_text.starts_with(&format!("Scope: commits reachable from {head}; cache tip")),
+        "{related_text}"
+    );
+    assert!(related_text.contains("coverage complete"), "{related_text}");
+    assert!(related_text.ends_with("No historical relations found.\n"));
 
     let tests = repo.run(["tests", "src/only.rs"]);
     assert_eq!(tests.status.code(), Some(0));
-    assert_eq!(stdout(&tests), "No historically related tests found.\n");
+    let tests_text = stdout(&tests);
+    assert!(
+        tests_text.starts_with(&format!("Scope: commits reachable from {head}; cache tip")),
+        "{tests_text}"
+    );
+    assert!(tests_text.contains("coverage complete"), "{tests_text}");
+    assert!(tests_text.ends_with("No historically related tests found.\n"));
 }
 
 #[test]
@@ -638,7 +651,9 @@ fn related_and_tests_filter_and_rank_only_scoped_cochanges() {
 
     let unscoped = repo.run(["related", "src/seed.rs", "--json"]);
     let unscoped: serde_json::Value = serde_json::from_slice(&unscoped.stdout).unwrap();
-    assert!(unscoped.get("scope").is_none());
+    assert_eq!(unscoped["scope"]["to_rev"], repo.head());
+    assert_eq!(unscoped["scope"]["cache_tip"], cache_tip);
+    assert_eq!(unscoped["scope"]["coverage_complete"], true);
 }
 
 #[test]
@@ -702,7 +717,10 @@ fn related_and_tests_help_document_scope_rules() {
             "committer time",
             "UTC calendar day",
             "RFC 3339",
-            "published cache tip",
+            "current HEAD",
+            "intersected with cached commits",
+            "published cache tip and coverage status",
+            "incomplete coverage",
             "before ranking and `--limit`",
         ] {
             assert!(help.contains(expected), "missing {expected:?} in:\n{help}");
@@ -1096,6 +1114,31 @@ fn patterns_discover_all_closed_groups_without_budget_cancellation() {
 }
 
 #[test]
+fn patterns_report_current_head_when_it_is_not_cached() {
+    let repo = TestRepo::new();
+    repo.commit_files(&[("A", b"seed\n")], "cached root");
+    repo.index();
+    let cache_tip = repo.head();
+    repo.commit_files(&[("A", b"seed on current HEAD\n")], "uncached HEAD");
+    let head = repo.head();
+
+    let output = repo.run(["related", "A", "--patterns", "--json"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["target_revision"], head);
+    assert_eq!(value["scope"]["to_rev"], head);
+    assert_eq!(value["scope"]["cache_tip"], cache_tip);
+    assert_eq!(value["scope"]["coverage_complete"], false);
+    assert!(
+        value["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|warning| { warning.as_str().unwrap().contains("run `gitscry index`") })
+    );
+}
+
+#[test]
 fn patterns_disclose_unscoped_history_and_order_count_recency_then_paths() {
     let repo = TestRepo::new();
     for (path, day) in [("old", "01"), ("z", "02"), ("b", "02")] {
@@ -1116,12 +1159,15 @@ fn patterns_disclose_unscoped_history_and_order_count_recency_then_paths() {
     }
     repo.index();
     let human = repo.run(["related", "A", "--patterns"]);
-    assert!(stdout(&human).contains("History: all available published-cache commits"));
+    assert!(stdout(&human).contains("Scope: commits reachable from"));
+    assert!(stdout(&human).contains("coverage complete"));
     let output = repo.run(["related", "A", "--patterns", "--json"]);
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["scope"]["to_rev"], repo.head());
+    assert_eq!(value["scope"]["coverage_complete"], true);
     assert_eq!(
         value["history_coverage"],
-        "available published-cache commits only"
+        "eligible commits intersected with published cache"
     );
     let patterns = value["patterns"].as_array().unwrap();
     assert_eq!(patterns.len(), 3);
@@ -1423,4 +1469,87 @@ fn patterns_keep_copied_paths_as_distinct_incarnations() {
     assert_eq!(copy_member["introduced_in"], copy);
     assert_ne!(source_member["introduced_in"], copy_member["introduced_in"]);
     assert_eq!(copy_member["target_paths"], serde_json::json!(["B"]));
+}
+
+#[test]
+fn patterns_resolve_current_paths_across_cached_parents_of_uncached_head_merge() {
+    let repo = TestRepo::new();
+    repo.commit_files_at(
+        &[("src/seed.rs", b"seed\n")],
+        "seed",
+        "2020-01-01T00:00:00+0000",
+        "2020-01-01T00:00:00+0000",
+    );
+    let base = repo.head();
+    git(
+        repo.dir.path(),
+        ["checkout", "-b", "feature", base.as_str()],
+    );
+    for day in 2..=4 {
+        let content = format!("feature {day}\n");
+        let message = format!("feature co-change {day}");
+        let date = format!("2020-01-{day:02}T00:00:00+0000");
+        repo.commit_files_at(
+            &[
+                ("src/seed.rs", content.as_bytes()),
+                ("src/feature_shared.rs", content.as_bytes()),
+                ("tests/feature.rs", content.as_bytes()),
+            ],
+            &message,
+            &date,
+            &date,
+        );
+    }
+    git(repo.dir.path(), ["checkout", "main"]);
+    repo.commit_files_at(
+        &[("src/main.rs", b"main\n")],
+        "main-only change",
+        "2020-01-05T00:00:00+0000",
+        "2020-01-05T00:00:00+0000",
+    );
+    let main_tip = repo.head();
+    git(
+        repo.dir.path(),
+        ["merge", "--no-ff", "feature", "-m", "cached merge"],
+    );
+    repo.index();
+    let cache_tip = repo.head();
+
+    git(repo.dir.path(), ["checkout", "--detach", main_tip.as_str()]);
+    git(
+        repo.dir.path(),
+        ["merge", "--no-ff", "feature", "-m", "uncached merge"],
+    );
+    let head = repo.head();
+    assert_ne!(head, cache_tip);
+
+    let output = repo.run([
+        "related",
+        "src/seed.rs",
+        "--patterns",
+        "--min-support",
+        "3",
+        "--json",
+    ]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["scope"]["to_rev"], head);
+    assert_eq!(report["scope"]["cache_tip"], cache_tip);
+    assert_eq!(report["scope"]["coverage_complete"], false);
+    let pattern = report["patterns"]
+        .as_array()
+        .unwrap()
+        .first()
+        .expect("three cached co-change commits form a pattern");
+    let member = pattern["members"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|member| member["path"] == "src/feature_shared.rs")
+        .expect("feature-only shared path is part of the pattern");
+    assert_eq!(member["exists_at_target"], true);
+    assert_eq!(
+        member["target_paths"],
+        serde_json::json!(["src/feature_shared.rs"])
+    );
 }

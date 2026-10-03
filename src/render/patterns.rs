@@ -15,10 +15,10 @@ pub(super) fn format_report(report: &Report) -> String {
     if let Some(scope) = &report.scope {
         lines.push(scope_summary(scope));
     } else {
-        lines.push("History: all available published-cache commits".to_owned());
+        lines.push("History: current HEAD-reachable commits in the published cache".to_owned());
     }
     lines.push(
-        "Coverage: available published-cache commits only; uncached history is not searched."
+        "Coverage: only eligible commits in the published cache are searched; uncached history is never searched."
             .to_owned(),
     );
     lines.push(NOTICE.to_owned());
@@ -109,7 +109,7 @@ pub(super) fn format_json_report(
     serde_json::to_string_pretty(&serde_json::json!({
         "schema_version": 1, "kind": "patterns", "target_revision": report.target_revision,
         "scope": report.scope.as_ref().map(json_scope), "eligible_seed_commits": report.eligible_seed_commits,
-        "history_coverage": "available published-cache commits only",
+        "history_coverage": "eligible commits intersected with published cache",
         "excluded_merges": report.excluded_merges, "excluded_mass_changes": report.excluded_mass_changes,
         "matched_count": report.matched_count, "returned_count": patterns.len(), "patterns": patterns,
         "warnings": warnings, "notices": [NOTICE],

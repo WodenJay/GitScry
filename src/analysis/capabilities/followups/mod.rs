@@ -3,7 +3,7 @@ mod regions;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use crate::analysis::query::{Options, Outcome, QueryReport};
+use crate::analysis::query::{Options, Outcome, QueryReport, scope};
 use crate::{
     app::AppError,
     cache::{self, followups::ForwardCommit},
@@ -191,11 +191,24 @@ pub(in crate::analysis) fn run(
     let seed = repository.resolve_commit(&revision)?;
     session.require_revision(&seed)?;
     let cache_tip = session.completed_tip()?;
-    let endpoint = match to_rev {
-        Some(revision) => repository.resolve_commit(&revision)?,
-        None => cache_tip.clone(),
+    let (endpoint, coverage_complete) = match to_rev {
+        Some(revision) => {
+            let endpoint = repository.resolve_commit(&revision)?;
+            session.require_revision(&endpoint)?;
+            let history = scope::reachable_history(&session, &repository, &endpoint)?;
+            (endpoint, history.coverage_complete)
+        }
+        None => {
+            let head = repository.resolve_commit("HEAD")?;
+            let history = scope::reachable_history(&session, &repository, &head)?;
+            let endpoint = history.revisions.first().cloned().ok_or_else(|| {
+                AppError::input(
+                    "no commits reachable from current HEAD are present in the published cache; run `gitscry index` first",
+                )
+            })?;
+            (endpoint, history.coverage_complete)
+        }
     };
-    session.require_revision(&endpoint)?;
     if !session.ancestors(&endpoint)?.contains(&seed) {
         return Err(AppError::input(
             "followups seed must be an ancestor of endpoint",
@@ -274,15 +287,39 @@ pub(in crate::analysis) fn run(
     }
     selected_paths.sort();
     selected_paths.dedup();
+
+    let mut warnings = vec![
+        "Coverage is limited to endpoint-reachable published cache history, not all refs; no fetch or index was performed.".into(),
+        "Explicit revert references are commit-message declarations only. Tracked regions begin at seed-added lines and continue only through complete cached text patches and detected renames; unrelated same-file edits remain same-file-only. Pure deletions establish no region; copies and same-path recreation do not continue an incarnation. Incomplete or ambiguous correspondence is downgraded. Neither association basis establishes causality or stability.".into(),
+        "Cached merge diffs are relative to the first parent; region coordinates must agree across parents or tracking downgrades, and merge-imported work is not described as a fresh correction.".into(),
+    ];
+    if !coverage_complete {
+        warnings.push(
+            "Endpoint-reachable local history is incomplete; cached commits only are included. Run `gitscry index` after making additional history available."
+                .into(),
+        );
+    }
     let mut report = Report {
-        scope: Scope { seed: seed.clone(), endpoint, cache_tip, seed_time, time_ceiling, days, max_commits, limit: options.limit, selected_paths },
-        inspected_count: 0, lineage_inspected_count: 0, inspected_first: None, inspected_last: None,
-        traversal_truncated: false, display_truncated: false, matched_in_inspected_scope: 0,
-        entries: Vec::new(), warnings: vec![
-            "Coverage is limited to endpoint-reachable published cache history, not all refs; no fetch or index was performed.".into(),
-            "Explicit revert references are commit-message declarations only. Tracked regions begin at seed-added lines and continue only through complete cached text patches and detected renames; unrelated same-file edits remain same-file-only. Pure deletions establish no region; copies and same-path recreation do not continue an incarnation. Incomplete or ambiguous correspondence is downgraded. Neither association basis establishes causality or stability.".into(),
-            "Cached merge diffs are relative to the first parent; region coordinates must agree across parents or tracking downgrades, and merge-imported work is not described as a fresh correction.".into(),
-        ],
+        scope: Scope {
+            seed: seed.clone(),
+            endpoint,
+            cache_tip,
+            seed_time,
+            time_ceiling,
+            days,
+            max_commits,
+            limit: options.limit,
+            selected_paths,
+        },
+        inspected_count: 0,
+        lineage_inspected_count: 0,
+        inspected_first: None,
+        inspected_last: None,
+        traversal_truncated: false,
+        display_truncated: false,
+        matched_in_inspected_scope: 0,
+        entries: Vec::new(),
+        warnings,
     };
     let mut states: HashMap<String, Incarnations> = HashMap::from([(seed.clone(), initial)]);
     let candidates: Vec<_> = graph

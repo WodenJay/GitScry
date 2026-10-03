@@ -183,6 +183,7 @@ pub(super) struct JsonSearchScope<'a> {
     since: Option<&'a str>,
     until: Option<&'a str>,
     cache_tip: &'a str,
+    coverage_complete: bool,
 }
 
 pub(super) fn json_scope(scope: &SearchScopeInfo) -> JsonSearchScope<'_> {
@@ -193,6 +194,7 @@ pub(super) fn json_scope(scope: &SearchScopeInfo) -> JsonSearchScope<'_> {
         since: scope.since.as_deref(),
         until: scope.until.as_deref(),
         cache_tip: &scope.cache_tip,
+        coverage_complete: scope.coverage_complete,
     }
 }
 

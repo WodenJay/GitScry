@@ -9,6 +9,15 @@ const REACHABLE: &str = "WITH RECURSIVE reachable(commit_id) AS (
     WHERE p.parent_id IS NOT NULL
 ) ";
 
+const REACHABLE_ROOTS: &str = "WITH RECURSIVE reachable(commit_id) AS (
+    SELECT commit_id FROM commits
+    WHERE ?1 IS NULL AND EXISTS (
+        SELECT 1 FROM temp.query_history_roots roots WHERE roots.oid = commits.oid
+    )
+    UNION SELECT p.parent_id FROM commit_parents p JOIN reachable r USING(commit_id)
+    WHERE p.parent_id IS NOT NULL
+) ";
+
 fn cache_error(error: rusqlite::Error) -> AppError {
     super::cache_error("reading cached file history", error)
 }
@@ -51,11 +60,31 @@ struct HistoryGraph {
 fn load_history(
     connection: &rusqlite::Connection,
     target: Option<&str>,
+    roots: Option<&[String]>,
 ) -> Result<HistoryGraph, AppError> {
+    let reachable = if let Some(roots) = roots {
+        connection
+            .execute_batch(
+                "CREATE TEMP TABLE IF NOT EXISTS query_history_roots (
+                    oid TEXT NOT NULL PRIMARY KEY
+                ) WITHOUT ROWID;
+                DELETE FROM temp.query_history_roots;",
+            )
+            .map_err(cache_error)?;
+        let mut statement = connection
+            .prepare("INSERT OR IGNORE INTO temp.query_history_roots (oid) VALUES (?1)")
+            .map_err(cache_error)?;
+        for root in roots {
+            statement.execute([root]).map_err(cache_error)?;
+        }
+        REACHABLE_ROOTS
+    } else {
+        REACHABLE
+    };
     let mut nodes = HashMap::new();
     let mut statement = connection
         .prepare(&format!(
-            "{REACHABLE}SELECT commit_id, oid, commit_time FROM commits JOIN reachable USING(commit_id)"
+            "{reachable}SELECT commit_id, oid, commit_time FROM commits JOIN reachable USING(commit_id)"
         ))
         .map_err(cache_error)?;
     let rows = statement
@@ -82,7 +111,7 @@ fn load_history(
 
     let mut statement = connection
         .prepare(&format!(
-            "{REACHABLE}SELECT p.commit_id, p.parent_id FROM commit_parents p JOIN reachable USING(commit_id) ORDER BY p.commit_id, p.position"
+            "{reachable}SELECT p.commit_id, p.parent_id FROM commit_parents p JOIN reachable USING(commit_id) ORDER BY p.commit_id, p.position"
         ))
         .map_err(cache_error)?;
     let rows = statement
@@ -97,7 +126,7 @@ fn load_history(
 
     let mut statement = connection
         .prepare(&format!(
-            "{REACHABLE}SELECT c.commit_id, c.change_id, c.status, c.old_path, c.new_path, c.old_blob, c.new_blob, c.old_mode, c.new_mode FROM changes c JOIN reachable USING(commit_id) ORDER BY c.commit_id, c.ordinal"
+            "{reachable}SELECT c.commit_id, c.change_id, c.status, c.old_path, c.new_path, c.old_blob, c.new_blob, c.old_mode, c.new_mode FROM changes c JOIN reachable USING(commit_id) ORDER BY c.commit_id, c.ordinal"
         ))
         .map_err(cache_error)?;
     let rows = statement
@@ -213,14 +242,10 @@ pub(crate) struct FileTouches {
 impl QuerySession {
     pub(crate) fn pattern_incarnations(
         &self,
-        target: &str,
+        target_revisions: &[String],
         current_paths: &[Vec<u8>],
     ) -> Result<PatternIncarnations, AppError> {
-        let HistoryGraph { nodes, .. } = load_history(&self.connection, None)?;
-        let target_id = nodes
-            .iter()
-            .find_map(|(&id, node)| (node.oid == target).then_some(id))
-            .ok_or_else(|| cache_error(rusqlite::Error::QueryReturnedNoRows))?;
+        let HistoryGraph { nodes, .. } = load_history(&self.connection, None, None)?;
         let mut history = PatternIncarnations {
             by_commit: HashMap::new(),
             aliases: BTreeMap::new(),
@@ -245,19 +270,25 @@ impl QuerySession {
             }
         }
 
-        for path in current_paths {
-            if let Some(origin) = origin(&nodes, target_id, path, &mut origins) {
-                let incarnation = file_incarnation(&nodes, &origin);
-                history
-                    .target_paths
-                    .entry(incarnation.clone())
-                    .or_default()
-                    .insert(path.clone());
-                history
-                    .aliases
-                    .entry(path.clone())
-                    .or_default()
-                    .insert(incarnation);
+        for target in target_revisions {
+            let target_id = nodes
+                .iter()
+                .find_map(|(&id, node)| (node.oid == *target).then_some(id))
+                .ok_or_else(|| cache_error(rusqlite::Error::QueryReturnedNoRows))?;
+            for path in current_paths {
+                if let Some(origin) = origin(&nodes, target_id, path, &mut origins) {
+                    let incarnation = file_incarnation(&nodes, &origin);
+                    history
+                        .target_paths
+                        .entry(incarnation.clone())
+                        .or_default()
+                        .insert(path.clone());
+                    history
+                        .aliases
+                        .entry(path.clone())
+                        .or_default()
+                        .insert(incarnation);
+                }
             }
         }
         Ok(history)
@@ -265,19 +296,21 @@ impl QuerySession {
 
     pub(crate) fn hotspot_touches(
         &self,
-        target: &str,
+        target_revisions: &[String],
         paths: Vec<Vec<u8>>,
         eligible_revisions: Option<&HashSet<String>>,
     ) -> Result<Vec<FileTouches>, AppError> {
-        let HistoryGraph { nodes, renames } = load_history(&self.connection, Some(target))?;
-        let target_id: i64 = self
-            .connection
-            .query_row(
-                "SELECT commit_id FROM commits WHERE oid = ?1",
-                [target],
-                |row| row.get(0),
-            )
-            .map_err(cache_error)?;
+        let HistoryGraph { nodes, renames } =
+            load_history(&self.connection, None, Some(target_revisions))?;
+        let target_ids = target_revisions
+            .iter()
+            .map(|target| {
+                nodes
+                    .iter()
+                    .find_map(|(&id, node)| (node.oid == *target).then_some(id))
+                    .ok_or_else(|| cache_error(rusqlite::Error::QueryReturnedNoRows))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let mut origins = HashMap::new();
         let changes_by_id = nodes
             .values()
@@ -297,7 +330,10 @@ impl QuerySession {
                         todo.extend(neighbors.iter().cloned());
                     }
                 }
-                let mut pending = vec![(target_id, path.clone())];
+                let mut pending = target_ids
+                    .iter()
+                    .map(|id| (*id, path.clone()))
+                    .collect::<Vec<_>>();
                 let mut visited = HashSet::new();
                 let mut touches = HashSet::new();
                 let mut change_ids = HashSet::new();

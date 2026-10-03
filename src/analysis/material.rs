@@ -24,6 +24,7 @@ pub(crate) struct SearchScopeInfo {
     pub(crate) since: Option<String>,
     pub(crate) until: Option<String>,
     pub(crate) cache_tip: String,
+    pub(crate) coverage_complete: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

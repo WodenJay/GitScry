@@ -178,7 +178,11 @@ fn regression_symbol_span_excludes_following_non_symbol_lines() {
         good.as_str(),
     ]);
     assert_eq!(output.status.code(), Some(0));
-    assert_eq!(output.stdout, b"No supported regression suspects found.\n");
+    assert!(
+        output
+            .stdout
+            .ends_with(b"No supported regression suspects found.\n")
+    );
 }
 
 #[test]
@@ -285,7 +289,7 @@ fn regression_symbol_tracking_keeps_unrelated_shifted_changes_out() {
     ]);
     assert_eq!(output.status.code(), Some(0));
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert_eq!(stdout, "No supported regression suspects found.\n");
+    assert!(stdout.ends_with("No supported regression suspects found.\n"));
     let patched = json(
         &repo,
         &[
@@ -346,12 +350,13 @@ fn regression_rejects_out_of_cache_bad_revision() {
 }
 
 #[test]
-fn regression_defaults_to_published_cache_tip_on_feature_branch() {
+fn regression_defaults_to_current_head_with_cached_ancestors_on_feature_branch() {
     let repo = TestRepo::new();
     repo.commit("target.txt", b"main\n", "Main target", None);
     repo.index();
     git(repo.dir.path(), ["switch", "-c", "feature"]);
     repo.commit("target.txt", b"feature\n", "Feature target", None);
+    let head = repo.head();
 
     let output = repo.run(["regression", "target", "--path", "target.txt"]);
     assert_eq!(
@@ -363,6 +368,11 @@ fn regression_defaults_to_published_cache_tip_on_feature_branch() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Main target"));
     assert!(!stdout.contains("Feature target"));
+    assert!(stdout.contains(&format!("commits reachable from {head}")));
+    assert!(
+        String::from_utf8_lossy(&output.stderr)
+            .contains(&format!("incomplete history coverage for {head}"))
+    );
 }
 
 #[test]
@@ -373,7 +383,11 @@ fn regression_uses_word_boundaries_for_symptom_terms() {
 
     let output = repo.run(["regression", "id", "--path", "target.txt"]);
     assert_eq!(output.status.code(), Some(0));
-    assert_eq!(output.stdout, b"No supported regression suspects found.\n");
+    assert!(
+        output
+            .stdout
+            .ends_with(b"No supported regression suspects found.\n")
+    );
 }
 
 #[test]

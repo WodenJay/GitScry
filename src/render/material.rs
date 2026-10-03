@@ -71,8 +71,13 @@ pub(super) fn scope_summary(scope: &SearchScopeInfo) -> String {
     if let Some(until) = &scope.until {
         criteria.push(format!("committer time through {until}"));
     }
+    let coverage = if scope.coverage_complete {
+        "complete".to_owned()
+    } else {
+        "incomplete; only cached reachable history is included".to_owned()
+    };
     format!(
-        "Scope: {}; cache tip {}",
+        "Scope: {}; cache tip {}; coverage {coverage}",
         criteria.join("; "),
         scope.cache_tip,
     )
