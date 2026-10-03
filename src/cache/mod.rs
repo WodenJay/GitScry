@@ -29,6 +29,7 @@ use std::{
     time::Duration,
 };
 const SCHEMA_VERSION: &str = "11";
+const SQL_PARAMETER_LIMIT: usize = 900;
 const WAITING_MESSAGE: &str = "Waiting for another GitScry process...";
 
 fn cache_directory(common_dir: &Path) -> PathBuf {

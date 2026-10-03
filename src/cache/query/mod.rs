@@ -9,10 +9,8 @@ mod search;
 pub(crate) use relations::RelationHistory;
 pub(crate) use search::{SearchCandidate, SearchMaterial};
 
-use super::cache_error;
+use super::{SQL_PARAMETER_LIMIT, cache_error};
 use crate::app::AppError;
-
-const SQL_PARAMETER_LIMIT: usize = 900;
 
 fn search_error(operation: &str, error: impl std::fmt::Display) -> AppError {
     cache_error(operation, error)

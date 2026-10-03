@@ -14,7 +14,7 @@ use crate::{
     git::{HistoryTarget, Repository, Snapshot},
 };
 
-use super::{SCHEMA_VERSION, SharedLock, cache_error, write};
+use super::{SCHEMA_VERSION, SQL_PARAMETER_LIMIT, SharedLock, cache_error, write};
 
 struct CacheState {
     default_ref: String,
@@ -624,30 +624,40 @@ fn commits_for_objects(common_dir: &Path, objects: &[String]) -> Result<Vec<Stri
     if objects.is_empty() {
         return Ok(Vec::new());
     }
-    let placeholders = std::iter::repeat_n("?", objects.len())
-        .collect::<Vec<_>>()
-        .join(", ");
-    let query = format!(
-        "SELECT DISTINCT c.oid
-         FROM changes AS ch
-         JOIN commits AS c ON c.commit_id = ch.commit_id
-         WHERE ch.old_blob IN ({placeholders}) OR ch.new_blob IN ({placeholders})
-         ORDER BY c.oid",
-    );
-    let values = objects.iter().chain(objects.iter());
+
     let connection = Connection::open_with_flags(
         super::cache_path(common_dir),
         OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .map_err(|error| cache_error("opening cache", error))?;
-    let mut statement = connection
-        .prepare(&query)
-        .map_err(|error| cache_error("preparing missing-object lookup", error))?;
-    statement
-        .query_map(params_from_iter(values), |row| row.get(0))
-        .map_err(|error| cache_error("reading missing-object lookup", error))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| cache_error("reading missing-object lookup", error))
+    let objects_per_batch = SQL_PARAMETER_LIMIT / 2;
+    let mut commits = HashSet::new();
+    for batch in objects.chunks(objects_per_batch) {
+        let placeholders = std::iter::repeat_n("?", batch.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let query = format!(
+            "SELECT DISTINCT c.oid
+             FROM changes AS ch
+             JOIN commits AS c ON c.commit_id = ch.commit_id
+             WHERE ch.old_blob IN ({placeholders}) OR ch.new_blob IN ({placeholders})
+             ORDER BY c.oid",
+        );
+        let values = batch.iter().chain(batch.iter());
+        let mut statement = connection
+            .prepare(&query)
+            .map_err(|error| cache_error("preparing missing-object lookup", error))?;
+        let rows = statement
+            .query_map(params_from_iter(values), |row| row.get(0))
+            .map_err(|error| cache_error("reading missing-object lookup", error))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| cache_error("reading missing-object lookup", error))?;
+        commits.extend(rows);
+    }
+
+    let mut commits = commits.into_iter().collect::<Vec<_>>();
+    commits.sort();
+    Ok(commits)
 }
 
 fn boundary_refreshes(common_dir: &Path) -> Result<Vec<String>, AppError> {
@@ -684,4 +694,42 @@ fn boundary_refreshes(common_dir: &Path) -> Result<Vec<String>, AppError> {
     refresh.sort();
     refresh.dedup();
     Ok(refresh)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use rusqlite::Connection;
+
+    use super::commits_for_objects;
+
+    #[test]
+    fn commits_for_objects_batches_large_object_sets_with_sorted_unique_commits() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache_directory = directory.path().join("gitscry");
+        fs::create_dir(&cache_directory).unwrap();
+        let cache_path = cache_directory.join("cache.sqlite");
+        let connection = Connection::open(cache_path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE commits (commit_id INTEGER PRIMARY KEY, oid TEXT NOT NULL);
+                 CREATE TABLE changes (commit_id INTEGER NOT NULL, old_blob TEXT, new_blob TEXT);
+                 INSERT INTO commits VALUES (1, 'commit-m'), (2, 'commit-a');
+                 INSERT INTO changes VALUES
+                     (1, 'object-0', 'object-16383'),
+                     (2, 'object-500', NULL);",
+            )
+            .unwrap();
+        drop(connection);
+
+        let objects = (0..16_384)
+            .map(|index| format!("object-{index}"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            commits_for_objects(directory.path(), &objects).unwrap(),
+            ["commit-a", "commit-m"]
+        );
+    }
 }
