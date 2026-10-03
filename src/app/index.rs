@@ -1,6 +1,6 @@
 use crate::{cache, git};
 
-use super::{AppError, IndexStage, Outcome};
+use super::{AppError, IndexReport, IndexStage, Outcome};
 
 pub(super) fn run(
     semantic: bool,
@@ -9,7 +9,7 @@ pub(super) fn run(
 ) -> Result<Outcome, AppError> {
     let repository = git::Repository::discover()?;
     let prepared = cache::prepare(&repository, report)?;
-    let (progress, current_head_commit_count, semantic_enabled) = prepared.release();
+    let (progress, current_head_commit_count, semantic_enabled, pinned_tip) = prepared.release();
     let preference = match (semantic, no_semantic) {
         (true, false) => cache::SemanticPreference::Enable,
         (false, true) => cache::SemanticPreference::Disable,
@@ -17,25 +17,22 @@ pub(super) fn run(
         (true, true) => unreachable!("clap prevents conflicting semantic options"),
     };
     if !matches!(preference, cache::SemanticPreference::Preserve) || semantic_enabled {
-        cache::maintain_semantic(&repository.common_dir, preference, report)?;
+        cache::maintain_semantic(&repository, &pinned_tip, preference, report)?;
     }
     report(IndexStage::Complete);
 
     Ok(Outcome {
         progress,
         warnings: Vec::new(),
-        message: format!(
-            "Indexed {current_head_commit_count} commit{} reachable from current HEAD.",
-            if current_head_commit_count == 1 {
-                ""
-            } else {
-                "s"
-            }
-        ),
+        message: String::new(),
         notices: Vec::new(),
         report: None,
         usage_report: None,
         github_links: None,
         clear_report: None,
+        index_report: Some(IndexReport {
+            current_head_commit_count,
+            semantic_disabled: no_semantic,
+        }),
     })
 }

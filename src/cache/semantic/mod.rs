@@ -6,7 +6,7 @@ mod vectors;
 pub(super) use migration::copy_semantic_vectors;
 pub(crate) use retrieval::SemanticCandidate;
 pub(super) use retrieval::semantic_top_k;
-use std::{collections::HashMap, path::Path};
+use std::collections::HashMap;
 use vectors::{valid_embedding, valid_fingerprint};
 
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
@@ -14,12 +14,16 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     app::{AppError, IndexStage},
+    git::Repository,
     semantic::{
         self, CommitDocument, EMBEDDING_BATCH_SIZE, Encoder, InputPreprocessor, PreparedInput,
     },
 };
 
-use super::cache_error;
+use super::{
+    cache_error,
+    scope::{SEARCH_SCOPE_CTE, SearchFilter, scope_values},
+};
 
 const PAGE_SIZE: usize = 256;
 
@@ -31,10 +35,12 @@ pub(crate) enum SemanticPreference {
 }
 
 pub(crate) fn maintain(
-    common_dir: &Path,
+    repository: &Repository,
+    pinned_tip: &str,
     preference: SemanticPreference,
     report: &mut dyn FnMut(IndexStage),
 ) -> Result<(), AppError> {
+    let common_dir = &repository.common_dir;
     let mut progress = Vec::new();
     let _lock = super::acquire_exclusive(common_dir, &mut progress, true)?;
     let path = super::cache_path(common_dir);
@@ -59,12 +65,26 @@ pub(crate) fn maintain(
         return Ok(());
     }
 
-    let (tip, commit_count) = completed_generation(&connection)?;
+    let (cache_tip, _) = completed_generation(&connection)?;
+    if cache_tip != pinned_tip {
+        return Err(AppError::operational(
+            "error: the published cache changed after HEAD was pinned; retry `gitscry index`",
+        ));
+    }
+    let reachable_oids = repository.reachable_commits(pinned_tip)?;
+    let commit_count = set_coverage_scope(&connection, &reachable_oids)?;
+    if usize::try_from(commit_count).ok() != Some(reachable_oids.len()) {
+        return Err(AppError::operational(
+            "error: the published cache does not contain the pinned current-HEAD history; retry `gitscry index`",
+        ));
+    }
+
+    let tip = pinned_tip;
     let encoder_fingerprint = semantic::encoder_fingerprint();
     let mut preprocessor = None;
     let ready = match is_ready(
         &connection,
-        &tip,
+        tip,
         commit_count,
         &encoder_fingerprint,
         &mut preprocessor,
@@ -105,10 +125,10 @@ pub(crate) fn maintain(
         ))
     })?;
 
-    let vector_count = count_vectors(&connection)?;
+    let vector_count = count_coverage_vectors(&connection)?;
     if vector_count != commit_count {
         return Err(AppError::operational(format!(
-            "error: semantic index covers {vector_count} of {commit_count} commits; retry `gitscry index`"
+            "error: semantic index covers {vector_count} of {commit_count} current-HEAD commits; retry `gitscry index`"
         )));
     }
     let runtime_provenance = runtime_provenance
@@ -121,7 +141,7 @@ pub(crate) fn maintain(
         &[
             ("semantic_enabled", "1"),
             ("semantic_ready", "1"),
-            ("semantic_coverage_tip", tip.as_str()),
+            ("semantic_coverage_tip", tip),
             ("semantic_coverage_count", coverage_count.as_str()),
             ("semantic_encoder_fingerprint", encoder_fingerprint.as_str()),
             ("semantic_runtime_provenance", runtime_provenance.as_str()),
@@ -177,6 +197,34 @@ fn completed_generation(connection: &Connection) -> Result<(String, i64), AppErr
     Ok((tip, count))
 }
 
+fn set_coverage_scope(connection: &Connection, reachable_oids: &[String]) -> Result<i64, AppError> {
+    connection
+        .execute_batch(
+            "CREATE TEMP TABLE IF NOT EXISTS semantic_coverage_commits (
+                oid TEXT PRIMARY KEY
+            ) WITHOUT ROWID;
+            DELETE FROM temp.semantic_coverage_commits;",
+        )
+        .map_err(|error| cache_error("preparing semantic coverage scope", error))?;
+    let mut statement = connection
+        .prepare("INSERT OR IGNORE INTO temp.semantic_coverage_commits (oid) VALUES (?1)")
+        .map_err(|error| cache_error("preparing semantic coverage scope", error))?;
+    for oid in reachable_oids {
+        statement
+            .execute([oid])
+            .map_err(|error| cache_error("setting semantic coverage scope", error))?;
+    }
+    drop(statement);
+    connection
+        .query_row(
+            "SELECT COUNT(*) FROM commits AS c
+             JOIN temp.semantic_coverage_commits AS scope ON scope.oid = c.oid",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|error| cache_error("counting semantic coverage commits", error))
+}
+
 fn commit_document(message: &[u8], paths: &[Vec<u8>]) -> CommitDocument {
     let (title, body) = super::message_parts(message);
     CommitDocument {
@@ -203,7 +251,7 @@ fn ready_metadata_matches(
                 == Some(coverage_count.as_str())
             && metadata(connection, "semantic_encoder_fingerprint")?.as_deref()
                 == Some(encoder_fingerprint)
-            && count_vectors(connection)? == commit_count,
+            && count_coverage_vectors(connection)? == commit_count,
     )
 }
 
@@ -252,10 +300,31 @@ fn is_ready(
 }
 
 fn reusable_vector(commit: &CachedCommit, encoder_fingerprint: &str) -> bool {
-    commit.cached_commit_oid.as_deref() == Some(commit.oid.as_str())
-        && valid_embedding(commit.embedding.as_deref())
-        && commit.encoder_fingerprint.as_deref() == Some(encoder_fingerprint)
-        && valid_fingerprint(commit.input_fingerprint.as_deref())
+    reusable_vector_data(
+        &commit.oid,
+        commit.cached_commit_oid.as_deref(),
+        commit.embedding.as_deref(),
+        commit.source_fingerprint.as_deref(),
+        commit.input_fingerprint.as_deref(),
+        commit.encoder_fingerprint.as_deref(),
+        encoder_fingerprint,
+    )
+}
+
+fn reusable_vector_data(
+    oid: &str,
+    cached_oid: Option<&str>,
+    embedding: Option<&[u8]>,
+    source_fingerprint: Option<&str>,
+    input_fingerprint: Option<&str>,
+    cached_encoder_fingerprint: Option<&str>,
+    encoder_fingerprint: &str,
+) -> bool {
+    cached_oid == Some(oid)
+        && valid_embedding(embedding)
+        && cached_encoder_fingerprint == Some(encoder_fingerprint)
+        && valid_fingerprint(source_fingerprint)
+        && valid_fingerprint(input_fingerprint)
 }
 
 fn has_incompatible_encoder(
@@ -270,13 +339,16 @@ fn has_incompatible_encoder(
     let incompatible_vectors = connection
         .query_row(
             "SELECT EXISTS(
-                SELECT 1 FROM semantic_vectors WHERE encoder_fingerprint != ?1
+                SELECT 1 FROM semantic_vectors AS v
+                JOIN commits AS c USING (commit_id)
+                JOIN temp.semantic_coverage_commits AS scope ON scope.oid = c.oid
+                WHERE v.encoder_fingerprint != ?1
             )",
             [encoder_fingerprint],
             |row| row.get::<_, bool>(0),
         )
         .map_err(|error| cache_error("checking semantic encoder compatibility", error))?;
-    let incomplete = count_vectors(connection)? < commit_count;
+    let incomplete = count_coverage_vectors(connection)? < commit_count;
     Ok(incompatible_vectors || (stale_metadata && incomplete))
 }
 
@@ -287,31 +359,79 @@ fn report_semantic_index(report: &mut dyn FnMut(IndexStage), reported: &mut bool
     }
 }
 
-pub(super) fn require_ready_for_query(connection: &Connection) -> Result<(), AppError> {
+pub(super) fn require_ready_for_query(
+    connection: &Connection,
+    filter: Option<&SearchFilter>,
+) -> Result<(), AppError> {
     if !semantic_enabled(connection)? {
         return Err(AppError::operational(
             "error: semantic search is disabled; run `gitscry index --semantic` while online to enable it. Ordinary history search remains available.",
         ));
     }
-    let (tip, commit_count) = completed_generation(connection)?;
-    let encoder_fingerprint = semantic::encoder_fingerprint();
-    if !ready_metadata_matches(connection, &tip, commit_count, &encoder_fingerprint)? {
-        return Err(AppError::operational(
-            "error: semantic index is missing, stale, or incomplete; run `gitscry index --semantic` while online to repair it. Ordinary history search remains available.",
-        ));
-    }
-    let linked_count = connection
-        .query_row(
-            "SELECT count(*) FROM semantic_vectors
-             JOIN commits USING (commit_id)",
-            [],
-            |row| row.get::<_, i64>(0),
+
+    let select = "SELECT c.oid, v.commit_oid, v.embedding, v.source_fingerprint,
+                         v.input_fingerprint, v.encoder_fingerprint";
+    let query = if filter.is_some() {
+        format!(
+            "{SEARCH_SCOPE_CTE}
+             {select}
+             FROM eligible
+             JOIN commits AS c USING (commit_id)
+             LEFT JOIN semantic_vectors AS v USING (commit_id)
+             ORDER BY c.position"
         )
-        .map_err(|error| super::cache_error("checking semantic vector identities", error))?;
-    if linked_count != commit_count {
-        return Err(AppError::operational(
-            "error: semantic index is missing, stale, or incomplete; run `gitscry index --semantic` while online to repair it. Ordinary history search remains available.",
-        ));
+    } else {
+        format!(
+            "{select}
+             FROM commits AS c
+             LEFT JOIN semantic_vectors AS v USING (commit_id)
+             ORDER BY c.position"
+        )
+    };
+    let mut statement = connection
+        .prepare(&query)
+        .map_err(|error| cache_error("preparing semantic readiness check", error))?;
+    let mut rows = match filter {
+        Some(filter) => statement.query(params_from_iter(scope_values(filter))),
+        None => statement.query([]),
+    }
+    .map_err(|error| cache_error("checking semantic vector coverage", error))?;
+    let encoder_fingerprint = semantic::encoder_fingerprint();
+    while let Some(row) = rows
+        .next()
+        .map_err(|error| cache_error("checking semantic vector coverage", error))?
+    {
+        let oid: String = row
+            .get(0)
+            .map_err(|error| cache_error("reading semantic vector identity", error))?;
+        let cached_oid: Option<String> = row
+            .get(1)
+            .map_err(|error| cache_error("reading semantic vector identity", error))?;
+        let embedding: Option<Vec<u8>> = row
+            .get(2)
+            .map_err(|error| cache_error("reading semantic vector identity", error))?;
+        let source_fingerprint: Option<String> = row
+            .get(3)
+            .map_err(|error| cache_error("reading semantic vector identity", error))?;
+        let input_fingerprint: Option<String> = row
+            .get(4)
+            .map_err(|error| cache_error("reading semantic vector identity", error))?;
+        let encoder: Option<String> = row
+            .get(5)
+            .map_err(|error| cache_error("reading semantic vector identity", error))?;
+        if !reusable_vector_data(
+            &oid,
+            cached_oid.as_deref(),
+            embedding.as_deref(),
+            source_fingerprint.as_deref(),
+            input_fingerprint.as_deref(),
+            encoder.as_deref(),
+            &encoder_fingerprint,
+        ) {
+            return Err(AppError::operational(format!(
+                "error: semantic index is missing, stale, or incomplete for commit {oid}; run `gitscry index --semantic` while online to repair it. Ordinary history search remains available."
+            )));
+        }
     }
     Ok(())
 }
@@ -429,6 +549,7 @@ fn read_page(connection: &Connection, after_position: i64) -> Result<Vec<CachedC
                     v.commit_oid, v.embedding, v.source_fingerprint,
                     v.input_fingerprint, v.encoder_fingerprint
              FROM commits AS c
+             JOIN temp.semantic_coverage_commits AS scope ON scope.oid = c.oid
              LEFT JOIN semantic_vectors AS v ON v.commit_id = c.commit_id
              WHERE c.position > ?1
              ORDER BY c.position
@@ -586,19 +707,25 @@ fn source_fingerprint(message: &[u8], paths: &[Vec<u8>]) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-fn count_vectors(connection: &Connection) -> Result<i64, AppError> {
+fn count_coverage_vectors(connection: &Connection) -> Result<i64, AppError> {
     connection
-        .query_row("SELECT COUNT(*) FROM semantic_vectors", [], |row| {
-            row.get(0)
-        })
+        .query_row(
+            "SELECT COUNT(*) FROM semantic_vectors AS v
+             JOIN commits AS c USING (commit_id)
+             JOIN temp.semantic_coverage_commits AS scope ON scope.oid = c.oid",
+            [],
+            |row| row.get(0),
+        )
         .map_err(|error| cache_error("counting semantic vectors", error))
 }
 
 fn latest_runtime_provenance(connection: &Connection) -> Result<Option<String>, AppError> {
     connection
         .query_row(
-            "SELECT runtime_provenance FROM semantic_vectors
-             ORDER BY commit_id DESC LIMIT 1",
+            "SELECT v.runtime_provenance FROM semantic_vectors AS v
+             JOIN commits AS c USING (commit_id)
+             JOIN temp.semantic_coverage_commits AS scope ON scope.oid = c.oid
+             ORDER BY c.position DESC LIMIT 1",
             [],
             |row| row.get(0),
         )
@@ -744,6 +871,7 @@ mod tests {
         drop(connection);
 
         let mut connection = Connection::open(cache_path).unwrap();
+        set_coverage_scope(&connection, &["oid".to_owned()]).unwrap();
         let mut preprocessor = Some(test_preprocessor());
         let document = commit_document(message, &paths);
         let input_fingerprint = preprocessor
@@ -816,7 +944,8 @@ mod tests {
             )
             .unwrap();
         copy_semantic_vectors(&cache_directory.join("cache.sqlite"), &staging);
-        assert!(require_ready_for_query(&rebuilt).is_err());
+        require_ready_for_query(&rebuilt, None).unwrap();
+        set_coverage_scope(&rebuilt, &["oid".to_owned()]).unwrap();
         assert!(
             maintain_vectors(
                 &mut rebuilt,
@@ -829,7 +958,7 @@ mod tests {
         );
         set_metadata(&rebuilt, &[("semantic_ready", "1")]).unwrap();
         assert!(is_ready(&rebuilt, "tip", 1, &encoder_fingerprint, &mut preprocessor).unwrap());
-        require_ready_for_query(&rebuilt).unwrap();
+        require_ready_for_query(&rebuilt, None).unwrap();
         let mut query = vec![0.0; crate::semantic::EMBEDDING_DIMENSION];
         query[0] = 1.0;
         let hits = semantic_top_k(&rebuilt, &[query], 1, None).unwrap();

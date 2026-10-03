@@ -37,20 +37,27 @@ enum Inspection {
 pub(crate) struct PreparedCache {
     pub(crate) progress: Vec<String>,
     pub(crate) current_head_commit_count: usize,
+    pub(crate) pinned_tip: String,
     pub(crate) semantic_enabled: bool,
     _lock: SharedLock,
 }
 
 impl PreparedCache {
-    pub(crate) fn release(self) -> (Vec<String>, usize, bool) {
+    pub(crate) fn release(self) -> (Vec<String>, usize, bool, String) {
         let Self {
             progress,
             current_head_commit_count,
+            pinned_tip,
             semantic_enabled,
             _lock,
         } = self;
         drop(_lock);
-        (progress, current_head_commit_count, semantic_enabled)
+        (
+            progress,
+            current_head_commit_count,
+            semantic_enabled,
+            pinned_tip,
+        )
     }
 }
 
@@ -117,6 +124,7 @@ fn prepare_at(
             progress,
             current_head_commit_count,
             semantic_enabled: state.semantic_enabled,
+            pinned_tip: expected.tip.clone(),
             _lock: shared,
         });
     }
@@ -138,6 +146,7 @@ fn prepare_at(
             progress,
             current_head_commit_count,
             semantic_enabled: state.semantic_enabled,
+            pinned_tip: expected.tip.clone(),
             _lock: shared,
         });
     }
@@ -214,6 +223,7 @@ fn prepare_at(
         progress,
         current_head_commit_count,
         semantic_enabled: state.semantic_enabled,
+        pinned_tip: expected.tip.clone(),
         _lock: shared,
     })
 }

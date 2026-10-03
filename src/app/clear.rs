@@ -14,5 +14,6 @@ pub(super) fn run(dry_run: bool) -> Result<Outcome, AppError> {
         usage_report: None,
         github_links: None,
         clear_report: Some(clear_report),
+        index_report: None,
     })
 }

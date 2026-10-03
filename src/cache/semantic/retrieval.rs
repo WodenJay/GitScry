@@ -59,14 +59,14 @@ pub(in crate::cache) fn semantic_top_k(
     let sql = match scope {
         Some(_) => format!(
             "{SEARCH_SCOPE_CTE}
-             SELECT c.commit_id, c.oid, c.commit_time, v.embedding,
+             SELECT c.commit_id, c.oid, c.commit_time, v.commit_oid, v.embedding,
                     v.source_fingerprint, v.input_fingerprint, v.encoder_fingerprint
              FROM eligible
              JOIN commits AS c ON c.commit_id = eligible.commit_id
              JOIN semantic_vectors AS v ON v.commit_id = c.commit_id
 "
         ),
-        None => "SELECT c.commit_id, c.oid, c.commit_time, v.embedding,
+        None => "SELECT c.commit_id, c.oid, c.commit_time, v.commit_oid, v.embedding,
                        v.source_fingerprint, v.input_fingerprint, v.encoder_fingerprint
                 FROM semantic_vectors AS v
                 JOIN commits AS c ON c.commit_id = v.commit_id
@@ -98,19 +98,23 @@ pub(in crate::cache) fn semantic_top_k(
         let commit_time = row
             .get(2)
             .map_err(|error| search_error("reading semantic commit identity", error))?;
-        let embedding: Vec<u8> = row
+        let cached_oid: String = row
             .get(3)
+            .map_err(|error| search_error("reading semantic vector identity", error))?;
+        let embedding: Vec<u8> = row
+            .get(4)
             .map_err(|error| search_error("reading semantic vector", error))?;
         let source_fingerprint: String = row
-            .get(4)
-            .map_err(|error| search_error("reading semantic vector identity", error))?;
-        let input_fingerprint: String = row
             .get(5)
             .map_err(|error| search_error("reading semantic vector identity", error))?;
-        let stored_encoder_fingerprint: String = row
+        let input_fingerprint: String = row
             .get(6)
             .map_err(|error| search_error("reading semantic vector identity", error))?;
-        if !valid_fingerprint(Some(&source_fingerprint))
+        let stored_encoder_fingerprint: String = row
+            .get(7)
+            .map_err(|error| search_error("reading semantic vector identity", error))?;
+        if cached_oid != oid
+            || !valid_fingerprint(Some(&source_fingerprint))
             || !valid_fingerprint(Some(&input_fingerprint))
             || stored_encoder_fingerprint != encoder_fingerprint
         {
@@ -187,6 +191,7 @@ mod semantic_tests {
                 );
                 CREATE TABLE semantic_vectors (
                     commit_id INTEGER PRIMARY KEY,
+                    commit_oid TEXT NOT NULL,
                     embedding BLOB NOT NULL,
                     source_fingerprint TEXT NOT NULL,
                     input_fingerprint TEXT NOT NULL,
@@ -217,11 +222,12 @@ mod semantic_tests {
         connection
             .execute(
                 "INSERT INTO semantic_vectors (
-                    commit_id, embedding, source_fingerprint,
+                    commit_id, commit_oid, embedding, source_fingerprint,
                     input_fingerprint, encoder_fingerprint
-                 ) VALUES (?1, ?2, ?3, ?4, ?5)",
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
                     id,
+                    oid,
                     bytes,
                     "a".repeat(64),
                     "b".repeat(64),
@@ -323,6 +329,19 @@ mod semantic_tests {
         assert_eq!(results.len(), 101);
         assert_eq!(results[0].oid, format!("{:040x}", 0));
         assert_eq!(results[100].oid, format!("{:040x}", 100));
+    }
+
+    #[test]
+    fn semantic_top_k_rejects_a_vector_for_a_different_commit_oid() {
+        let connection = database();
+        let query = unit_vector(0);
+        insert_vector(&connection, 1, "current", &query);
+        connection
+            .execute("UPDATE semantic_vectors SET commit_oid = 'stale'", [])
+            .unwrap();
+
+        let error = semantic_top_k(&connection, std::slice::from_ref(&query), 1, None).unwrap_err();
+        assert!(error.to_string().contains("invalid or stale"));
     }
 
     #[test]

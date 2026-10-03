@@ -17,7 +17,7 @@ pub(in crate::analysis) fn execute(
 ) -> Result<Outcome, AppError> {
     let intent = Intent::parse(&words, &[])?;
     let context = Context::open(options.scope)?;
-    context.session.require_semantic_ready()?;
+    context.session.require_semantic_ready(context.filter())?;
 
     let query = words.join(" ");
     let (mut encoder, inputs) = Encoder::load_for_query(&query)?;

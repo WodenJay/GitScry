@@ -39,6 +39,12 @@ pub(crate) enum Progress {
     Update(UpdateStage),
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct IndexReport {
+    pub(crate) current_head_commit_count: usize,
+    pub(crate) semantic_disabled: bool,
+}
+
 pub(crate) struct Outcome {
     pub(crate) progress: Vec<String>,
     pub(crate) warnings: Vec<String>,
@@ -48,6 +54,7 @@ pub(crate) struct Outcome {
     pub(crate) usage_report: Option<usage::Report>,
     pub(crate) github_links: Option<crate::github::LinksReport>,
     pub(crate) clear_report: Option<crate::cache::ClearReport>,
+    pub(crate) index_report: Option<IndexReport>,
 }
 
 impl From<HistoricalScopeArgs> for SearchScopeOptions {
@@ -94,6 +101,7 @@ pub(crate) fn execute(
                 usage_report: Some(usage_report),
                 github_links: None,
                 clear_report: None,
+                index_report: None,
             });
         }
         command => command,
@@ -403,5 +411,6 @@ pub(crate) fn execute(
         usage_report: None,
         github_links,
         clear_report: None,
+        index_report: None,
     })
 }

@@ -486,6 +486,10 @@ fn semantic_index_options_are_exposed_and_mutually_exclusive() {
     let help = String::from_utf8_lossy(&help.stdout);
     assert!(help.contains("--semantic"), "{help}");
     assert!(help.contains("--no-semantic"), "{help}");
+    assert!(
+        help.contains("deletes every repository semantic vector"),
+        "{help}"
+    );
 
     let conflict = support::isolated_gitscry_command(user_data.path())
         .args(["index", "--semantic", "--no-semantic"])
@@ -567,6 +571,12 @@ fn semantic_index_failure_preserves_history_until_explicitly_disabled() {
         "{}",
         String::from_utf8_lossy(&disabled.stderr)
     );
+    let output = String::from_utf8_lossy(&disabled.stdout);
+    assert!(output.contains("repository-wide"), "{output}");
+    assert!(
+        output.contains("all cached semantic vectors were removed"),
+        "{output}"
+    );
     assert_eq!(metadata("semantic_enabled"), "0");
     assert_eq!(metadata("semantic_ready"), "0");
     assert_eq!(
@@ -594,6 +604,99 @@ fn semantic_index_failure_preserves_history_until_explicitly_disabled() {
     assert_eq!(metadata("semantic_ready"), "0");
 }
 
+#[test]
+fn hybrid_readiness_uses_query_scope_instead_of_repository_wide_coverage() {
+    let repo = TestRepo::new();
+    repo.commit("base.txt", b"base\n", "Base commit");
+    let base = repo.head();
+    repo.index();
+
+    git(repo.dir.path(), ["switch", "-c", "side"]);
+    repo.commit("side.txt", b"side\n", "Side-only commit");
+    let side = repo.head();
+    repo.index();
+
+    git(repo.dir.path(), ["switch", "main"]);
+    repo.commit("main.txt", b"main\n", "Main-only commit");
+    let head = repo.head();
+    repo.index();
+
+    let cache = Connection::open(repo.cache_dir().join("cache.sqlite")).unwrap();
+    for (oid, commit_time) in [(&base, 0_i64), (&side, 0), (&head, 86_400)] {
+        cache
+            .execute(
+                "UPDATE commits SET commit_time = ?1 WHERE oid = ?2",
+                rusqlite::params![commit_time, oid],
+            )
+            .unwrap();
+    }
+    cache
+        .execute(
+            "UPDATE metadata SET value = '1' WHERE key = 'semantic_enabled'",
+            [],
+        )
+        .unwrap();
+    cache
+        .execute(
+            "UPDATE metadata SET value = '0' WHERE key = 'semantic_ready'",
+            [],
+        )
+        .unwrap();
+    let encoder_fingerprint = expected_encoder_fingerprint();
+    for (axis, oid) in [(0, &base), (1, &head)] {
+        let commit_id = cache
+            .query_row(
+                "SELECT commit_id FROM commits WHERE oid = ?1",
+                [oid],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap();
+        let source_fingerprint = expected_source_fingerprint(&cache, commit_id);
+        cache
+            .execute(
+                "INSERT INTO semantic_vectors(
+                    commit_id, commit_oid, source_fingerprint, embedding, input_fingerprint,
+                    encoder_fingerprint, runtime_provenance
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'test')",
+                rusqlite::params![
+                    commit_id,
+                    oid,
+                    source_fingerprint,
+                    normalized_vector(axis),
+                    "c".repeat(64),
+                    encoder_fingerprint,
+                ],
+            )
+            .unwrap();
+    }
+    drop(cache);
+
+    let isolated = IsolatedExecutable::new();
+    let assert_resources_missing = |args: &[&str]| {
+        let output = isolated.run(repo.dir.path(), args);
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{error}");
+        assert!(
+            error.contains("pinned semantic model resource"),
+            "{args:?}: {error}"
+        );
+    };
+    let assert_scope_incomplete = |args: &[&str]| {
+        let output = isolated.run(repo.dir.path(), args);
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{error}");
+        assert!(
+            error.contains("semantic index is missing, stale, or incomplete"),
+            "{error}"
+        );
+    };
+
+    // The side branch has no vectors, but all current-HEAD history does.
+    assert_resources_missing(&["search", "marker", "--hybrid"]);
+    assert_scope_incomplete(&["search", "marker", "--hybrid", "--to-rev", &side]);
+    assert_resources_missing(&["search", "marker", "--hybrid", "--from-rev", &base]);
+    assert_resources_missing(&["search", "marker", "--hybrid", "--since", "1970-01-02"]);
+}
 #[test]
 fn semantic_vectors_survive_rebuild_by_commit_identity() {
     let repo = TestRepo::new();
@@ -888,7 +991,7 @@ fn expected_encoder_fingerprint() -> String {
     hasher.update(b"8f518e882455312b086101e60691f5e6e2f05c3c");
     for (path, bytes, hash) in [
         (
-            "onnx/model.onnx",
+            "model.onnx",
             90_387_630_u64,
             "bbd7b466f6d58e646fdc2bd5fd67b2f5e93c0b687011bd4548c420f7bd46f0c5",
         ),

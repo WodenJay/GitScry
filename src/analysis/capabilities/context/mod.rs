@@ -31,7 +31,7 @@ pub(in crate::analysis) fn execute(
     }
     let context = Context::open(options.scope)?;
     if hybrid {
-        context.session.require_semantic_ready()?;
+        context.session.require_semantic_ready(context.filter())?;
     }
     let report = run(
         &context.session,

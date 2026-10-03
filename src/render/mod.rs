@@ -52,6 +52,24 @@ fn format_report(
     }
 }
 
+fn format_index_report(report: &app::IndexReport) -> String {
+    let mut message = format!(
+        "Indexed {} commit{} reachable from current HEAD.",
+        report.current_head_commit_count,
+        if report.current_head_commit_count == 1 {
+            ""
+        } else {
+            "s"
+        }
+    );
+    if report.semantic_disabled {
+        message.push_str(
+            " Semantic indexing was disabled repository-wide; all cached semantic vectors were removed.",
+        );
+    }
+    message
+}
+
 fn format_json_report(
     report: &QueryReport,
     additional_warnings: &[String],
@@ -225,6 +243,9 @@ fn write_outcome(outcome: Outcome, json_output: bool) -> io::Result<()> {
 
     if let Some(report) = &outcome.clear_report {
         return writeln!(io::stdout().lock(), "{}", clear::format_report(report));
+    }
+    if let Some(report) = &outcome.index_report {
+        return writeln!(io::stdout().lock(), "{}", format_index_report(report));
     }
     if json_output {
         let report = outcome.report.as_ref().ok_or_else(|| {

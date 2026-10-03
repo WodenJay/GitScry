@@ -52,8 +52,11 @@ impl QuerySession {
         candidates_scoped(&self.connection, match_query, scope, explicit_paths)
     }
 
-    pub(crate) fn require_semantic_ready(&self) -> Result<(), AppError> {
-        crate::cache::semantic::require_ready_for_query(&self.connection)
+    pub(crate) fn require_semantic_ready(
+        &self,
+        filter: Option<&SearchFilter>,
+    ) -> Result<(), AppError> {
+        crate::cache::semantic::require_ready_for_query(&self.connection, filter)
     }
     pub(crate) fn semantic_top_k(
         &self,
