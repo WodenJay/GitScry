@@ -49,12 +49,9 @@ fn ranks_repeated_touches_at_published_tip_and_limits_after_sorting() {
     let stamp = json["files"][0]["last_changed"].as_str().unwrap();
     assert_eq!(stamp.len(), 20);
     assert!(stamp.ends_with('Z'));
-    assert!(
-        !json["files"][0]
-            .as_object()
-            .unwrap()
-            .contains_key("additions")
-    );
+    assert_eq!(json["files"][0]["additions"], 2);
+    assert_eq!(json["files"][0]["deletions"], 1);
+    assert_eq!(json["files"][0]["churn_complete"], true);
 }
 
 fn record(repo: &TestRepo) {
@@ -71,6 +68,32 @@ fn count(json: &Value, path: &str) -> u64 {
         .as_u64()
         .unwrap()
 }
+#[test]
+fn reports_exact_textual_additions_and_deletions_for_created_and_modified_files() {
+    let repo = TestRepo::new();
+    commit(&repo, "often", "one\ntwo\nthree\n");
+    commit(&repo, "often", "one\nfour\n");
+    commit(&repo, "created", "first\nsecond\n");
+    repo.index();
+
+    let json = report(&repo, &["hotspots", "--json"]);
+    let files = json["files"].as_array().unwrap();
+    let often = files.iter().find(|file| file["path"] == "often").unwrap();
+    assert_eq!(often["additions"], 4);
+    assert_eq!(often["deletions"], 2);
+    assert_eq!(often["churn_complete"], true);
+    let created = files.iter().find(|file| file["path"] == "created").unwrap();
+    assert_eq!(created["additions"], 2);
+    assert_eq!(created["deletions"], 0);
+    assert_eq!(created["churn_complete"], true);
+
+    let text = String::from_utf8(repo.run(["hotspots"]).stdout).unwrap();
+    assert!(text.contains("Touches  +lines  -lines"));
+    assert!(text.contains("Textual churn"));
+    assert!(text.contains("4  2  "));
+    assert!(text.contains("2  0  "));
+}
+
 #[test]
 fn follows_rename_chains_but_not_copies_or_recreated_paths() {
     let repo = TestRepo::new();
@@ -95,6 +118,19 @@ fn follows_rename_chains_but_not_copies_or_recreated_paths() {
     assert_eq!(count(&json, "new"), 4);
     assert_eq!(count(&json, "copy"), 1);
     assert_eq!(count(&json, "reused"), 1);
+
+    let files = json["files"].as_array().unwrap();
+    let renamed = files.iter().find(|file| file["path"] == "new").unwrap();
+    assert_eq!(renamed["additions"], 4);
+    assert_eq!(renamed["deletions"], 0);
+    assert_eq!(renamed["churn_complete"], true);
+    let copy = files.iter().find(|file| file["path"] == "copy").unwrap();
+    assert_eq!(copy["additions"], 4);
+    assert_eq!(copy["deletions"], 0);
+    let recreated = files.iter().find(|file| file["path"] == "reused").unwrap();
+    assert_eq!(recreated["additions"], 1);
+    assert_eq!(recreated["deletions"], 0);
+    assert_eq!(recreated["churn_complete"], true);
     assert_eq!(json["files"].as_array().unwrap().len(), 3);
 }
 #[test]
@@ -115,6 +151,16 @@ fn retains_branch_touches_and_rename_lineage_without_merge_contributions() {
     let json = report(&repo, &["hotspots", "--json"]);
     assert_eq!(count(&json, "new"), 3);
     assert_eq!(count(&json, "main-only"), 1);
+
+    let new = json["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|file| file["path"] == "new")
+        .unwrap();
+    assert_eq!(new["additions"], 4);
+    assert_eq!(new["deletions"], 0);
+    assert_eq!(new["churn_complete"], true);
     assert_eq!(json["files"].as_array().unwrap().len(), 2);
     assert!(
         json["policy"]["merge"]
@@ -123,6 +169,72 @@ fn retains_branch_touches_and_rename_lineage_without_merge_contributions() {
             .contains("merge-only")
     );
 }
+#[test]
+fn marks_gitlink_churn_unavailable_when_path_becomes_a_file() {
+    let repo = TestRepo::new();
+    commit(&repo, "seed", "base\n");
+
+    let first_link = format!("160000,{},module", repo.head());
+    git(
+        repo.dir.path(),
+        ["update-index", "--add", "--cacheinfo", first_link.as_str()],
+    );
+    git(repo.dir.path(), ["commit", "-m", "add gitlink"]);
+
+    let second_link = format!("160000,{},module", repo.head());
+    git(
+        repo.dir.path(),
+        ["update-index", "--cacheinfo", second_link.as_str()],
+    );
+    git(repo.dir.path(), ["commit", "-m", "update gitlink"]);
+
+    git(repo.dir.path(), ["rm", "--cached", "module"]);
+    fs::write(repo.dir.path().join("module"), "").unwrap();
+    git(repo.dir.path(), ["add", "module"]);
+    git(
+        repo.dir.path(),
+        ["commit", "-m", "replace gitlink with empty file"],
+    );
+    repo.index();
+
+    let json = report(&repo, &["hotspots", "--json"]);
+    let module = json["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|file| file["path"] == "module")
+        .unwrap();
+    assert_eq!(module["touching_commits"], 3);
+
+    assert_eq!(module["additions"], Value::Null);
+    assert_eq!(module["deletions"], Value::Null);
+    assert_eq!(module["churn_complete"], false);
+}
+#[test]
+fn reports_empty_file_and_rename_as_complete_zero_churn() {
+    let repo = TestRepo::new();
+    commit(&repo, "empty", "");
+
+    git(repo.dir.path(), ["mv", "empty", "renamed-empty"]);
+    record(&repo);
+    repo.index();
+
+    let json = report(&repo, &["hotspots", "--json"]);
+    let empty = &json["files"][0];
+    assert_eq!(empty["path"], "renamed-empty");
+    assert_eq!(empty["touching_commits"], 2);
+    assert_eq!(empty["additions"], 0);
+    assert_eq!(empty["deletions"], 0);
+    assert_eq!(empty["churn_complete"], true);
+
+    let text = String::from_utf8(repo.run(["hotspots"]).stdout).unwrap();
+    let row = text
+        .lines()
+        .find(|line| line.ends_with(" renamed-empty"))
+        .unwrap();
+    assert!(row.contains("2  0  0  "));
+}
+
 #[test]
 fn includes_binary_permission_generated_and_lockfile_touches_and_maximum_time() {
     let repo = TestRepo::new();
@@ -169,6 +281,39 @@ fn includes_binary_permission_generated_and_lockfile_touches_and_maximum_time() 
         ["binary", "dated", "generated.lock"]
     );
     assert_eq!(files[1]["last_changed"], "2020-01-01T00:00:00Z");
+    assert_eq!(files[0]["additions"], Value::Null);
+    assert_eq!(files[0]["deletions"], Value::Null);
+    assert_eq!(files[0]["churn_complete"], false);
+
+    let text = String::from_utf8(repo.run(["hotspots"]).stdout).unwrap();
+    let binary = text.lines().find(|line| line.ends_with(" binary")).unwrap();
+    assert!(binary.contains("—  —"));
+    assert_eq!(files[2]["additions"], 1);
+    assert_eq!(files[2]["deletions"], 0);
+    assert_eq!(files[2]["churn_complete"], true);
+}
+#[test]
+fn marks_partial_textual_churn_when_binary_history_is_unavailable() {
+    let repo = TestRepo::new();
+    commit(&repo, "mixed", "first\nsecond\n");
+    commit(&repo, "mixed", "a\0b");
+    repo.index();
+
+    let json = report(&repo, &["hotspots", "--json"]);
+    let mixed = json["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|file| file["path"] == "mixed")
+        .unwrap();
+    assert_eq!(mixed["touching_commits"], 2);
+    assert_eq!(mixed["additions"], 2);
+    assert_eq!(mixed["deletions"], 0);
+    assert_eq!(mixed["churn_complete"], false);
+
+    let text = String::from_utf8(repo.run(["hotspots"]).stdout).unwrap();
+    let row = text.lines().find(|line| line.ends_with(" mixed")).unwrap();
+    assert!(row.contains("2*  0*"));
 }
 #[test]
 fn empty_results_default_top_twenty_and_validation() {
@@ -234,6 +379,9 @@ fn cache_errors_and_shallow_coverage_remain_visible() {
     assert!(help.status.success());
     let help = String::from_utf8(help.stdout).unwrap();
     assert!(help.contains("merge-only"));
+
+    assert!(help.contains("churn_complete"));
+    assert!(help.contains("unavailable counts with"));
     assert!(!help.contains("--since"));
 }
 

@@ -94,8 +94,8 @@ Examples:
         json: bool,
     },
     #[command(
-        about = "Rank current files by repeated historical touches",
-        long_about = "Rank tracked files present at the published cache tip by distinct non-merge touching commits. Default limit: 20. Reachable branch commits and root introductions count; merge-only conflict resolutions do not. Detected renames preserve identity, copies do not; deletion/recreation starts a new incarnation. Binary, permission and pure rename changes count. No generated/vendor/lockfile or large-commit exclusions. Last changed is the maximum eligible committer time in UTC. History and rename continuity are bounded by published cache coverage and available local objects. Read-only: does not index or fetch.\n\nExamples:\n  gitscry hotspots\n  gitscry hotspots --json --limit 10"
+        about = "Rank files by historical touches and textual churn",
+        long_about = "Rank tracked files present at the published cache tip across full reachable published history by distinct non-merge touching commits. Default limit: 20. Reachable branch commits and root introductions count; merge-only conflict resolutions do not. Detected renames preserve identity, copies do not; deletion/recreation starts a new incarnation. Binary, permission and pure rename changes count. Textual churn sums cached added/deleted lines for those touches; JSON counts are null when no diff is usable and churn_complete is false when any eligible diff is unavailable. Text output marks partial counts with * and unavailable counts with —. No generated/vendor/lockfile or large-commit exclusions. Last changed is the maximum eligible committer time in UTC. History and rename continuity are bounded by published cache coverage and available local objects. Read-only: does not index or fetch.\n\nExamples:\n  gitscry hotspots\n  gitscry hotspots --json --limit 10"
     )]
     Hotspots {
         #[arg(long, default_value = "20", value_parser = parse_limit)]

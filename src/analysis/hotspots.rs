@@ -11,6 +11,9 @@ pub(crate) struct File {
     pub(crate) path: Vec<u8>,
     pub(crate) touching_commits: usize,
     pub(crate) last_changed: String,
+    pub(crate) additions: Option<u64>,
+    pub(crate) deletions: Option<u64>,
+    pub(crate) churn_complete: bool,
 }
 impl Report {
     pub(crate) fn aggregate(target: String, touches: Vec<FileTouches>, limit: usize) -> Self {
@@ -22,6 +25,9 @@ impl Report {
                     path: touches.path,
                     touching_commits: touches.times.len(),
                     last_changed: format_timestamp(latest),
+                    additions: touches.additions,
+                    deletions: touches.deletions,
+                    churn_complete: touches.churn_complete,
                 })
             })
             .collect();
