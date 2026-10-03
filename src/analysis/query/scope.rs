@@ -34,6 +34,20 @@ pub(in crate::analysis) struct ReachableHistory {
     pub(in crate::analysis) coverage_complete: bool,
 }
 
+pub(in crate::analysis) fn install_shared_history_scope(
+    session: &QuerySession,
+    revisions: &[String],
+    merge_base: &str,
+) -> Result<SearchFilter, AppError> {
+    session.set_scope_revisions(revisions, &[], revisions)?;
+    Ok(SearchFilter {
+        from_oid: None,
+        to_oid: merge_base.to_owned(),
+        since: None,
+        until: None,
+    })
+}
+
 struct TimeBound {
     second: i64,
     fraction: String,

@@ -138,6 +138,123 @@ fn associated_fixture() -> TestRepo {
     merge(&repo, "other");
     repo
 }
+
+fn shared_history_fixture() -> (TestRepo, String, String, String, String, String) {
+    let repo = TestRepo::new();
+    commit(&repo, "a.txt", "route=old\n", "base");
+    commit(&repo, "b.txt", "base b\n", "base b");
+    let fix = commit(
+        &repo,
+        "a.txt",
+        "route=fast\n",
+        "fix: preserve the fast route",
+    );
+    git(repo.dir.path(), ["revert", "--no-edit", fix.as_str()]);
+    let revert = repo.head();
+    for version in 1..=4 {
+        commit(
+            &repo,
+            "a.txt",
+            &format!("route=intermediate-{version}\n"),
+            &format!("routine path edit {version}"),
+        );
+    }
+    let unrelated = commit(
+        &repo,
+        "unrelated.txt",
+        "unrelated\n",
+        "fix: unrelated historical behavior",
+    );
+    git(repo.dir.path(), ["branch", "other"]);
+    let ours = commit(&repo, "a.txt", "route=ours\n", "change ours");
+    repo.index();
+    git(repo.dir.path(), ["checkout", "other"]);
+    let theirs = commit(&repo, "a.txt", "route=theirs\n", "change theirs");
+    git(repo.dir.path(), ["checkout", "main"]);
+    merge(&repo, "other");
+    (repo, fix, revert, ours, theirs, unrelated)
+}
+
+#[test]
+fn reports_reverted_shared_history_once_with_source_and_conflict_associations() {
+    let (repo, fix, revert, ours, theirs, unrelated) = shared_history_fixture();
+    let before = state(&repo);
+    let report = json(repo.run(["conflicts", "--json"]));
+    let file = &report["files"][0];
+    let related = file["related_history"].as_array().unwrap();
+    assert_eq!(related[0]["commit"], fix);
+    assert_eq!(
+        related.iter().filter(|lead| lead["commit"] == fix).count(),
+        1
+    );
+    assert!(!related.iter().any(|lead| lead["commit"] == revert));
+    let fix_lead = related.iter().find(|lead| lead["commit"] == fix).unwrap();
+    assert_eq!(fix_lead["path"], "a.txt");
+    assert_eq!(
+        fix_lead["association"],
+        "shared pre-merge-base path history"
+    );
+    assert_eq!(
+        fix_lead["related_sides"],
+        serde_json::json!(["ours", "theirs"])
+    );
+    assert_eq!(fix_lead["reverted_by"]["commit"], revert);
+    assert_eq!(fix_lead["recorded_reason"], Value::Null);
+    assert!(
+        fix_lead["reason_source"]
+            .as_str()
+            .unwrap()
+            .contains("revert")
+    );
+    assert!(
+        fix_lead["selection_basis"]
+            .as_array()
+            .is_some_and(|basis| !basis.is_empty())
+    );
+    assert!(!fix_lead["regions"].as_array().unwrap().is_empty());
+    assert_eq!(file["related_history_total"], 6);
+    assert_eq!(file["related_history_truncated"], true);
+    assert_eq!(file["sides"][0]["leads"][0]["commit"], ours);
+    assert_eq!(file["sides"][1]["leads"][0]["commit"], theirs);
+    assert!(!related.iter().any(|lead| lead["commit"] == unrelated));
+
+    let text = repo.run(["conflicts"]);
+    assert!(text.status.success());
+    let text = String::from_utf8_lossy(&text.stdout);
+    assert!(text.contains(&fix) && text.contains(&revert));
+    assert!(text.contains("shared pre-merge-base path history"));
+    assert!(text.contains("none recorded"));
+    assert_eq!(state(&repo), before);
+}
+
+#[test]
+fn bounds_shared_history_per_conflicted_file() {
+    let repo = TestRepo::new();
+    commit(&repo, "a.txt", "value=0\n", "base a");
+    commit(&repo, "b.txt", "base b\n", "base b");
+    for value in 1..=5 {
+        commit(
+            &repo,
+            "a.txt",
+            &format!("value={value}\n"),
+            &format!("shared change {value}"),
+        );
+    }
+    git(repo.dir.path(), ["branch", "other"]);
+    commit(&repo, "a.txt", "value=ours\n", "change ours");
+    repo.index();
+    git(repo.dir.path(), ["checkout", "other"]);
+    commit(&repo, "a.txt", "value=theirs\n", "change theirs");
+    git(repo.dir.path(), ["checkout", "main"]);
+    merge(&repo, "other");
+
+    let report = json(repo.run(["conflicts", "--json"]));
+    let file = &report["files"][0];
+    assert_eq!(file["related_history"].as_array().unwrap().len(), 3);
+    assert_eq!(file["related_history_total"], 6);
+    assert_eq!(file["related_history_truncated"], true);
+    assert_eq!(report["limits"]["related_history_per_file"], 3);
+}
 fn state(repo: &TestRepo) -> Vec<Vec<u8>> {
     let root = repo.dir.path();
     let mut state = vec![
@@ -410,7 +527,7 @@ fn reports_same_commit_callers_tests_and_bounded_matching_hunks() {
     let report = json(repo.run(["conflicts", "--json"]));
     let materials = report["associated_materials"].as_array().unwrap();
     assert_eq!(materials.len(), 2);
-    assert_eq!(report["schema_version"], 2);
+    assert_eq!(report["schema_version"], 3);
     assert_eq!(report["associated_materials_truncated"], false);
 
     let caller = materials

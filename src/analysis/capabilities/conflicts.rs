@@ -1,9 +1,14 @@
 //! Direct cached file-change evidence, separately oriented to pinned merge sides.
 use crate::analysis::{
-    query::{Outcome, QueryReport},
+    provenance::revert_reason,
+    query::{self, Outcome, QueryReport},
     retrieval,
 };
-use crate::{app::AppError, cache, git};
+use crate::{
+    app::AppError,
+    cache::{self, QuerySession, SearchFilter},
+    git,
+};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 const FILE_LIMIT: usize = 100;
@@ -19,6 +24,7 @@ const ASSOCIATED_HUNK_BYTE_LIMIT: usize = 16 * 1024;
 const ASSOCIATED_HUNK_LIMIT: usize = 3;
 const ASSOCIATED_LINE_LIMIT: usize = 4;
 const ASSOCIATED_LINE_CHAR_LIMIT: usize = 240;
+const RELATED_HISTORY_LIMIT: usize = 3;
 
 #[derive(Serialize)]
 pub(crate) struct Report {
@@ -51,6 +57,7 @@ pub(crate) struct Limits {
     associated_lines_per_hunk: usize,
     associated_line_characters: usize,
     message_characters: usize,
+    related_history_per_file: usize,
 }
 #[derive(Serialize)]
 pub(crate) struct File {
@@ -58,6 +65,9 @@ pub(crate) struct File {
     pub(crate) path_bytes: Vec<u8>,
     pub(crate) unsupported: Option<String>,
     pub(crate) sides: Vec<Side>,
+    pub(crate) related_history: Vec<RelatedLead>,
+    pub(crate) related_history_total: usize,
+    pub(crate) related_history_truncated: bool,
 }
 #[derive(Serialize)]
 pub(crate) struct Side {
@@ -92,6 +102,28 @@ pub(crate) struct PathReference {
     pub(crate) status: String,
     pub(crate) old_path: Option<String>,
     pub(crate) new_path: Option<String>,
+}
+#[derive(Serialize)]
+pub(crate) struct RelatedLead {
+    pub(crate) commit: String,
+    pub(crate) path: String,
+    pub(crate) association: &'static str,
+    pub(crate) related_sides: [&'static str; 2],
+    pub(crate) selection_basis: Vec<&'static str>,
+    pub(crate) subject: String,
+    pub(crate) recorded_reason: Option<String>,
+    pub(crate) reason_source: &'static str,
+    pub(crate) reverted_by: Option<HistoricalReference>,
+    pub(crate) reverts_commit: Option<String>,
+    pub(crate) message_truncated: bool,
+    pub(crate) message_lossy: bool,
+    pub(crate) regions: Vec<Region>,
+    pub(crate) regions_truncated: bool,
+}
+#[derive(Serialize)]
+pub(crate) struct HistoricalReference {
+    pub(crate) commit: String,
+    pub(crate) subject: String,
 }
 #[derive(Serialize)]
 pub(crate) struct Region {
@@ -140,7 +172,6 @@ pub(crate) struct AssociatedHunk {
     pub(crate) lines: Vec<String>,
     pub(crate) excerpt_truncated: bool,
 }
-
 fn bounded(text: &str) -> (String, bool) {
     (
         text.chars().take(MESSAGE_LIMIT).collect(),
@@ -559,6 +590,14 @@ pub(crate) fn execute(paths: Vec<String>, limit: usize) -> Result<Outcome, AppEr
         histories.push((name, endpoint, reachable, incarnations, endpoint_paths));
     }
     let mut associated_materials = AssociatedMaterialCollector::new(&session, &unmerged_paths);
+    let shared_reachable = excluded
+        .intersection(&cached)
+        .cloned()
+        .collect::<HashSet<_>>();
+    let shared_revisions = shared_reachable.iter().cloned().collect::<Vec<_>>();
+    let shared_scope =
+        query::scope::install_shared_history_scope(&session, &shared_revisions, &target.base)?;
+    let reverts = retrieval::reverts(&session, Some(&shared_scope))?;
     let mut files = Vec::new();
     for file in target.files {
         let mut sides = Vec::new();
@@ -712,11 +751,28 @@ pub(crate) fn execute(paths: Vec<String>, limit: usize) -> Result<Outcome, AppEr
                 });
             }
         }
+
+        let (related_history, related_history_total, related_history_truncated) =
+            if file.unsupported.is_none() {
+                related_history(
+                    &session,
+                    &file.path,
+                    &shared_reachable,
+                    &shared_scope,
+                    &reverts,
+                    RELATED_HISTORY_LIMIT,
+                )?
+            } else {
+                (Vec::new(), 0, false)
+            };
         files.push(File {
             path: String::from_utf8_lossy(&file.path).into_owned(),
             path_bytes: file.path,
             unsupported: file.unsupported,
             sides,
+            related_history,
+            related_history_total,
+            related_history_truncated,
         });
     }
     warnings.sort();
@@ -725,7 +781,7 @@ pub(crate) fn execute(paths: Vec<String>, limit: usize) -> Result<Outcome, AppEr
         && !files_truncated
         && files.iter().all(|file| file.unsupported.is_none());
     let report = Report {
-        schema_version: 2,
+        schema_version: 3,
         ours: target.ours,
         theirs: target.theirs,
         merge_base: target.base,
@@ -749,13 +805,16 @@ pub(crate) fn execute(paths: Vec<String>, limit: usize) -> Result<Outcome, AppEr
             associated_lines_per_hunk: ASSOCIATED_LINE_LIMIT,
             associated_line_characters: ASSOCIATED_LINE_CHAR_LIMIT,
             message_characters: MESSAGE_LIMIT,
+            related_history_per_file: RELATED_HISTORY_LIMIT,
         },
         limitations: vec![
             "History is bounded to each side's commits after the merge base and selected by file-incarnation identity; detected renames are followed. Cross-file migration, semantic responsibility, and paths without an established incarnation are not inferred. Cached merge changes are first-parent diffs."
                 .to_owned(),
             "Associated material is selected from same-commit code, test and configuration changes by exact distinctive identities in changed lines; this historical association is not proof of dependency or a requirement that files change together."
                 .to_owned(),
-            "Commit message bodies are recorded participant reasons, bounded and decoded as UTF-8 with replacement for invalid bytes (message_lossy identifies affected leads); absence does not establish that no reason existed."
+            "Shared history is limited to same-path textual changes in cached merge-base ancestry shared by both pinned endpoints; these are contextual precedents, not causal explanations. Rename lineage and associated changes are not included in this section."
+                .to_owned(),
+            "Commit message bodies and revert reasons are recorded participant text, bounded and decoded as UTF-8 with replacement for invalid bytes (message_lossy identifies affected leads); absence does not establish that no reason existed."
                 .to_owned(),
         ],
         warnings,
@@ -767,6 +826,192 @@ pub(crate) fn execute(paths: Vec<String>, limit: usize) -> Result<Outcome, AppEr
     })
 }
 
+fn related_history(
+    session: &QuerySession,
+    path: &[u8],
+    reachable: &HashSet<String>,
+    scope: &SearchFilter,
+    reverts: &retrieval::RevertIndex,
+    limit: usize,
+) -> Result<(Vec<RelatedLead>, usize, bool), AppError> {
+    let history = session
+        .path_history(path, reachable)?
+        .into_iter()
+        .filter(|commit| {
+            commit.changes.iter().any(|change| {
+                change.old_path.as_deref() == Some(path) || change.new_path.as_deref() == Some(path)
+            })
+        })
+        .collect::<Vec<_>>();
+    let history_oids = history
+        .iter()
+        .map(|commit| commit.oid.clone())
+        .collect::<HashSet<_>>();
+    let mut paired_reverts = HashSet::new();
+    let mut linked_reverts = HashMap::new();
+    for commit in &history {
+        if let Some(revert) = retrieval::link_change(
+            session,
+            reverts,
+            Some(scope),
+            &commit.oid,
+            &commit.paths,
+            commit.position,
+        )? {
+            if history_oids.contains(&revert.oid) {
+                paired_reverts.insert(revert.oid.clone());
+            }
+            linked_reverts.insert(commit.oid.clone(), revert);
+        }
+    }
+
+    let total = history.len().saturating_sub(paired_reverts.len());
+    let mut candidates = history
+        .into_iter()
+        .filter(|commit| !paired_reverts.contains(&commit.oid))
+        .collect::<Vec<_>>();
+    // Put explicit revert links first; keep recency within each priority.
+    candidates.sort_by_key(|commit| {
+        !(linked_reverts.contains_key(&commit.oid) || reverts.is_revert(&commit.oid))
+    });
+    let mut leads = Vec::new();
+    for commit in candidates.into_iter().take(limit) {
+        let linked_revert = linked_reverts.get(&commit.oid).copied();
+        let is_revert = reverts.is_revert(&commit.oid);
+        let (subject, subject_truncated) = bounded(&commit.subject);
+        let (recorded_reason, reason_truncated, reason_source) = if let Some(revert) = linked_revert
+        {
+            let (reason, truncated) =
+                bounded_optional(revert_reason(&revert.subject, &revert.body));
+            (
+                reason,
+                truncated,
+                "recorded in the reverting commit body; not inferred",
+            )
+        } else if is_revert {
+            let (reason, truncated) =
+                bounded_optional(revert_reason(&commit.subject, &commit.body));
+            (
+                reason,
+                truncated,
+                "recorded in this revert commit body; not inferred",
+            )
+        } else {
+            let (reason, truncated) = bounded(&commit.body);
+            (
+                (!reason.trim().is_empty()).then_some(reason),
+                truncated,
+                "commit message body (recorded participant text; not inferred or verified)",
+            )
+        };
+        let (reverted_by, revert_subject_truncated, revert_message_lossy) =
+            if let Some(revert) = linked_revert {
+                let (subject, truncated) = bounded(&revert.subject);
+                (
+                    Some(HistoricalReference {
+                        commit: revert.oid.clone(),
+                        subject,
+                    }),
+                    truncated,
+                    message_is_lossy(session, &revert.oid)?,
+                )
+            } else {
+                (None, false, false)
+            };
+        let mut selection_basis = vec![
+            "same conflicted path changed in cached history reachable from the merge base",
+            "merge-base ancestry is shared by the pinned ours and theirs endpoints",
+        ];
+        if linked_revert.is_some() {
+            selection_basis.push(if reverts.of(&commit.oid).is_some() {
+                "revert trailer names this change"
+            } else {
+                "revert covers all changed paths without an intervening path touch"
+            });
+        } else if is_revert {
+            selection_basis.push("commit subject identifies a revert or rollback");
+        }
+        let (regions, regions_truncated) = history_regions(session, &commit, path)?;
+        leads.push(RelatedLead {
+            commit: commit.oid.clone(),
+            path: String::from_utf8_lossy(path).into_owned(),
+            association: "shared pre-merge-base path history",
+            related_sides: ["ours", "theirs"],
+            selection_basis,
+            subject,
+            recorded_reason,
+            reason_source,
+            reverted_by,
+            reverts_commit: reverts.target_of(&commit.oid).map(str::to_owned),
+            message_truncated: subject_truncated || reason_truncated || revert_subject_truncated,
+            message_lossy: message_is_lossy(session, &commit.oid)? || revert_message_lossy,
+            regions,
+            regions_truncated,
+        });
+    }
+    let truncated = total > leads.len();
+    Ok((leads, total, truncated))
+}
+
+fn history_regions(
+    session: &QuerySession,
+    commit: &cache::HistoryCommit,
+    path: &[u8],
+) -> Result<(Vec<Region>, bool), AppError> {
+    let matching = session
+        .history_hunks(&commit.oid)?
+        .into_iter()
+        .filter(|hunk| {
+            commit.changes.iter().any(|change| {
+                change.ordinal == hunk.change_ordinal
+                    && (change.old_path.as_deref() == Some(path)
+                        || change.new_path.as_deref() == Some(path))
+            })
+        })
+        .collect::<Vec<_>>();
+    let truncated = matching.len() > REGION_LIMIT;
+    let regions = matching
+        .into_iter()
+        .take(REGION_LIMIT)
+        .map(|hunk| {
+            let change = commit
+                .changes
+                .iter()
+                .find(|change| change.ordinal == hunk.change_ordinal)
+                .expect("history hunk must belong to a commit change");
+            Region {
+                change_ordinal: hunk.change_ordinal,
+                hunk_ordinal: hunk.hunk_ordinal,
+                old_path: change
+                    .old_path
+                    .as_ref()
+                    .map(|path| String::from_utf8_lossy(path).into_owned()),
+                new_path: change
+                    .new_path
+                    .as_ref()
+                    .map(|path| String::from_utf8_lossy(path).into_owned()),
+                old_start: hunk.old_start,
+                old_lines: hunk.old_lines,
+                new_start: hunk.new_start,
+                new_lines: hunk.new_lines,
+            }
+        })
+        .collect();
+    Ok((regions, truncated))
+}
+
+fn bounded_optional(text: Option<String>) -> (Option<String>, bool) {
+    text.map_or((None, false), |text| {
+        let (bounded, truncated) = bounded(&text);
+        (Some(bounded), truncated)
+    })
+}
+
+fn message_is_lossy(session: &QuerySession, oid: &str) -> Result<bool, AppError> {
+    Ok(session
+        .commit_message(oid)?
+        .is_some_and(|message| std::str::from_utf8(&message).is_err()))
+}
 #[cfg(test)]
 mod tests {
     use super::*;
