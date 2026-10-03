@@ -1,9 +1,11 @@
 use super::{escape, json::json_scope, material::scope_summary};
 use crate::analysis::PatternsReport as Report;
 
+const NOTICE: &str = "Historical co-change material, not a checklist of required edits. Detected Git rename records connect paths; deletion ends an incarnation, while recreation and copies start new ones. Undetected renames are not inferred.";
+
 pub(super) fn format_report(report: &Report) -> String {
     let mut lines = vec![
-        "Recurring concrete-path combinations (all seeds)".to_owned(),
+        "Recurring file-incarnation combinations (all seeds)".to_owned(),
         format!("Target: {}", report.target_revision),
         format!(
             "Eligible seed commits: {}; excluded merges: {}; excluded >50-path commits: {}",
@@ -19,7 +21,7 @@ pub(super) fn format_report(report: &Report) -> String {
         "Coverage: available published-cache commits only; uncached history is not searched."
             .to_owned(),
     );
-    lines.push("Historical co-change material, not a checklist of required edits. Rename continuity is not inferred.".to_owned());
+    lines.push(NOTICE.to_owned());
     if report.patterns.is_empty() {
         lines.push("No recurring combinations meet the minimum support.".to_owned());
     }
@@ -31,19 +33,38 @@ pub(super) fn format_report(report: &Report) -> String {
             pattern.proportion * 100.0
         ));
         for member in &pattern.members {
+            let target_paths = member
+                .target_paths
+                .iter()
+                .map(|path| escape::path(path))
+                .collect::<Vec<_>>();
+            let presence = if target_paths.is_empty() {
+                "missing at target".to_owned()
+            } else {
+                format!("present at target as {}", target_paths.join(", "))
+            };
             lines.push(format!(
-                "  {}{} [{} at target]",
+                "  {}{} [incarnation introduced at {}; {presence}]",
                 escape::path(&member.path),
                 if member.seed { " (seed)" } else { "" },
-                if member.exists_at_target {
-                    "present"
-                } else {
-                    "missing"
-                }
+                member.introduced_in,
             ));
         }
-        for (oid, _) in &pattern.citations {
-            lines.push(format!("  commit: {oid}"));
+        for citation in &pattern.citations {
+            lines.push(format!("  commit: {}", citation.oid));
+            for member in &citation.members {
+                let changed_paths = member
+                    .changed_paths
+                    .iter()
+                    .map(|path| escape::path(path))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                lines.push(format!(
+                    "    incarnation introduced at {} as {}; changed paths: {changed_paths}",
+                    member.introduced_in,
+                    escape::path(&member.introduced_path),
+                ));
+            }
         }
         if pattern.references_not_shown > 0 {
             lines.push(format!(
@@ -66,9 +87,23 @@ pub(super) fn format_json_report(
     warnings: &[String],
 ) -> Result<String, serde_json::Error> {
     let patterns = report.patterns.iter().map(|pattern| serde_json::json!({
-        "members": pattern.members.iter().map(|member| serde_json::json!({"path": escape::path(&member.path), "seed": member.seed, "exists_at_target": member.exists_at_target})).collect::<Vec<_>>(),
+        "members": pattern.members.iter().map(|member| serde_json::json!({
+            "path": escape::path(&member.path),
+            "introduced_in": member.introduced_in,
+            "seed": member.seed,
+            "exists_at_target": member.exists_at_target,
+            "target_paths": member.target_paths.iter().map(|path| escape::path(path)).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>(),
         "support_count": pattern.support_count, "proportion": pattern.proportion,
-        "citations": pattern.citations.iter().map(|(oid, time)| serde_json::json!({"oid": oid, "commit_time": time})).collect::<Vec<_>>(),
+        "citations": pattern.citations.iter().map(|citation| serde_json::json!({
+            "oid": citation.oid,
+            "commit_time": citation.commit_time,
+            "members": citation.members.iter().map(|member| serde_json::json!({
+                "introduced_in": member.introduced_in,
+                "introduced_path": escape::path(&member.introduced_path),
+                "changed_paths": member.changed_paths.iter().map(|path| escape::path(path)).collect::<Vec<_>>(),
+            })).collect::<Vec<_>>(),
+        })).collect::<Vec<_>>(),
         "references_not_shown": pattern.references_not_shown,
     })).collect::<Vec<_>>();
     serde_json::to_string_pretty(&serde_json::json!({
@@ -77,6 +112,6 @@ pub(super) fn format_json_report(
         "history_coverage": "available published-cache commits only",
         "excluded_merges": report.excluded_merges, "excluded_mass_changes": report.excluded_mass_changes,
         "matched_count": report.matched_count, "returned_count": patterns.len(), "patterns": patterns,
-        "warnings": warnings, "notices": ["Historical co-change material, not a checklist of required edits. Rename continuity is not inferred."],
+        "warnings": warnings, "notices": [NOTICE],
     }))
 }
