@@ -33,7 +33,7 @@ pub(super) fn append(path: &Path, snapshot: &Snapshot) -> Result<usize, AppError
              ON commit_parents(external_oid, commit_id) WHERE external_oid IS NOT NULL",
         )
         .map_err(|error| cache_error("indexing unresolved commit parents", error))?;
-    write_snapshot_rows(&transaction, snapshot, replace_commit)?;
+    write_append_rows(&transaction, snapshot, replace_commit)?;
     replace_metadata(&transaction, snapshot, None)?;
     transaction
         .execute(
@@ -116,40 +116,67 @@ fn write_snapshot_rows(
     snapshot: &Snapshot,
     write_commit: fn(&Connection, &Commit) -> Result<(), AppError>,
 ) -> Result<(), AppError> {
-    let change_ids = {
-        let paths_by_commit = paths_by_commit(snapshot);
-        let projected_paths = projected_paths_by_commit(snapshot);
-        for commit in &snapshot.commits {
-            write_commit(transaction, commit)?;
-        }
-        for commit in &snapshot.commits {
-            insert_parents(transaction, commit)?;
-            insert_document(
-                transaction,
-                commit,
-                paths_by_commit
-                    .get(&commit.oid)
-                    .map(Vec::as_slice)
-                    .unwrap_or(&[]),
-            )?;
-        }
-        relink_cached_parents(transaction, snapshot)?;
-        let change_ids = insert_changes(transaction, &snapshot.changes)?;
-        for commit in &snapshot.commits {
-            insert_path_projection(
-                transaction,
-                commit,
-                projected_paths
-                    .get(&commit.oid)
-                    .map(Vec::as_slice)
-                    .unwrap_or(&[]),
-            )?;
-        }
-        change_ids
-    };
-    write_hunks(transaction, &snapshot.patches, &change_ids)
+    let paths_by_commit = paths_by_commit(snapshot);
+    let projected_paths = projected_paths_by_commit(snapshot);
+    for commit in &snapshot.commits {
+        write_commit(transaction, commit)?;
+    }
+    for commit in &snapshot.commits {
+        insert_parents(transaction, commit)?;
+        insert_document(
+            transaction,
+            commit,
+            paths_by_commit
+                .get(&commit.oid)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]),
+        )?;
+    }
+    write_snapshot_projections(transaction, snapshot, &projected_paths)
 }
 
+fn write_append_rows(
+    transaction: &rusqlite::Transaction<'_>,
+    snapshot: &Snapshot,
+    write_commit: fn(&Connection, &Commit) -> Result<(), AppError>,
+) -> Result<(), AppError> {
+    let paths_by_commit = paths_by_commit(snapshot);
+    let projected_paths = projected_paths_by_commit(snapshot);
+    // Write descendants first so restored parents can be positioned before them.
+    for commit in snapshot.commits.iter().rev() {
+        write_commit(transaction, commit)?;
+        insert_parents(transaction, commit)?;
+        insert_document(
+            transaction,
+            commit,
+            paths_by_commit
+                .get(&commit.oid)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]),
+        )?;
+    }
+    write_snapshot_projections(transaction, snapshot, &projected_paths)
+}
+
+fn write_snapshot_projections(
+    transaction: &rusqlite::Transaction<'_>,
+    snapshot: &Snapshot,
+    projected_paths: &HashMap<String, Vec<ProjectedPath>>,
+) -> Result<(), AppError> {
+    relink_cached_parents(transaction, snapshot)?;
+    let change_ids = insert_changes(transaction, &snapshot.changes)?;
+    for commit in &snapshot.commits {
+        insert_path_projection(
+            transaction,
+            commit,
+            projected_paths
+                .get(&commit.oid)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]),
+        )?;
+    }
+    write_hunks(transaction, &snapshot.patches, &change_ids)
+}
 fn relink_cached_parents(connection: &Connection, snapshot: &Snapshot) -> Result<(), AppError> {
     const CHUNK_SIZE: usize = 500;
 
@@ -311,14 +338,92 @@ fn replace_commit(connection: &Connection, commit: &Commit) -> Result<(), AppErr
 }
 
 fn insert_commit(connection: &Connection, commit: &Commit) -> Result<(), AppError> {
+    let position = position_for_insert(connection, &commit.oid)?;
     let (message, message_length) = encode(&commit.message);
     connection
         .execute(
             "INSERT INTO commits(position, oid, message, message_length, commit_time)
-             VALUES ((SELECT COALESCE(MAX(position), -1) + 1 FROM commits), ?1, ?2, ?3, ?4)",
-            params![commit.oid, message, message_length, commit.time],
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![position, commit.oid, message, message_length, commit.time],
         )
         .map_err(|error| cache_error("writing commit", error))?;
+    Ok(())
+}
+
+fn position_for_insert(connection: &Connection, oid: &str) -> Result<i64, AppError> {
+    let child_position: Option<i64> = connection
+        .query_row(
+            "SELECT MIN(child.position)
+             FROM commit_parents AS parent
+             JOIN commits AS child ON child.commit_id = parent.commit_id
+             WHERE parent.external_oid = ?1",
+            [oid],
+            |row| row.get(0),
+        )
+        .map_err(|error| cache_error("finding restored commit children", error))?;
+    if let Some(child_position) = child_position {
+        if child_position > 0 {
+            let available_position = child_position - 1;
+            let available: bool = connection
+                .query_row(
+                    "SELECT NOT EXISTS(SELECT 1 FROM commits WHERE position = ?1)",
+                    [available_position],
+                    |row| row.get(0),
+                )
+                .map_err(|error| cache_error("checking restored commit position", error))?;
+            if available {
+                return Ok(available_position);
+            }
+        }
+        shift_positions_from(connection, child_position)?;
+        return Ok(child_position);
+    }
+
+    let max_position: Option<i64> = connection
+        .query_row("SELECT MAX(position) FROM commits", [], |row| row.get(0))
+        .map_err(|error| cache_error("finding last commit position", error))?;
+    match max_position {
+        Some(position) => position
+            .checked_add(1)
+            .ok_or_else(|| cache_error("positioning commit", "commit positions exceeded limits")),
+        None => Ok(0),
+    }
+}
+
+fn shift_positions_from(connection: &Connection, position: i64) -> Result<(), AppError> {
+    let max_position: i64 = connection
+        .query_row("SELECT MAX(position) FROM commits", [], |row| row.get(0))
+        .map_err(|error| cache_error("finding last commit position", error))?;
+    let offset = max_position
+        .checked_sub(position)
+        .and_then(|distance| distance.checked_add(2))
+        .filter(|offset| max_position.checked_add(*offset).is_some())
+        .ok_or_else(|| {
+            cache_error(
+                "shifting commit positions",
+                "commit positions exceeded limits",
+            )
+        })?;
+    let temporary_start = max_position.checked_add(2).ok_or_else(|| {
+        cache_error(
+            "shifting commit positions",
+            "commit positions exceeded limits",
+        )
+    })?;
+
+    // Stage above the current range first because commit positions are unique.
+    connection
+        .execute(
+            "UPDATE commits SET position = position + ?1 WHERE position >= ?2",
+            params![offset, position],
+        )
+        .map_err(|error| cache_error("staging commit positions", error))?;
+    connection
+        .execute(
+            "UPDATE commits SET position = position - ?1 + 1 WHERE position >= ?2",
+            params![offset, temporary_start],
+        )
+        .map_err(|error| cache_error("shifting commit positions", error))?;
     Ok(())
 }
 
