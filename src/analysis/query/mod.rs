@@ -26,7 +26,9 @@ pub(crate) enum Request {
         days: usize,
         max_commits: usize,
     },
-    Hotspots,
+    Hotspots {
+        path_prefix: Option<String>,
+    },
     Context {
         staged: bool,
         hybrid: bool,
@@ -177,7 +179,7 @@ impl Context {
             QueryReport::Analysis(report) => report.scope = scope,
             QueryReport::Timeline(report) => report.scope = scope,
             QueryReport::TraceRemoval(report) => report.scope = scope,
-            QueryReport::Hotspots(_) => {}
+            QueryReport::Hotspots(report) => report.scope = scope,
         }
         Outcome {
             progress: self.session.progress().to_vec(),
@@ -200,7 +202,7 @@ pub(crate) fn execute(request: Request, options: Options) -> Result<Outcome, App
             max_commits,
         } => followups::run(revision, paths, to_rev, days, max_commits, options),
         Request::Context { staged, hybrid } => run_context(staged, hybrid, options),
-        Request::Hotspots => run_hotspots(options.limit),
+        Request::Hotspots { path_prefix } => run_hotspots(options, path_prefix),
         Request::Search { words, hybrid } => {
             if hybrid {
                 run_hybrid_search(words, options)
@@ -535,17 +537,52 @@ fn run_trace_fix(
     Ok(context.finish(QueryReport::Analysis(report)))
 }
 
-fn run_hotspots(limit: usize) -> Result<Outcome, AppError> {
+fn normalize_hotspot_path_prefix(prefix: Option<String>) -> Result<Option<String>, AppError> {
+    let Some(prefix) = prefix else {
+        return Ok(None);
+    };
+    let normalized = prefix.replace('\\', "/");
+    let normalized = normalized.trim_end_matches('/');
+    let bytes = normalized.as_bytes();
+    let is_windows_drive = bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
+    if normalized.is_empty()
+        || normalized.starts_with('/')
+        || is_windows_drive
+        || normalized.contains('\0')
+        || normalized
+            .split('/')
+            .any(|component| component.is_empty() || component == "." || component == "..")
+    {
+        return Err(AppError::input(
+            "--path-prefix must be a repository-relative directory without `.` or `..` components",
+        ));
+    }
+    Ok(Some(normalized.to_owned()))
+}
+
+fn run_hotspots(options: Options, path_prefix: Option<String>) -> Result<Outcome, AppError> {
+    let path_prefix = normalize_hotspot_path_prefix(path_prefix)?;
     let repository = Repository::discover()?;
     let session = cache::open_query(&repository.root)?;
-    let target = session.completed_tip()?;
+    let target = match options.scope.to_rev.as_deref() {
+        Some(revision) => repository.resolve_commit(revision)?,
+        None => session.completed_tip()?,
+    };
     session.require_revision(&target)?;
-    let paths = repository.tracked_files(&target)?;
-    let touches = session.hotspot_touches(&target, paths)?;
-    let report = super::HotspotsReport::aggregate(target, touches, limit);
-    Ok(Outcome {
-        progress: session.progress().to_vec(),
-        warnings: session.warnings().to_vec(),
-        report: QueryReport::Hotspots(report),
-    })
+    let context = Context::for_target(session, options.scope, &target)?;
+    let eligible = context.eligible_revisions(&target)?;
+    let paths = repository
+        .tracked_files(&target)?
+        .into_iter()
+        .filter(|path| {
+            path_prefix.as_ref().is_none_or(|prefix| {
+                path.starts_with(prefix.as_bytes()) && path.get(prefix.len()) == Some(&b'/')
+            })
+        })
+        .collect();
+    let touches = context
+        .session
+        .hotspot_touches(&target, paths, eligible.as_ref())?;
+    let report = super::HotspotsReport::aggregate(target, touches, options.limit, path_prefix);
+    Ok(context.finish(QueryReport::Hotspots(report)))
 }

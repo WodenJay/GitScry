@@ -114,11 +114,16 @@ pub(crate) fn execute(
             });
         }
         Command::Update => return update::run(&mut |stage| report(Progress::Update(stage))),
-        Command::Hotspots { limit, .. } => (
-            Request::Hotspots,
+        Command::Hotspots {
+            limit,
+            path_prefix,
+            scope,
+            ..
+        } => (
+            Request::Hotspots { path_prefix },
             limit,
             false,
-            SearchScopeOptions::default(),
+            scope.into(),
         ),
         Command::Search {
             query,

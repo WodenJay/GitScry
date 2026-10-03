@@ -95,13 +95,17 @@ Examples:
     },
     #[command(
         about = "Rank current files by repeated historical touches",
-        long_about = "Rank tracked files present at the published cache tip by distinct non-merge touching commits. Default limit: 20. Reachable branch commits and root introductions count; merge-only conflict resolutions do not. Detected renames preserve identity, copies do not; deletion/recreation starts a new incarnation. Binary, permission and pure rename changes count. No generated/vendor/lockfile or large-commit exclusions. Last changed is the maximum eligible committer time in UTC. History and rename continuity are bounded by published cache coverage and available local objects. Read-only: does not index or fetch.\n\nExamples:\n  gitscry hotspots\n  gitscry hotspots --json --limit 10"
+        long_about = "Rank tracked files present at the selected target (the published cache tip by default) by distinct non-merge touching commits. Default limit: 20. Reachable branch commits and root introductions count; merge-only conflict resolutions do not. Detected renames preserve identity, copies do not; deletion/recreation starts a new incarnation. Binary, permission and pure rename changes count. No generated/vendor/lockfile or large-commit exclusions. Last changed is the maximum eligible committer time in UTC. `--from-rev` excludes its commit and ancestors; `--to-rev` includes the selected target and ancestors. `--since` and `--until` filter inclusive committer-time bounds; all bounds combine and never reset rename lineage. `--path-prefix DIR` selects target-present files below a literal repository-relative directory (not a glob; `src` matches `src/` descendants, not `src-old`). History and rename continuity are bounded by published cache coverage and available local objects. Read-only: does not index or fetch.\n\nExamples:\n  gitscry hotspots\n  gitscry hotspots --json --limit 10"
     )]
     Hotspots {
         #[arg(long, default_value = "20", value_parser = parse_limit)]
         limit: usize,
         #[arg(long)]
         json: bool,
+        #[arg(long, value_name = "DIR")]
+        path_prefix: Option<String>,
+        #[command(flatten)]
+        scope: HistoricalScopeArgs,
     },
     #[command(
         about = "Discover historical changes, abandonments, paths and tests",

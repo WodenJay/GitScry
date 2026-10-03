@@ -182,6 +182,7 @@ impl QuerySession {
         &self,
         target: &str,
         paths: Vec<Vec<u8>>,
+        eligible_revisions: Option<&HashSet<String>>,
     ) -> Result<Vec<FileTouches>, AppError> {
         let HistoryGraph { nodes, renames } = load_history(&self.connection, Some(target))?;
         let target_id: i64 = self
@@ -220,7 +221,10 @@ impl QuerySession {
                         .changes
                         .iter()
                         .find(|c| c.new.as_deref() == Some(&alias));
-                    if node.parents.len() <= 1 && change.is_some() {
+                    if node.parents.len() <= 1
+                        && change.is_some()
+                        && eligible_revisions.is_none_or(|eligible| eligible.contains(&node.oid))
+                    {
                         touches.insert(id);
                     }
                     let previous = match change {

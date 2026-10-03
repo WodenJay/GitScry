@@ -1,10 +1,12 @@
 //! Aggregation over eligible touches, independent of display and lineage traversal.
-use super::capabilities::timeline::format_timestamp;
+use super::{SearchScopeInfo, capabilities::timeline::format_timestamp};
 use crate::cache::FileTouches;
 
 pub(crate) struct Report {
     pub(crate) target: String,
     pub(crate) total: usize,
+    pub(crate) scope: Option<SearchScopeInfo>,
+    pub(crate) path_prefix: Option<String>,
     pub(crate) files: Vec<File>,
 }
 pub(crate) struct File {
@@ -13,7 +15,12 @@ pub(crate) struct File {
     pub(crate) last_changed: String,
 }
 impl Report {
-    pub(crate) fn aggregate(target: String, touches: Vec<FileTouches>, limit: usize) -> Self {
+    pub(crate) fn aggregate(
+        target: String,
+        touches: Vec<FileTouches>,
+        limit: usize,
+        path_prefix: Option<String>,
+    ) -> Self {
         let mut files: Vec<_> = touches
             .into_iter()
             .filter_map(|touches| {
@@ -34,6 +41,8 @@ impl Report {
         files.truncate(limit);
         Self {
             target,
+            scope: None,
+            path_prefix,
             total,
             files,
         }
