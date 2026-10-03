@@ -527,7 +527,7 @@ mod unix {
                     .chain(std::env::split_paths(&original_path)),
             )
             .unwrap();
-            Command::new(env!("CARGO_BIN_EXE_gitscry"))
+            support::isolated_gitscry_command(repo.user_data_dir())
                 .args(args)
                 .current_dir(repo.dir.path())
                 .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -579,7 +579,7 @@ mod unix {
             .find(|candidate| candidate.is_file())
             .expect("git executable is available on PATH");
         std::os::unix::fs::symlink(git, path.path().join("git")).unwrap();
-        Command::new(env!("CARGO_BIN_EXE_gitscry"))
+        support::isolated_gitscry_command(repo.user_data_dir())
             .args(args)
             .current_dir(repo.dir.path())
             .env("GIT_CONFIG_NOSYSTEM", "1")

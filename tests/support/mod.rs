@@ -10,6 +10,7 @@ use tempfile::TempDir;
 
 pub(crate) struct TestRepo {
     pub(crate) dir: TempDir,
+    user_data: TempDir,
 }
 
 impl TestRepo {
@@ -21,7 +22,8 @@ impl TestRepo {
             dir.path(),
             ["config", "user.email", "gitscry@example.invalid"],
         );
-        Self { dir }
+        let user_data = tempfile::tempdir().expect("create temporary user data directory");
+        Self { dir, user_data }
     }
 
     pub(crate) fn head(&self) -> String {
@@ -40,8 +42,25 @@ impl TestRepo {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        Self::run_at(self.dir.path(), args)
+        Self::run_at_with_user_data_dir(self.dir.path(), args, self.user_data.path())
     }
+
+    pub(crate) fn run_with_user_data_dir<I, S>(
+        &self,
+        args: I,
+        user_data_dir: &Path,
+    ) -> std::process::Output
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        Self::run_at_with_user_data_dir(self.dir.path(), args, user_data_dir)
+    }
+
+    pub(crate) fn user_data_dir(&self) -> &Path {
+        self.user_data.path()
+    }
+
     pub(crate) fn index(&self) {
         let output = self.run(["index"]);
         assert!(
@@ -56,14 +75,45 @@ impl TestRepo {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
-        Command::new(env!("CARGO_BIN_EXE_gitscry"))
+        let user_data = tempfile::tempdir().expect("create temporary user data directory");
+        Self::run_at_with_user_data_dir(cwd, args, user_data.path())
+    }
+
+    pub(crate) fn run_at_with_user_data_dir<I, S>(
+        cwd: &Path,
+        args: I,
+        user_data_dir: &Path,
+    ) -> std::process::Output
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
+        Self::command_at(cwd, user_data_dir)
             .args(args)
-            .current_dir(cwd)
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", cwd.join("global-config"))
             .output()
             .expect("run gitscry")
     }
+
+    pub(crate) fn command_at(cwd: &Path, user_data_dir: &Path) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_gitscry"));
+        command
+            .current_dir(cwd)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", cwd.join("global-config"))
+            .env("LOCALAPPDATA", user_data_dir)
+            .env("XDG_DATA_HOME", user_data_dir.join("xdg"))
+            .env("HOME", user_data_dir.join("home"));
+        command
+    }
+}
+
+pub(crate) fn isolated_gitscry_command(user_data_dir: &Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_gitscry"));
+    command
+        .env("LOCALAPPDATA", user_data_dir)
+        .env("XDG_DATA_HOME", user_data_dir.join("xdg"))
+        .env("HOME", user_data_dir.join("home"));
+    command
 }
 
 pub(crate) fn git_command(cwd: &Path) -> Command {

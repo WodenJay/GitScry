@@ -5,6 +5,7 @@ pub(crate) mod followups;
 mod generation;
 mod history;
 mod hotspots;
+pub(crate) mod usage;
 pub(crate) use hotspots::{FileIncarnation, FileTouches, PatternIncarnations};
 mod payload;
 mod query;

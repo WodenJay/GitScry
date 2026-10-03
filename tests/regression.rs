@@ -1,6 +1,6 @@
 mod support;
 
-use std::{fs, path::Path, process::Command};
+use std::{fs, path::Path};
 
 use support::{TestRepo, git, git_command, git_stdout};
 
@@ -493,7 +493,7 @@ fn regression_warns_for_shallow_history() {
         String::from_utf8_lossy(&indexed.stderr)
     );
 
-    let output = Command::new(env!("CARGO_BIN_EXE_gitscry"))
+    let output = support::isolated_gitscry_command(source.user_data_dir())
         .args(["regression", "target", "--path", "target.txt"])
         .current_dir(&clone)
         .output()

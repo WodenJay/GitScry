@@ -151,6 +151,43 @@ Examples:
         scope: HistoricalScopeArgs,
     },
     #[command(
+        about = "Summarize local GitScry command usage",
+        long_about = r#"Show aggregate call counts and elapsed time for recognized GitScry commands. This report does not access Git history and works outside a repository.
+
+After command-line parsing succeeds, GitScry records completed commands (including commands that later fail). It excludes help/version output, argument-parse failures, and this stats command. Timing starts after parsing and stops after command output is written. `upgrade` is recorded as `update`.
+
+Only the local calendar date, canonical command name, call count, and cumulative elapsed nanoseconds are stored. Arguments, paths, repository identity, output, and file contents are never stored; usage data is never uploaded. Recording is best effort and cannot change another command's output or exit status. Aggregates are retained until you delete the database to reset history.
+
+The database is user-scoped: `%LOCALAPPDATA%\GitScry\usage.sqlite` on Windows, `~/Library/Application Support/GitScry/usage.sqlite` on macOS, and `$XDG_DATA_HOME/gitscry/usage.sqlite` (or `~/.local/share/gitscry/usage.sqlite`) on Linux.
+
+By default, include the last 30 local calendar days, including today. `--since` and `--until` accept inclusive local dates in YYYY-MM-DD format; an omitted lower bound means all earlier history, and an omitted upper bound means today. `--all` includes all recorded dates and conflicts with both date options. `--group` selects daily, Monday-starting weekly, or calendar-month buckets. Partial buckets contain only calls inside the selected date range.
+
+`--json` returns schema version 1 with range, group, per-command totals, overall totals, and a chronological call trend.
+
+Examples:
+  gitscry stats
+  gitscry stats --since 2025-01-01 --group week
+  gitscry stats --all --json"#
+    )]
+    Stats {
+        /// Include every recorded date; conflicts with --since and --until.
+        #[arg(long, conflicts_with_all = ["since", "until"])]
+        all: bool,
+        /// Inclusive local calendar start date.
+        #[arg(long, value_name = "YYYY-MM-DD")]
+        since: Option<String>,
+        /// Inclusive local calendar end date; defaults to today.
+        #[arg(long, value_name = "YYYY-MM-DD")]
+        until: Option<String>,
+        /// Trend buckets: day, week (starting Monday), or month.
+        #[arg(long, value_enum, default_value = "day")]
+        group: StatsGroup,
+        /// Output a stable structured JSON report instead of human-readable text.
+        #[arg(long)]
+        json: bool,
+    },
+
+    #[command(
         about = "Update GitScry to the latest stable release",
         long_about = "Update GitScry to the latest stable release.\n\nUse `gitscry update` to check GitHub for a newer release, verify its SHA-256 checksum, and replace this executable. The update is refused when the release is older than the running version.\n\nExamples:\n\n  gitscry update\n\n  gitscry upgrade",
         alias = "upgrade"
@@ -554,6 +591,13 @@ Examples:
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub(crate) enum StatsGroup {
+    Day,
+    Week,
+    Month,
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
 pub(crate) enum CodeChange {
     Added,
     Removed,
@@ -574,8 +618,30 @@ impl Command {
             | Self::Followups { json, .. }
             | Self::TraceRemoval { json, .. }
             | Self::Hotspots { json, .. }
-            | Self::Timeline { json, .. } => *json,
+            | Self::Timeline { json, .. }
+            | Self::Stats { json, .. } => *json,
             Self::Update | Self::Index { .. } => false,
+        }
+    }
+
+    pub(crate) fn usage_name(&self) -> Option<&'static str> {
+        match self {
+            Self::Stats { .. } => None,
+            Self::Followups { .. } => Some("followups"),
+            Self::Hotspots { .. } => Some("hotspots"),
+            Self::Context { .. } => Some("context"),
+            Self::Update => Some("update"),
+            Self::TraceRemoval { .. } => Some("trace-removal"),
+            Self::Index { .. } => Some("index"),
+            Self::Search { .. } => Some("search"),
+            Self::Examples { .. } => Some("examples"),
+            Self::Failures { .. } => Some("failures"),
+            Self::Related { .. } => Some("related"),
+            Self::Tests { .. } => Some("tests"),
+            Self::Regression { .. } => Some("regression"),
+            Self::Why { .. } => Some("why"),
+            Self::TraceFix { .. } => Some("trace-fix"),
+            Self::Timeline { .. } => Some("timeline"),
         }
     }
 }
@@ -631,6 +697,7 @@ mod tests {
     fn update_command_accepts_canonical_name_and_alias() {
         for name in ["update", "upgrade"] {
             let cli = Cli::try_parse_from(["gitscry", name]).unwrap();
+            assert_eq!(cli.command.usage_name(), Some("update"));
             assert!(matches!(cli.command, Command::Update));
         }
     }

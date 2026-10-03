@@ -26,6 +26,7 @@ impl TestRepo {
 
 struct IsolatedExecutable {
     _install: TempDir,
+    user_data: TempDir,
     path: PathBuf,
 }
 
@@ -42,6 +43,7 @@ impl IsolatedExecutable {
         Self {
             _install: install,
             path,
+            user_data: tempfile::tempdir().expect("create isolated user data directory"),
         }
     }
 
@@ -49,6 +51,9 @@ impl IsolatedExecutable {
         Command::new(&self.path)
             .args(args)
             .current_dir(cwd)
+            .env("LOCALAPPDATA", self.user_data.path())
+            .env("XDG_DATA_HOME", self.user_data.path().join("xdg"))
+            .env("HOME", self.user_data.path().join("home"))
             .env("GIT_CONFIG_NOSYSTEM", "1")
             .env("GIT_CONFIG_GLOBAL", cwd.join("global-config"))
             .output()
@@ -393,8 +398,9 @@ fn sole_local_branch_is_used_as_default() {
 fn bare_repository_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
     git(dir.path(), ["init", "--bare"]);
+    let user_data = tempfile::tempdir().expect("create isolated user data");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_gitscry"))
+    let output = support::isolated_gitscry_command(user_data.path())
         .arg("index")
         .current_dir(dir.path())
         .output()
@@ -419,7 +425,8 @@ fn preparation_failure_does_not_publish_a_cache() {
 
 #[test]
 fn invalid_cli_input_exits_two() {
-    let output = Command::new(env!("CARGO_BIN_EXE_gitscry"))
+    let user_data = tempfile::tempdir().expect("create isolated user data");
+    let output = support::isolated_gitscry_command(user_data.path())
         .args(["index", "--unexpected"])
         .output()
         .unwrap();
@@ -430,7 +437,8 @@ fn invalid_cli_input_exits_two() {
 
 #[test]
 fn semantic_index_options_are_exposed_and_mutually_exclusive() {
-    let help = Command::new(env!("CARGO_BIN_EXE_gitscry"))
+    let user_data = tempfile::tempdir().expect("create isolated user data");
+    let help = support::isolated_gitscry_command(user_data.path())
         .args(["index", "--help"])
         .output()
         .unwrap();
@@ -439,7 +447,7 @@ fn semantic_index_options_are_exposed_and_mutually_exclusive() {
     assert!(help.contains("--semantic"), "{help}");
     assert!(help.contains("--no-semantic"), "{help}");
 
-    let conflict = Command::new(env!("CARGO_BIN_EXE_gitscry"))
+    let conflict = support::isolated_gitscry_command(user_data.path())
         .args(["index", "--semantic", "--no-semantic"])
         .output()
         .unwrap();
@@ -632,7 +640,7 @@ fn semantic_vectors_survive_rebuild_by_commit_identity() {
         .unwrap();
     drop(cache);
 
-    let rebuilt = Command::new(env!("CARGO_BIN_EXE_gitscry"))
+    let rebuilt = support::isolated_gitscry_command(repo.user_data_dir())
         .arg("index")
         .current_dir(repo.dir.path())
         .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -701,7 +709,7 @@ fn semantic_vectors_survive_rebuild_by_commit_identity() {
         .unwrap();
     drop(cache);
 
-    let resumed = Command::new(env!("CARGO_BIN_EXE_gitscry"))
+    let resumed = support::isolated_gitscry_command(repo.user_data_dir())
         .arg("index")
         .current_dir(repo.dir.path())
         .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -761,7 +769,7 @@ fn semantic_vectors_survive_rebuild_by_commit_identity() {
         )
         .unwrap();
     drop(cache);
-    let legacy_rebuilt = Command::new(env!("CARGO_BIN_EXE_gitscry"))
+    let legacy_rebuilt = support::isolated_gitscry_command(repo.user_data_dir())
         .arg("index")
         .current_dir(repo.dir.path())
         .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -806,7 +814,7 @@ fn semantic_vectors_survive_rebuild_by_commit_identity() {
         )
         .unwrap();
     drop(cache);
-    let damaged = Command::new(env!("CARGO_BIN_EXE_gitscry"))
+    let damaged = support::isolated_gitscry_command(repo.user_data_dir())
         .arg("index")
         .current_dir(repo.dir.path())
         .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -986,7 +994,8 @@ fn damaged_cache_rebuild_preserves_semantic_enablement() {
 
 #[test]
 fn help_is_successful_output() {
-    let output = Command::new(env!("CARGO_BIN_EXE_gitscry"))
+    let user_data = tempfile::tempdir().expect("create isolated user data");
+    let output = support::isolated_gitscry_command(user_data.path())
         .arg("--help")
         .output()
         .unwrap();
@@ -1028,7 +1037,7 @@ fn shallow_merge_keeps_parents_and_reindexes_after_deepening() {
         String::from_utf8_lossy(&cloned.stderr)
     );
 
-    let first = Command::new(env!("CARGO_BIN_EXE_gitscry"))
+    let first = support::isolated_gitscry_command(source.user_data_dir())
         .arg("index")
         .current_dir(&clone)
         .output()
@@ -1070,7 +1079,7 @@ fn shallow_merge_keeps_parents_and_reindexes_after_deepening() {
     drop(cache);
 
     git(&clone, ["fetch", "--unshallow"]);
-    let second = Command::new(env!("CARGO_BIN_EXE_gitscry"))
+    let second = support::isolated_gitscry_command(source.user_data_dir())
         .arg("index")
         .current_dir(&clone)
         .output()
@@ -1603,12 +1612,12 @@ fn concurrent_indexers_leave_one_complete_generation() {
     let repo = TestRepo::new();
     repo.commit("history.txt", b"one\n", "Initial history");
 
-    let first = Command::new(env!("CARGO_BIN_EXE_gitscry"))
+    let first = support::isolated_gitscry_command(repo.user_data_dir())
         .arg("index")
         .current_dir(repo.dir.path())
         .spawn()
         .unwrap();
-    let second = Command::new(env!("CARGO_BIN_EXE_gitscry"))
+    let second = support::isolated_gitscry_command(repo.user_data_dir())
         .arg("index")
         .current_dir(repo.dir.path())
         .spawn()
@@ -1718,12 +1727,12 @@ fn concurrent_readers_return_identical_material() {
     repo.commit("history.txt", b"one\n", "Initial history");
     assert_eq!(repo.run(["index"]).status.code(), Some(0));
 
-    let first = Command::new(env!("CARGO_BIN_EXE_gitscry"))
+    let first = support::isolated_gitscry_command(repo.user_data_dir())
         .args(["search", "history"])
         .current_dir(repo.dir.path())
         .spawn()
         .unwrap();
-    let second = Command::new(env!("CARGO_BIN_EXE_gitscry"))
+    let second = support::isolated_gitscry_command(repo.user_data_dir())
         .args(["search", "history"])
         .current_dir(repo.dir.path())
         .spawn()
@@ -1758,7 +1767,7 @@ fn reduced_shallow_history_rebuilds_without_reusing_rows() {
         .unwrap();
     assert!(cloned.status.success());
 
-    let first = Command::new(env!("CARGO_BIN_EXE_gitscry"))
+    let first = support::isolated_gitscry_command(source.user_data_dir())
         .arg("index")
         .current_dir(&clone)
         .output()
@@ -1776,7 +1785,7 @@ fn reduced_shallow_history_rebuilds_without_reusing_rows() {
     drop(cache);
 
     git(&clone, ["fetch", "--depth=1"]);
-    let second = Command::new(env!("CARGO_BIN_EXE_gitscry"))
+    let second = support::isolated_gitscry_command(source.user_data_dir())
         .arg("index")
         .current_dir(&clone)
         .output()
