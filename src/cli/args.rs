@@ -7,6 +7,7 @@ use clap::{ArgGroup, Args, Parser, Subcommand};
     version,
     color = clap::ColorChoice::Never,
     before_help = ROOT_LONG_HELP,
+    help_template = root_help_template(),
 )]
 pub(super) struct Cli {
     #[command(subcommand)]
@@ -20,6 +21,40 @@ Your Git history is a treasure trove. GitScry uncovers the implementation exampl
 
 Pick one command by intent, then run `gitscry <command> --help` for inputs, options, and examples.\n\nQuery commands support `--json` for structured output.";
 
+// Derive the command map from clap metadata so descriptions stay owned by each command.
+fn root_help_template() -> String {
+    use std::fmt::Write;
+
+    const MANAGEMENT: &[&str] = &["index", "prune", "clear", "update", "stats", "help"];
+    let mut command = Command::augment_subcommands(clap::Command::new("gitscry"));
+    command.build();
+    let commands: Vec<_> = command
+        .get_subcommands()
+        .filter(|subcommand| !subcommand.is_hide_set())
+        .collect();
+    let width = commands
+        .iter()
+        .map(|subcommand| subcommand.get_name().len())
+        .max()
+        .unwrap_or(0);
+    let mut template = String::from("{before-help}{usage-heading} {usage}\n");
+    for (heading, management) in [("Query commands", false), ("Management commands", true)] {
+        writeln!(template, "\n{heading}:").expect("write help heading");
+        for subcommand in &commands {
+            if MANAGEMENT.contains(&subcommand.get_name()) == management {
+                writeln!(
+                    template,
+                    "  {:width$}  {}",
+                    subcommand.get_name(),
+                    subcommand.get_about().expect("command description")
+                )
+                .expect("write help template");
+            }
+        }
+    }
+    template.push_str("\nOptions:\n{options}{after-help}");
+    template
+}
 const MATERIAL_LINKS_LONG_HELP: &str = "`--github-links` walks explicit commit→PR→issue associations for returned material through the authenticated `gh` CLI. It uses coverage-first pagination: all eligible commit PR homepages and discovered PR issue homepages precede continuation pages. Both connections share a 15-second timeout, 20 API requests, 50 results per page, and 200 deduplicated PR+issue objects. These fixed limits are conservative starting values, not empirically optimized. Human and JSON output mark each layer complete, partial, not queried, or failed; missing or unreturned associations do not prove none exist. Partial data and local object/field errors preserve usable links and continue other lookups; global authentication, rate-limit, network, or timeout failures stop link fetching only and preserve Git materials and command exit status. No automatic retries. Issue links are explicit `closingIssuesReferences`, not arbitrary mentions, and are navigation evidence, not proof of closure or causality. `--github-repo OWNER/REPO` selects a repository but does not itself contact GitHub; without it, repository inference follows `search` rules. Without `--github-links`, no GitHub lookup occurs. Links add navigation only, do not change Git material, and do not promise command-specific benefits. In particular, test co-change history does not prove assertions exist, regression suspects are not root-cause findings, and participant descriptions do not outweigh changes visible in Git.";
 #[derive(Debug, Args, Default)]
 pub(crate) struct HistoricalScopeArgs {
