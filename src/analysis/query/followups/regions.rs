@@ -8,12 +8,14 @@ const MAX_PATCHES: usize = 10_000;
 const MAX_HUNKS: usize = 4_096;
 const MAX_PATCH_BYTES: usize = 64 * 1024 * 1024;
 const MAX_HUNK_BYTES: usize = 16 * 1024;
+const MAX_TRACKING_WORK: usize = 10_000;
 
 #[derive(Default)]
 pub(super) struct Budget {
     patches: usize,
     hunks: usize,
     bytes: usize,
+    tracking_work: usize,
 }
 
 impl Budget {
@@ -22,7 +24,16 @@ impl Budget {
             patches: MAX_PATCHES,
             hunks: MAX_HUNKS,
             bytes: MAX_PATCH_BYTES,
+            tracking_work: MAX_TRACKING_WORK,
         }
+    }
+
+    fn consume_tracking_work(&mut self) -> Result<(), RegionTrackingReason> {
+        if self.tracking_work == 0 {
+            return Err(RegionTrackingReason::TrackingBudgetExhausted);
+        }
+        self.tracking_work -= 1;
+        Ok(())
     }
 }
 
@@ -85,7 +96,7 @@ pub(super) fn seed_tracking(
             RegionTrackingReason::NonTextualSeedChange,
         ));
     }
-    let parsed = match parse_hunks(&hunks, change_ordinal) {
+    let parsed = match parse_hunks(&hunks, change_ordinal, budget) {
         Ok(parsed) => parsed,
         Err(reason) => return Ok(RegionTracking::Unavailable(reason)),
     };
@@ -98,6 +109,7 @@ pub(super) fn seed_tracking(
         .map(|position| TrackedRegion {
             seed_position: position.clone(),
             current_positions: vec![position],
+            protected_boundaries: Vec::new(),
         })
         .collect();
     Ok(RegionTracking::Available(regions))
@@ -120,11 +132,7 @@ pub(super) fn advance(
             downgrade_reason: Some(*reason),
         });
     };
-    if !regions
-        .iter()
-        .any(|region| !region.current_positions.is_empty())
-        || !context.content_changed
-    {
+    if regions.is_empty() || !context.content_changed {
         return Ok(Advance {
             tracking: tracking.clone(),
             associations: Vec::new(),
@@ -141,11 +149,18 @@ pub(super) fn advance(
     if hunks.is_empty() {
         return Ok(unavailable(RegionTrackingReason::NonTextualChange));
     }
-    let parsed = match parse_hunks(&hunks, context.change_ordinal) {
+    let parsed = match parse_hunks(&hunks, context.change_ordinal, budget) {
         Ok(parsed) => parsed,
         Err(reason) => return Ok(unavailable(reason)),
     };
-    match map_regions(regions, &parsed, &context, seed_path, include_associations) {
+    match map_regions(
+        regions,
+        &parsed,
+        &context,
+        seed_path,
+        include_associations,
+        budget,
+    ) {
         Ok((regions, associations)) => Ok(Advance {
             tracking: RegionTracking::Available(regions),
             associations,
@@ -204,6 +219,7 @@ fn patch_material(
 fn parse_hunks(
     hunks: &[PatchHistoryHunk],
     change_ordinal: i64,
+    budget: &mut Budget,
 ) -> Result<Vec<ParsedHunk>, RegionTrackingReason> {
     hunks
         .iter()
@@ -211,12 +227,15 @@ fn parse_hunks(
             if hunk.change_ordinal != change_ordinal {
                 return Err(RegionTrackingReason::InvalidPatchMapping);
             }
-            parse_hunk(hunk)
+            parse_hunk(hunk, budget)
         })
         .collect()
 }
 
-fn parse_hunk(hunk: &PatchHistoryHunk) -> Result<ParsedHunk, RegionTrackingReason> {
+fn parse_hunk(
+    hunk: &PatchHistoryHunk,
+    budget: &mut Budget,
+) -> Result<ParsedHunk, RegionTrackingReason> {
     let old_first = first_line(hunk.old_start, hunk.old_lines)?;
     let new_first = first_line(hunk.new_start, hunk.new_lines)?;
     let text = hunk
@@ -240,6 +259,7 @@ fn parse_hunk(hunk: &PatchHistoryHunk) -> Result<ParsedHunk, RegionTrackingReaso
         }
         match row.first() {
             Some(b' ') => {
+                budget.consume_tracking_work()?;
                 if let Some(edit) = edit.take() {
                     edits.push(edit);
                 }
@@ -252,6 +272,7 @@ fn parse_hunk(hunk: &PatchHistoryHunk) -> Result<ParsedHunk, RegionTrackingReaso
                     .ok_or(RegionTrackingReason::InvalidPatchMapping)?;
             }
             Some(b'-') => {
+                budget.consume_tracking_work()?;
                 let edit = edit.get_or_insert_with(|| EditGroup {
                     old_boundary: old_line,
                     new_boundary: new_line,
@@ -264,6 +285,7 @@ fn parse_hunk(hunk: &PatchHistoryHunk) -> Result<ParsedHunk, RegionTrackingReaso
                     .ok_or(RegionTrackingReason::InvalidPatchMapping)?;
             }
             Some(b'+') => {
+                budget.consume_tracking_work()?;
                 let edit = edit.get_or_insert_with(|| EditGroup {
                     old_boundary: old_line,
                     new_boundary: new_line,
@@ -317,9 +339,17 @@ fn map_regions(
     context: &ChangeContext<'_>,
     seed_path: &[u8],
     include_associations: bool,
+    budget: &mut Budget,
 ) -> Result<(Vec<TrackedRegion>, Vec<RegionAssociation>), RegionTrackingReason> {
     let mut mapped = vec![Vec::new(); regions.len()];
+    let mut mapped_boundaries = vec![Vec::new(); regions.len()];
     let mut associations = Vec::new();
+    for (index, region) in regions.iter().enumerate() {
+        for &boundary in &region.protected_boundaries {
+            budget.consume_tracking_work()?;
+            mapped_boundaries[index].push(map_boundary(boundary, hunks, budget)?);
+        }
+    }
     let (mut old_cursor, mut new_cursor) = (1_i64, 1_i64);
     for hunk in hunks {
         if hunk.old_first < old_cursor || hunk.new_first < new_cursor {
@@ -332,10 +362,12 @@ fn map_regions(
                 hunk.old_first,
                 new_cursor - old_cursor,
                 mapped_positions,
+                budget,
             )?;
         }
         for &(old_line, new_line) in &hunk.context {
             for (index, region) in regions.iter().enumerate() {
+                budget.consume_tracking_work()?;
                 if contains(&region.current_positions, old_line) {
                     mapped[index].push(LinePosition {
                         start_line: new_line,
@@ -345,32 +377,60 @@ fn map_regions(
             }
         }
         for edit in &hunk.edits {
+            let added_positions = line_positions(edit.added.iter().copied());
+            let deleted_count = i64::try_from(edit.deleted.len())
+                .map_err(|_| RegionTrackingReason::InvalidPatchMapping)?;
+            let deleted_end = edit
+                .old_boundary
+                .checked_add(deleted_count)
+                .ok_or(RegionTrackingReason::InvalidPatchMapping)?;
             for (region_index, region) in regions.iter().enumerate() {
-                let deleted = edit
-                    .deleted
-                    .iter()
-                    .copied()
-                    .filter(|line| contains(&region.current_positions, *line))
-                    .collect::<Vec<_>>();
-                let insertion_inside = !edit.added.is_empty()
+                budget.consume_tracking_work()?;
+                let mut deleted = Vec::new();
+                for &line in &edit.deleted {
+                    budget.consume_tracking_work()?;
+                    if contains(&region.current_positions, line) {
+                        deleted.push(line);
+                    }
+                }
+                let insertion_inside = !added_positions.is_empty()
                     && contains_interior_boundary(&region.current_positions, edit.old_boundary);
                 if deleted.is_empty() && !insertion_inside {
                     continue;
                 }
-                mapped[region_index].extend(line_positions(edit.added.iter().copied()));
+                for position in &added_positions {
+                    budget.consume_tracking_work()?;
+                    mapped[region_index].push(position.clone());
+                }
+                if edit.added.is_empty() && !deleted.is_empty() {
+                    let has_tracked_line_before = region
+                        .current_positions
+                        .first()
+                        .is_some_and(|position| position.start_line < edit.old_boundary);
+                    let has_tracked_line_after = region
+                        .current_positions
+                        .last()
+                        .and_then(|position| position.start_line.checked_add(position.line_count))
+                        .is_some_and(|end| end > deleted_end);
+                    if has_tracked_line_before && has_tracked_line_after {
+                        budget.consume_tracking_work()?;
+                        mapped_boundaries[region_index].push(edit.new_boundary);
+                    }
+                }
                 if include_associations {
                     let previous_positions = if deleted.is_empty() {
                         vec![point(edit.old_boundary)]
                     } else {
                         line_positions(deleted)
                     };
-                    let current_positions = if edit.added.is_empty() {
+                    let current_positions = if added_positions.is_empty() {
                         vec![point(edit.new_boundary)]
                     } else {
-                        line_positions(edit.added.iter().copied())
+                        added_positions.clone()
                     };
                     for previous_position in &previous_positions {
                         for current_position in &current_positions {
+                            budget.consume_tracking_work()?;
                             associations.push(RegionAssociation {
                                 seed_path: seed_path.to_vec(),
                                 previous_revision: context.previous_revision.to_owned(),
@@ -400,31 +460,126 @@ fn map_regions(
             old_cursor,
             new_cursor - old_cursor,
             mapped_positions,
+            budget,
         )?;
     }
-    let regions = regions
+    let regions: Vec<TrackedRegion> = regions
         .iter()
         .zip(mapped)
-        .map(|(region, positions)| {
+        .zip(mapped_boundaries)
+        .map(|((region, positions), mut protected_boundaries)| {
+            protected_boundaries.sort_unstable();
+            protected_boundaries.dedup();
             Ok(TrackedRegion {
                 seed_position: region.seed_position.clone(),
-                current_positions: normalize_positions(positions)?,
+                current_positions: normalize_positions(positions, &protected_boundaries, budget)?,
+                protected_boundaries,
             })
         })
         .collect::<Result<_, RegionTrackingReason>>()?;
+    let mut live_regions = Vec::with_capacity(regions.len());
+    for region in regions {
+        budget.consume_tracking_work()?;
+        if !region.current_positions.is_empty() {
+            live_regions.push(region);
+        }
+    }
     associations.sort();
     associations.dedup();
-    Ok((regions, associations))
+    Ok((live_regions, associations))
 }
 
+fn map_boundary(
+    boundary: i64,
+    hunks: &[ParsedHunk],
+    budget: &mut Budget,
+) -> Result<i64, RegionTrackingReason> {
+    if boundary < 1 {
+        return Err(RegionTrackingReason::InvalidPatchMapping);
+    }
+    let (mut old_cursor, mut new_cursor) = (1_i64, 1_i64);
+    for hunk in hunks {
+        budget.consume_tracking_work()?;
+        if hunk.old_first < old_cursor || hunk.new_first < new_cursor {
+            return Err(RegionTrackingReason::InvalidPatchMapping);
+        }
+        if boundary <= hunk.old_first {
+            let gap = boundary
+                .checked_sub(old_cursor)
+                .ok_or(RegionTrackingReason::InvalidPatchMapping)?;
+            return new_cursor
+                .checked_add(gap)
+                .filter(|mapped| *mapped >= 1)
+                .ok_or(RegionTrackingReason::InvalidPatchMapping);
+        }
+        let old_end = hunk
+            .old_first
+            .checked_add(hunk.old_lines)
+            .ok_or(RegionTrackingReason::InvalidPatchMapping)?;
+        if boundary <= old_end {
+            let mut delta = hunk
+                .new_first
+                .checked_sub(hunk.old_first)
+                .ok_or(RegionTrackingReason::InvalidPatchMapping)?;
+            for edit in &hunk.edits {
+                budget.consume_tracking_work()?;
+                let deleted_count = i64::try_from(edit.deleted.len())
+                    .map_err(|_| RegionTrackingReason::InvalidPatchMapping)?;
+                let added_count = i64::try_from(edit.added.len())
+                    .map_err(|_| RegionTrackingReason::InvalidPatchMapping)?;
+                let old_edit_end = edit
+                    .old_boundary
+                    .checked_add(deleted_count)
+                    .ok_or(RegionTrackingReason::InvalidPatchMapping)?;
+                let new_edit_end = edit
+                    .new_boundary
+                    .checked_add(added_count)
+                    .ok_or(RegionTrackingReason::InvalidPatchMapping)?;
+                if boundary < edit.old_boundary {
+                    return boundary
+                        .checked_add(delta)
+                        .filter(|mapped| *mapped >= 1)
+                        .ok_or(RegionTrackingReason::InvalidPatchMapping);
+                }
+                if boundary == edit.old_boundary || boundary < old_edit_end {
+                    return Ok(edit.new_boundary);
+                }
+                if boundary == old_edit_end {
+                    return Ok(new_edit_end);
+                }
+                delta = new_edit_end
+                    .checked_sub(old_edit_end)
+                    .ok_or(RegionTrackingReason::InvalidPatchMapping)?;
+            }
+            return boundary
+                .checked_add(delta)
+                .filter(|mapped| *mapped >= 1)
+                .ok_or(RegionTrackingReason::InvalidPatchMapping);
+        }
+        old_cursor = old_end;
+        new_cursor = hunk
+            .new_first
+            .checked_add(hunk.new_lines)
+            .ok_or(RegionTrackingReason::InvalidPatchMapping)?;
+    }
+    let tail = boundary
+        .checked_sub(old_cursor)
+        .ok_or(RegionTrackingReason::InvalidPatchMapping)?;
+    new_cursor
+        .checked_add(tail)
+        .filter(|mapped| *mapped >= 1)
+        .ok_or(RegionTrackingReason::InvalidPatchMapping)
+}
 fn map_gap(
     positions: &[LinePosition],
     start: i64,
     end: i64,
     delta: i64,
     mapped: &mut Vec<LinePosition>,
+    budget: &mut Budget,
 ) -> Result<(), RegionTrackingReason> {
     for position in positions {
+        budget.consume_tracking_work()?;
         let position_end = position
             .start_line
             .checked_add(position.line_count)
@@ -443,8 +598,10 @@ fn map_tail(
     start: i64,
     delta: i64,
     mapped: &mut Vec<LinePosition>,
+    budget: &mut Budget,
 ) -> Result<(), RegionTrackingReason> {
     for position in positions {
+        budget.consume_tracking_work()?;
         let position_end = position
             .start_line
             .checked_add(position.line_count)
@@ -474,21 +631,21 @@ fn translate(start: i64, end: i64, delta: i64) -> Result<LinePosition, RegionTra
 }
 
 fn contains(positions: &[LinePosition], line: i64) -> bool {
-    positions.iter().any(|position| {
-        position
-            .start_line
-            .checked_add(position.line_count)
-            .is_some_and(|end| position.start_line <= line && line < end)
-    })
+    let index = positions.partition_point(|position| position.start_line <= line);
+    index
+        .checked_sub(1)
+        .and_then(|index| positions.get(index))
+        .and_then(|position| position.start_line.checked_add(position.line_count))
+        .is_some_and(|end| line < end)
 }
 
 fn contains_interior_boundary(positions: &[LinePosition], boundary: i64) -> bool {
-    positions.iter().any(|position| {
-        position
-            .start_line
-            .checked_add(position.line_count)
-            .is_some_and(|end| position.start_line < boundary && boundary < end)
-    })
+    let index = positions.partition_point(|position| position.start_line < boundary);
+    index
+        .checked_sub(1)
+        .and_then(|index| positions.get(index))
+        .and_then(|position| position.start_line.checked_add(position.line_count))
+        .is_some_and(|end| boundary < end)
 }
 
 fn point(line: i64) -> LinePosition {
@@ -519,14 +676,44 @@ fn line_positions(lines: impl IntoIterator<Item = i64>) -> Vec<LinePosition> {
 }
 
 fn normalize_positions(
-    mut positions: Vec<LinePosition>,
+    positions: Vec<LinePosition>,
+    protected_boundaries: &[i64],
+    budget: &mut Budget,
 ) -> Result<Vec<LinePosition>, RegionTrackingReason> {
-    positions.sort_unstable();
-    let mut normalized: Vec<LinePosition> = Vec::new();
+    let mut split_positions = Vec::new();
     for position in positions {
+        budget.consume_tracking_work()?;
         if position.line_count <= 0 || position.start_line < 1 {
             return Err(RegionTrackingReason::InvalidPatchMapping);
         }
+        let end = position
+            .start_line
+            .checked_add(position.line_count)
+            .ok_or(RegionTrackingReason::InvalidPatchMapping)?;
+        let mut start = position.start_line;
+        let mut seam_index = protected_boundaries.partition_point(|boundary| *boundary <= start);
+        while seam_index < protected_boundaries.len() && protected_boundaries[seam_index] < end {
+            budget.consume_tracking_work()?;
+            let boundary = protected_boundaries[seam_index];
+            if start < boundary {
+                split_positions.push(LinePosition {
+                    start_line: start,
+                    line_count: boundary - start,
+                });
+            }
+            start = boundary;
+            seam_index += 1;
+        }
+        if start < end {
+            split_positions.push(LinePosition {
+                start_line: start,
+                line_count: end - start,
+            });
+        }
+    }
+    split_positions.sort_unstable();
+    let mut normalized: Vec<LinePosition> = Vec::new();
+    for position in split_positions {
         let end = position
             .start_line
             .checked_add(position.line_count)
@@ -536,7 +723,9 @@ fn normalize_positions(
                 .start_line
                 .checked_add(last.line_count)
                 .ok_or(RegionTrackingReason::InvalidPatchMapping)?;
-            if position.start_line <= last_end {
+            let joins_at_seam = protected_boundaries.binary_search(&last_end).is_ok();
+            if position.start_line < last_end || (position.start_line == last_end && !joins_at_seam)
+            {
                 last.line_count = last_end.max(end) - last.start_line;
                 continue;
             }

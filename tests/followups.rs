@@ -176,6 +176,103 @@ fn followups_tracks_changed_regions_through_shifts_and_groups_them_first() {
 }
 
 #[test]
+fn followups_does_not_overlap_insertions_at_deleted_region_seams() {
+    let repo = TestRepo::new();
+    commit(
+        &repo,
+        "a",
+        "prefix\nsuffix\n",
+        "Baseline",
+        "2020-01-01T00:00:00Z",
+    );
+    let seed = commit(
+        &repo,
+        "a",
+        "prefix\ntracked one\ntracked two\ntracked three\nsuffix\n",
+        "Seed region",
+        "2020-01-02T00:00:00Z",
+    );
+    let deletion = commit(
+        &repo,
+        "a",
+        "prefix\ntracked one\ntracked three\nsuffix\n",
+        "Delete inside seed region",
+        "2020-01-03T00:00:00Z",
+    );
+    let nearby = commit(
+        &repo,
+        "a",
+        "prefix\ntracked one\nnearby insertion\ntracked three\nsuffix\n",
+        "Insert at deleted seam",
+        "2020-01-04T00:00:00Z",
+    );
+    repo.index();
+
+    let report = json(&repo, &["followups", &seed, "--json"]);
+    let entries = report["entries"].as_array().unwrap();
+    let deletion_entry = entries
+        .iter()
+        .find(|entry| entry["commit_id"] == deletion)
+        .unwrap();
+    assert_eq!(deletion_entry["basis"], "region_overlap");
+    let nearby_entry = entries
+        .iter()
+        .find(|entry| entry["commit_id"] == nearby)
+        .unwrap();
+    assert_eq!(nearby_entry["basis"], "same_file");
+    assert!(
+        nearby_entry["region_associations"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn followups_downgrades_when_region_tracking_work_budget_is_exhausted() {
+    let repo = TestRepo::new();
+    let (mut baseline, mut seeded) = (String::new(), String::new());
+    for index in 0..800 {
+        baseline.push_str(&format!("o{index:x}\ns{index:x}\n"));
+        seeded.push_str(&format!("n{index:x}\ns{index:x}\n"));
+    }
+    commit(&repo, "a", &baseline, "Baseline", "2020-01-01T00:00:00Z");
+    let seed = commit(
+        &repo,
+        "a",
+        &seeded,
+        "Seed many separated regions",
+        "2020-01-02T00:00:00Z",
+    );
+    let followup = seeded.replacen("n190\n", "z190\n", 1);
+    let changed = commit(
+        &repo,
+        "a",
+        &followup,
+        "Change one region",
+        "2020-01-03T00:00:00Z",
+    );
+    repo.index();
+
+    let report = json(&repo, &["followups", &seed, "--json"]);
+    let entry = report["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["commit_id"] == changed)
+        .unwrap();
+    assert_eq!(entry["basis"], "same_file");
+    assert_eq!(
+        entry["region_tracking_downgrades"][0]["reason"],
+        "tracking_budget_exhausted"
+    );
+
+    let text = String::from_utf8(repo.run(["followups", &seed]).stdout).unwrap();
+    assert!(text.contains("tracking_budget_exhausted"));
+    assert!(text.contains("bounded changed-region tracking budget was exhausted"));
+}
+
+#[test]
 fn followups_tracks_seed_regions_across_renames() {
     let repo = TestRepo::new();
     commit(

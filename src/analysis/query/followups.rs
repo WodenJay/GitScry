@@ -126,6 +126,7 @@ enum RegionTracking {
 struct TrackedRegion {
     seed_position: LinePosition,
     current_positions: Vec<LinePosition>,
+    protected_boundaries: Vec<i64>,
 }
 
 pub(crate) struct Report {
