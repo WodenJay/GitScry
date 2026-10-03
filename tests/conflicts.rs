@@ -61,6 +61,14 @@ fn shared_history_fixture() -> (TestRepo, String, String, String, String, String
     );
     git(repo.dir.path(), ["revert", "--no-edit", fix.as_str()]);
     let revert = repo.head();
+    for version in 1..=4 {
+        commit(
+            &repo,
+            "a.txt",
+            &format!("route=intermediate-{version}\n"),
+            &format!("routine path edit {version}"),
+        );
+    }
     let unrelated = commit(
         &repo,
         "unrelated.txt",
@@ -84,6 +92,7 @@ fn reports_reverted_shared_history_once_with_source_and_conflict_associations() 
     let report = json(repo.run(["conflicts", "--json"]));
     let file = &report["files"][0];
     let related = file["related_history"].as_array().unwrap();
+    assert_eq!(related[0]["commit"], fix);
     assert_eq!(
         related.iter().filter(|lead| lead["commit"] == fix).count(),
         1
@@ -113,8 +122,8 @@ fn reports_reverted_shared_history_once_with_source_and_conflict_associations() 
             .is_some_and(|basis| !basis.is_empty())
     );
     assert!(!fix_lead["regions"].as_array().unwrap().is_empty());
-    assert_eq!(file["related_history_total"], related.len());
-    assert_eq!(file["related_history_truncated"], false);
+    assert_eq!(file["related_history_total"], 6);
+    assert_eq!(file["related_history_truncated"], true);
     assert_eq!(file["sides"][0]["leads"][0]["commit"], ours);
     assert_eq!(file["sides"][1]["leads"][0]["commit"], theirs);
     assert!(!related.iter().any(|lead| lead["commit"] == unrelated));

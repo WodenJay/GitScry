@@ -1,7 +1,7 @@
 //! Direct cached file-change evidence, separately oriented to pinned merge sides.
 use crate::analysis::{
     provenance::revert_reason,
-    query::{Outcome, QueryReport},
+    query::{self, Outcome, QueryReport},
     retrieval,
 };
 use crate::{
@@ -163,13 +163,8 @@ pub(crate) fn execute(paths: Vec<String>, limit: usize) -> Result<Outcome, AppEr
         .cloned()
         .collect::<HashSet<_>>();
     let shared_revisions = shared_reachable.iter().cloned().collect::<Vec<_>>();
-    session.set_scope_revisions(&shared_revisions, &[], &shared_revisions)?;
-    let shared_scope = SearchFilter {
-        from_oid: None,
-        to_oid: target.base.clone(),
-        since: None,
-        until: None,
-    };
+    let shared_scope =
+        query::scope::install_shared_history_scope(&session, &shared_revisions, &target.base)?;
     let reverts = retrieval::reverts(&session, Some(&shared_scope))?;
     warnings.sort();
     warnings.dedup();
@@ -181,33 +176,11 @@ pub(crate) fn execute(paths: Vec<String>, limit: usize) -> Result<Outcome, AppEr
                 let history = session.path_history(&file.path, reachable)?;
                 let mut leads = Vec::new();
                 for commit in history {
-                    let hunks = session.history_hunks(&commit.oid)?;
-                    let matching: Vec<_> = hunks
-                        .into_iter()
-                        .filter(|hunk| {
-                            commit.changes.iter().any(|change| {
-                                change.ordinal == hunk.change_ordinal
-                                    && (change.old_path.as_deref() == Some(file.path.as_slice())
-                                        || change.new_path.as_deref() == Some(file.path.as_slice()))
-                            })
-                        })
-                        .collect();
-                    if matching.is_empty() {
+                    let (regions, regions_truncated) =
+                        history_regions(&session, &commit, &file.path)?;
+                    if regions.is_empty() {
                         continue;
                     }
-                    let regions_truncated = matching.len() > REGION_LIMIT;
-                    let regions = matching
-                        .into_iter()
-                        .take(REGION_LIMIT)
-                        .map(|hunk| Region {
-                            change_ordinal: hunk.change_ordinal,
-                            hunk_ordinal: hunk.hunk_ordinal,
-                            old_start: hunk.old_start,
-                            old_lines: hunk.old_lines,
-                            new_start: hunk.new_start,
-                            new_lines: hunk.new_lines,
-                        })
-                        .collect();
                     let (subject, subject_truncated) = bounded(&commit.subject);
                     let (reason, reason_truncated) = bounded(&commit.body);
                     let message_lossy = session
@@ -319,12 +292,16 @@ fn related_history(
     }
 
     let total = history.len().saturating_sub(paired_reverts.len());
-    let mut leads = Vec::new();
-    for commit in history
+    let mut candidates = history
         .into_iter()
         .filter(|commit| !paired_reverts.contains(&commit.oid))
-        .take(limit)
-    {
+        .collect::<Vec<_>>();
+    // Put explicit revert links first; keep recency within each priority.
+    candidates.sort_by_key(|commit| {
+        !(linked_reverts.contains_key(&commit.oid) || reverts.is_revert(&commit.oid))
+    });
+    let mut leads = Vec::new();
+    for commit in candidates.into_iter().take(limit) {
         let linked_revert = linked_reverts.get(&commit.oid).copied();
         let is_revert = reverts.is_revert(&commit.oid);
         let (subject, subject_truncated) = bounded(&commit.subject);
