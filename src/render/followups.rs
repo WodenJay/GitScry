@@ -1,13 +1,13 @@
 use serde_json::json;
 
 use super::{escape, json::json_path};
-use crate::analysis::query::followups::Report;
+use crate::analysis::query::followups::{Entry, Report};
 
 pub(super) fn format_report(report: &Report) -> String {
     let scope = &report.scope;
     let mut lines = vec![
         format!(
-            "Follow-up same-file material for {} through {}",
+            "Follow-up material for {} through {}",
             scope.seed, scope.endpoint
         ),
         format!(
@@ -39,7 +39,7 @@ pub(super) fn format_report(report: &Report) -> String {
     ];
     if report.entries.is_empty() {
         lines.push(
-            "No associated material in the inspected scope; this is not a stability conclusion."
+            "No associated follow-up material in the inspected scope; this is not a stability conclusion."
                 .into(),
         );
     }
@@ -50,8 +50,10 @@ pub(super) fn format_report(report: &Report) -> String {
             entry.commit_id,
             escape::subject(&entry.subject)
         ));
+        let association_bases = association_bases(entry).collect::<Vec<_>>();
         lines.push(format!(
-            "    basis: same_file; elapsed {} seconds; {}",
+            "    association bases: {}; elapsed {} seconds; {}",
+            association_bases.join(", "),
             entry.elapsed_seconds,
             entry
                 .file_associations
@@ -81,6 +83,11 @@ pub(super) fn format_report(report: &Report) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ));
+        if let Some(reference) = &entry.revert_reference {
+            lines.push(format!(
+                "    Revert reference: commit-level declaration targeting {reference}; not path-specific and not proof of path reversal."
+            ));
+        }
         if entry.parent_count > 1 {
             lines.push("    Merge diff comparison: first parent.".into());
         }
@@ -88,6 +95,18 @@ pub(super) fn format_report(report: &Report) -> String {
         super::material::render_patch(&mut lines, entry.patch.as_ref(), "    ");
     }
     lines.join("\n")
+}
+
+fn association_bases(entry: &Entry) -> impl Iterator<Item = &'static str> {
+    [
+        entry
+            .revert_reference
+            .as_ref()
+            .map(|_| "explicit_revert_reference"),
+        entry.same_file_association.then_some("same_file"),
+    ]
+    .into_iter()
+    .flatten()
 }
 
 pub(super) fn format_json_report(
@@ -99,12 +118,18 @@ pub(super) fn format_json_report(
         .entries
         .iter()
         .map(|entry| {
+            let association_bases = association_bases(entry).collect::<Vec<_>>();
+            let basis = association_bases
+                .first()
+                .copied()
+                .expect("follow-up entries always have an association basis");
             let mut material = json!({
                 "commit_id": entry.commit_id,
                 "subject": entry.subject,
                 "commit_time": entry.commit_time,
                 "elapsed_seconds": entry.elapsed_seconds,
-                "basis": "same_file",
+                "basis": basis,
+                "association_bases": association_bases,
                 "paths": entry.paths.iter().map(|p| json_path(p)).collect::<Vec<_>>(),
                 "change_types": entry.change_types,
                 "file_associations": entry.file_associations.iter().map(|association| json!({
@@ -118,6 +143,13 @@ pub(super) fn format_json_report(
                 "diff_comparison": if entry.parent_count > 1 { Some("first_parent") } else { None },
                 "inspect_command": format!("git show {}", entry.commit_id),
             });
+            if let Some(reference) = &entry.revert_reference {
+                material["revert_reference"] = json!({
+                    "target_commit_id": reference,
+                    "scope": "commit_level",
+                    "path_specific": false,
+                });
+            }
             if let Some(patch) = &entry.patch {
                 material["patch"] = serde_json::to_value(super::json::json_patch(patch))?;
             }
@@ -132,9 +164,9 @@ pub(super) fn format_json_report(
             "seed_time": scope.seed_time, "time_ceiling": scope.time_ceiling,
             "days": scope.days, "max_commits": scope.max_commits, "limit": scope.limit,
             "selected_paths": scope.selected_paths.iter().map(|p| json_path(p)).collect::<Vec<_>>(),
-            "order": "forward_topological",
+            "order": "explicit_revert_reference_then_same_file_then_forward_topological",
             "coverage": "endpoint_reachable_published_cache",
-            "association": "same_file_only",
+            "association": "explicit_revert_reference_or_same_file",
         },
         "inspected_count": report.inspected_count,
         "lineage_inspected_count": report.lineage_inspected_count,

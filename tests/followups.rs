@@ -649,3 +649,263 @@ fn followups_discloses_out_of_window_lineage_budget() {
     assert_eq!(report["matched_in_inspected_scope"], 0);
     assert!(report["warnings"].to_string().contains("lineage budget"));
 }
+
+#[test]
+fn followups_prioritizes_explicit_revert_references_and_keeps_bases_separate() {
+    let repo = TestRepo::new();
+    fs::write(repo.dir.path().join("a"), "seed a\n").unwrap();
+    fs::write(repo.dir.path().join("b"), "seed b\n").unwrap();
+    let seed = commit_all(&repo, "Seed", "2020-01-01T00:00:00Z");
+
+    let generic = commit(
+        &repo,
+        "a",
+        "generic revert contents\n",
+        "Revert \"Seed\"",
+        "2020-01-02T00:00:00Z",
+    );
+    let explicit_other_path = commit(
+        &repo,
+        "b",
+        "other path changed\n",
+        &format!("Revert unrelated title\n\nThis reverts commit {seed}."),
+        "2020-01-03T00:00:00Z",
+    );
+    let empty_message = format!("Revert without a diff\n\nThis reverts commit {seed}.");
+    let empty_out = git_command(repo.dir.path())
+        .args(["commit", "--allow-empty", "-m", &empty_message])
+        .env("GIT_AUTHOR_DATE", "2020-01-04T00:00:00Z")
+        .env("GIT_COMMITTER_DATE", "2020-01-04T00:00:00Z")
+        .output()
+        .unwrap();
+    assert!(
+        empty_out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&empty_out.stderr)
+    );
+    let explicit_no_paths = repo.head();
+    let explicit_same_file = commit(
+        &repo,
+        "a",
+        "referenced path changed\n",
+        &format!("Revert with path change\n\nThis reverts commit {seed}."),
+        "2020-01-05T00:00:00Z",
+    );
+    let generic_same_file = commit(
+        &repo,
+        "a",
+        "generic revert path change\n",
+        "Revert \"Seed\"",
+        "2020-01-06T00:00:00Z",
+    );
+    repo.index();
+
+    let report = json(
+        &repo,
+        &[
+            "followups",
+            &seed,
+            "--path",
+            "a",
+            "--limit",
+            "3",
+            "--patch",
+            "--json",
+        ],
+    );
+    assert_eq!(report["matched_in_inspected_scope"], 5);
+    assert_eq!(report["display_truncated"], true);
+    assert_eq!(
+        report["scope"]["order"],
+        "explicit_revert_reference_then_same_file_then_forward_topological"
+    );
+    let entries = report["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 3);
+    assert_eq!(entries[0]["commit_id"], explicit_other_path);
+    assert_eq!(entries[0]["basis"], "explicit_revert_reference");
+    assert_eq!(
+        entries[0]["association_bases"],
+        serde_json::json!(["explicit_revert_reference"])
+    );
+    assert_eq!(entries[0]["revert_reference"]["target_commit_id"], seed);
+    assert_eq!(entries[0]["revert_reference"]["scope"], "commit_level");
+    assert_eq!(entries[0]["revert_reference"]["path_specific"], false);
+    assert_eq!(entries[0]["paths"], serde_json::json!([]));
+    assert_eq!(entries[0]["patch"]["status"], "available");
+    assert_eq!(entries[1]["commit_id"], explicit_no_paths);
+    assert_eq!(entries[2]["commit_id"], explicit_same_file);
+    assert_eq!(
+        entries[2]["association_bases"],
+        serde_json::json!(["explicit_revert_reference", "same_file"])
+    );
+    assert_eq!(entries[2]["paths"], serde_json::json!(["a"]));
+    assert_eq!(
+        entries
+            .iter()
+            .filter(|entry| entry["commit_id"] == explicit_same_file)
+            .count(),
+        1
+    );
+
+    let complete = json(
+        &repo,
+        &["followups", &seed, "--path", "a", "--limit", "10", "--json"],
+    );
+    let complete_entries = complete["entries"].as_array().unwrap();
+    let ids = complete_entries
+        .iter()
+        .map(|entry| entry["commit_id"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ids,
+        vec![
+            explicit_other_path.as_str(),
+            explicit_no_paths.as_str(),
+            explicit_same_file.as_str(),
+            generic.as_str(),
+            generic_same_file.as_str(),
+        ]
+    );
+    assert_eq!(
+        complete_entries[3]["association_bases"],
+        serde_json::json!(["same_file"])
+    );
+    assert!(complete_entries[3].get("revert_reference").is_none());
+
+    let text_out = repo.run(["followups", &seed, "--path", "a", "--limit", "10"]);
+    assert!(text_out.status.success());
+    let text = String::from_utf8(text_out.stdout).unwrap();
+    assert!(text.contains("explicit_revert_reference"));
+    assert!(text.contains("commit-level") && text.contains("not path-specific"));
+    let text_positions = ids
+        .iter()
+        .map(|id| text.find(&format!("  {id}  ")).unwrap())
+        .collect::<Vec<_>>();
+    assert!(
+        text_positions.windows(2).all(|pair| pair[0] < pair[1]),
+        "{text}\n{ids:?}\n{text_positions:?}"
+    );
+}
+
+#[test]
+fn followups_revert_references_obey_endpoint_time_and_traversal_bounds() {
+    let repo = TestRepo::new();
+    let seed = commit(&repo, "a", "seed\n", "Seed", "2020-01-01T00:00:00Z");
+    commit(
+        &repo,
+        "other",
+        "nonmatch\n",
+        "Nonmatch before references",
+        "2020-01-02T00:00:00Z",
+    );
+    let inverted = commit(
+        &repo,
+        "other",
+        "inverted\n",
+        &format!("Revert\n\nThis reverts commit {seed}."),
+        "2019-12-31T00:00:00Z",
+    );
+    let boundary = commit(
+        &repo,
+        "other",
+        "boundary\n",
+        &format!("Revert at boundary\n\nThis reverts commit {seed}."),
+        "2020-01-02T00:00:00Z",
+    );
+    commit(
+        &repo,
+        "other",
+        "outside\n",
+        &format!("Outside window\n\nThis reverts commit {seed}."),
+        "2020-01-02T00:00:01Z",
+    );
+    let after_endpoint = commit(
+        &repo,
+        "other",
+        "after endpoint\n",
+        &format!("After endpoint\n\nThis reverts commit {seed}."),
+        "2020-01-02T00:00:00Z",
+    );
+    repo.index();
+
+    let report = json(
+        &repo,
+        &[
+            "followups",
+            &seed,
+            "--days",
+            "1",
+            "--max-commits",
+            "10",
+            "--json",
+        ],
+    );
+    let entries = report["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 3);
+    assert_eq!(entries[0]["commit_id"], inverted);
+    assert_eq!(entries[0]["elapsed_seconds"], -86400);
+    assert_eq!(entries[1]["commit_id"], boundary);
+    assert_eq!(entries[1]["elapsed_seconds"], 86400);
+    assert_eq!(entries[2]["commit_id"], after_endpoint);
+    assert_eq!(report["lineage_inspected_count"], 1);
+    assert!(
+        report["warnings"]
+            .to_string()
+            .contains("Timestamp inversion")
+    );
+
+    let endpoint_report = json(
+        &repo,
+        &[
+            "followups",
+            &seed,
+            "--to-rev",
+            &boundary,
+            "--days",
+            "1",
+            "--json",
+        ],
+    );
+    let endpoint_entries = endpoint_report["entries"].as_array().unwrap();
+    assert_eq!(endpoint_entries.len(), 2);
+    assert_eq!(endpoint_entries[0]["commit_id"], inverted);
+    assert_eq!(endpoint_entries[1]["commit_id"], boundary);
+
+    let budget_report = json(
+        &repo,
+        &[
+            "followups",
+            &seed,
+            "--days",
+            "1",
+            "--max-commits",
+            "1",
+            "--json",
+        ],
+    );
+    assert_eq!(budget_report["inspected_count"], 1);
+    assert_eq!(budget_report["traversal_truncated"], true);
+    assert!(budget_report["entries"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn followups_resolves_unique_abbreviated_revert_reference() {
+    let repo = TestRepo::new();
+    let seed = commit(&repo, "a", "seed\n", "Seed", "2020-01-01T00:00:00Z");
+    let abbreviated_seed = &seed[..12];
+    let reference = commit(
+        &repo,
+        "other",
+        "unselected path\n",
+        &format!("Revert note\n\nThis reverts commit {abbreviated_seed}."),
+        "2020-01-02T00:00:00Z",
+    );
+    repo.index();
+
+    let report = json(&repo, &["followups", &seed, "--path", "a", "--json"]);
+    let entries = report["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["commit_id"], reference);
+    assert_eq!(entries[0]["revert_reference"]["target_commit_id"], seed);
+    assert_eq!(entries[0]["paths"], serde_json::json!([]));
+}

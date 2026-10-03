@@ -122,7 +122,10 @@ pub(in crate::analysis) fn index(
 }
 
 /// Resolve an abbreviated object ID, but only when it is unambiguous.
-fn resolve(known: &HashSet<String>, hex: &str) -> Option<String> {
+pub(in crate::analysis) fn resolve_oid_prefix(
+    known: &HashSet<String>,
+    hex: &str,
+) -> Option<String> {
     if hex.len() < 7 {
         return None;
     }
@@ -136,7 +139,7 @@ fn resolve_in_scope(
     eligible: &HashSet<String>,
     hex: &str,
 ) -> Option<String> {
-    resolve(all_cached, hex).filter(|target| eligible.contains(target))
+    resolve_oid_prefix(all_cached, hex).filter(|target| eligible.contains(target))
 }
 
 #[cfg(test)]

@@ -50,8 +50,8 @@ pub(crate) struct GithubLinkArgs {
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
     #[command(
-        about = "Inspect bounded later same-file changes",
-        long_about = r#"Inspect factual same-file associations after a cached seed commit.
+        about = "Inspect bounded later follow-up material",
+        long_about = r#"Inspect bounded follow-up material after a cached seed commit.
 
 REV and --to-rev must resolve in the published cache; the seed must be an ancestor of the endpoint (default cache tip). Equal endpoints succeed with no material. Only strict seed descendants reachable from that endpoint are inspected, not parallel work or all refs. This is read-only: no fetch, index or implicit cache expansion. Shallow and missing-history coverage is reported.
 
@@ -59,7 +59,7 @@ Repeat --path with exact repository-relative original changed paths, without glo
 
 --days (default 90), --max-commits (default 2000), and --limit (default 20) require positive, representable integers. The inclusive committer-time ceiling is seed time plus --days; there is no lower timestamp bound. Timestamp-inverted descendants keep signed negative elapsed times and warnings. Deterministic forward topological inspection prioritizes early history; nonmatching eligible commits count against --max-commits. --limit separately bounds displayed matches. Out-of-window lineage inspection has an additional --max-commits budget; exhausted or unavailable correspondence is disclosed. Inspected extent and traversal/display truncation are separate.
 
-This first slice supplies same-file-only material, not changed-region overlap, explicit-revert analysis, fix/test labels, causality or stability judgments. Deletion ends an incarnation (a seed-deleted file has none); later recreation and copies are not continuations. Detected subsequent renames are followed across path changes; undetected renames cannot be recovered. Branch correspondence is conservative; ambiguous merges stop affected tracking. Merge diffs are relative to the first parent, not proof of fresh corrections. Empty success means only no associations in the inspected scope.
+An explicit revert reference requires a trimmed commit-message line of the form `This reverts commit <OID>` (optional final period; surrounding whitespace is ignored), where <OID> is a full object ID or an unambiguous cached hexadecimal prefix of at least 7 digits. A generic revert subject or shared path is insufficient. References are commit-level: `--path` filters seed paths but does not hide a reference when its commit touches no selected path. References use the same endpoint, inclusive time ceiling, and inspection budget as path associations. Explicit references precede same-file-only results and receive the display limit first, with forward topological ordering within each group. A reference is a declaration only; it does not verify patch inversion or selected-path reversal, and neither basis establishes causality or stability. Deletion ends an incarnation (a seed-deleted file has none); later recreation and copies are not continuations. Detected subsequent renames are followed across path changes; undetected renames cannot be recovered. Branch correspondence is conservative; ambiguous merges stop affected tracking. Merge diffs are relative to the first parent, not proof of fresh corrections. Empty success means only no associations in the inspected scope.
 
 No full diff by default. --patch includes bounded supporting cached hunks (64 scanned, 16 displayed, 8 KiB per hunk, 32 KiB per result) and discloses unavailable/truncated content. --json exposes equivalent material, effective scope and coverage.
 
