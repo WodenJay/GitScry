@@ -626,7 +626,11 @@ fn commits_for_reachable_parents(
 
 #[cfg(test)]
 mod tests {
-    use super::{CacheState, Expected, publication_matches_target};
+    use std::fs;
+
+    use rusqlite::Connection;
+
+    use super::{CacheState, Expected, commits_for_objects, publication_matches_target};
 
     #[test]
     fn publication_accepts_a_pinned_head_cached_before_another_head() {
@@ -648,15 +652,6 @@ mod tests {
 
         assert!(publication_matches_target(&state, &expected));
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::fs;
-
-    use rusqlite::Connection;
-
-    use super::commits_for_objects;
 
     #[test]
     fn commits_for_objects_batches_large_object_sets_with_sorted_unique_commits() {
