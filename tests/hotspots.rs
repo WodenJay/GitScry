@@ -262,6 +262,11 @@ fn empty_results_default_top_twenty_and_validation() {
         String::from_utf8_lossy(&uncached_output.stderr)
             .contains("outside the published cache generation")
     );
+    let after_uncached = report(&repo, &["hotspots", "--json"]);
+    assert_eq!(
+        after_uncached["scope"]["target_rev"],
+        json["scope"]["target_rev"]
+    );
 }
 
 #[test]
@@ -404,6 +409,23 @@ fn scopes_hotspots_by_revisions_committer_time_and_target_directory() {
     assert_eq!(json["files"][0]["path"], "src/file.rs");
     assert_eq!(json["files"][0]["touching_commits"], 1, "{json}");
     assert_eq!(json["files"][0]["last_changed"], "2020-01-02T00:00:00Z");
+
+    let target_scope = report(
+        &repo,
+        &[
+            "hotspots",
+            "--json",
+            "--to-rev",
+            &target,
+            "--path-prefix",
+            "src/",
+        ],
+    );
+    assert_eq!(target_scope["scope"]["target_rev"], target);
+    assert_eq!(target_scope["scope"]["cache_tip"], cache_tip);
+    assert_eq!(count(&target_scope, "src/file.rs"), 3);
+    assert_eq!(count(&target_scope, "src/zero.rs"), 1);
+    assert_eq!(target_scope["files"].as_array().unwrap().len(), 2);
 
     let text = repo.run([
         "hotspots",
