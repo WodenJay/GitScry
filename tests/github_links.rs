@@ -456,14 +456,9 @@ fn timeline_github_options_preserve_entries_and_only_the_explicit_repo_enables_f
 
 #[cfg(unix)]
 mod unix {
-    use std::{
-        fs,
-        os::unix::fs::PermissionsExt,
-        path::PathBuf,
-        process::{Command, Output},
-    };
+    use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf, process::Output};
 
-    use super::support::{TestRepo, git};
+    use super::support::{self, TestRepo, git};
     use tempfile::TempDir;
 
     pub(super) struct FakeGh {
