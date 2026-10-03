@@ -289,7 +289,7 @@ fn matching_material_hunks(
 fn merge_material_hunks(
     existing: &mut Vec<AssociatedHunk>,
     incoming: Vec<AssociatedHunk>,
-    truncated: &mut bool,
+    hunks_truncated: &mut bool,
 ) {
     for hunk in incoming {
         if let Some(previous) = existing.iter_mut().find(|previous| {
@@ -297,159 +297,173 @@ fn merge_material_hunks(
                 && previous.hunk_ordinal == hunk.hunk_ordinal
         }) {
             previous.excerpt_truncated |= hunk.excerpt_truncated;
-            for identity in hunk.shared_identities {
-                if !previous.shared_identities.contains(&identity) {
-                    previous.shared_identities.push(identity);
-                }
-            }
-            previous.shared_identities.sort();
+            merge_sorted_unique(&mut previous.shared_identities, hunk.shared_identities);
             for line in hunk.lines {
                 if previous.lines.contains(&line) {
                     continue;
                 }
                 if previous.lines.len() == ASSOCIATED_LINE_LIMIT {
                     previous.excerpt_truncated = true;
-                    *truncated = true;
+                    *hunks_truncated = true;
                     break;
                 }
                 previous.lines.push(line);
             }
         } else if existing.len() == ASSOCIATED_HUNK_LIMIT {
-            *truncated = true;
+            *hunks_truncated = true;
         } else {
             existing.push(hunk);
         }
     }
 }
 
-fn associate_materials(
-    session: &cache::QuerySession,
-    conflict_path: &[u8],
-    conflict_paths: &HashSet<Vec<u8>>,
-    side: &'static str,
-    commit: &crate::cache::HistoryCommit,
-    conflict_hunks: &[crate::cache::HistoryHunk],
-    materials: &mut Vec<AssociatedMaterial>,
-    material_indices: &mut HashMap<(String, i64), usize>,
-    report_truncated: &mut bool,
-    remaining_changes: &mut usize,
-) -> Result<(Vec<usize>, bool), AppError> {
-    let conflict_signals = conflict_hunks
-        .iter()
-        .flat_map(|hunk| changed_line_signals(&hunk.text))
-        .collect::<BTreeSet<_>>();
-    if conflict_signals.is_empty() {
-        return Ok((Vec::new(), false));
+fn merge_sorted_unique(target: &mut Vec<String>, incoming: impl IntoIterator<Item = String>) {
+    for identity in incoming {
+        if !target.contains(&identity) {
+            target.push(identity);
+        }
+    }
+    target.sort();
+}
+
+struct AssociatedMaterialCollector<'a> {
+    session: &'a cache::QuerySession,
+    conflict_paths: &'a HashSet<Vec<u8>>,
+    materials: Vec<AssociatedMaterial>,
+    material_indices: HashMap<(String, i64), usize>,
+    truncated: bool,
+    remaining_changes: usize,
+}
+
+impl<'a> AssociatedMaterialCollector<'a> {
+    fn new(session: &'a cache::QuerySession, conflict_paths: &'a HashSet<Vec<u8>>) -> Self {
+        Self {
+            session,
+            conflict_paths,
+            materials: Vec::new(),
+            material_indices: HashMap::new(),
+            truncated: false,
+            remaining_changes: ASSOCIATED_CHANGE_REPORT_LIMIT,
+        }
     }
 
-    let mut material_ids = Vec::new();
-    let mut truncated = false;
-    let mut scanned = 0;
-    for change in &commit.changes {
-        if change
-            .old_path
-            .as_ref()
-            .is_some_and(|path| conflict_paths.contains(path))
-            || change
-                .new_path
+    fn associate(
+        &mut self,
+        conflict_path: &[u8],
+        side: &'static str,
+        commit: &crate::cache::HistoryCommit,
+        conflict_hunks: &[crate::cache::HistoryHunk],
+    ) -> Result<(Vec<usize>, bool), AppError> {
+        let conflict_signals = conflict_hunks
+            .iter()
+            .flat_map(|hunk| changed_line_signals(&hunk.text))
+            .collect::<BTreeSet<_>>();
+        if conflict_signals.is_empty() {
+            return Ok((Vec::new(), false));
+        }
+
+        let mut material_ids = Vec::new();
+        let mut truncated = false;
+        let mut scanned = 0;
+        for change in &commit.changes {
+            if change
+                .old_path
                 .as_ref()
-                .is_some_and(|path| conflict_paths.contains(path))
-        {
-            continue;
-        }
-        let Some(path) = change.new_path.as_deref().or(change.old_path.as_deref()) else {
-            continue;
-        };
-        let Some(kind) = associated_kind(path) else {
-            continue;
-        };
-        if scanned == ASSOCIATED_CHANGE_SCAN_LIMIT || *remaining_changes == 0 {
-            truncated = true;
-            break;
-        }
-        scanned += 1;
-        *remaining_changes -= 1;
-        let patch = session.patch_history_for_change(
-            &commit.oid,
-            change.ordinal,
-            ASSOCIATED_HUNK_SCAN_LIMIT,
-            ASSOCIATED_HUNK_BYTE_LIMIT,
-        )?;
-        let mut patch_truncated = patch.truncated || patch.missing_objects;
-        let (hunks, shared) =
-            matching_material_hunks(patch.hunks, &conflict_signals, &mut patch_truncated);
-        truncated |= patch_truncated;
-        if shared.is_empty() {
-            continue;
-        }
-        let key = (commit.oid.clone(), change.ordinal);
-        let existing = material_indices.get(&key).copied();
-        if existing.is_none() && material_ids.len() == ASSOCIATED_MATERIALS_PER_LEAD {
-            truncated = true;
-            break;
-        }
-        if existing.is_none() && materials.len() == ASSOCIATED_MATERIAL_LIMIT {
-            truncated = true;
-            *report_truncated = true;
-            break;
-        }
-        let index = if let Some(index) = existing {
-            index
-        } else {
-            let index = materials.len();
-            materials.push(AssociatedMaterial {
-                id: index + 1,
-                commit: commit.oid.clone(),
-                path: String::from_utf8_lossy(path).into_owned(),
-                path_bytes: path.to_vec(),
-                kind,
-                association: "same-commit changes share exact distinctive identities; historical association, not proof of dependency",
-                shared_identities: Vec::new(),
-                hunks: Vec::new(),
-                hunks_truncated: false,
-                associated_with: Vec::new(),
-                associations_truncated: false,
-            });
-            material_indices.insert(key, index);
-            index
-        };
-        let material = &mut materials[index];
-        for identity in &shared {
-            if !material.shared_identities.contains(identity) {
-                material.shared_identities.push(identity.clone());
+                .is_some_and(|path| self.conflict_paths.contains(path))
+                || change
+                    .new_path
+                    .as_ref()
+                    .is_some_and(|path| self.conflict_paths.contains(path))
+            {
+                continue;
             }
-        }
-        material.shared_identities.sort();
-        let excerpts_truncated = hunks.iter().any(|hunk| hunk.excerpt_truncated);
-        let mut hunk_truncated = patch_truncated;
-        merge_material_hunks(&mut material.hunks, hunks, &mut hunk_truncated);
-        material.hunks_truncated |= hunk_truncated || excerpts_truncated;
-        truncated |= hunk_truncated;
-
-        let reference = AssociatedLead {
-            conflict_path: String::from_utf8_lossy(conflict_path).into_owned(),
-            side,
-            lead_commit: commit.oid.clone(),
-            shared_identities: shared.into_iter().collect(),
-        };
-        if !material.associated_with.iter().any(|existing| {
-            existing.conflict_path == reference.conflict_path
-                && existing.side == reference.side
-                && existing.lead_commit == reference.lead_commit
-        }) {
-            if material.associated_with.len() == FILE_LIMIT * 2 {
-                material.associations_truncated = true;
+            let Some(path) = change.new_path.as_deref().or(change.old_path.as_deref()) else {
+                continue;
+            };
+            let Some(kind) = associated_kind(path) else {
+                continue;
+            };
+            if scanned == ASSOCIATED_CHANGE_SCAN_LIMIT || self.remaining_changes == 0 {
                 truncated = true;
+                break;
+            }
+            scanned += 1;
+            self.remaining_changes -= 1;
+            let patch = self.session.patch_history_for_change(
+                &commit.oid,
+                change.ordinal,
+                ASSOCIATED_HUNK_SCAN_LIMIT,
+                ASSOCIATED_HUNK_BYTE_LIMIT,
+            )?;
+            let mut patch_truncated = patch.truncated || patch.missing_objects;
+            let (hunks, shared) =
+                matching_material_hunks(patch.hunks, &conflict_signals, &mut patch_truncated);
+            if shared.is_empty() {
+                truncated |= patch_truncated;
+                continue;
+            }
+            let key = (commit.oid.clone(), change.ordinal);
+            let existing = self.material_indices.get(&key).copied();
+            if existing.is_none() && material_ids.len() == ASSOCIATED_MATERIALS_PER_LEAD {
+                truncated = true;
+                break;
+            }
+            if existing.is_none() && self.materials.len() == ASSOCIATED_MATERIAL_LIMIT {
+                truncated = true;
+                break;
+            }
+            let index = if let Some(index) = existing {
+                index
             } else {
-                material.associated_with.push(reference);
+                let index = self.materials.len();
+                self.materials.push(AssociatedMaterial {
+                    id: index + 1,
+                    commit: commit.oid.clone(),
+                    path: String::from_utf8_lossy(path).into_owned(),
+                    path_bytes: path.to_vec(),
+                    kind,
+                    association: "same-commit changes share exact distinctive identities; historical association, not proof of dependency",
+                    shared_identities: Vec::new(),
+                    hunks: Vec::new(),
+                    hunks_truncated: false,
+                    associated_with: Vec::new(),
+                    associations_truncated: false,
+                });
+                self.material_indices.insert(key, index);
+                index
+            };
+            let material = &mut self.materials[index];
+            merge_sorted_unique(&mut material.shared_identities, shared.iter().cloned());
+            let excerpts_truncated = hunks.iter().any(|hunk| hunk.excerpt_truncated);
+            let mut hunks_truncated = patch_truncated;
+            merge_material_hunks(&mut material.hunks, hunks, &mut hunks_truncated);
+            material.hunks_truncated |= hunks_truncated || excerpts_truncated;
+
+            let reference = AssociatedLead {
+                conflict_path: String::from_utf8_lossy(conflict_path).into_owned(),
+                side,
+                lead_commit: commit.oid.clone(),
+                shared_identities: shared.into_iter().collect(),
+            };
+            if !material.associated_with.iter().any(|existing| {
+                existing.conflict_path == reference.conflict_path
+                    && existing.side == reference.side
+                    && existing.lead_commit == reference.lead_commit
+            }) {
+                if material.associated_with.len() == FILE_LIMIT * 2 {
+                    material.associations_truncated = true;
+                    truncated = true;
+                } else {
+                    material.associated_with.push(reference);
+                }
+            }
+            if !material_ids.contains(&material.id) {
+                material_ids.push(material.id);
             }
         }
-        if !material_ids.contains(&material.id) {
-            material_ids.push(material.id);
-        }
+        self.truncated |= truncated;
+        Ok((material_ids, truncated))
     }
-    *report_truncated |= truncated;
-    Ok((material_ids, truncated))
 }
 
 pub(crate) fn execute(paths: Vec<String>, limit: usize) -> Result<Outcome, AppError> {
@@ -508,10 +522,7 @@ pub(crate) fn execute(paths: Vec<String>, limit: usize) -> Result<Outcome, AppEr
     }
     warnings.sort();
     warnings.dedup();
-    let mut associated_materials = Vec::new();
-    let mut associated_material_indices = HashMap::new();
-    let mut associated_materials_truncated = false;
-    let mut remaining_associated_changes = ASSOCIATED_CHANGE_REPORT_LIMIT;
+    let mut associated_materials = AssociatedMaterialCollector::new(&session, &unmerged_paths);
     let mut files = Vec::new();
     for file in target.files {
         let mut sides = Vec::new();
@@ -536,18 +547,7 @@ pub(crate) fn execute(paths: Vec<String>, limit: usize) -> Result<Outcome, AppEr
                     }
                     let (associated_material_ids, associated_materials_truncated) =
                         if leads.len() < limit {
-                            associate_materials(
-                                &session,
-                                &file.path,
-                                &unmerged_paths,
-                                *name,
-                                &commit,
-                                &matching,
-                                &mut associated_materials,
-                                &mut associated_material_indices,
-                                &mut associated_materials_truncated,
-                                &mut remaining_associated_changes,
-                            )?
+                            associated_materials.associate(&file.path, name, &commit, &matching)?
                         } else {
                             (Vec::new(), false)
                         };
@@ -605,8 +605,8 @@ pub(crate) fn execute(paths: Vec<String>, limit: usize) -> Result<Outcome, AppEr
     let report = Report {
         schema_version: 2, ours: target.ours, theirs: target.theirs, merge_base: target.base,
         total_unmerged_paths, selected_paths, files, files_truncated, coverage_complete,
-        associated_materials,
-        associated_materials_truncated,
+        associated_materials: associated_materials.materials,
+        associated_materials_truncated: associated_materials.truncated,
         limits: Limits {
             files: FILE_LIMIT,
             leads_per_file_side: limit,

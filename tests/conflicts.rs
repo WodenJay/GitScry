@@ -93,7 +93,7 @@ fn associated_fixture() -> TestRepo {
         &[
             (
                 "src/service.rs",
-                "pub fn service_identity(name: &str) -> String {\n    normalize_identity(name, Owner::Service)\n}\n",
+                "pub fn service_identity(name: &str) -> String {\n    const LABEL: &str = \"secret\x1btag\";\n    normalize_identity(name, Owner::Service)\n}\n",
             ),
             (
                 "src/identity.rs",
@@ -101,7 +101,7 @@ fn associated_fixture() -> TestRepo {
             ),
             (
                 "src/caller.rs",
-                "pub fn caller(name: &str) -> String {\n    let value = normalize_identity(name, Owner::Service);\n    log_identity(normalize_identity(name, Owner::Service));\n    audit_identity(normalize_identity(name, Owner::Service));\n    publish_identity(normalize_identity(name, Owner::Service));\n    export_identity(normalize_identity(name, Owner::Service));\n    value\n}\n",
+                "pub fn caller(name: &str) -> String {\n    let label = \"secret\x1btag\";\n    let value = normalize_identity(name, Owner::Service);\n    log_identity(normalize_identity(name, Owner::Service));\n    audit_identity(normalize_identity(name, Owner::Service));\n    publish_identity(normalize_identity(name, Owner::Service));\n    export_identity(normalize_identity(name, Owner::Service));\n    value\n}\n",
             ),
             ("src/unrelated.rs", "fn unrelated_ours() {}\n"),
         ],
@@ -229,9 +229,12 @@ fn reports_same_commit_callers_tests_and_bounded_matching_hunks() {
         .find(|material| material["path"] == "src/caller.rs")
         .unwrap();
     assert_eq!(caller["kind"], "changed_code");
-    assert_eq!(
-        caller["shared_identities"],
-        serde_json::json!(["normalize_identity"])
+    let caller_identities = caller["shared_identities"].as_array().unwrap();
+    assert!(caller_identities.contains(&serde_json::json!("normalize_identity")));
+    assert!(
+        caller_identities
+            .iter()
+            .any(|identity| identity.as_str().unwrap().contains('\x1b'))
     );
     assert_eq!(caller["associated_with"].as_array().unwrap().len(), 2);
     assert!(
@@ -288,13 +291,19 @@ fn reports_same_commit_callers_tests_and_bounded_matching_hunks() {
                 .iter()
                 .find(|side| side["name"] == association["side"])
                 .unwrap();
-            assert!(side["leads"].as_array().unwrap().iter().any(|lead| {
-                lead["commit"] == association["lead_commit"]
-                    && lead["associated_material_ids"]
-                        .as_array()
-                        .unwrap()
-                        .contains(&material["id"])
-            }));
+            let lead = side["leads"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|lead| lead["commit"] == association["lead_commit"])
+                .unwrap();
+            assert!(
+                lead["associated_material_ids"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&material["id"])
+            );
+            assert_eq!(lead["associated_materials_truncated"], false);
         }
     }
 
@@ -319,6 +328,8 @@ fn reports_same_commit_callers_tests_and_bounded_matching_hunks() {
     assert!(text.contains("src/caller.rs"));
     assert!(text.contains("tests/identity_regression.rs"));
     assert!(text.contains("normalize_identity"));
+    assert!(!text.contains('\x1b'));
+    assert!(text.contains("\\u{1b}"));
     assert!(text.contains("excerpt truncated"));
 }
 

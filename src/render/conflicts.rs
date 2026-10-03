@@ -2,6 +2,14 @@ use super::escape::subject as display;
 use crate::analysis::capabilities::conflicts::Report;
 use std::fmt::Write;
 
+fn display_identities(identities: &[String]) -> String {
+    identities
+        .iter()
+        .map(|identity| display(identity))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 pub(super) fn format_report(report: &Report) -> String {
     let mut output = format!(
         "Merge conflict historical leads\nours: {}\ntheirs: {}\nmerge base: {}\nCoverage complete for selected supported paths: {}\n",
@@ -94,7 +102,7 @@ pub(super) fn format_report(report: &Report) -> String {
             writeln!(
                 output,
                 "    Shared identities: {}",
-                material.shared_identities.join(", ")
+                display_identities(&material.shared_identities)
             )
             .unwrap();
             for association in &material.associated_with {
@@ -104,7 +112,7 @@ pub(super) fn format_report(report: &Report) -> String {
                     display(&association.conflict_path),
                     association.side,
                     association.lead_commit,
-                    association.shared_identities.join(", ")
+                    display_identities(&association.shared_identities)
                 )
                 .unwrap();
             }
@@ -118,7 +126,7 @@ pub(super) fn format_report(report: &Report) -> String {
                     hunk.old_lines,
                     hunk.new_start,
                     hunk.new_lines,
-                    hunk.shared_identities.join(", ")
+                    display_identities(&hunk.shared_identities)
                 )
                 .unwrap();
                 for line in &hunk.lines {
