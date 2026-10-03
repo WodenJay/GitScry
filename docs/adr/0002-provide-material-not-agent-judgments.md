@@ -1,0 +1,5 @@
+# Provide historical material, not judgments on behalf of agents
+
+GitScry gives development agents compact, traceable historical material so they can investigate further and make their own judgments. GitScry retrieves and organizes historical facts and relationships; it does not decide on an agent's behalf that a current change is incomplete, that a later change was corrective, or that a candidate file must be modified. Requiring GitScry to establish those conclusions would confuse historical association with intent or causation and duplicate the agent's responsibility.
+
+Historical relationships may be returned as investigation leads without classifying later work as corrective or proving a current omission. Returned material must expose the underlying commits, paths, and basis of the relationship so the agent can inspect it; temporal association must not be presented as proven causation. Conservative selection should reduce weak or generic associations, not require GitScry to resolve the agent's investigation before returning material.
