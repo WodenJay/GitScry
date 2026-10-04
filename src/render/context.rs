@@ -108,6 +108,28 @@ pub(super) fn format_report(report: &ContextReport) -> String {
                     .unwrap_or_else(|| "unknown".to_owned())
             ));
         }
+        if let Some(followup) = &suggestion.historical_followup {
+            lines.push(format!(
+                "  Historical follow-up: supporting origins {}/{}, {} independent chains; candidate baseline {}/{}",
+                followup.supporting_origins,
+                followup.complete_origins,
+                followup.independent_chains,
+                followup.baseline_occurrences,
+                followup.baseline_sample_size,
+            ));
+            for chain in &followup.chains {
+                lines.push(format!(
+                    "    Historical chain: {} -> {}",
+                    chain.origin_oid, chain.later_oid
+                ));
+            }
+            if followup.undisplayed_supporting_origins > 0 {
+                lines.push(format!(
+                    "    Additional supporting origins not shown: {}",
+                    followup.undisplayed_supporting_origins
+                ));
+            }
+        }
         for item in &suggestion.content_matches {
             lines.push(format!("  Content: current {} {} (old {}, new {}) -> historical {} {} {} line {} (old {}, new {}); signals: {}",
                 escape::path(&item.current_path), if item.current_added { "added" } else { "removed" },
@@ -257,11 +279,27 @@ struct JsonSuggestion<'a> {
     content_matches: Vec<JsonContentMatch<'a>>,
     content_matches_truncated: bool,
     abandonment: Option<JsonAbandonment<'a>>,
+    historical_followup: Option<JsonHistoricalFollowup<'a>>,
 }
 #[derive(Serialize)]
 struct JsonAbandonment<'a> {
     reason: Option<&'a str>,
     retry: Option<&'a str>,
+}
+#[derive(Serialize)]
+struct JsonHistoricalFollowup<'a> {
+    supporting_origins: usize,
+    complete_origins: usize,
+    independent_chains: usize,
+    baseline_occurrences: usize,
+    baseline_sample_size: usize,
+    undisplayed_supporting_origins: usize,
+    chains: Vec<JsonHistoricalFollowupChain<'a>>,
+}
+#[derive(Serialize)]
+struct JsonHistoricalFollowupChain<'a> {
+    origin_oid: &'a str,
+    later_oid: &'a str,
 }
 #[derive(Serialize)]
 struct JsonContentMatch<'a> {
@@ -296,6 +334,24 @@ impl<'a> From<&'a ContextSuggestion> for JsonSuggestion<'a> {
                     reason: detail.reason.as_deref(),
                     retry: detail.retry.as_deref(),
                 }),
+            historical_followup: suggestion.historical_followup.as_ref().map(|detail| {
+                JsonHistoricalFollowup {
+                    supporting_origins: detail.supporting_origins,
+                    complete_origins: detail.complete_origins,
+                    independent_chains: detail.independent_chains,
+                    baseline_occurrences: detail.baseline_occurrences,
+                    baseline_sample_size: detail.baseline_sample_size,
+                    undisplayed_supporting_origins: detail.undisplayed_supporting_origins,
+                    chains: detail
+                        .chains
+                        .iter()
+                        .map(|chain| JsonHistoricalFollowupChain {
+                            origin_oid: &chain.origin_oid,
+                            later_oid: &chain.later_oid,
+                        })
+                        .collect(),
+                }
+            }),
             path: json::json_path(&suggestion.path),
             associated_current_paths: suggestion
                 .associated_current_paths

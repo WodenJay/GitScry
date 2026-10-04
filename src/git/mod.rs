@@ -43,6 +43,12 @@ impl Repository {
         conflicts::pin(self)
     }
     pub(crate) fn tracked_files(&self, revision: &str) -> Result<Vec<Vec<u8>>, AppError> {
+        self.tree_paths(revision, false)
+    }
+    pub(crate) fn regular_files(&self, revision: &str) -> Result<Vec<Vec<u8>>, AppError> {
+        self.tree_paths(revision, true)
+    }
+    fn tree_paths(&self, revision: &str, regular_only: bool) -> Result<Vec<Vec<u8>>, AppError> {
         let tree = self.git.output(["ls-tree", "-r", "-z", revision], &[])?;
         let mut paths = Vec::new();
         for entry in tree
@@ -52,7 +58,11 @@ impl Repository {
             let Some(tab) = entry.iter().position(|byte| *byte == b'\t') else {
                 return Err(AppError::operational("error: invalid Git tree entry"));
             };
-            if entry[..tab].split(|byte| *byte == b' ').nth(1) == Some(b"blob") {
+            let mut header = entry[..tab].split(|byte| *byte == b' ');
+            let mode = header.next();
+            let kind = header.next();
+            let regular_mode = mode.is_some_and(|mode| mode == b"100644" || mode == b"100755");
+            if kind == Some(&b"blob"[..]) && (!regular_only || regular_mode) {
                 paths.push(entry[tab + 1..].to_vec());
             }
         }
@@ -220,6 +230,44 @@ impl Repository {
             graph.insert(oid, parents);
         }
         Ok(graph)
+    }
+
+    pub(crate) fn reachable_commit_times(
+        &self,
+        tip: &str,
+    ) -> Result<HashMap<String, i64>, AppError> {
+        let output = self.git.text(["rev-list", "--timestamp", tip])?;
+        let mut times = HashMap::new();
+        for line in output.lines() {
+            let mut fields = line.split_ascii_whitespace();
+            let timestamp = fields.next().ok_or_else(|| {
+                AppError::operational(
+                    "error: Git revision graph contained an invalid commit timestamp",
+                )
+            })?;
+            let oid = fields
+                .next()
+                .filter(|oid| {
+                    matches!(oid.len(), 40 | 64) && oid.bytes().all(|byte| byte.is_ascii_hexdigit())
+                })
+                .ok_or_else(|| {
+                    AppError::operational(
+                        "error: Git revision graph contained an invalid object ID",
+                    )
+                })?;
+            if fields.next().is_some() {
+                return Err(AppError::operational(
+                    "error: Git revision graph contained an invalid commit timestamp",
+                ));
+            }
+            let commit_time = timestamp.parse::<i64>().map_err(|_| {
+                AppError::operational(
+                    "error: Git revision graph contained an invalid commit timestamp",
+                )
+            })?;
+            times.insert(oid.to_owned(), commit_time);
+        }
+        Ok(times)
     }
     pub(crate) fn is_ancestor(&self, ancestor: &str, descendant: &str) -> Result<bool, AppError> {
         self.git
