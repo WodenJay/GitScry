@@ -1,9 +1,8 @@
 # GitScry Dogfooding
 
-Record a case only when GitScry did **not meaningfully help** with the intended task, such as: 
-its output was not useful, it failed to provide information needed to complete the task, or its behavior differed materially from what was reasonably expected.
+Whenever GitScry is used, briefly assess whether it meaningfully helped with the intended task.
 
-Do not record successful or merely imperfect uses.
+Record a case only when it did not—for example, its output was not useful, it failed to provide needed information, or its behavior materially differed from what was reasonably expected. Do not record merely imperfect uses or create entries just for the sake of dogfooding.
 
 ## Template
 
