@@ -100,6 +100,12 @@ Results stay traceable: GitScry shows the commits, paths, confidence, and eviden
 
 GitScry is local by design. It builds a rebuildable cache from your local repository history; Git remains the source of truth.
 
+### Cache initialization and refresh
+
+Run `gitscry index` once per repository to initialize its shared cache. Search and capabilities using shared query preparation then synchronously add missing locally available history reachable from the invocation's pinned HEAD, including merged parents, before selecting material. Previously cached branch history is retained; query filters do not limit maintenance. Covered targets remain quiet even when the published cache tip differs.
+
+Queries do not initialize, repair, upgrade, fetch, or scan all refs. Refresh and lock waits report progress on stderr, without a default timeout. Shallow and missing-object limitations remain disclosed. A failed refresh uses prior published material only when the cache is safely readable and query prerequisites hold, with explicit failure and incomplete-coverage warnings in human and JSON reports. Semantic settings remain unchanged; hybrid queries still require compatible semantic coverage. Explicit `index` remains available for maintenance and semantic preparation.
+
 ## Installation
 
 ```bash
