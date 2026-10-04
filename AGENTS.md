@@ -7,6 +7,7 @@
 - If /implement skill is used, after finishing the whole task: reviewer then find bugs -> add test (if possible; **never write complex and meaningless test**) -> RED -> fix bugs -> GREEN -> done. **Do NOT re-review after fixing bugs. One task, one batch review**.
 - Keep code clean and intentional with /codebase-design skill; prefer clarity over compatibility. Give each module one reason to change, with a small public interface over a private implementation.
 - Dogfood GitScry during development whenever repository history may be useful. Follow `docs\DOGFOODING.md` for usage and logging guidance; see `gitscry --help` for commands.
+- For agents: do NOT change `README.md`.
 
 ## Cargo Rules
 
