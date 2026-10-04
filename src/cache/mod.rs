@@ -18,7 +18,7 @@ mod semantic;
 mod write;
 use crate::{app::AppError, git::Repository};
 pub(crate) use clear::{ClearReport, clear};
-pub(crate) use generation::{prepare, prepare_at, refresh_query};
+pub(crate) use generation::{prepare, refresh_query};
 pub(crate) use history::HunkId;
 pub(crate) use history::PathChange;
 pub(crate) use history::{CodeHunk, HistoryCommit, HistoryHunk, OtherFileChange, PatchHistoryHunk};
@@ -233,6 +233,35 @@ pub(crate) fn open_query(repository: &Repository) -> Result<QuerySession, AppErr
         warnings,
         has_published_cache: true,
     })
+}
+
+/// Refresh each pinned target through the shared lifecycle and retain one read session.
+pub(crate) fn refresh_query_targets(
+    repository: &Repository,
+    tips: &[&str],
+) -> Result<QuerySession, AppError> {
+    let mut progress = Vec::new();
+    let mut warnings = Vec::new();
+    for tip in tips {
+        let refreshed = generation::refresh_query(repository, tip)?;
+        append_unique(&mut progress, refreshed.progress());
+        append_unique(&mut warnings, refreshed.warnings());
+        drop(refreshed);
+    }
+    let mut session = open_query(repository)?;
+    append_unique(&mut progress, session.progress());
+    append_unique(&mut warnings, session.warnings());
+    session.progress = progress;
+    session.warnings = warnings;
+    Ok(session)
+}
+
+fn append_unique(existing: &mut Vec<String>, additional: &[String]) {
+    for value in additional {
+        if !existing.contains(value) {
+            existing.push(value.clone());
+        }
+    }
 }
 
 fn acquire_query_shared(

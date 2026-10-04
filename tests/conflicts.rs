@@ -29,6 +29,13 @@ fn merge(repo: &TestRepo, branch: &str) {
             .success()
     );
 }
+
+fn reject_history_refresh_writes(repo: &TestRepo) {
+    let cache = rusqlite::Connection::open(repo.cache_dir().join("cache.sqlite")).unwrap();
+    cache
+        .execute_batch("CREATE TRIGGER reject_history_refresh BEFORE INSERT ON hunks BEGIN SELECT RAISE(ABORT, 'injected conflict history refresh failure'); END;")
+        .unwrap();
+}
 fn fixture() -> (TestRepo, String, String, String, String) {
     let repo = TestRepo::new();
     let base = commit(&repo, "a.txt", "base\n", "base");
@@ -49,6 +56,197 @@ fn fixture() -> (TestRepo, String, String, String, String) {
     git(repo.dir.path(), ["checkout", "main"]);
     merge(&repo, "other");
     (repo, base, ours, theirs, unrelated)
+}
+
+#[test]
+fn conflicts_help_requires_explicit_cache_initialization() {
+    let repo = TestRepo::new();
+    let output = repo.run(["conflicts", "--help"]);
+    assert!(output.status.success());
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(help.contains("run `gitscry index` first"), "{help}");
+    assert!(help.contains("both pinned endpoints"), "{help}");
+}
+
+#[test]
+fn conflicts_rejects_missing_published_cache_without_initializing_it() {
+    let (repo, _, _, _, _) = fixture();
+    fs::remove_dir_all(repo.cache_dir()).unwrap();
+
+    let output = repo.run(["conflicts", "--json"]);
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("run `gitscry index` first"));
+    assert!(!repo.cache_dir().exists());
+}
+
+#[test]
+fn refreshes_both_conflict_sides_and_preserves_other_cached_history() {
+    let repo = TestRepo::new();
+    commit(&repo, "a.txt", "base\n", "base");
+    git(repo.dir.path(), ["branch", "other"]);
+    let unrelated = commit(
+        &repo,
+        "unrelated.txt",
+        "cached\n",
+        "UnrelatedCacheMarker published history",
+    );
+    repo.index();
+
+    let ours = commit(&repo, "a.txt", "ours\n", "ours after initialization");
+    git(repo.dir.path(), ["checkout", "other"]);
+    let theirs = commit(&repo, "a.txt", "theirs\n", "theirs after initialization");
+    git(repo.dir.path(), ["checkout", "main"]);
+    merge(&repo, "other");
+
+    let before = state(&repo);
+    let output = repo.run(["conflicts", "--json"]);
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let report = json(output);
+    assert!(stderr.contains("Refreshing pinned history"), "{stderr}");
+    assert_eq!(report["coverage_complete"], true);
+    let sides = report["files"][0]["sides"].as_array().unwrap();
+    assert_eq!(sides[0]["leads"][0]["commit"], ours);
+    assert_eq!(sides[1]["leads"][0]["commit"], theirs);
+    assert_eq!(state(&repo), before);
+
+    let retained = repo.run([
+        "search",
+        "UnrelatedCacheMarker",
+        "--to-rev",
+        &unrelated,
+        "--json",
+    ]);
+    assert!(
+        retained.status.success(),
+        "{}",
+        String::from_utf8_lossy(&retained.stderr)
+    );
+    assert!(String::from_utf8_lossy(&retained.stdout).contains("UnrelatedCacheMarker"));
+
+    let again = repo.run(["conflicts", "--json"]);
+    assert!(again.status.success());
+    assert!(
+        again.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&again.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&again.stdout).unwrap(),
+        report
+    );
+}
+
+#[test]
+fn conflicts_reports_local_semantic_refresh_failure_but_keeps_history() {
+    let (repo, _, _, _, _) = fixture();
+    let cache = rusqlite::Connection::open(repo.cache_dir().join("cache.sqlite")).unwrap();
+    cache
+        .execute(
+            "UPDATE metadata SET value = '1' WHERE key = 'semantic_enabled'",
+            [],
+        )
+        .unwrap();
+    drop(cache);
+
+    let output = repo.run(["conflicts", "--json"]);
+    let report = json(output);
+    let warnings = report["warnings"].to_string();
+    assert!(
+        warnings.contains("automatic semantic refresh failed"),
+        "{warnings}"
+    );
+    assert!(
+        warnings.contains("pinned semantic model resource"),
+        "{warnings}"
+    );
+    assert_eq!(report["files"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn conflicts_falls_back_to_cached_history_after_refresh_failure() {
+    let repo = TestRepo::new();
+    commit(
+        &repo,
+        "history.txt",
+        "parent history\n",
+        "unpublished parent history",
+    );
+    let shallow_boundary = commit(
+        &repo,
+        "history.txt",
+        "boundary history\n",
+        "shallow boundary",
+    );
+    commit(&repo, "a.txt", "base\n", "base");
+    git(repo.dir.path(), ["branch", "other"]);
+    let ours = commit(&repo, "a.txt", "ours\n", "ours");
+    git(repo.dir.path(), ["checkout", "other"]);
+    let theirs = commit(&repo, "a.txt", "theirs\n", "theirs");
+    git(repo.dir.path(), ["checkout", "main"]);
+
+    let tree = git_stdout(repo.dir.path(), ["write-tree"]);
+    let cache_anchor = git_stdout(
+        repo.dir.path(),
+        [
+            "commit-tree",
+            &tree,
+            "-p",
+            &ours,
+            "-p",
+            &theirs,
+            "-m",
+            "cache both sides",
+        ],
+    );
+    git(
+        repo.dir.path(),
+        ["update-ref", "refs/heads/cache-anchor", &cache_anchor],
+    );
+    git(repo.dir.path(), ["checkout", "cache-anchor"]);
+    fs::write(
+        repo.common_dir().join("shallow"),
+        format!("{shallow_boundary}\n"),
+    )
+    .unwrap();
+    repo.index();
+    reject_history_refresh_writes(&repo);
+    fs::remove_file(repo.common_dir().join("shallow")).unwrap();
+
+    git(repo.dir.path(), ["checkout", "main"]);
+    merge(&repo, "other");
+    let report = json(repo.run(["conflicts", "--json"]));
+    let warnings = report["warnings"].to_string();
+    assert!(
+        warnings.contains("automatic history refresh failed"),
+        "{warnings}"
+    );
+    assert!(
+        warnings.contains("injected conflict history refresh failure"),
+        "{warnings}"
+    );
+    assert!(
+        warnings.contains("incomplete history coverage"),
+        "{warnings}"
+    );
+    assert_eq!(report["files"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn conflicts_rejects_failed_refresh_when_an_endpoint_is_not_cached() {
+    let (repo, _, _, _, _) = fixture();
+    let theirs = git_stdout(repo.dir.path(), ["rev-parse", "MERGE_HEAD"]);
+    reject_history_refresh_writes(&repo);
+
+    let output = repo.run(["conflicts", "--json"]);
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(&theirs), "{stderr}");
+    assert!(
+        stderr.contains("outside the published cache generation"),
+        "{stderr}"
+    );
 }
 
 fn commit_files(repo: &TestRepo, files: &[(&str, &str)], message: &str) -> String {
@@ -355,6 +553,7 @@ fn exposes_earlier_behavior_and_refactor_across_a_detected_rename() {
         "pub fn score(input: i32) -> i32 {\n    input\n}\n\nfn adjust(input: i32) -> i32 {\n    input\n}\n",
         "base score",
     );
+    repo.index();
     git(repo.dir.path(), ["branch", "other"]);
     git(repo.dir.path(), ["checkout", "other"]);
     let earlier = commit(
@@ -420,6 +619,7 @@ fn does_not_join_a_reintroduced_path_to_an_older_incarnation() {
         "pub fn score() -> i32 { 0 }\n",
         "base score",
     );
+    repo.index();
     git(repo.dir.path(), ["branch", "other"]);
     git(repo.dir.path(), ["checkout", "other"]);
     let earlier_incarnation = commit(
@@ -480,6 +680,7 @@ fn rename_does_not_claim_same_commit_reintroduction() {
     commit(&repo, "lib.rs", original, "base score");
     git(repo.dir.path(), ["mv", "lib.rs", "score.rs"]);
     commit(&repo, "score.rs", original, "rename lib.rs to score.rs");
+    repo.index();
     git(repo.dir.path(), ["branch", "other"]);
     git(repo.dir.path(), ["checkout", "other"]);
     fs::write(
@@ -716,6 +917,7 @@ fn explicitly_reports_file_level_and_binary_conflicts() {
     let repo = TestRepo::new();
     commit(&repo, "a.txt", "base\n", "base");
     commit(&repo, "binary", "base\0\n", "binary");
+    repo.index();
     git(repo.dir.path(), ["branch", "other"]);
     git(repo.dir.path(), ["rm", "a.txt"]);
     git(repo.dir.path(), ["commit", "-m", "delete"]);
@@ -771,6 +973,7 @@ fn traces_rename_delete_conflicts_alongside_text_conflicts_without_git_changes()
         "base score implementation",
     );
     commit(&repo, "notes.txt", "value=base\n", "base notes");
+    repo.index();
     git(repo.dir.path(), ["branch", "other"]);
 
     git(repo.dir.path(), ["checkout", "other"]);
@@ -873,16 +1076,23 @@ fn rejects_multiple_endpoints_and_reports_cache_preparation_failure() {
 }
 
 #[test]
-fn shallow_history_returns_two_sides_with_explicit_incomplete_coverage() {
+fn shallow_history_after_initialization_reports_incomplete_coverage() {
     let (repo, _, ours, theirs, _) = fixture();
     let base = git_stdout(repo.dir.path(), ["merge-base", "main", "other"]);
     fs::write(repo.common_dir().join("shallow"), format!("{base}\n")).unwrap();
-    fs::remove_dir_all(repo.cache_dir()).unwrap();
     let report = json(repo.run(["conflicts", "--json"]));
     assert_eq!(report["coverage_complete"], false);
     assert!(!report["warnings"].as_array().unwrap().is_empty());
     assert_eq!(report["files"][0]["sides"][0]["leads"][0]["commit"], ours);
     assert_eq!(report["files"][0]["sides"][1]["leads"][0]["commit"], theirs);
+    let again = repo.run(["conflicts", "--json"]);
+    assert!(again.status.success());
+    assert!(
+        again.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&again.stderr)
+    );
+    assert_eq!(json(again), report);
 }
 
 #[test]
