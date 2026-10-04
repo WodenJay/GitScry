@@ -16,6 +16,22 @@ use crate::app::{AppError, IndexStage};
 
 pub(crate) use history::{Change, Commit, HistoryTarget, Hunk, PatchStream, Snapshot};
 use process::Git;
+
+/// Canonicalize repository-relative paths like Git tree paths.
+pub(crate) fn normalize_git_path(path: &[u8]) -> Vec<u8> {
+    let mut normalized = Vec::new();
+    for component in path.split(|byte| *byte == b'/' || *byte == b'\\') {
+        if component.is_empty() || component == b"." {
+            continue;
+        }
+        if !normalized.is_empty() {
+            normalized.push(b'/');
+        }
+        normalized.extend_from_slice(component);
+    }
+    normalized
+}
+
 pub(crate) use target::TimelineTarget;
 pub(crate) use target::{DeletedLine, RegressionTarget, TraceFixTarget, WhyAnchor, WhyTarget};
 

@@ -26,9 +26,13 @@ pub(crate) use examples::run as examples;
 pub(crate) use failures::run as failures;
 pub(crate) use relations::{related, tests};
 
-/// Convert user-facing path separators to Git's canonical separator.
-fn normalize_path_separators(path: &str) -> String {
-    path.replace('\\', "/")
+/// Normalize user-provided paths using Git's shared path canonicalizer.
+fn normalize_git_path_string(path: &str) -> String {
+    if path.starts_with('/') || path.starts_with('\\') {
+        return path.replace('\\', "/");
+    }
+    String::from_utf8(crate::git::normalize_git_path(path.as_bytes()))
+        .expect("normalizing a UTF-8 path preserves UTF-8")
 }
 
 pub(super) fn lexical_confidence(signals: &super::retrieval::Signals) -> super::Confidence {

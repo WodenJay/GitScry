@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use super::process::Git;
+use super::{normalize_git_path, process::Git};
 use crate::app::AppError;
 
 mod blame;
@@ -20,20 +20,6 @@ pub(crate) use trace_fix::{DeletedLine, TraceFixTarget};
 pub(super) use why::pin;
 pub(crate) use why::{WhyAnchor, WhyTarget};
 
-fn normalize_path(path: &[u8]) -> Vec<u8> {
-    let mut normalized = Vec::new();
-    for component in path.split(|byte| *byte == b'/' || *byte == b'\\') {
-        if component.is_empty() || component == b"." {
-            continue;
-        }
-        if !normalized.is_empty() {
-            normalized.push(b'/');
-        }
-        normalized.extend_from_slice(component);
-    }
-    normalized
-}
-
 fn validate_path(path: &str) -> Result<String, AppError> {
     if path.is_empty() {
         return Err(AppError::input("path must not be empty"));
@@ -47,11 +33,8 @@ fn validate_path(path: &str) -> Result<String, AppError> {
         )));
     }
 
-    let normalized = path
-        .split(['/', '\\'])
-        .filter(|component| !component.is_empty() && *component != ".")
-        .collect::<Vec<_>>()
-        .join("/");
+    let normalized = String::from_utf8(normalize_git_path(path.as_bytes()))
+        .expect("normalizing a UTF-8 path preserves UTF-8");
     if normalized.is_empty() {
         return Err(AppError::input(format!(
             "path must name a repository file: {path}"

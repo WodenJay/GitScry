@@ -1,7 +1,7 @@
 //! Fix target preparation and deleted-line attribution.
 
 use super::blame::{Blame, blame_ignore_file, read_blame_range};
-use super::{normalize_path, read_shallow_boundaries, resolve_revision, validate_path};
+use super::{normalize_git_path, read_shallow_boundaries, resolve_revision, validate_path};
 use crate::app::AppError;
 use crate::git::{history, process::Git};
 use std::collections::HashSet;
@@ -82,8 +82,17 @@ pub(in crate::git) fn pin_trace_fix(
             for path in &paths {
                 let normalized = path.as_bytes();
                 let matches = all_changes.iter().filter(|change| {
-                    change.old_path.as_deref().map(normalize_path).as_deref() == Some(normalized)
-                        || change.new_path.as_deref().map(normalize_path).as_deref()
+                    change
+                        .old_path
+                        .as_deref()
+                        .map(normalize_git_path)
+                        .as_deref()
+                        == Some(normalized)
+                        || change
+                            .new_path
+                            .as_deref()
+                            .map(normalize_git_path)
+                            .as_deref()
                             == Some(normalized)
                 });
                 let mut found = false;
