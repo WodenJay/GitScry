@@ -223,12 +223,12 @@ fn search_help_documents_historical_scope() {
 }
 
 #[test]
-fn context_help_explains_local_semantic_maintenance() {
+fn context_help_explains_published_semantic_coverage() {
     let repo = TestRepo::new();
     let output = repo.run(["context", "--help"]);
     assert!(output.status.success());
     let help = String::from_utf8_lossy(&output.stdout);
-    assert!(help.contains("local-only best-effort update"), "{help}");
+    assert!(help.contains("never updates the cache"), "{help}");
     assert!(
         help.contains("never download model or runtime resources"),
         "{help}"

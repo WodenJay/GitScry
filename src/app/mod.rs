@@ -253,11 +253,16 @@ pub(crate) fn execute(
         Command::Context {
             staged,
             hybrid,
+            max_followup_checks,
             limit,
             scope,
             ..
         } => (
-            Request::Context { staged, hybrid },
+            Request::Context {
+                staged,
+                hybrid,
+                max_followup_checks,
+            },
             limit,
             false,
             scope.into(),

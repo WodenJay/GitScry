@@ -1050,9 +1050,14 @@ fn scope_narrows_cached_history_not_current_change_baseline() {
     commit(&repo, &[("src/a.rs", "uncached\n")], "uncached HEAD");
     fs::write(repo.dir.path().join("src/a.rs"), "current\n").unwrap();
     let all = json(repo.run(["context", "--json"]));
-    assert_eq!(all["cache_tip"], repo.head());
+    assert_eq!(all["cache_tip"], cached_tip);
     assert_eq!(all["input"]["head"], repo.head());
-    assert!(all["warnings"].as_array().unwrap().is_empty());
+    assert!(all["warnings"].as_array().unwrap().iter().any(|warning| {
+        warning
+            .as_str()
+            .unwrap()
+            .contains("current HEAD is outside the published cache")
+    }));
     let revision = json(repo.run([
         "context",
         "--from-rev",

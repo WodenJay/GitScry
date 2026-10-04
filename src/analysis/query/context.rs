@@ -70,6 +70,21 @@ impl Context {
         })
     }
 
+    /// Open the published cache without mutating it; context is advisory and index publication is explicit.
+    pub(in crate::analysis) fn open_published(
+        options: SearchScopeOptions,
+    ) -> Result<Self, AppError> {
+        let repository = Repository::discover()?;
+        let head = Self::pin_current_head(&repository)?;
+        let session = cache::open_query(&repository)?;
+        let scope = scope::resolve_for_query(&session, options, &head)?;
+        Ok(Self {
+            session,
+            scope,
+            pinned_head: head,
+        })
+    }
+
     /// Pin HEAD while preserving the initialized-cache prerequisite on failure.
     pub(in crate::analysis) fn pin_current_head(
         repository: &Repository,
