@@ -1861,6 +1861,43 @@ fn code_search_accepts_windows_style_path_separators() {
 }
 
 #[test]
+fn code_search_accepts_dot_and_repeated_separator_paths() {
+    let repo = TestRepo::new();
+    repo.commit_at(
+        "src/lib.rs",
+        b"old_call();\n",
+        "Add old call",
+        "2020-01-01T00:00:00Z",
+    );
+    repo.commit_at(
+        "src/lib.rs",
+        b"new_call();\n",
+        "Remove old call",
+        "2020-01-02T00:00:00Z",
+    );
+    repo.index();
+
+    for mode in ["--code", "--code-regex"] {
+        let canonical = repo.run(["search", mode, "old_call", "--path", "src/lib.rs", "--json"]);
+        assert_eq!(canonical.status.code(), Some(0));
+        let canonical: serde_json::Value = serde_json::from_slice(&canonical.stdout).unwrap();
+        let expected_matches = canonical["code_matches"].clone();
+        assert_eq!(canonical["matched_count"], 2);
+
+        for path in ["./src/lib.rs", "./src//lib.rs"] {
+            let output = repo.run(["search", mode, "old_call", "--path", path, "--json"]);
+            assert_eq!(output.status.code(), Some(0));
+            let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(
+                report["matched_count"], canonical["matched_count"],
+                "{mode}, {path}"
+            );
+            assert_eq!(report["code_matches"], expected_matches, "{mode}, {path}");
+        }
+    }
+}
+
+#[test]
 fn code_search_json_and_human_output_escape_arbitrary_line_bytes() {
     let repo = TestRepo::new();
     let invalid_line = b"prefix needle-\xff";

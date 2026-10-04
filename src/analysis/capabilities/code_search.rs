@@ -218,7 +218,7 @@ fn run_with_scope(
     limit: usize,
     scope: Option<&SearchFilter>,
 ) -> Result<Report, AppError> {
-    let normalized_path = path.map(super::normalize_path_separators);
+    let normalized_path = path.map(super::normalize_git_path_string);
     let mut search = CodeSearch {
         matcher,
         path_filter: normalized_path.as_deref().map(str::as_bytes),
@@ -262,7 +262,7 @@ pub(crate) fn visit_matches(
 ) -> Result<(), AppError> {
     validate_query(query)?;
     let matcher = CodeMatcher::Literal(query.as_bytes());
-    let normalized_path = path.map(super::normalize_path_separators);
+    let normalized_path = path.map(super::normalize_git_path_string);
     let scan = |hunk: CodeHunk| {
         visit_hunk_matches(
             &hunk,

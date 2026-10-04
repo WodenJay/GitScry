@@ -262,6 +262,38 @@ fn trace_removal_accepts_windows_style_path_separators() {
 }
 
 #[test]
+fn trace_removal_accepts_dot_and_repeated_separator_paths() {
+    let repo = TestRepo::new();
+    fs::create_dir_all(repo.dir.path().join("src")).unwrap();
+    commit(
+        &repo,
+        &[("src/lib.rs", "old()\n")],
+        "Introduce old call",
+        "2000-01-01T00:00:00Z",
+    );
+    let removal = commit(
+        &repo,
+        &[("src/lib.rs", "new()\n")],
+        "Remove old call",
+        "2000-01-02T00:00:00Z",
+    );
+    repo.index();
+
+    let canonical = query(&repo, &["--path", "src/lib.rs"]);
+    assert_eq!(canonical["matched_count"], 1);
+    assert_eq!(canonical["events"][0]["commit_id"], removal);
+
+    for path in ["./src/lib.rs", "./src//lib.rs"] {
+        let report = query(&repo, &["--path", path]);
+        assert_eq!(
+            report["matched_count"], canonical["matched_count"],
+            "{path}"
+        );
+        assert_eq!(report["events"], canonical["events"], "{path}");
+    }
+}
+
+#[test]
 fn equal_timestamps_use_commit_then_path_ties_and_dates_filter_before_limit() {
     let repo = TestRepo::new();
     let root = commit(

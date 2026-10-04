@@ -186,7 +186,7 @@ pub(in crate::analysis) fn run(
     let paths = paths
         .into_iter()
         .map(|path| {
-            let path = super::normalize_path_separators(&path);
+            let path = super::normalize_git_path_string(&path);
             validate_path(&path)?;
             Ok(path)
         })
