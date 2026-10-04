@@ -1,3 +1,33 @@
+## [0.10.0] - 2026-10-04
+
+### 🚀 Features
+
+- *(context)* Detect historical follow-ups
+- *(context)* Merge historical follow-ups
+- *(query)* Refresh initialized HEAD history
+- *(cache)* Refresh semantic coverage on queries
+- *(query)* Unify historical refresh
+
+### 🐛 Bug Fixes
+
+- *(context)* Respect current file identity
+- *(help)* Match shared query refresh behavior
+- *(regression)* Exclude preceding deletions
+- *(paths)* Canonicalize historical filters
+- *(conflicts)* Use shared cache refresh
+
+### 🚜 Refactor
+
+- *(query)* Own target preparation protocol
+- *(cache)* Encapsulate incarnation queries
+
+### 📚 Documentation
+
+- Refine DOGFOODING
+- *(adr)* Allow automatic cache refresh
+- Record follow-up dogfood gap
+- *(query)* Explain automatic history refresh
+- Remove redundant --json help content
 ## [0.9.0] - 2026-10-04
 
 ### 🚀 Features
