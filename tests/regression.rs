@@ -186,6 +186,87 @@ fn regression_symbol_span_excludes_following_non_symbol_lines() {
 }
 
 #[test]
+fn regression_symbol_ignores_deletion_before_symbol() {
+    let repo = TestRepo::new();
+    repo.commit(
+        "src/lib.rs",
+        b"const OLD: i32 = 0;\nfn target() { work(); }\n",
+        "Create target",
+        None,
+    );
+    let good = repo.head();
+    repo.commit(
+        "src/lib.rs",
+        b"fn target() { work(); }\n",
+        "Remove obsolete constant",
+        None,
+    );
+    let bad = repo.head();
+    repo.index();
+
+    let output = repo.run([
+        "regression",
+        "impossible-symptom",
+        "--path",
+        "src/lib.rs",
+        "--symbol",
+        "target",
+        "--good",
+        good.as_str(),
+        "--bad",
+        bad.as_str(),
+    ]);
+
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("No supported regression suspects found."),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn regression_symbol_reports_deletion_inside_symbol() {
+    let repo = TestRepo::new();
+    repo.commit(
+        "src/lib.rs",
+        b"fn target() {\n    keep();\n    obsolete();\n    finish();\n}\n",
+        "Create target",
+        None,
+    );
+    let good = repo.head();
+    repo.commit(
+        "src/lib.rs",
+        b"fn target() {\n    keep();\n    finish();\n}\n",
+        "Remove obsolete call",
+        None,
+    );
+    let bad = repo.head();
+    repo.index();
+
+    let output = repo.run([
+        "regression",
+        "impossible-symptom",
+        "--path",
+        "src/lib.rs",
+        "--symbol",
+        "target",
+        "--good",
+        good.as_str(),
+        "--bad",
+        bad.as_str(),
+    ]);
+
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Remove obsolete call"), "{stdout}");
+    assert!(
+        stdout.contains("symbol/hunk overlap for target"),
+        "{stdout}"
+    );
+}
+
+#[test]
 fn regression_symbol_tracking_survives_overlapping_newest_change() {
     let repo = TestRepo::new();
     repo.commit(

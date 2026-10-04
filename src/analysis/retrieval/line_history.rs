@@ -70,24 +70,25 @@ pub(in crate::analysis) fn trace_line(
 
 /// Check whether changed diff lines touch a symbol's current line range.
 pub(in crate::analysis) fn hunk_overlaps_symbol(hunk: &HistoryHunk, start: i64, end: i64) -> bool {
-    let mut line = hunk.new_start;
+    let mut new_line = hunk.new_start;
     for diff_line in hunk.text.split_inclusive(|byte| *byte == b'\n') {
         let Some(marker) = diff_line.first() else {
             continue;
         };
         match marker {
             b'+' => {
-                if (start..=end).contains(&line) {
+                if (start..=end).contains(&new_line) {
                     return true;
                 }
-                line += 1;
+                new_line += 1;
             }
             b'-' => {
-                if (start..=end).contains(&line) {
+                // The cursor is a boundary: `start` is just before the symbol.
+                if new_line > start && new_line <= end {
                     return true;
                 }
             }
-            b' ' => line += 1,
+            b' ' => new_line += 1,
             b'\\' | b'@' => {}
             _ => {}
         }
