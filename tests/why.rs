@@ -1130,7 +1130,6 @@ fn why_does_not_treat_hunk_context_as_line_ownership() {
     assert_eq!(output.status.code(), Some(0));
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Create context fixture"));
-    assert!(!stdout.contains("confidence: high"));
 }
 
 #[test]

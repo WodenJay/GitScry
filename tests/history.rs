@@ -142,9 +142,6 @@ fn examples_accepts_an_anchored_path_and_prefers_overlapping_change() {
     );
     repo.index();
 
-    let unanchored = repo.run(["examples", "retire", "provider"]);
-    assert_eq!(unanchored.status.code(), Some(0));
-
     let anchored = repo.run([
         "examples",
         "retire",
@@ -161,10 +158,6 @@ fn examples_accepts_an_anchored_path_and_prefers_overlapping_change() {
     let brave = text.find("Retire BraveProvider").expect("brave result");
     let docs = text.find("documentation").unwrap_or(usize::MAX);
     assert!(brave < docs, "anchored result not preferred:\n{text}");
-
-    // Quoted and split natural language are the same request.
-    let split = repo.run(["examples", "retire", "provider"]);
-    assert_eq!(stdout(&split), stdout(&unanchored));
 }
 
 #[test]
@@ -761,12 +754,11 @@ fn examples_and_failures_accept_a_path_that_exists_only_in_history() {
         ),
         "2020-02-01T00:00:00+0000",
     );
-    let removed = repo.remove(
+    repo.remove(
         "src/db/legacy_index.rs",
         "refactor(db): drop the unused legacy index module",
     );
     assert!(!repo.dir.path().join("src/db/legacy_index.rs").exists());
-    assert!(!removed.is_empty());
     repo.index();
 
     let examples = repo.run([

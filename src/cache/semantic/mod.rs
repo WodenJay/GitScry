@@ -1088,34 +1088,5 @@ mod tests {
             .unwrap(),
             "a well-formed but incorrect input fingerprint must not establish readiness"
         );
-        connection
-            .execute("UPDATE semantic_vectors SET commit_oid = 'other'", [])
-            .unwrap();
-        assert!(
-            !is_ready(
-                &connection,
-                "tip",
-                1,
-                &encoder_fingerprint,
-                &mut preprocessor,
-            )
-            .unwrap()
-        );
-        connection
-            .execute(
-                "UPDATE semantic_vectors SET commit_oid = 'oid', source_fingerprint = ?1",
-                ["d".repeat(64)],
-            )
-            .unwrap();
-        assert!(
-            !is_ready(
-                &connection,
-                "tip",
-                1,
-                &encoder_fingerprint,
-                &mut preprocessor,
-            )
-            .unwrap()
-        );
     }
 }

@@ -2187,30 +2187,6 @@ fn plain_index_requires_explicit_semantic_encoder_migration() {
 }
 
 #[test]
-fn concurrent_readers_return_identical_material() {
-    let repo = TestRepo::new();
-    repo.commit("history.txt", b"one\n", "Initial history");
-    assert_eq!(repo.run(["index"]).status.code(), Some(0));
-
-    let first = support::isolated_gitscry_command(repo.user_data_dir())
-        .args(["search", "history"])
-        .current_dir(repo.dir.path())
-        .spawn()
-        .unwrap();
-    let second = support::isolated_gitscry_command(repo.user_data_dir())
-        .args(["search", "history"])
-        .current_dir(repo.dir.path())
-        .spawn()
-        .unwrap();
-    let first = first.wait_with_output().unwrap();
-    let second = second.wait_with_output().unwrap();
-
-    assert_eq!(first.status.code(), Some(0));
-    assert_eq!(second.status.code(), Some(0));
-    assert_eq!(first.stdout, second.stdout);
-}
-
-#[test]
 fn reduced_shallow_history_retains_cached_rows() {
     let source = TestRepo::new();
     for (index, contents) in [

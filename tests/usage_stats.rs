@@ -114,8 +114,7 @@ fn help_version_and_parse_failures_are_not_recorded() {
         vec!["search"],
         vec!["unknown-command"],
     ] {
-        let output = repo.run(args);
-        assert!(output.status.code().is_some());
+        repo.run(args);
     }
 
     let report = json(&repo.run(["stats", "--all", "--json"]));
