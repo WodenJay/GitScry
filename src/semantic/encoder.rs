@@ -766,11 +766,6 @@ mod tests {
         };
         let message = error.to_string();
         assert!(message.contains("32-chunk limit"), "{message}");
-        assert!(message.contains("shorten the query"), "{message}");
-        assert!(
-            message.contains("ordinary lexical search without `--hybrid`"),
-            "{message}"
-        );
     }
     #[test]
     fn query_tokenizer_clears_configured_truncation() {

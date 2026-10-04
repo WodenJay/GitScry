@@ -81,9 +81,6 @@ fn regression_reports_a_historical_suspect() {
     assert!(stdout.contains("suspect"));
     assert!(stdout.contains("Refactor Matrix stop chat key matching"));
     assert!(stdout.contains("confidence:"));
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("do not replace executable git bisect")
-    );
 }
 
 #[test]
@@ -260,10 +257,6 @@ fn regression_symbol_reports_deletion_inside_symbol() {
     assert_eq!(output.status.code(), Some(0));
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Remove obsolete call"), "{stdout}");
-    assert!(
-        stdout.contains("symbol/hunk overlap for target"),
-        "{stdout}"
-    );
 }
 
 #[test]

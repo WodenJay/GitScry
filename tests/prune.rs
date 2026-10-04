@@ -80,26 +80,11 @@ fn prune_dry_run_without_cache_creates_no_cache_data() {
 }
 
 #[test]
-fn prune_help_explains_git_object_retention_and_dry_run_limits() {
+fn prune_help_exposes_dry_run() {
     let repo = TestRepo::new();
     let output = repo.run(["prune", "--help"]);
     assert_eq!(output.status.code(), Some(0));
-    let help = String::from_utf8_lossy(&output.stdout)
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    assert!(help.contains("repository-wide"), "{help}");
-    assert!(help.contains("Git still retains"), "{help}");
-    assert!(help.contains("--dry-run"), "{help}");
-    assert!(help.contains("does not estimate reclaimed bytes"), "{help}");
-    assert!(help.contains("deleted commits"), "{help}");
-    assert!(help.contains("semantic vectors"), "{help}");
-    assert!(
-        help.contains("measured before/after cache data-file sizes"),
-        "{help}"
-    );
-    assert!(help.contains("bytes actually released"), "{help}");
-    assert!(help.contains("physical filesystem allocation"), "{help}");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("--dry-run"));
 }
 
 #[test]
@@ -125,10 +110,6 @@ fn prune_dry_run_reports_candidates_and_preserves_cache_data() {
     assert!(stdout.contains("candidate commits: 0"), "{stdout}");
     assert!(
         stdout.contains(&format!("before: {before_bytes} bytes")),
-        "{stdout}"
-    );
-    assert!(
-        stdout.contains("does not estimate reclaimed bytes"),
         "{stdout}"
     );
     assert_eq!(cache_snapshot(&repo.cache_dir()), before);

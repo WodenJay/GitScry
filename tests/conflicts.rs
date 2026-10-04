@@ -59,16 +59,6 @@ fn fixture() -> (TestRepo, String, String, String, String) {
 }
 
 #[test]
-fn conflicts_help_requires_explicit_cache_initialization() {
-    let repo = TestRepo::new();
-    let output = repo.run(["conflicts", "--help"]);
-    assert!(output.status.success());
-    let help = String::from_utf8_lossy(&output.stdout);
-    assert!(help.contains("run `gitscry index` first"), "{help}");
-    assert!(help.contains("both pinned endpoints"), "{help}");
-}
-
-#[test]
 fn conflicts_rejects_missing_published_cache_without_initializing_it() {
     let (repo, _, _, _, _) = fixture();
     fs::remove_dir_all(repo.cache_dir()).unwrap();

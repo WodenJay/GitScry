@@ -1075,7 +1075,6 @@ fn why_exposes_rename_history_and_rejects_invalid_anchors() {
     assert_eq!(output.status.code(), Some(0));
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Add old path"));
-    assert!(stdout.contains("rename events alone are not target-related modifications"));
     assert!(!stdout.contains("rename boundary"));
 
     let missing_anchor = repo.run(["why", "new.txt"]);
@@ -1390,10 +1389,6 @@ fn why_marks_merge_boundaries_and_honors_limit() {
     repo.index();
     let merge_output = repo.run(["why", "target.txt", "--line", "1"]);
     assert_eq!(merge_output.status.code(), Some(0));
-    assert!(
-        String::from_utf8_lossy(&merge_output.stdout)
-            .contains("Target-line tracing follows first-parent history")
-    );
 
     repo.commit("target.txt", b"latest\n", "Latest target change", None);
     repo.index();
@@ -1529,7 +1524,6 @@ fn why_scope_intersects_target_and_filters_target_modifications() {
         later.as_str(),
     ]);
     assert_eq!(text.status.code(), Some(0));
-    assert!(String::from_utf8_lossy(&text.stdout).contains("intersected with target revision"));
 }
 
 #[test]

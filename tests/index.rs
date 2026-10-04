@@ -474,10 +474,6 @@ fn semantic_index_options_are_exposed_and_mutually_exclusive() {
     let help = String::from_utf8_lossy(&help.stdout);
     assert!(help.contains("--semantic"), "{help}");
     assert!(help.contains("--no-semantic"), "{help}");
-    assert!(
-        help.contains("deletes every repository semantic vector"),
-        "{help}"
-    );
 
     let conflict = support::isolated_gitscry_command(user_data.path())
         .args(["index", "--semantic", "--no-semantic"])

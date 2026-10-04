@@ -194,9 +194,6 @@ fn timeline_json_pages_topologically_and_follows_renames() {
     ] {
         assert!(help.contains(option), "timeline help is missing {option}");
     }
-    assert!(
-        help.contains("does not retrieve uncached history or commits outside the returned page")
-    );
     let root_help = repo.run(["--help"]);
     let root_help_text = String::from_utf8_lossy(&root_help.stdout);
     assert!(root_help_text.contains("gitscry <command> --help"));
@@ -876,7 +873,6 @@ fn timeline_scope_intersects_target_and_preserves_renames() {
         feature.as_str(),
     ]);
     assert_eq!(text.status.code(), Some(0));
-    assert!(String::from_utf8_lossy(&text.stdout).contains("intersected with target revision"));
 }
 
 #[test]

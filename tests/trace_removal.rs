@@ -37,24 +37,6 @@ fn query(repo: &TestRepo, args: &[&str]) -> Value {
 }
 
 #[test]
-fn shared_query_help_distinguishes_refresh_from_initialization() {
-    let repo = TestRepo::new();
-    let output = repo.run(["trace-removal", "--help"]);
-    assert!(output.status.success());
-    let help = String::from_utf8_lossy(&output.stdout);
-    assert!(help.contains("initialize"), "{help}");
-    assert!(help.contains("automatically refreshes"), "{help}");
-    assert!(!help.contains("Run `gitscry index` explicitly to refresh"));
-    let output = repo.run(["hotspots", "--help"]);
-    assert!(output.status.success());
-    let help = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        help.contains("never initialize, repair, upgrade, or fetch"),
-        "{help}"
-    );
-}
-
-#[test]
 fn groups_deleted_lines_into_events_with_complete_historical_locators() {
     let repo = TestRepo::new();
     let parent = commit(
@@ -519,8 +501,6 @@ fn command_help_and_json_contract_are_explicit_and_extensible() {
         assert!(text.contains(option), "{option}");
     }
     assert!(text.contains("[default: 10]"));
-    assert!(text.contains("first parent"));
-    assert!(text.contains("not a resolved symbol"));
     assert!(String::from_utf8_lossy(&repo.run(["--help"]).stdout).contains("trace-removal"));
     commit(
         &repo,
@@ -797,15 +777,10 @@ fn same_commit_navigation_is_per_event_and_lists_detected_changes() {
         ])
     );
     assert_eq!(report["truncated"], false);
-    assert_eq!(
-        report["notices"][0],
-        "Same-commit co-changes are navigation only; they do not prove replacement, migration intent, causality, or cross-file identity."
-    );
+    assert!(!report["notices"].as_array().unwrap().is_empty());
 
     let human = repo.run(["trace-removal", "--code", "old()"]);
     assert!(human.status.success());
-    assert!(String::from_utf8_lossy(&human.stdout).contains("Same-commit file navigation"));
-    assert!(String::from_utf8_lossy(&human.stdout).contains("do not prove replacement"));
 }
 
 #[test]

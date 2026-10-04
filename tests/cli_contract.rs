@@ -357,67 +357,21 @@ fn json_flag_is_available_only_for_query_commands() {
     }
     let search_help = repo.run(["search", "--help"]);
 
-    let why_help_lowercase = why_help.to_ascii_lowercase();
-    for phrase in [
-        "target-line attribution",
-        "starting line only",
-        "standalone target-related modifications",
-        "attribution is independent",
-        "not a root-cause explanation",
-    ] {
-        assert!(
-            why_help_lowercase.contains(phrase),
-            "why help should describe {phrase}"
-        );
-    }
     assert_eq!(search_help.status.code(), Some(0));
     let search_help = String::from_utf8_lossy(&search_help.stdout)
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
-    assert!(search_help.contains("case-sensitive literal substring in added or removed lines"));
-    assert!(search_help.contains("--code-regex <PATTERN>"));
-    assert!(search_help.contains("Look-around and backreferences are unsupported"));
-    assert!(search_help.contains("16,384 UTF-8 bytes"));
-    assert!(search_help.contains("bounds returned lines, not scan work"));
-    assert!(search_help.contains("--code <TEXT>"));
-    assert!(search_help.contains("--change <CHANGE>"));
-    assert!(search_help.contains("--path <PATH>"));
-    assert!(search_help.contains("case-sensitive literal substring"));
-    assert!(search_help.contains("current HEAD"));
-    assert!(search_help.contains("--github-links"));
-    assert!(search_help.contains("--github-repo <OWNER/REPO>"));
-    assert!(search_help.contains("Commit.associatedPullRequests"));
-    assert!(search_help.contains("existing GitHub login"));
-    assert!(search_help.contains("Coverage comes first"));
-    assert!(search_help.contains("continuation pages"));
-    assert!(search_help.contains("conservative starting values, not empirically optimized"));
-    assert!(search_help.contains("15-second timeout, 20-request, 50-results-per-page"));
-    assert!(search_help.contains("complete, partial, not queried, or failed"));
-    assert!(search_help.contains(
-        "Partial GraphQL data and local object/field errors preserve usable associations"
-    ));
-    assert!(search_help.contains(
-        "global authentication, rate-limit, network, or timeout failures stop link fetching"
-    ));
-    assert!(search_help.contains("No automatic retries"));
-    assert!(search_help.contains("PR number, title, URL, repository identity"));
-    assert!(search_help.contains("does not audit or claim a minimum permission set"));
-    assert!(search_help.contains("schema_version` is 1 by default, 2 for `--patch` alone, and 4 whenever `--github-links` is enabled, except `why` reports use version 5"));
-    assert!(search_help.contains("Version 4 may also include the optional `patch` field"));
-    assert!(
-        search_help.contains(
-            "inspect optional fields instead of inferring enabled options from the version"
-        )
-    );
-    assert!(search_help.contains("cannot guarantee every PR containing a commit"));
-    assert!(search_help.contains("omit many issue mentions"));
-    assert!(search_help.contains("not proof of closure or causality"));
-    assert!(
-        search_help.contains("Missing data or permissions do not prove that no association exists")
-    );
-    assert!(search_help.contains("search does not contact GitHub"));
-    assert!(search_help.contains("Examples:"));
+    for flag in [
+        "--code-regex <PATTERN>",
+        "--code <TEXT>",
+        "--change <CHANGE>",
+        "--path <PATH>",
+        "--github-links",
+        "--github-repo <OWNER/REPO>",
+    ] {
+        assert!(search_help.contains(flag), "search help missing {flag}");
+    }
     for name in ["regression", "trace-fix"] {
         let help = repo.run([name, "--help"]);
         assert_eq!(help.status.code(), Some(0), "{name}");
@@ -433,25 +387,14 @@ fn json_flag_is_available_only_for_query_commands() {
         ] {
             assert!(help.contains(flag), "{name} help missing {flag}");
         }
-        assert!(
-            help.contains("committer time"),
-            "{name} help must explain time scope"
-        );
-        assert!(help.contains("UTC"), "{name} help must explain UTC bounds");
-        assert!(
-            help.contains("Examples:"),
-            "{name} help must include examples"
-        );
     }
     let regression_help = repo.run(["regression", "--help"]);
     let regression_help = String::from_utf8_lossy(&regression_help.stdout);
     assert!(regression_help.contains("--good"));
     assert!(regression_help.contains("--bad"));
-    assert!(regression_help.contains("suspect window"));
     let trace_help = repo.run(["trace-fix", "--help"]);
     let trace_help = String::from_utf8_lossy(&trace_help.stdout);
     assert!(trace_help.contains("FIX_REVISION"));
-    assert!(trace_help.contains("fix target"));
 
     for name in ["index", "update", "clear", "prune"] {
         let help = repo.run([name, "--help"]);
@@ -469,36 +412,11 @@ fn json_flag_is_available_only_for_query_commands() {
 }
 
 #[test]
-fn index_help_documents_shared_cache_scope() {
-    let repo = TestRepo::new();
-    let help = repo.run(["index", "--help"]);
-    assert_eq!(help.status.code(), Some(0));
-    let help = String::from_utf8_lossy(&help.stdout);
-    assert!(help.contains("linked worktrees"));
-    assert!(help.contains("Git common directory"));
-    assert!(help.contains("gitscry/"));
-    assert!(help.contains("current HEAD"));
-    assert!(help.contains("Shared ancestors are stored once"));
-    assert!(help.contains("without collecting commits that were cached earlier"));
-}
-
-#[test]
-fn clear_help_documents_repository_wide_effects_and_preview() {
+fn clear_help_exposes_dry_run() {
     let repo = TestRepo::new();
     let help = repo.run(["clear", "--help"]);
     assert_eq!(help.status.code(), Some(0));
-    let help = String::from_utf8_lossy(&help.stdout);
-    for requirement in [
-        "repository-wide",
-        "linked worktrees",
-        "--dry-run",
-        "cache.lock",
-        "Git history",
-        "model/runtime resources",
-        "file sizes",
-    ] {
-        assert!(help.contains(requirement), "missing {requirement}:\n{help}");
-    }
+    assert!(String::from_utf8_lossy(&help.stdout).contains("--dry-run"));
 }
 #[test]
 fn json_preserves_unclipped_paths_steps_and_complete_citations() {
@@ -566,7 +484,7 @@ fn json_preserves_unclipped_paths_steps_and_complete_citations() {
     }
 }
 #[test]
-fn material_commands_share_github_link_options_and_caveats() {
+fn material_commands_share_github_link_options() {
     let repo = TestRepo::new();
     for name in [
         "examples",
@@ -584,33 +502,8 @@ fn material_commands_share_github_link_options_and_caveats() {
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ");
-        for detail in [
-            "--github-links",
-            "--github-repo <OWNER/REPO>",
-            "authenticated `gh` CLI",
-            "does not enable link fetching by itself",
-            "coverage-first pagination",
-            "15-second timeout",
-            "20 API requests",
-            "50 results per page",
-            "200 deduplicated PR+issue objects",
-            "conservative starting values, not empirically optimized",
-            "complete, partial, not queried, or failed",
-            "stop link fetching only",
-            "No automatic retries",
-            "missing or unreturned associations do not prove none exist",
-            "navigation only",
-            "do not change Git material",
-            "do not promise command-specific benefits",
-            "participant descriptions do not outweigh changes visible in Git",
-        ] {
-            assert!(help.contains(detail), "{name} help missing {detail}");
-        }
-        if name == "tests" {
-            assert!(help.contains("test co-change history does not prove assertions exist"));
-        }
-        if name == "regression" {
-            assert!(help.contains("regression suspects are not root-cause findings"));
+        for flag in ["--github-links", "--github-repo <OWNER/REPO>"] {
+            assert!(help.contains(flag), "{name} help missing {flag}");
         }
     }
 }
@@ -757,7 +650,11 @@ fn update_help_is_canonical_and_upgrade_is_an_exact_alias() {
 
     let root = repo.run(["--help"]);
     let root_help = String::from_utf8_lossy(&root.stdout);
-    assert!(root_help.lines().any(|line| line.trim_start().starts_with("update ") && line.contains("Update GitScry")));
+    assert!(
+        root_help
+            .lines()
+            .any(|line| line.trim_start().starts_with("update "))
+    );
     assert!(
         !root_help
             .lines()

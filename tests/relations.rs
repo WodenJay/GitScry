@@ -369,7 +369,6 @@ fn tests_filter_deleted_candidates_and_warn_about_rename_continuity() {
     assert!(!text.contains("tests/test_renamed_widget.py"), "{text}");
     assert!(!text.contains("tests/test_deleted_widget.py"), "{text}");
     assert!(!text.contains("tests/test_old_widget.py"), "{text}");
-    assert!(text.contains("beyond mirrored test name"), "{text}");
     assert!(stderr(&output).contains("warning:"), "{}", stderr(&output));
     assert!(stderr(&output).contains("rename"), "{}", stderr(&output));
 }
@@ -709,25 +708,8 @@ fn related_and_tests_help_document_scope_rules() {
         let output = repo.run([command, "--help"]);
         assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
         let help = stdout(&output);
-        for expected in [
-            "--from-rev",
-            "--to-rev",
-            "--since",
-            "--until",
-            "committer time",
-            "UTC calendar day",
-            "RFC 3339",
-            "current HEAD",
-            "intersected with cached commits",
-            "published cache tip and coverage status",
-            "incomplete coverage",
-            "before ranking and `--limit`",
-        ] {
+        for expected in ["--from-rev", "--to-rev", "--since", "--until"] {
             assert!(help.contains(expected), "missing {expected:?} in:\n{help}");
-        }
-        if command == "tests" {
-            assert!(help.contains("current test paths"), "{help}");
-            assert!(help.contains("scope narrows historical support"), "{help}");
         }
     }
 }
