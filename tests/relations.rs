@@ -1118,7 +1118,6 @@ fn patterns_report_current_head_when_it_is_not_cached() {
     let repo = TestRepo::new();
     repo.commit_files(&[("A", b"seed\n")], "cached root");
     repo.index();
-    let cache_tip = repo.head();
     repo.commit_files(&[("A", b"seed on current HEAD\n")], "uncached HEAD");
     let head = repo.head();
 
@@ -1127,15 +1126,9 @@ fn patterns_report_current_head_when_it_is_not_cached() {
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["target_revision"], head);
     assert_eq!(value["scope"]["to_rev"], head);
-    assert_eq!(value["scope"]["cache_tip"], cache_tip);
-    assert_eq!(value["scope"]["coverage_complete"], false);
-    assert!(
-        value["warnings"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|warning| { warning.as_str().unwrap().contains("run `gitscry index`") })
-    );
+    assert_eq!(value["scope"]["cache_tip"], head);
+    assert_eq!(value["scope"]["coverage_complete"], true);
+    assert!(value["warnings"].as_array().unwrap().is_empty());
 }
 
 #[test]
@@ -1534,8 +1527,8 @@ fn patterns_resolve_current_paths_across_cached_parents_of_uncached_head_merge()
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(report["scope"]["to_rev"], head);
-    assert_eq!(report["scope"]["cache_tip"], cache_tip);
-    assert_eq!(report["scope"]["coverage_complete"], false);
+    assert_eq!(report["scope"]["cache_tip"], head);
+    assert_eq!(report["scope"]["coverage_complete"], true);
     let pattern = report["patterns"]
         .as_array()
         .unwrap()

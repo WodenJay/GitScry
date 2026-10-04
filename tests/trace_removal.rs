@@ -131,21 +131,13 @@ fn scopes_before_limiting_and_preserves_repeated_deletions_and_cache_boundary() 
     );
     let uncached_head = repo.head();
     let after_uncached = query(&repo, &[]);
-    assert_eq!(after_uncached["events"], report["events"]);
+    assert_eq!(after_uncached["matched_count"], 3);
+    assert_eq!(after_uncached["events"][0]["commit_id"], uncached_head);
+    assert_eq!(after_uncached["events"][1], report["events"][0]);
     assert_eq!(after_uncached["scope"]["to_rev"], uncached_head);
-    assert_eq!(after_uncached["scope"]["cache_tip"], report["cache_tip"]);
-    assert_eq!(after_uncached["scope"]["coverage_complete"], false);
-    assert!(
-        after_uncached["warnings"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|warning| {
-                let warning = warning.as_str().unwrap();
-                warning.contains("incomplete history coverage")
-                    && warning.contains("run `gitscry index`")
-            })
-    );
+    assert_eq!(after_uncached["scope"]["cache_tip"], uncached_head);
+    assert_eq!(after_uncached["scope"]["coverage_complete"], true);
+    assert!(after_uncached["warnings"].as_array().unwrap().is_empty());
 }
 
 #[test]

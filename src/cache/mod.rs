@@ -18,7 +18,7 @@ mod semantic;
 mod write;
 use crate::{app::AppError, git::Repository};
 pub(crate) use clear::{ClearReport, clear};
-pub(crate) use generation::{prepare, prepare_at};
+pub(crate) use generation::{prepare, prepare_at, refresh_query};
 pub(crate) use history::HunkId;
 pub(crate) use history::PathChange;
 pub(crate) use history::{CodeHunk, HistoryCommit, HistoryHunk, OtherFileChange, PatchHistoryHunk};
@@ -185,6 +185,7 @@ fn open_lock_file(common_dir: &Path, ensure_ignore: bool) -> Result<File, AppErr
 fn report_wait(progress: &mut Vec<String>) {
     if !progress.iter().any(|line| line == WAITING_MESSAGE) {
         progress.push(WAITING_MESSAGE.to_owned());
+        crate::render::waiting_for_cache(WAITING_MESSAGE);
     }
 }
 

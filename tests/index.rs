@@ -2329,7 +2329,17 @@ fn linked_worktrees_share_the_repository_cache_and_lock() {
         String::from_utf8_lossy(&shared_query.stdout),
         String::from_utf8_lossy(&shared_query.stderr)
     );
-    assert!(!shared_query_output.contains("Waiting for another GitScry process..."));
+    assert!(shared_query_output.contains("Waiting for another GitScry process..."));
+    let _ = shared_holder
+        .wait_with_output()
+        .expect("wait for shared lock holder");
+    fs::write(linked.join("history.txt"), b"updated again\n").unwrap();
+    git(&linked, ["add", "history.txt"]);
+    git(
+        &linked,
+        ["commit", "-m", "Update history after query refresh"],
+    );
+    let shared_holder = spawn_cache_lock_holder(&repo, "index-lock-ready", true, 5_000);
     let blocked_index = TestRepo::run_at(&linked, ["index"]);
     let _ = shared_holder
         .wait_with_output()
@@ -2357,7 +2367,7 @@ fn linked_worktrees_share_the_repository_cache_and_lock() {
             .query_row("SELECT COUNT(*) FROM commits", [], |row| row
                 .get::<_, i64>(0))
             .unwrap(),
-        2
+        3
     );
     assert!(!repo.dir.path().join(".gitscry").exists());
     assert!(!linked.join(".gitscry").exists());

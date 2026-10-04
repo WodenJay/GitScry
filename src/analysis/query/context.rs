@@ -18,8 +18,15 @@ pub(in crate::analysis) struct Context {
 impl Context {
     pub(in crate::analysis) fn open(options: SearchScopeOptions) -> Result<Self, AppError> {
         let repository = Repository::discover()?;
-        let session = cache::open_query(&repository)?;
-        let scope = scope::resolve(&session, options)?;
+        let head = match repository.resolve_commit("HEAD") {
+            Ok(head) => head,
+            Err(error) => {
+                cache::open_query(&repository)?;
+                return Err(error);
+            }
+        };
+        let session = cache::refresh_query(&repository, &head)?;
+        let scope = scope::resolve_for_query(&session, options, &head)?;
         Ok(Self { session, scope })
     }
 

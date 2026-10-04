@@ -178,33 +178,15 @@ pub(crate) fn prepare_at(
             missing_objects,
             changed_objects,
             reachable_commits,
-        } => {
-            let current_head_commit_count = reachable_commits.len();
-            report(IndexStage::ReadingCommits);
-            let reachable = reachable_commits.iter().cloned().collect::<HashSet<_>>();
-            let mut refresh = commits_for_objects(&repository.common_dir, &changed_objects)?;
-            refresh.extend(commits_for_reachable_parents(
-                &repository.common_dir,
-                &reachable_commits,
-            )?);
-            refresh.retain(|commit| reachable.contains(commit));
-            refresh.sort();
-            refresh.dedup();
-            let snapshot = repository.read_incremental_history_at(
-                HistoryTarget {
-                    tip: expected.tip.clone(),
-                    object_format: expected.object_format.clone(),
-                    shallow_boundaries: expected.shallow_boundaries.clone(),
-                },
-                &state.commits,
-                &refresh,
-                missing_objects,
-                report,
-            )?;
-            report(IndexStage::WritingCache);
-            write::append(&super::cache_path(&repository.common_dir), &snapshot)?;
-            current_head_commit_count
-        }
+        } => append_incremental(
+            repository,
+            &expected,
+            &state,
+            missing_objects,
+            changed_objects,
+            reachable_commits,
+            report,
+        )?,
         Plan::Fresh { .. } => unreachable!("fresh plans return before publishing"),
     };
     drop(exclusive);
@@ -226,6 +208,158 @@ pub(crate) fn prepare_at(
         pinned_tip: expected.tip.clone(),
         _lock: shared,
     })
+}
+
+/// Refresh only a validated publication; never invoke explicit-index recovery.
+pub(crate) fn refresh_query(
+    repository: &Repository,
+    tip: &str,
+) -> Result<super::QuerySession, AppError> {
+    let mut session = super::open_query(repository)?;
+    let expected = Expected {
+        tip: tip.to_owned(),
+        object_format: repository.object_format()?,
+        shallow_boundaries: repository.shallow_boundaries()?,
+    };
+    let state = require_publication(repository, &expected)?;
+    let plan = refresh_plan(repository, &expected, state);
+    if let Ok(Plan::Fresh {
+        missing_objects, ..
+    }) = &plan
+    {
+        if let Some(warning) = super::missing_warning(!missing_objects.is_empty())
+            && !session.warnings.contains(&warning)
+        {
+            session.warnings.push(warning);
+        }
+        return Ok(session);
+    }
+    drop(session);
+    let refresh = (|| {
+        let mut progress = Vec::new();
+        let _exclusive = super::acquire_exclusive(&repository.common_dir, &mut progress, false)?;
+        let state = require_publication(repository, &expected)?;
+        match refresh_plan(repository, &expected, state)? {
+            Plan::Incremental {
+                state,
+                missing_objects,
+                changed_objects,
+                reachable_commits,
+            } => {
+                append_incremental(
+                    repository,
+                    &expected,
+                    &state,
+                    missing_objects,
+                    changed_objects,
+                    reachable_commits,
+                    &mut crate::render::refresh_progress,
+                )?;
+            }
+            Plan::Fresh { .. } => {}
+            Plan::Rebuild { .. } => unreachable!("query refresh never rebuilds"),
+        }
+        Ok::<_, AppError>(())
+    })();
+    // Revalidate even on failure: rollback is not permission to use unsafe history.
+    let mut session = super::open_query(repository)?;
+    require_publication(repository, &expected)?;
+    if let Err(error) = refresh {
+        session.warnings.push(format!("automatic history refresh failed: {error}; incomplete history coverage for {tip}; using safely published cached history"));
+    }
+    Ok(session)
+}
+
+fn require_publication(
+    repository: &Repository,
+    expected: &Expected,
+) -> Result<CacheState, AppError> {
+    match inspect(&repository.common_dir) {
+        Inspection::Ready(state) if state.object_format == expected.object_format => Ok(state),
+        _ => Err(super::query_error(
+            "published cache is incompatible, unfinished, or damaged; run `gitscry index`",
+        )),
+    }
+}
+
+fn refresh_plan(
+    repository: &Repository,
+    expected: &Expected,
+    state: CacheState,
+) -> Result<Plan, AppError> {
+    let plan = evaluate(repository, expected, Inspection::Ready(state))?;
+    match plan {
+        Plan::Incremental {
+            state,
+            missing_objects,
+            changed_objects,
+            reachable_commits,
+        } => {
+            // Missing objects do not authorize rewriting usable cached material.
+            // Only newly restored objects in this target can add local history.
+            let restored = changed_objects
+                .into_iter()
+                .filter(|object| state.missing_objects.contains(object))
+                .collect::<Vec<_>>();
+            let reachable = reachable_commits.iter().collect::<HashSet<_>>();
+            let restored_commits = commits_for_objects(&repository.common_dir, &restored)?;
+            if reachable_commits
+                .iter()
+                .all(|oid| state.commits.contains(oid))
+                && !restored_commits.iter().any(|oid| reachable.contains(oid))
+            {
+                Ok(Plan::Fresh {
+                    state,
+                    missing_objects,
+                    current_head_commit_count: reachable_commits.len(),
+                })
+            } else {
+                Ok(Plan::Incremental {
+                    state,
+                    missing_objects,
+                    changed_objects: restored,
+                    reachable_commits,
+                })
+            }
+        }
+        plan => Ok(plan),
+    }
+}
+
+fn append_incremental(
+    repository: &Repository,
+    expected: &Expected,
+    state: &CacheState,
+    missing_objects: Vec<String>,
+    changed_objects: Vec<String>,
+    reachable_commits: Vec<String>,
+    report: &mut dyn FnMut(IndexStage),
+) -> Result<usize, AppError> {
+    let current_head_commit_count = reachable_commits.len();
+    report(IndexStage::ReadingCommits);
+    let reachable = reachable_commits.iter().cloned().collect::<HashSet<_>>();
+    let mut refresh = commits_for_objects(&repository.common_dir, &changed_objects)?;
+    refresh.extend(commits_for_reachable_parents(
+        &repository.common_dir,
+        &reachable_commits,
+    )?);
+    refresh.retain(|commit| reachable.contains(commit));
+    refresh.sort();
+    refresh.dedup();
+    let snapshot = repository.read_incremental_history_at(
+        HistoryTarget {
+            tip: expected.tip.clone(),
+            object_format: expected.object_format.clone(),
+            shallow_boundaries: expected.shallow_boundaries.clone(),
+        },
+        &state.commits,
+        &refresh,
+        missing_objects,
+        report,
+    )?;
+    report(IndexStage::WritingCache);
+    write::append(&super::cache_path(&repository.common_dir), &snapshot)?;
+    Ok(current_head_commit_count)
 }
 
 fn evaluate(

@@ -48,6 +48,153 @@ impl TestRepo {
 }
 
 #[test]
+fn search_refreshes_new_head_before_resolving_scope() {
+    let repo = TestRepo::new();
+    repo.commit("old.txt", b"old\n", "Existing history");
+    repo.index();
+    repo.commit("new.txt", b"refresh_marker\n", "RefreshMarker new history");
+    let head = repo.head();
+    let output = repo.run(["search", "RefreshMarker", "--to-rev", &head, "--json"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(report.to_string().contains("RefreshMarker new history"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Refreshing"));
+    let quiet = repo.run(["search", "RefreshMarker", "--json"]);
+    assert!(quiet.status.success());
+    assert!(
+        quiet.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&quiet.stderr)
+    );
+}
+
+#[test]
+fn failed_refresh_preserves_history_and_discloses_safe_fallback() {
+    let repo = TestRepo::new();
+    repo.commit("old.txt", b"old\n", "FallbackMarker published history");
+    repo.index();
+    let old = repo.head();
+    let cache = Connection::open(repo.cache_dir().join("cache.sqlite")).unwrap();
+    cache.execute_batch("CREATE TRIGGER reject_hunk BEFORE INSERT ON hunks BEGIN SELECT RAISE(ABORT, 'injected hunk write failure'); END;").unwrap();
+    drop(cache);
+    repo.commit("new.txt", b"new\n", "FallbackMarker unpublished history");
+    let output = repo.run(["search", "FallbackMarker", "--json"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["materials"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        value["materials"][0]["subject"],
+        "FallbackMarker published history"
+    );
+    assert_eq!(value["scope"]["cache_tip"], old);
+    assert_eq!(value["scope"]["coverage_complete"], false);
+    assert!(
+        value["warnings"]
+            .to_string()
+            .contains("injected hunk write failure")
+    );
+    let human = repo.run(["search", "FallbackMarker"]);
+    assert!(human.status.success());
+    assert!(String::from_utf8_lossy(&human.stderr).contains("automatic history refresh failed"));
+    git(repo.dir.path(), ["switch", "--orphan", "unrelated"]);
+    repo.commit("unrelated.txt", b"unrelated\n", "Unrelated history");
+    let failed = repo.run(["search", "FallbackMarker", "--json"]);
+    assert_eq!(failed.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&failed.stderr).contains("no commits reachable"));
+    assert!(failed.stdout.is_empty());
+}
+
+#[test]
+fn query_filters_do_not_narrow_refresh_and_cached_branches_stay_quiet() {
+    let repo = TestRepo::new();
+    repo.commit_at(
+        "old.txt",
+        b"old\n",
+        "FilterMarker old",
+        "2000-01-01T00:00:00Z",
+    );
+    repo.index();
+    let old = repo.head();
+    repo.commit_at(
+        "new.txt",
+        b"new\n",
+        "FilterMarker new",
+        "2001-01-01T00:00:00Z",
+    );
+    let filtered = repo.run([
+        "search",
+        "FilterMarker",
+        "--until",
+        "2000-01-01",
+        "--limit",
+        "1",
+        "--json",
+    ]);
+    assert!(filtered.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&filtered.stdout).unwrap();
+    assert_eq!(value["materials"][0]["subject"], "FilterMarker old");
+    let cache_before = fs::read(repo.cache_dir().join("cache.sqlite")).unwrap();
+    git(repo.dir.path(), ["switch", "--detach", &old]);
+    let quiet = repo.run(["search", "FilterMarker", "--json"]);
+    assert!(quiet.status.success());
+    assert!(quiet.stderr.is_empty());
+    assert_eq!(
+        cache_before,
+        fs::read(repo.cache_dir().join("cache.sqlite")).unwrap()
+    );
+    let retained = repo.run(["search", "FilterMarker", "--to-rev", "main", "--json"]);
+    assert!(retained.status.success());
+    assert!(String::from_utf8_lossy(&retained.stdout).contains("FilterMarker new"));
+}
+
+#[test]
+fn search_pins_head_before_waiting_for_another_writer() {
+    use std::io::{BufRead, BufReader};
+    use std::process::Stdio;
+    let repo = TestRepo::new();
+    repo.commit("old.txt", b"old\n", "PinnedMarker old");
+    repo.index();
+    let old = repo.head();
+    repo.commit("new.txt", b"new\n", "PinnedMarker new");
+    let pinned = repo.head();
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(repo.cache_dir().join("cache.lock"))
+        .unwrap();
+    lock.lock().unwrap();
+    let mut query = support::isolated_gitscry_command(repo.user_data_dir())
+        .args(["search", "PinnedMarker", "--json"])
+        .current_dir(repo.dir.path())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stderr = BufReader::new(query.stderr.take().unwrap());
+    let mut waiting = String::new();
+    stderr.read_line(&mut waiting).unwrap();
+    assert!(
+        waiting.contains("Waiting for another GitScry process"),
+        "{waiting}"
+    );
+    git(repo.dir.path(), ["switch", "--detach", &old]);
+    lock.unlock().unwrap();
+    let output = query.wait_with_output().unwrap();
+    assert!(output.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["scope"]["to_rev"], pinned);
+    assert!(value["materials"].to_string().contains("PinnedMarker new"));
+}
+
+#[test]
 fn search_help_documents_historical_scope() {
     let repo = TestRepo::new();
     let output = repo.run(["search", "--help"]);
@@ -460,22 +607,14 @@ fn unscoped_search_follows_current_head_across_cached_and_uncached_history() {
         .iter()
         .map(|material| material["subject"].as_str().unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(subjects, ["ReachabilityMarker root"], "{value}");
+    assert!(subjects.contains(&"ReachabilityMarker root"), "{value}");
+    assert!(subjects.contains(&"ReachabilityMarker topic"), "{value}");
+    assert!(!subjects.contains(&"ReachabilityMarker main"), "{value}");
     assert_eq!(value["scope"]["to_rev"], topic);
-    assert_eq!(value["scope"]["cache_tip"], main);
-    assert_eq!(value["scope"]["coverage_complete"], false);
-    assert!(value["warnings"].as_array().unwrap().iter().any(|warning| {
-        warning
-            .as_str()
-            .unwrap()
-            .contains("only cached reachable commits")
-    }));
-    let uncached_upper = repo.run(["search", "ReachabilityMarker", "--to-rev", topic.as_str()]);
-    assert_eq!(uncached_upper.status.code(), Some(2));
-    assert!(
-        String::from_utf8_lossy(&uncached_upper.stderr)
-            .contains("outside the published cache generation; run `gitscry index` first")
-    );
+    assert_eq!(value["scope"]["cache_tip"], topic);
+    assert_eq!(value["scope"]["coverage_complete"], true);
+    let refreshed_upper = repo.run(["search", "ReachabilityMarker", "--to-rev", topic.as_str()]);
+    assert_eq!(refreshed_upper.status.code(), Some(0));
 
     git(repo.dir.path(), ["switch", "--detach", topic.as_str()]);
 
@@ -488,9 +627,16 @@ fn unscoped_search_follows_current_head_across_cached_and_uncached_history() {
         .iter()
         .map(|material| material["subject"].as_str().unwrap())
         .collect::<Vec<_>>();
-    assert_eq!(detached_subjects, ["ReachabilityMarker root"], "{detached}");
+    assert!(
+        detached_subjects.contains(&"ReachabilityMarker root"),
+        "{detached}"
+    );
+    assert!(
+        detached_subjects.contains(&"ReachabilityMarker topic"),
+        "{detached}"
+    );
     assert_eq!(detached["scope"]["to_rev"], topic);
-    assert_eq!(detached["scope"]["coverage_complete"], false);
+    assert_eq!(detached["scope"]["coverage_complete"], true);
     let explicit = repo.run([
         "search",
         "ReachabilityMarker",
@@ -546,7 +692,7 @@ fn unscoped_search_follows_current_head_across_cached_and_uncached_history() {
     assert!(subjects.contains(&"ReachabilityMarker main"), "{value}");
     assert!(subjects.contains(&"ReachabilityMarker root"), "{value}");
     assert_eq!(value["scope"]["to_rev"], merged);
-    assert_eq!(value["scope"]["coverage_complete"], false);
+    assert_eq!(value["scope"]["coverage_complete"], true);
 }
 
 #[test]
@@ -1042,7 +1188,7 @@ fn query_finds_the_published_cache_from_a_nested_working_directory() {
 }
 
 #[test]
-fn search_rebuilds_cache_when_default_tip_changes() {
+fn search_refreshes_cache_when_head_gains_history() {
     let repo = TestRepo::new();
     repo.commit("history.txt", b"first\n", "Initial history");
 
@@ -1052,16 +1198,10 @@ fn search_rebuilds_cache_when_default_tip_changes() {
     assert!(String::from_utf8_lossy(&first.stdout).contains("Initial history"));
 
     repo.commit("history.txt", b"second\n", "Second history");
-    let stale = repo.run(["search", "second"]);
-    assert_eq!(stale.status.code(), Some(0));
-    let stale_text = String::from_utf8_lossy(&stale.stdout);
-    assert!(
-        stale_text.contains("No relevant history found."),
-        "{stale_text}"
-    );
-    assert!(stale_text.contains("coverage incomplete"), "{stale_text}");
-    assert!(String::from_utf8_lossy(&stale.stderr).contains("incomplete history coverage"));
-
+    let refreshed = repo.run(["search", "second"]);
+    assert_eq!(refreshed.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&refreshed.stdout).contains("Second history"));
+    assert!(String::from_utf8_lossy(&refreshed.stderr).contains("Refreshing"));
     repo.index();
     let refreshed = repo.run(["search", "second"]);
     assert_eq!(refreshed.status.code(), Some(0));
@@ -1097,6 +1237,9 @@ fn search_refreshes_cache_after_shallow_history_deepens() {
         String::from_utf8_lossy(&indexed.stderr)
     );
 
+    let git_dir = git_stdout(&clone, ["rev-parse", "--absolute-git-dir"]);
+    let cache_path = Path::new(&git_dir).join("gitscry/cache.sqlite");
+    let shallow_cache = fs::read(&cache_path).unwrap();
     let first = support::isolated_gitscry_command(source.user_data_dir())
         .args(["search", "commit", "one"])
         .current_dir(&clone)
@@ -1112,14 +1255,8 @@ fn search_refreshes_cache_after_shallow_history_deepens() {
         String::from_utf8_lossy(&code_first.stdout).contains("No matching changed lines found.")
     );
 
+    assert_eq!(shallow_cache, fs::read(&cache_path).unwrap());
     git(&clone, ["fetch", "--deepen=2"]);
-
-    let refreshed = TestRepo::run_at(&clone, ["index"]);
-    assert!(
-        refreshed.status.success(),
-        "re-index failed: {}",
-        String::from_utf8_lossy(&refreshed.stderr)
-    );
 
     let second = support::isolated_gitscry_command(source.user_data_dir())
         .args(["search", "commit", "one"])
@@ -1362,7 +1499,7 @@ fn search_replays_issue_2_secret_redaction_case() {
 }
 
 #[test]
-fn search_uses_damaged_fts_without_rebuilding_cache() {
+fn search_rejects_damaged_fts_without_rebuilding_cache() {
     let repo = TestRepo::new();
     repo.commit("provider.txt", b"provider\n", "Provider history");
 
@@ -1380,9 +1517,8 @@ fn search_uses_damaged_fts_without_rebuilding_cache() {
     drop(cache);
 
     let second = repo.run(["search", "provider"]);
-    assert_eq!(second.status.code(), Some(0));
-    assert!(String::from_utf8_lossy(&second.stdout).contains("No relevant history found."));
-    assert!(second.stderr.is_empty());
+    assert_eq!(second.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&second.stderr).contains("gitscry index"));
     assert!(
         !fs::read_dir(repo.cache_dir())
             .unwrap()

@@ -100,6 +100,22 @@ fn format_json_report(
     }
 }
 
+/// Live query maintenance progress never enters machine-readable stdout.
+pub(crate) fn refresh_progress(stage: IndexStage) {
+    let label = match stage {
+        IndexStage::ReadingCommits => "Refreshing pinned history: reading commits...",
+        IndexStage::ReadingChanges => "Refreshing pinned history: reading changes...",
+        IndexStage::ReadingPatches => "Refreshing pinned history: reading patches...",
+        IndexStage::WritingCache => "Refreshing pinned history: writing cache...",
+        IndexStage::Complete | IndexStage::BuildingSemanticIndex => return,
+    };
+    let _ = writeln!(io::stderr(), "{label}");
+}
+
+pub(crate) fn waiting_for_cache(message: &str) {
+    let _ = writeln!(io::stderr(), "{message}");
+}
+
 pub(crate) fn run(command: Command) -> i32 {
     let json_output = command.uses_json();
     let stderr = io::stderr();
@@ -234,7 +250,11 @@ fn finish_with_format(result: Result<Outcome, AppError>, json_output: bool) -> i
 
 fn write_outcome(outcome: Outcome, json_output: bool) -> io::Result<()> {
     let mut stderr = io::stderr().lock();
-    for progress in &outcome.progress {
+    for progress in outcome
+        .progress
+        .iter()
+        .filter(|line| !line.starts_with("Waiting for another GitScry process"))
+    {
         writeln!(stderr, "{progress}")?;
     }
 

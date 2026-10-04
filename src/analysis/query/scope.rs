@@ -104,19 +104,20 @@ fn time_bounds(
     Ok((since, until))
 }
 
-pub(super) fn resolve(
-    session: &QuerySession,
-    options: SearchScopeOptions,
-) -> Result<Option<ResolvedSearchScope>, AppError> {
-    resolve_with_target(session, options, None, false)
-}
-
 pub(super) fn resolve_for_target(
     session: &QuerySession,
     options: SearchScopeOptions,
     target_revision: &str,
 ) -> Result<Option<ResolvedSearchScope>, AppError> {
-    resolve_with_target(session, options, Some(target_revision), false)
+    resolve_with_target(session, options, Some(target_revision), false, None)
+}
+
+pub(in crate::analysis) fn resolve_for_query(
+    session: &QuerySession,
+    options: SearchScopeOptions,
+    head: &str,
+) -> Result<Option<ResolvedSearchScope>, AppError> {
+    resolve_with_target(session, options, None, true, Some(head))
 }
 
 pub(in crate::analysis) fn resolve_for_head_target(
@@ -124,7 +125,7 @@ pub(in crate::analysis) fn resolve_for_head_target(
     options: SearchScopeOptions,
     target_revision: &str,
 ) -> Result<Option<ResolvedSearchScope>, AppError> {
-    resolve_with_target(session, options, Some(target_revision), true)
+    resolve_with_target(session, options, Some(target_revision), true, None)
 }
 pub(in crate::analysis) fn reachable_history(
     session: &QuerySession,
@@ -184,6 +185,7 @@ fn resolve_with_target(
     options: SearchScopeOptions,
     target_revision: Option<&str>,
     default_to_head: bool,
+    pinned_head: Option<&str>,
 ) -> Result<Option<ResolvedSearchScope>, AppError> {
     if options.is_empty() && target_revision.is_some() && !default_to_head {
         return Ok(None);
@@ -199,8 +201,11 @@ fn resolve_with_target(
             revision
         }
         None => match (default_to_head, target_revision) {
-            (false, Some(revision)) => revision.to_owned(),
-            _ => repository.resolve_commit("HEAD")?,
+            (_, Some(revision)) => revision.to_owned(),
+            (_, None) => match pinned_head {
+                Some(head) => head.to_owned(),
+                None => repository.resolve_commit("HEAD")?,
+            },
         },
     };
     let from_rev = options
@@ -231,6 +236,11 @@ fn resolve_with_target(
     let to_history = reachable_history(session, &repository, &to_rev)?;
     let coverage_complete = to_history.coverage_complete;
     let reachable_oids = to_history.revisions;
+    if reachable_oids.is_empty() {
+        return Err(AppError::input(
+            "no commits reachable from the query target are present in the published cache; run `gitscry index` first",
+        ));
+    }
     let cached_oids = session.commit_oids()?;
     let excluded_oids = from_rev
         .as_deref()
