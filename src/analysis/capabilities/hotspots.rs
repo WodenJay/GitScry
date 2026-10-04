@@ -33,21 +33,14 @@ pub(in crate::analysis) fn execute(
 ) -> Result<Outcome, AppError> {
     let path_prefix = normalize_hotspot_path_prefix(path_prefix)?;
     let repository = Repository::discover()?;
-    let head = Context::pin_current_head(&repository)?;
-    let implicit_target = options.scope.to_rev.is_none();
-    let target = match options.scope.to_rev.as_deref() {
-        Some(revision) => repository.resolve_commit(revision)?,
-        None => head.clone(),
-    };
-    let session = Context::refresh_query(&repository, &head)?;
-    if !implicit_target {
-        session.require_revision(&target)?;
-    }
-    let context = if implicit_target {
-        Context::for_head_target(session, options.scope, &target, &head)?
-    } else {
-        Context::for_target(session, options.scope, &target, &head)?
-    };
+    let requested = options.scope.to_rev.clone();
+    let implicit_target = requested.is_none();
+    let (context, target) = Context::prepare_target(
+        &repository,
+        requested.as_deref(),
+        options.scope,
+        |revision| repository.resolve_commit(revision),
+    )?;
     let history_targets = if implicit_target {
         scope::cached_head_history_frontier(&context.session, &repository, &context.pinned_head)?
     } else {

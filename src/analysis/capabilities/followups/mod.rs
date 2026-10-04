@@ -194,7 +194,7 @@ pub(in crate::analysis) fn run(
         .as_deref()
         .map(|revision| repository.resolve_commit(revision))
         .transpose()?;
-    let session = Context::refresh_query(&repository, &head)?;
+    let session = crate::cache::refresh_query(&repository, &head)?;
     session.require_revision(&seed)?;
     let cache_tip = session.completed_tip()?;
     let (endpoint, coverage_complete) = match requested_endpoint {

@@ -18,11 +18,12 @@ pub(in crate::analysis) fn execute(
     options: Options,
 ) -> Result<Outcome, AppError> {
     let repository = Repository::discover()?;
-    let head = Context::pin_current_head(&repository)?;
-    let target = repository.pin_trace_fix(&revision, &paths)?;
-    let session = Context::refresh_query(&repository, &head)?;
-    session.require_revision(&target.revision)?;
-    let context = Context::for_target(session, options.scope, &target.revision, &head)?;
+    let (context, target) = Context::prepare_target(
+        &repository,
+        Some(revision.as_str()),
+        options.scope,
+        |revision| repository.pin_trace_fix(revision, &paths),
+    )?;
     let mut reachable = context.session.ancestors(&target.revision)?;
     context.intersect(&target.revision, &mut reachable)?;
     let mut report = run(

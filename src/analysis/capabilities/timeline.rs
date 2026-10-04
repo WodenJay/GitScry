@@ -18,22 +18,10 @@ pub(in crate::analysis) fn execute(
     options: Options,
 ) -> Result<Outcome, AppError> {
     let repository = Repository::discover()?;
-    let head = Context::pin_current_head(&repository)?;
-    let implicit_target = at.is_none();
-    let revision = match at {
-        Some(revision) => revision,
-        None => head.clone(),
-    };
-    let target = repository.pin_timeline_target(&revision, &path)?;
-    let session = Context::refresh_query(&repository, &head)?;
-    if !implicit_target {
-        session.require_revision(&target.revision)?;
-    }
-    let context = if implicit_target {
-        Context::for_head_target(session, options.scope, &target.revision, &head)?
-    } else {
-        Context::for_target(session, options.scope, &target.revision, &head)?
-    };
+    let (context, target) =
+        Context::prepare_target(&repository, at.as_deref(), options.scope, |revision| {
+            repository.pin_timeline_target(revision, &path)
+        })?;
     let reachable_order = repository.reachable_commits_in_history_order(&target.revision)?;
     let reachable = reachable_order.iter().cloned().collect();
     let eligible = context.eligible_revisions(&target.revision)?;

@@ -15,12 +15,53 @@ pub(in crate::analysis) struct Context {
     pub(in crate::analysis) scope: Option<scope::ResolvedSearchScope>,
     pub(in crate::analysis) pinned_head: String,
 }
+/// Cache prerequisites of pinned Git targets, not material-selection policy.
+pub(in crate::analysis) trait QueryTarget {
+    fn revision(&self) -> &str;
+
+    fn additional_revision(&self) -> Option<&str> {
+        None
+    }
+}
+
+impl QueryTarget for String {
+    fn revision(&self) -> &str {
+        self
+    }
+}
+
+impl QueryTarget for crate::git::WhyTarget {
+    fn revision(&self) -> &str {
+        &self.revision
+    }
+}
+
+impl QueryTarget for crate::git::TimelineTarget {
+    fn revision(&self) -> &str {
+        &self.revision
+    }
+}
+
+impl QueryTarget for crate::git::TraceFixTarget {
+    fn revision(&self) -> &str {
+        &self.revision
+    }
+}
+
+impl QueryTarget for crate::git::RegressionTarget {
+    fn revision(&self) -> &str {
+        &self.bad_revision
+    }
+    fn additional_revision(&self) -> Option<&str> {
+        self.good_revision.as_deref()
+    }
+}
 
 impl Context {
     pub(in crate::analysis) fn open(options: SearchScopeOptions) -> Result<Self, AppError> {
         let repository = Repository::discover()?;
         let head = Self::pin_current_head(&repository)?;
-        let session = Self::refresh_query(&repository, &head)?;
+        let session = cache::refresh_query(&repository, &head)?;
         let scope = scope::resolve_for_query(&session, options, &head)?;
         Ok(Self {
             session,
@@ -42,40 +83,37 @@ impl Context {
         }
     }
 
-    /// Refresh the initialized cache against this invocation's pinned HEAD.
-    pub(in crate::analysis) fn refresh_query(
+    /// Pin the feature target before waiting for refresh, then validate its
+    /// cache prerequisites and install scope. An implicit HEAD target may use
+    /// safely cached history even when refresh could not publish HEAD itself.
+    pub(in crate::analysis) fn prepare_target<T: QueryTarget>(
         repository: &Repository,
-        pinned_head: &str,
-    ) -> Result<QuerySession, AppError> {
-        cache::refresh_query(repository, pinned_head)
-    }
-
-    pub(in crate::analysis) fn for_target(
-        session: QuerySession,
+        requested: Option<&str>,
         options: SearchScopeOptions,
-        revision: &str,
-        pinned_head: &str,
-    ) -> Result<Self, AppError> {
-        let scope = scope::resolve_for_target(&session, options, revision)?;
-        Ok(Self {
-            session,
-            scope,
-            pinned_head: pinned_head.to_owned(),
-        })
-    }
-
-    pub(in crate::analysis) fn for_head_target(
-        session: QuerySession,
-        options: SearchScopeOptions,
-        revision: &str,
-        pinned_head: &str,
-    ) -> Result<Self, AppError> {
-        let scope = scope::resolve_for_head_target(&session, options, revision)?;
-        Ok(Self {
-            session,
-            scope,
-            pinned_head: pinned_head.to_owned(),
-        })
+        pin: impl FnOnce(&str) -> Result<T, AppError>,
+    ) -> Result<(Self, T), AppError> {
+        let head = Self::pin_current_head(repository)?;
+        let target = pin(requested.unwrap_or(&head))?;
+        let session = cache::refresh_query(repository, &head)?;
+        if requested.is_some() {
+            session.require_revision(target.revision())?;
+        }
+        if let Some(revision) = target.additional_revision() {
+            session.require_revision(revision)?;
+        }
+        let scope = if requested.is_none() {
+            scope::resolve_for_head_target(&session, options, target.revision())?
+        } else {
+            scope::resolve_for_target(&session, options, target.revision())?
+        };
+        Ok((
+            Self {
+                session,
+                scope,
+                pinned_head: head,
+            },
+            target,
+        ))
     }
 
     pub(in crate::analysis) fn filter(&self) -> Option<&SearchFilter> {
