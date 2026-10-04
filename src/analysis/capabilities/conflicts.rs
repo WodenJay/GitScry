@@ -616,16 +616,12 @@ pub(crate) fn execute(paths: Vec<String>, limit: usize) -> Result<Outcome, AppEr
     let selected_paths = target.files.len();
     let files_truncated = selected_paths > FILE_LIMIT;
     target.files.truncate(FILE_LIMIT);
-    let mut progress = Vec::new();
-    for endpoint in [&target.ours, &target.theirs] {
-        let prepared = cache::prepare_at(&repository, endpoint.clone(), &mut |_| {})?;
-        progress.extend(prepared.release().0);
-    }
-    let session = cache::open_query(&repository)?;
+    let session =
+        cache::refresh_query_targets(&repository, &[target.ours.as_str(), target.theirs.as_str()])?;
     for oid in [&target.ours, &target.theirs, &target.base] {
         session.require_revision(oid)?;
     }
-    progress.extend_from_slice(session.progress());
+    let progress = session.progress().to_vec();
     let mut warnings = session.warnings().to_vec();
     warnings.extend(
         progress
