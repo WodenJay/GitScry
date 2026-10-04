@@ -48,6 +48,25 @@ fn context_returns_repeated_historical_followup_with_traceable_statistics() {
     assert!(support * 2 >= complete);
     assert!(support * sample_size >= 2 * baseline * complete);
 
+    let clipped = json(repo.run(["context", "--json", "--until", "2025-02-07"]));
+    assert!(
+        clipped["suggestions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|suggestion| suggestion["category"] != "historical_followup"),
+        "clipped observation windows must not support a follow-up"
+    );
+    let staged = json(repo.run(["context", "--staged", "--json"]));
+    assert!(
+        staged["suggestions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|suggestion| suggestion["category"] != "historical_followup"),
+        "staged context must not use unstaged content origins"
+    );
+
     let rendered = repo.run(["context"]);
     assert!(rendered.status.success());
     let rendered = String::from_utf8(rendered.stdout).unwrap();
@@ -116,6 +135,77 @@ fn context_rejects_two_origins_reaching_only_one_later_change() {
             .unwrap()
             .iter()
             .all(|suggestion| { suggestion["category"] != "historical_followup" })
+    );
+}
+
+#[test]
+fn context_rejects_followup_that_does_not_outperform_candidate_baseline() {
+    let repo = TestRepo::new();
+    commit_at(
+        &repo,
+        &[
+            ("current.rs", "fn placeholder() {}\n"),
+            ("candidate.rs", "fn candidate_start() {}\n"),
+            (
+                "historical-a.rs",
+                "fn alpha_feature() { let outcome = false; }\n",
+            ),
+            (
+                "historical-b.rs",
+                "fn beta_feature() { let outcome = false; }\n",
+            ),
+        ],
+        "base",
+        "2025-01-01T00:00:00+0000",
+    );
+    let alpha = "fn alpha_feature() { let outcome = identityAlpha(); }\n";
+    let beta = "fn beta_feature() { let outcome = identityBeta(); }\n";
+    commit_at(
+        &repo,
+        &[("historical-a.rs", alpha)],
+        "content origin alpha",
+        "2025-02-01T00:00:00+0000",
+    );
+    commit_at(
+        &repo,
+        &[("baseline.rs", "fn baseline_origin() {}\n")],
+        "baseline origin",
+        "2025-02-01T12:00:00+0000",
+    );
+    commit_at(
+        &repo,
+        &[("historical-b.rs", beta)],
+        "content origin beta",
+        "2025-02-02T00:00:00+0000",
+    );
+    commit_at(
+        &repo,
+        &[("candidate.rs", "fn candidate_followup_one() {}\n")],
+        "first candidate follow-up",
+        "2025-02-03T00:00:00+0000",
+    );
+    commit_at(
+        &repo,
+        &[("candidate.rs", "fn candidate_followup_two() {}\n")],
+        "second candidate follow-up",
+        "2025-02-04T00:00:00+0000",
+    );
+    empty_commit_at(
+        &repo,
+        "observation windows complete",
+        "2025-02-11T00:00:00+0000",
+    );
+    repo.index();
+    fs::write(repo.dir.path().join("current.rs"), format!("{alpha}{beta}")).unwrap();
+
+    let report = json(repo.run(["context", "--json"]));
+    assert!(
+        report["suggestions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|suggestion| suggestion["category"] != "historical_followup"),
+        "frequent candidate changes should fail the two-times baseline gate"
     );
 }
 
@@ -382,7 +472,7 @@ fn context_rejects_symlink_candidate_materialized_as_regular_file() {
 #[test]
 fn context_does_not_link_scoped_origins_to_a_recreated_current_file() {
     let repo = TestRepo::new();
-    complete_context_fixture(&repo, false);
+    let (alpha, beta, _, _) = complete_context_fixture(&repo, false);
     let scoped_revision = repo.head();
     let scoped_report = json(repo.run(["context", "--json", "--to-rev", &scoped_revision]));
     assert!(
@@ -393,6 +483,7 @@ fn context_does_not_link_scoped_origins_to_a_recreated_current_file() {
             .any(|suggestion| suggestion["category"] == "historical_followup"),
         "fixture should qualify at the selected historical revision"
     );
+    git(repo.dir.path(), ["checkout", "HEAD", "--", "current.rs"]);
     fs::remove_file(repo.dir.path().join("candidate.rs")).unwrap();
     commit_at(&repo, &[], "delete candidate", "2025-02-12T00:00:00+0000");
     commit_at(
@@ -401,6 +492,7 @@ fn context_does_not_link_scoped_origins_to_a_recreated_current_file() {
         "recreate candidate path",
         "2025-02-13T00:00:00+0000",
     );
+    fs::write(repo.dir.path().join("current.rs"), format!("{alpha}{beta}")).unwrap();
     repo.index();
 
     let report = json(repo.run(["context", "--json", "--to-rev", &scoped_revision]));

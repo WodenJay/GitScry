@@ -47,6 +47,19 @@ pub(super) fn discover(
         .filter(|oid| cached.contains(*oid))
         .cloned()
         .collect::<HashSet<_>>();
+    // Scope bounds evidence, but identity must follow the current HEAD file incarnation.
+    let active_revision = input.head.as_deref().unwrap_or(target);
+    let active_parents = if active_revision == target {
+        None
+    } else {
+        Some(repository.reachable_commit_parents(active_revision)?)
+    };
+    let identity_parents = active_parents.as_ref().unwrap_or(&parents);
+    let identity_cached = identity_parents
+        .keys()
+        .filter(|oid| cached.contains(*oid))
+        .cloned()
+        .collect::<HashSet<_>>();
     let excluded = match scope.and_then(|scope| scope.from_oid.as_deref()) {
         Some(from_oid) => repository
             .reachable_commits(from_oid)?
@@ -153,7 +166,6 @@ pub(super) fn discover(
         return Ok(Vec::new());
     }
 
-    let active_revision = input.head.as_deref().unwrap_or(target);
     let tracked_paths = repository
         .regular_files(active_revision)?
         .into_iter()
@@ -161,7 +173,7 @@ pub(super) fn discover(
     let selected_paths = input.paths().into_iter().collect::<HashSet<_>>();
     let mut candidate_paths = BTreeSet::new();
     for seed in candidate_seeds {
-        for commit in session.timeline_history(&seed, &reachable_cached)? {
+        for commit in session.timeline_history(&seed, &identity_cached)? {
             for path in commit.paths {
                 if tracked_paths.contains(&path)
                     && !selected_paths.contains(&path)
@@ -175,9 +187,14 @@ pub(super) fn discover(
 
     let mut results = Vec::new();
     for path in candidate_paths {
-        let history = session.timeline_history(&path, &reachable_cached)?;
-        let incarnation_changes =
-            incarnation_changes(&history, &path, target, &parents, &reachable_cached);
+        let history = session.timeline_history(&path, &identity_cached)?;
+        let incarnation_changes = incarnation_changes(
+            &history,
+            &path,
+            active_revision,
+            identity_parents,
+            &identity_cached,
+        );
         if incarnation_changes.is_empty() {
             continue;
         }
