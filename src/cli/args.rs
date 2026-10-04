@@ -19,7 +19,7 @@ pub(super) struct Cli {
 const ROOT_LONG_HELP: &str = "\
 Your Git history is a treasure trove. GitScry uncovers the implementation examples, failed approaches, code relationships, and regression context hidden inside.
 
-Pick one command by intent, then run `gitscry <command> --help` for inputs, options, and examples.\n\nQuery commands support `--json` for structured output.";
+Pick one command by intent, then run `gitscry <command> --help` for inputs, options, and examples.";
 
 // Derive the command map from clap metadata so descriptions stay owned by each command.
 fn root_help_template() -> String {
