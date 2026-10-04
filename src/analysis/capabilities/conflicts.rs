@@ -10,7 +10,7 @@ use crate::{
     git,
 };
 use serde::Serialize;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 const FILE_LIMIT: usize = 100;
 const PATH_CHANGE_LIMIT: usize = 20;
 const REGION_LIMIT: usize = 20;
@@ -187,14 +187,13 @@ fn bounded(text: &str) -> (String, bool) {
 
 fn change_belongs_to_incarnation(
     change: &cache::PathChange,
-    changes_by_ordinal: Option<&BTreeMap<i64, BTreeSet<cache::FileIncarnation>>>,
+    incarnations: &cache::FileIncarnationHistory,
+    revision: &str,
     incarnation: Option<&cache::FileIncarnation>,
     conflict_path: &[u8],
 ) -> bool {
     if let Some(incarnation) = incarnation {
-        changes_by_ordinal
-            .and_then(|changes| changes.get(&change.ordinal))
-            .is_some_and(|incarnations| incarnations.contains(incarnation))
+        incarnations.change_has_identity(revision, change.ordinal, incarnation)
     } else {
         change.old_path.as_deref() == Some(conflict_path)
             || change.new_path.as_deref() == Some(conflict_path)
@@ -208,14 +207,7 @@ fn incarnation_paths(
     conflict_path: &[u8],
 ) -> Vec<Vec<u8>> {
     let mut paths = if let Some(incarnation) = incarnation {
-        incarnations
-            .aliases
-            .iter()
-            .filter(|(path, identities)| {
-                endpoint_paths.contains(*path) && identities.contains(incarnation)
-            })
-            .map(|(path, _)| path.clone())
-            .collect::<Vec<_>>()
+        incarnations.aliases_in(incarnation, endpoint_paths)
     } else {
         Vec::new()
     };
@@ -244,12 +236,9 @@ fn history_anchor(
     incarnation
         .and_then(|incarnation| {
             incarnations
-                .aliases
-                .iter()
-                .find(|(path, identities)| {
-                    base_paths.contains(*path) && identities.contains(incarnation)
-                })
-                .map(|(path, _)| path.clone())
+                .aliases_in(incarnation, base_paths)
+                .into_iter()
+                .next()
                 .or_else(|| Some(incarnation.path.clone()))
         })
         .or_else(|| {
@@ -670,14 +659,8 @@ pub(crate) fn execute(paths: Vec<String>, limit: usize) -> Result<Outcome, AppEr
                     "theirs" => (3, &target.ours),
                     _ => unreachable!("conflict history has exactly two sides"),
                 };
-                let own_incarnation = incarnations
-                    .target_incarnations
-                    .get(*endpoint)
-                    .and_then(|paths| paths.get(&file.path));
-                let counterpart_incarnation = incarnations
-                    .target_incarnations
-                    .get(counterpart)
-                    .and_then(|paths| paths.get(&file.path));
+                let own_incarnation = incarnations.identity_at(endpoint, &file.path);
+                let counterpart_incarnation = incarnations.identity_at(counterpart, &file.path);
                 let incarnation = if own_incarnation.is_some() {
                     own_incarnation
                 } else if !endpoint_paths.contains(&file.path) {
@@ -713,14 +696,14 @@ pub(crate) fn execute(paths: Vec<String>, limit: usize) -> Result<Outcome, AppEr
                 };
                 let mut leads = Vec::new();
                 for commit in history {
-                    let changes_by_ordinal = incarnations.changes_by_commit.get(&commit.oid);
                     let associated_changes = commit
                         .changes
                         .iter()
                         .filter(|change| {
                             change_belongs_to_incarnation(
                                 change,
-                                changes_by_ordinal,
+                                &incarnations,
+                                &commit.oid,
                                 incarnation,
                                 &file.path,
                             )
@@ -1110,19 +1093,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn does_not_associate_a_change_by_a_reused_alias() {
-        let incarnation = cache::FileIncarnation {
-            introduced_in: "base".to_owned(),
-            path: b"lib.rs".to_vec(),
-        };
-        let reintroduced = cache::FileIncarnation {
-            introduced_in: "reintroduced".to_owned(),
-            path: b"lib.rs".to_vec(),
-        };
-        let incarnations_by_change = BTreeMap::from([
-            (0, BTreeSet::from([incarnation.clone()])),
-            (1, BTreeSet::from([reintroduced])),
-        ]);
+    fn unestablished_incarnation_only_matches_exact_path() {
+        let history = cache::FileIncarnationHistory::default();
         let changes = [
             cache::PathChange {
                 ordinal: 0,
@@ -1144,12 +1116,7 @@ mod tests {
         let associated = changes
             .iter()
             .filter(|change| {
-                change_belongs_to_incarnation(
-                    change,
-                    Some(&incarnations_by_change),
-                    Some(&incarnation),
-                    b"score.rs",
-                )
+                change_belongs_to_incarnation(change, &history, "head", None, b"score.rs")
             })
             .map(|change| change.ordinal)
             .collect::<Vec<_>>();

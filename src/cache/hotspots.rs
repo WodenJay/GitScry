@@ -47,12 +47,87 @@ pub(crate) struct FileIncarnation {
     pub(crate) path: Vec<u8>,
 }
 
+#[derive(Default)]
 pub(crate) struct FileIncarnationHistory {
-    pub(crate) by_commit: HashMap<String, BTreeMap<FileIncarnation, BTreeSet<Vec<u8>>>>,
-    pub(crate) changes_by_commit: HashMap<String, BTreeMap<i64, BTreeSet<FileIncarnation>>>,
-    pub(crate) aliases: BTreeMap<Vec<u8>, BTreeSet<FileIncarnation>>,
-    pub(crate) target_paths: BTreeMap<FileIncarnation, BTreeSet<Vec<u8>>>,
-    pub(crate) target_incarnations: BTreeMap<String, BTreeMap<Vec<u8>, FileIncarnation>>,
+    by_commit: HashMap<String, BTreeMap<FileIncarnation, BTreeSet<Vec<u8>>>>,
+    changes_by_commit: HashMap<String, BTreeMap<i64, BTreeSet<FileIncarnation>>>,
+    aliases: BTreeMap<Vec<u8>, BTreeSet<FileIncarnation>>,
+    target_paths: BTreeMap<FileIncarnation, BTreeSet<Vec<u8>>>,
+    target_incarnations: BTreeMap<String, BTreeMap<Vec<u8>, FileIncarnation>>,
+}
+
+impl FileIncarnationHistory {
+    pub(crate) fn identities_for_paths(
+        &self,
+        paths: &BTreeSet<Vec<u8>>,
+    ) -> BTreeSet<FileIncarnation> {
+        paths
+            .iter()
+            .filter_map(|path| self.aliases.get(path))
+            .flatten()
+            .cloned()
+            .collect()
+    }
+
+    /// A path may name multiple incarnations across history. Membership must
+    /// match an identity, not merely a reused spelling of the path.
+    pub(crate) fn contains_path(
+        &self,
+        path: &[u8],
+        has_member: impl FnMut(&FileIncarnation) -> bool,
+    ) -> bool {
+        self.aliases
+            .get(path)
+            .is_some_and(|aliases| aliases.iter().any(has_member))
+    }
+
+    pub(crate) fn members_at(
+        &self,
+        revision: &str,
+    ) -> Option<&BTreeMap<FileIncarnation, BTreeSet<Vec<u8>>>> {
+        self.by_commit.get(revision)
+    }
+
+    pub(crate) fn identity_at(&self, revision: &str, path: &[u8]) -> Option<&FileIncarnation> {
+        self.target_incarnations
+            .get(revision)
+            .and_then(|paths| paths.get(path))
+    }
+
+    pub(crate) fn change_has_identity(
+        &self,
+        revision: &str,
+        ordinal: i64,
+        identity: &FileIncarnation,
+    ) -> bool {
+        self.changes_by_commit
+            .get(revision)
+            .and_then(|changes| changes.get(&ordinal))
+            .is_some_and(|identities| identities.contains(identity))
+    }
+
+    pub(crate) fn aliases_in(
+        &self,
+        identity: &FileIncarnation,
+        paths: &BTreeSet<Vec<u8>>,
+    ) -> Vec<Vec<u8>> {
+        paths
+            .iter()
+            .filter(|path| {
+                self.aliases
+                    .get(*path)
+                    .is_some_and(|identities| identities.contains(identity))
+            })
+            .cloned()
+            .collect()
+    }
+
+    pub(crate) fn paths_at_target(&self, identity: &FileIncarnation) -> Vec<Vec<u8>> {
+        self.target_paths
+            .get(identity)
+            .map(|paths| paths.iter().cloned().collect())
+            .unwrap_or_default()
+    }
 }
 
 struct HistoryGraph {
@@ -413,13 +488,7 @@ fn file_incarnation_history(
     target_revisions: &[String],
     current_paths: &[Vec<u8>],
 ) -> Result<FileIncarnationHistory, AppError> {
-    let mut history = FileIncarnationHistory {
-        by_commit: HashMap::new(),
-        changes_by_commit: HashMap::new(),
-        aliases: BTreeMap::new(),
-        target_paths: BTreeMap::new(),
-        target_incarnations: BTreeMap::new(),
-    };
+    let mut history = FileIncarnationHistory::default();
     let mut origins = HashMap::new();
 
     for (&id, node) in nodes {
@@ -658,16 +727,38 @@ mod tests {
             ),
         ]);
 
-        let history =
-            file_incarnation_history(&nodes, &["head".to_owned()], &[new_path.to_vec()]).unwrap();
-        let original = &history.target_incarnations["head"][new_path.as_slice()];
-        let changes = &history.changes_by_commit["head"];
-        assert!(changes[&0].contains(original));
-        assert!(!changes[&1].contains(original));
-        assert!(
-            changes[&1]
-                .iter()
-                .any(|incarnation| incarnation.introduced_in == "head")
+        let history = file_incarnation_history(
+            &nodes,
+            &["head".to_owned()],
+            &[old_path.to_vec(), new_path.to_vec()],
+        )
+        .unwrap();
+        let original = history.identity_at("head", new_path).unwrap();
+        let recreated = history.identity_at("head", old_path).unwrap();
+        assert_ne!(original, recreated);
+        assert_eq!(recreated.introduced_in, "head");
+        assert!(history.change_has_identity("head", 0, original));
+        assert!(!history.change_has_identity("head", 1, original));
+        assert!(history.change_has_identity("head", 1, recreated));
+
+        let seeds = BTreeSet::from([old_path.to_vec()]);
+        assert_eq!(
+            history.identities_for_paths(&seeds),
+            BTreeSet::from([original.clone(), recreated.clone()])
         );
+        assert!(history.contains_path(old_path, |identity| identity == original));
+        assert!(!history.contains_path(new_path, |identity| identity == recreated));
+        assert_eq!(
+            history.aliases_in(original, &seeds),
+            vec![old_path.to_vec()]
+        );
+        assert_eq!(history.paths_at_target(original), vec![new_path.to_vec()]);
+        assert_eq!(history.paths_at_target(recreated), vec![old_path.to_vec()]);
+        let members = history.members_at("head").unwrap();
+        assert_eq!(
+            members[original],
+            BTreeSet::from([old_path.to_vec(), new_path.to_vec()])
+        );
+        assert_eq!(members[recreated], BTreeSet::from([old_path.to_vec()]));
     }
 }

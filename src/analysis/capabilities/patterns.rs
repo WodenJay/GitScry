@@ -98,12 +98,7 @@ fn run(
     let current_paths = current_paths.into_iter().collect::<Vec<_>>();
     let incarnations: FileIncarnationHistory =
         session.pattern_incarnations(cached_targets, &current_paths)?;
-    let seed_incarnations = seeds
-        .iter()
-        .filter_map(|seed| incarnations.aliases.get(seed))
-        .flatten()
-        .cloned()
-        .collect::<BTreeSet<_>>();
+    let seed_incarnations = incarnations.identities_for_paths(&seeds);
     let mut report = Report {
         target_revision,
         scope: None,
@@ -122,15 +117,11 @@ fn run(
         if merge || mass {
             continue;
         }
-        let Some(members) = incarnations.by_commit.get(&observation.oid) else {
+        let Some(members) = incarnations.members_at(&observation.oid) else {
             continue;
         };
         let all_seeds_present = seeds.iter().all(|seed| {
-            incarnations.aliases.get(seed).is_some_and(|aliases| {
-                aliases
-                    .iter()
-                    .any(|identity| members.contains_key(identity))
-            })
+            incarnations.contains_path(seed, |identity| members.contains_key(identity))
         });
         if all_seeds_present {
             observations.push(Observation {
@@ -195,12 +186,9 @@ fn run(
                 pending.push((common, next));
             }
         }
-        let all_seeds_present = seeds.iter().all(|seed| {
-            incarnations
-                .aliases
-                .get(seed)
-                .is_some_and(|aliases| aliases.iter().any(|identity| members.contains(identity)))
-        });
+        let all_seeds_present = seeds
+            .iter()
+            .all(|seed| incarnations.contains_path(seed, |identity| members.contains(identity)));
         let has_non_seed = members
             .iter()
             .any(|identity| !seed_incarnations.contains(identity));
@@ -249,11 +237,7 @@ fn run(
             members: members
                 .into_iter()
                 .map(|identity| {
-                    let target_paths = incarnations
-                        .target_paths
-                        .get(&identity)
-                        .map(|paths| paths.iter().cloned().collect::<Vec<_>>())
-                        .unwrap_or_default();
+                    let target_paths = incarnations.paths_at_target(&identity);
                     Member {
                         path: identity.path.clone(),
                         introduced_in: identity.introduced_in.clone(),
