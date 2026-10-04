@@ -1,6 +1,7 @@
 //! Select path-association material; no content-similarity or review conclusions.
 mod abandonment;
 mod content;
+mod historical_followup;
 
 use super::relations::is_test_path;
 use crate::analysis::query::{Context, Options, Outcome, QueryReport, scope};
@@ -36,6 +37,7 @@ pub(in crate::analysis) fn execute(
     let report = run(
         &context.session,
         input,
+        &repository,
         &repository.root,
         options.limit,
         context.filter(),
@@ -72,6 +74,7 @@ pub(crate) struct Report {
 pub(crate) enum Category {
     RecordedAbandonment,
     HistoricalChange,
+    HistoricalFollowup,
     Test,
     CoChangingFile,
 }
@@ -82,8 +85,25 @@ impl Category {
             Self::Test => "test",
             Self::CoChangingFile => "co_changing_file",
             Self::HistoricalChange => "historical_change",
+            Self::HistoricalFollowup => "historical_followup",
         }
     }
+}
+
+#[derive(Clone)]
+pub(crate) struct HistoricalFollowupChain {
+    pub(crate) origin_oid: String,
+    pub(crate) later_oid: String,
+}
+
+pub(crate) struct HistoricalFollowup {
+    pub(crate) supporting_origins: usize,
+    pub(crate) complete_origins: usize,
+    pub(crate) independent_chains: usize,
+    pub(crate) baseline_occurrences: usize,
+    pub(crate) baseline_sample_size: usize,
+    pub(crate) undisplayed_supporting_origins: usize,
+    pub(crate) chains: Vec<HistoricalFollowupChain>,
 }
 
 pub(crate) struct Suggestion {
@@ -98,6 +118,7 @@ pub(crate) struct Suggestion {
     pub(crate) content_matches: Vec<ContentMatch>,
     pub(crate) content_matches_truncated: bool,
     pub(crate) abandonment: Option<crate::analysis::Failure>,
+    pub(crate) historical_followup: Option<HistoricalFollowup>,
 }
 
 pub(crate) struct ContentMatch {
@@ -136,6 +157,7 @@ impl Report {
 fn run(
     session: &QuerySession,
     input: CurrentChange,
+    repository: &Repository,
     root: &Path,
     limit: usize,
     scope: Option<&SearchFilter>,
@@ -231,6 +253,7 @@ fn run(
                 content_matches: Vec::new(),
                 content_matches_truncated: false,
                 abandonment: None,
+                historical_followup: None,
             },
             supporting,
         ));
@@ -239,6 +262,11 @@ fn run(
         report.warnings.push("warning: historical test paths absent as safe regular files in the current worktree were omitted; renames are not resolved".to_owned());
     }
     let changes = content::discover(session, &mut report, scope, hybrid)?;
+    for (strength, time, suggestion) in
+        historical_followup::discover(session, repository, root, &report.input, &changes, scope)?
+    {
+        ranked.push((strength, time, suggestion, Vec::new()));
+    }
     for (strength, time, suggestion) in abandonment::compose(session, changes, scope)? {
         ranked.push((strength, time, suggestion, Vec::new()));
     }
@@ -258,6 +286,7 @@ fn run(
     let mut tests = 0;
     let mut files = 0;
     let mut changes = 0;
+    let mut followups = 0;
     let mut abandonments = 0;
     for (_, _, mut suggestion, supporting) in ranked {
         let category_count = match suggestion.category {
@@ -265,6 +294,7 @@ fn run(
             Category::Test => &mut tests,
             Category::CoChangingFile => &mut files,
             Category::HistoricalChange => &mut changes,
+            Category::HistoricalFollowup => &mut followups,
         };
         if report.suggestions.len() >= limit || *category_count >= CATEGORY_LIMIT {
             continue;
