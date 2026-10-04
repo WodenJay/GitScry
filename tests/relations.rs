@@ -977,7 +977,11 @@ fn patterns_include_fifty_paths_but_exclude_fifty_one() {
         repo.commit_files(&borrowed, "boundary");
     }
     repo.index();
-    let output = repo.run(["related", "A", "--patterns", "--min-support", "2", "--json"]);
+    let output = TestRepo::command_at(repo.dir.path(), repo.user_data_dir())
+        .args(["related", "A", "--patterns", "--min-support", "2", "--json"])
+        .env("GITSCRY_FULL_OUTPUT", "1")
+        .output()
+        .unwrap();
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(value["eligible_seed_commits"], 2);
     assert_eq!(value["excluded_mass_changes"], 1);
