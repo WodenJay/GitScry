@@ -223,6 +223,12 @@ pub(crate) fn refresh_query(
     };
     let state = require_publication(repository, &expected)?;
     let plan = refresh_plan(repository, &expected, state);
+    let semantic_enabled = match &plan {
+        Ok(Plan::Fresh { state, .. }) | Ok(Plan::Incremental { state, .. }) => {
+            state.semantic_enabled
+        }
+        _ => false,
+    };
     if let Ok(Plan::Fresh {
         missing_objects, ..
     }) = &plan
@@ -231,6 +237,22 @@ pub(crate) fn refresh_query(
             && !session.warnings.contains(&warning)
         {
             session.warnings.push(warning);
+        }
+        if semantic_enabled {
+            let progress = std::mem::take(&mut session.progress);
+            let warnings = std::mem::take(&mut session.warnings);
+            drop(session);
+            let semantic_refresh = refresh_semantics(repository, tip);
+            let mut session = super::open_query(repository)?;
+            require_publication(repository, &expected)?;
+            session.progress.splice(0..0, progress);
+            session.warnings.splice(0..0, warnings);
+            if let Err(error) = semantic_refresh {
+                session.warnings.push(format!(
+                    "automatic semantic refresh failed: {error}; ordinary history remains available"
+                ));
+            }
+            return Ok(session);
         }
         return Ok(session);
     }
@@ -261,13 +283,33 @@ pub(crate) fn refresh_query(
         }
         Ok::<_, AppError>(())
     })();
+    let semantic_refresh = if refresh.is_ok() && semantic_enabled {
+        refresh_semantics(repository, tip)
+    } else {
+        Ok(())
+    };
     // Revalidate even on failure: rollback is not permission to use unsafe history.
     let mut session = super::open_query(repository)?;
     require_publication(repository, &expected)?;
     if let Err(error) = refresh {
         session.warnings.push(format!("automatic history refresh failed: {error}; incomplete history coverage for {tip}; using safely published cached history"));
     }
+    if let Err(error) = semantic_refresh {
+        session.warnings.push(format!(
+            "automatic semantic refresh failed: {error}; ordinary history remains available"
+        ));
+    }
     Ok(session)
+}
+
+fn refresh_semantics(repository: &Repository, tip: &str) -> Result<(), AppError> {
+    super::maintain_semantic(
+        repository,
+        tip,
+        super::SemanticPreference::Preserve,
+        super::SemanticResourcePolicy::ExistingOnly,
+        &mut crate::render::refresh_progress,
+    )
 }
 
 fn require_publication(

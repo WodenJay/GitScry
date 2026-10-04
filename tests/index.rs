@@ -488,6 +488,86 @@ fn semantic_index_options_are_exposed_and_mutually_exclusive() {
 }
 
 #[test]
+fn ordinary_query_refreshes_enabled_semantics_best_effort_across_branches() {
+    let repo = TestRepo::new();
+    repo.commit("first.txt", b"first\n", "initial commit");
+    repo.index();
+
+    let isolated = IsolatedExecutable::new();
+    let disabled = isolated.run(repo.dir.path(), &["search", "first"]);
+    assert_eq!(disabled.status.code(), Some(0));
+    assert!(!String::from_utf8_lossy(&disabled.stderr).contains("automatic semantic refresh"));
+    assert!(!isolated.user_data.path().join("GitScry/semantic").exists());
+
+    let cache_path = repo.cache_dir().join("cache.sqlite");
+    let cache = Connection::open(&cache_path).unwrap();
+    cache
+        .execute(
+            "UPDATE metadata SET value = '1' WHERE key = 'semantic_enabled'",
+            [],
+        )
+        .unwrap();
+    drop(cache);
+    git(repo.dir.path(), ["switch", "-c", "side"]);
+    repo.commit("second.txt", b"second\n", "second commit");
+    let side = repo.head();
+
+    let output = isolated.run(repo.dir.path(), &["search", "first"]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let warning = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        warning.contains("automatic semantic refresh failed"),
+        "{warning}"
+    );
+    assert!(
+        warning.contains("pinned semantic model resource"),
+        "{warning}"
+    );
+
+    git(repo.dir.path(), ["switch", "main"]);
+    let fresh = isolated.run(repo.dir.path(), &["search", "first"]);
+    assert_eq!(
+        fresh.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&fresh.stderr)
+    );
+    let warning = String::from_utf8_lossy(&fresh.stderr);
+    assert!(
+        warning.contains("automatic semantic refresh failed"),
+        "{warning}"
+    );
+    assert!(
+        warning.contains("pinned semantic model resource"),
+        "{warning}"
+    );
+    assert!(
+        !warning.contains("published cache changed after HEAD was pinned"),
+        "{warning}"
+    );
+
+    let cache = Connection::open(&cache_path).unwrap();
+    let metadata = |key: &str| {
+        cache
+            .query_row("SELECT value FROM metadata WHERE key = ?1", [key], |row| {
+                row.get::<_, String>(0)
+            })
+            .unwrap()
+    };
+    assert_eq!(metadata("completed_tip"), side);
+    assert_ne!(metadata("completed_tip"), repo.head());
+    assert_eq!(metadata("completed_commit_count"), "2");
+    assert_eq!(metadata("semantic_enabled"), "1");
+    assert_eq!(metadata("semantic_ready"), "0");
+    assert!(!isolated.user_data.path().join("GitScry/semantic").exists());
+}
+
+#[test]
 fn semantic_index_failure_preserves_history_until_explicitly_disabled() {
     let repo = TestRepo::new();
     repo.commit("hello.txt", b"hello\n", "initial commit");
