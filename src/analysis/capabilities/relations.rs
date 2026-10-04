@@ -61,7 +61,8 @@ fn run(
     scope: Option<&SearchFilter>,
 ) -> Result<Report, AppError> {
     let seed_keys = intent.anchors().iter().cloned().collect::<HashSet<_>>();
-    let seed_list = seed_keys.iter().cloned().collect::<Vec<_>>();
+    let mut seed_list = seed_keys.iter().cloned().collect::<Vec<_>>();
+    seed_list.sort();
     let retrieval::RelationHistory {
         candidates,
         seed_touch_commits,
@@ -152,6 +153,8 @@ fn run(
                 co_change_count: support_count,
                 proportion,
                 supporting_count: support_count,
+                follow_on: Vec::new(),
+                co_change_citations: citation_oids.clone(),
             })),
             patch: None,
         };
@@ -162,6 +165,58 @@ fn run(
             citation_oids,
             material,
         });
+    }
+
+    if !tests_only {
+        let repository = crate::git::Repository::discover()?;
+        let sources = seed_list
+            .iter()
+            .map(|path| path.as_bytes().to_vec())
+            .collect::<Vec<_>>();
+        for evidence in retrieval::follow_on::paths(session, &repository, &sources, scope)? {
+            let path = evidence.observation.path.clone();
+            let latest = evidence.observation.latest_support_time;
+            let score = evidence.observation.independent_chains as f64;
+            let index = ranked.iter().position(|candidate| candidate.key == path);
+            let candidate = if let Some(index) = index {
+                &mut ranked[index]
+            } else {
+                ranked.push(RankedCandidate {
+                    score,
+                    latest_support_time: latest,
+                    key: path.clone(),
+                    citation_oids: Vec::new(),
+                    material: Material {
+                        subject: String::new(),
+                        paths: vec![path],
+                        confidence: Confidence::Medium,
+                        basis: Vec::new(),
+                        citations: Vec::new(),
+                        patch: None,
+                        detail: Some(Detail::Relation(Relation {
+                            co_change_count: 0,
+                            proportion: 0.0,
+                            supporting_count: 0,
+                            follow_on: Vec::new(),
+                            co_change_citations: Vec::new(),
+                        })),
+                    },
+                });
+                ranked.last_mut().unwrap()
+            };
+            candidate.score = candidate.score.max(score);
+            candidate.latest_support_time = candidate.latest_support_time.max(latest);
+            for chain in &evidence.observation.chains {
+                for oid in [&chain.origin_oid, &chain.later_oid] {
+                    if !candidate.citation_oids.contains(oid) {
+                        candidate.citation_oids.push(oid.clone());
+                    }
+                }
+            }
+            if let Some(Detail::Relation(relation)) = &mut candidate.material.detail {
+                relation.follow_on.push(evidence);
+            }
+        }
     }
 
     ranked.sort_by(|left, right| {

@@ -179,6 +179,73 @@ fn related_keeps_case_distinct_paths_as_distinct_history() {
 }
 
 #[test]
+fn related_discovers_separate_commit_follow_on_by_default() {
+    let repo = TestRepo::new();
+    for cycle in 0..2 {
+        let start = if cycle == 0 {
+            "2025-01-01"
+        } else {
+            "2025-01-20"
+        };
+        let later = if cycle == 0 {
+            "2025-01-02"
+        } else {
+            "2025-01-21"
+        };
+        let value = format!("{cycle}\n");
+        let start = format!("{start}T12:00:00Z");
+        let later = format!("{later}T12:00:00Z");
+        repo.commit_files_at(&[("source.rs", value.as_bytes())], "source", &start, &start);
+        repo.commit_files_at(
+            &[("candidate.rs", value.as_bytes())],
+            "candidate",
+            &later,
+            &later,
+        );
+    }
+    for day in 1..=8 {
+        let date = format!("2025-02-{day:02}T12:00:00Z");
+        let value = format!("{day}\n");
+        repo.commit_files_at(
+            &[("noise.txt", value.as_bytes())],
+            "background",
+            &date,
+            &date,
+        );
+    }
+    repo.commit_files_at(
+        &[("noise.txt", b"end\n")],
+        "end",
+        "2025-02-20T12:00:00Z",
+        "2025-02-20T12:00:00Z",
+    );
+    repo.index();
+    let output = repo.run(["related", "source.rs", "--json"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let item = &json["materials"][0];
+    assert_eq!(item["paths"][0], "candidate.rs", "{json}");
+    assert_eq!(
+        item["detail"]["follow_on"][0]["supporting_origins"], 2,
+        "{json}"
+    );
+    assert_eq!(
+        item["detail"]["follow_on"][0]["eligible_origins"], 2,
+        "{json}"
+    );
+    assert_eq!(
+        item["detail"]["follow_on"][0]["independent_chains"], 2,
+        "{json}"
+    );
+    let reverse = repo.run(["related", "candidate.rs", "--json"]);
+    let reverse: serde_json::Value = serde_json::from_slice(&reverse.stdout).unwrap();
+    assert!(
+        reverse["materials"].as_array().unwrap().is_empty(),
+        "{reverse}"
+    );
+}
+
+#[test]
 fn related_does_not_treat_case_distinct_mass_change_as_exact_seed() {
     let repo = TestRepo::new();
     git(repo.dir.path(), ["config", "core.ignorecase", "false"]);

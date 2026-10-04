@@ -323,6 +323,63 @@ pub(super) enum JsonPath<'a> {
 }
 
 #[derive(Serialize)]
+struct JsonFollowOn<'a> {
+    source: JsonPath<'a>,
+    candidate: JsonPath<'a>,
+    supporting_origins: usize,
+    eligible_origins: usize,
+    independent_chains: usize,
+    baseline_occurrences: usize,
+    baseline_sample_size: usize,
+    observation_days: usize,
+    max_parent_distance: usize,
+    omitted_examples: usize,
+    denominator_basis: &'static str,
+    limitations: &'static str,
+    examples: Vec<JsonFollowOnExample<'a>>,
+}
+
+#[derive(Serialize)]
+struct JsonFollowOnExample<'a> {
+    origin_oid: &'a str,
+    later_oid: &'a str,
+    origin_path: JsonPath<'a>,
+    later_path: JsonPath<'a>,
+    parent_distance: usize,
+    elapsed_seconds: i64,
+}
+
+fn json_follow_on(evidence: &crate::analysis::PathObservation) -> JsonFollowOn<'_> {
+    let observation = &evidence.observation;
+    JsonFollowOn {
+        source: json_path(&evidence.source),
+        candidate: json_path(&observation.path),
+        supporting_origins: observation.supporting_origins,
+        eligible_origins: observation.eligible_origins,
+        independent_chains: observation.independent_chains,
+        baseline_occurrences: observation.baseline_occurrences,
+        baseline_sample_size: observation.baseline_sample_size,
+        observation_days: observation.observation_days,
+        max_parent_distance: crate::analysis::FOLLOW_ON_MAX_PARENT_DISTANCE,
+        omitted_examples: observation.omitted_examples,
+        denominator_basis: "complete non-merge origins excluding candidate-touching origins; background uniformly samples at most 100 such origins",
+        limitations: "detected renames only; copies and recreation start new incarnations; incomplete or unobserved windows excluded; historical association, not causation",
+        examples: observation
+            .chains
+            .iter()
+            .map(|chain| JsonFollowOnExample {
+                origin_oid: &chain.origin_oid,
+                later_oid: &chain.later_oid,
+                origin_path: json_path(&chain.origin_path),
+                later_path: json_path(&chain.later_path),
+                parent_distance: chain.parent_distance,
+                elapsed_seconds: chain.elapsed_seconds,
+            })
+            .collect(),
+    }
+}
+
+#[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum JsonDetail<'a> {
     Steps {
@@ -336,6 +393,9 @@ enum JsonDetail<'a> {
         co_change_count: usize,
         proportion: f64,
         supporting_count: usize,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        follow_on: Vec<JsonFollowOn<'a>>,
+        co_change_citations: &'a [String],
     },
     TraceFix {
         role: &'a str,
@@ -449,10 +509,14 @@ fn json_detail(detail: &Detail) -> JsonDetail<'_> {
             co_change_count,
             proportion,
             supporting_count,
+            follow_on,
+            co_change_citations,
         }) => JsonDetail::Relation {
             co_change_count: *co_change_count,
             proportion: *proportion,
             supporting_count: *supporting_count,
+            follow_on: follow_on.iter().map(json_follow_on).collect(),
+            co_change_citations,
         },
         Detail::TraceFix(trace) => JsonDetail::TraceFix {
             role: trace.role,
