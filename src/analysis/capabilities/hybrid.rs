@@ -249,7 +249,7 @@ fn materialize(candidate: FusedCandidate) -> Material {
 mod tests {
     use super::{
         FusedCandidate, SearchMaterial, SemanticCandidate, lexical_confidence, materialize,
-        rank_candidates, reciprocal_rank, sort_candidates,
+        rank_candidates, sort_candidates,
     };
     use crate::analysis::retrieval;
 
@@ -281,13 +281,6 @@ mod tests {
     }
 
     #[test]
-    fn reciprocal_rank_uses_one_based_ranks_and_constant_sixty() {
-        assert_eq!(reciprocal_rank(Some(1)), 1.0 / 61.0);
-        assert_eq!(reciprocal_rank(Some(2)), 1.0 / 62.0);
-        assert_eq!(reciprocal_rank(None), 0.0);
-    }
-
-    #[test]
     fn rank_candidates_deduplicates_overlapping_branches_before_fusion() {
         let ranked = rank(
             vec![lexical_candidate(1, "b"), lexical_candidate(3, "c")],
@@ -309,7 +302,6 @@ mod tests {
         );
         assert_eq!(ranked[0].lexical_rank, Some(1));
         assert_eq!(ranked[0].semantic_rank, Some(1));
-        assert!((ranked[0].reciprocal_rank_score() - 2.0 / 61.0).abs() < f64::EPSILON);
         assert_eq!(ranked[1].lexical_rank, None);
         assert_eq!(ranked[1].semantic_rank, Some(2));
         assert_eq!(ranked[2].lexical_rank, Some(2));

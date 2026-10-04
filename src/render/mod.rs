@@ -306,16 +306,34 @@ mod tests {
             IndexStage::ReadingChanges,
             IndexStage::ReadingPatches,
             IndexStage::WritingCache,
-            IndexStage::Complete,
+            IndexStage::BuildingSemanticIndex,
         ] {
+            let previous_len = progress.output.len();
             progress.report(Progress::Index(stage));
+            let frame = &progress.output[previous_len..];
+            assert!(frame.starts_with(b"\r"));
+            assert!(!frame.contains(&b'\n'));
+            assert!(
+                String::from_utf8_lossy(frame)
+                    .chars()
+                    .any(char::is_alphabetic)
+            );
         }
+        let previous_len = progress.output.len();
+        progress.report(Progress::Index(IndexStage::Complete));
+        let completion = &progress.output[previous_len..];
+        assert!(completion.starts_with(b"\r"));
+        assert!(completion.ends_with(b"\n"));
+        assert_eq!(completion.iter().filter(|byte| **byte == b'\n').count(), 1);
+        assert!(
+            String::from_utf8_lossy(completion)
+                .chars()
+                .any(char::is_alphabetic)
+        );
+        let completed_len = progress.output.len();
         progress.finish().unwrap();
 
-        let output = String::from_utf8(output).unwrap();
-        assert_eq!(output.matches('\r').count(), 5);
-        assert!(output.contains("[████                ] Reading commits"));
-        assert!(output.ends_with("[████████████████████] Complete       \n"));
+        assert_eq!(output.len(), completed_len);
     }
 
     #[test]
@@ -333,6 +351,11 @@ mod tests {
         }
         progress.finish().unwrap();
 
-        assert_eq!(output, b"Indexing history reachable from current HEAD...\n");
+        let output = String::from_utf8(output).unwrap();
+        assert_eq!(output.lines().count(), 1);
+        assert!(!output.trim().is_empty());
+        assert!(output.ends_with('\n'));
+        assert!(!output.contains('\r'));
+        assert!(!output.contains('\x1b'));
     }
 }

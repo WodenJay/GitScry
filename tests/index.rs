@@ -464,18 +464,6 @@ fn preparation_failure_does_not_publish_a_cache() {
 }
 
 #[test]
-fn invalid_cli_input_exits_two() {
-    let user_data = tempfile::tempdir().expect("create isolated user data");
-    let output = support::isolated_gitscry_command(user_data.path())
-        .args(["index", "--unexpected"])
-        .output()
-        .unwrap();
-
-    assert_eq!(output.status.code(), Some(2));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("unexpected"));
-}
-
-#[test]
 fn semantic_index_options_are_exposed_and_mutually_exclusive() {
     let user_data = tempfile::tempdir().expect("create isolated user data");
     let help = support::isolated_gitscry_command(user_data.path())
@@ -1133,23 +1121,6 @@ fn damaged_cache_rebuild_preserves_semantic_enablement() {
         )
         .unwrap();
     assert_eq!(state, ("11".to_owned(), "1".to_owned(), "0".to_owned(), 1));
-}
-
-#[test]
-fn help_is_successful_output() {
-    let user_data = tempfile::tempdir().expect("create isolated user data");
-    let output = support::isolated_gitscry_command(user_data.path())
-        .arg("--help")
-        .output()
-        .unwrap();
-
-    assert_eq!(output.status.code(), Some(0));
-    assert!(String::from_utf8_lossy(&output.stdout).contains("Usage:"));
-    let root_help = String::from_utf8_lossy(&output.stdout);
-    assert!(!root_help.contains("--semantic"), "{root_help}");
-    assert!(!root_help.contains("--no-semantic"), "{root_help}");
-    assert!(!root_help.contains("gitscry timeline PATH"), "{root_help}");
-    assert!(output.stderr.is_empty());
 }
 
 #[test]

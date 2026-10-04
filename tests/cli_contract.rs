@@ -304,6 +304,9 @@ fn json_flag_is_available_only_for_query_commands() {
     assert_eq!(root.status.code(), Some(0));
     assert!(String::from_utf8_lossy(&root.stdout).contains("--json"));
     let root_help = String::from_utf8_lossy(&root.stdout);
+    assert!(root.stderr.is_empty());
+    assert!(!root_help.contains("--semantic"), "{root_help}");
+    assert!(!root_help.contains("--no-semantic"), "{root_help}");
     assert!(
         root_help.contains("timeline"),
         "root help should list timeline"
@@ -459,6 +462,10 @@ fn json_flag_is_available_only_for_query_commands() {
         let rejected = repo.run([name, "--json"]);
         assert_eq!(rejected.status.code(), Some(2), "{name}");
         assert!(rejected.stdout.is_empty(), "{name}");
+        assert!(
+            String::from_utf8_lossy(&rejected.stderr).contains("--json"),
+            "{name} should identify the rejected argument"
+        );
     }
 }
 

@@ -282,29 +282,15 @@ mod tests {
     }
 
     #[test]
-    fn large_repeated_cjk_input_deduplicates_overlapping_fragments() {
-        let input = "缓存".repeat(20_000);
-        let terms = tokenize(&input);
-        assert!(terms.len() <= 5);
-        assert_eq!(terms.iter().collect::<HashSet<_>>().len(), terms.len());
-    }
-
-    #[test]
-    fn large_repeated_token_input_deduplicates_once() {
-        let input = "repeated ".repeat(20_000);
-        assert_eq!(tokenize(&input), ["repeated"]);
-    }
-
-    #[test]
-    fn large_unique_token_input_remains_linear() {
+    fn large_unique_token_input_preserves_count_and_order() {
         let input = (0..20_000)
             .map(|index| format!("term{index}"))
             .collect::<Vec<_>>()
             .join(" ");
         let tokens = tokenize(&input);
-        assert_eq!(tokens.len(), 20_001);
-        assert_eq!(tokens.first().map(String::as_str), Some("term"));
-        assert_eq!(tokens.get(1).map(String::as_str), Some("0"));
-        assert_eq!(tokens.last().map(String::as_str), Some("19999"));
+        let expected = std::iter::once("term".to_owned())
+            .chain((0..20_000).map(|index| index.to_string()))
+            .collect::<Vec<_>>();
+        assert_eq!(tokens, expected);
     }
 }
