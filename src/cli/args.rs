@@ -159,7 +159,7 @@ Examples:
         about = "Discover historical changes, abandonments, paths and tests",
         long_about = r#"Select traceable changed-code and path-association material for the current change.
 
-Default input is the net HEAD-to-worktree path/status difference plus Git-unignored untracked paths. Staged/unstaged cancellations disappear. --staged selects HEAD-to-index only, excluding untracked paths and unstaged edits. Run inside a worktree; paths are root-relative. Unresolved conflicts fail. Detected rename sides are retained and excluded from suggestions; detection is not exhaustive.
+Default input is the net HEAD-to-worktree path/status difference plus Git-unignored untracked paths. Staged/unstaged cancellations disappear. --staged selects HEAD-to-index only, excluding untracked paths and unstaged edits. Run inside a worktree; paths are root-relative. Unresolved conflicts fail. Detected rename sides are retained and excluded from suggestions; detection is not exhaustive. Results apply only to the selected baseline: default mode analyzes HEAD-to-worktree plus untracked paths, while --staged analyzes HEAD-to-index only; a result makes no claim about changes visible only in the other mode.
 
 Changed-code material uses distinctive exact identities from individual current hunk sides and verifies them in historical added/removed lines, even with generic commit descriptions. Matches retain current/historical paths, locations and directions with short real excerpts. Opposite-direction matches are not a same-kind conclusion. Associated reverted changes appear once as recorded_abandonment, citing the underlying original, recorded revert and any relevant recorded corrective follow-up. Existing revert interpretation supplies reasons and recorded retry conditions; missing values remain unknown, not claims about current code or safe retry. Revert markers or complete provenance alone never qualify unrelated history. Original/revert matches merge current bases; each excerpt identifies its actual historical commit. Mandatory edits, coverage verdicts and required test execution are not supplied. No external symlink targets or recursive submodule contents are read; binary/non-UTF-8/oversized/unsafe content retains path/status with explicit omissions. Ordinary context retrieval does not use semantic results; shared query preparation may make a local-only best-effort update to already-enabled semantic coverage. Queries never download model or runtime resources. External LLMs are never used.
 
@@ -173,7 +173,9 @@ Semantic budgets: first 16 eligible local hunk sides, first eight distinctive si
 
 Path suggestions exclude every selected current path; historical commit material can concern those paths. Test-shaped candidates must exist as safe regular files in this worktree and appear once as tests, merging co-change and test-path bases. Path association history excludes merge commits and commits changing over 50 paths; content matching independently uses cached hunks. Weak associations are not filled to meet a quota; zero results is valid. Historical matching uses exact path bytes, without basename or case-fold fallback. At most 256 byte-sorted input paths are queried; all input paths retain exclusion identity and omitted retrieval is reported. Path results include at most three historical citations with their full support count and citation truncation flag. Abandonment results cite one original, one recorded revert, and at most one relevant corrective follow-up, all within the selected historical scope.
 
-Default total ceiling is eight, with at most three entries per category. Positive --limit changes only the total ceiling. Distinct supported current paths order the unified list; abandonments precede historical changes, tests, then co-changing files on equal strength. Provenance completeness adds no relevance weight. Latest verified supporting committer time, byte-sorted path and canonical commit identity break ties. --json expresses the same material, input, scope, limitations and truncation as text.
+Historical follow-up is enabled by default. It observes same-file descendant changes within `--followup-days` for each content origin (default 7 days); this window applies to both support and baseline comparisons, with at most 20 parent edges. `--followup-days` must be a positive integer whose seconds fit a signed timestamp window. `--no-historical-followup` skips only this analysis; changed-code, ordinary co-change and abandonment material remain active. A candidate needs at least two independent chains, support from at least half of complete origins, and at least twice the sampled baseline rate from up to 100 complete origins. These are observational associations, not causal claims, recommendations, defect/regression findings, quality verdicts or predictions. A zero sampled baseline is shown as no observed baseline, never numeric infinity. Empty or missing results mean no candidate qualified within the selected input, cached scope, observation window and analysis budgets.
+
+Default total ceiling is eight, with at most three entries per category. Positive --limit changes only the total ceiling. Non-follow-up items order by distinct supported current paths; equal strengths put abandonments before historical changes, tests, then co-changing files. Historical-follow-up items rank by independent-chain count, then supporting-origin proportion, then baseline lift, with latest matched follow-up committer time and byte-sorted path as tie-breaks. A path returned by both follow-up and co-change appears once while retaining separate relationship bases, counts and citation sets; the merged item counts toward each category ceiling. Provenance completeness adds no relevance weight. Latest verified supporting committer time, byte-sorted path and canonical commit identity break ties for other categories. --json expresses the same material, input, scope, limitations and truncation as text.
 
 Content budgets: first 128 selected files; 256 KiB per current file/patch, 4 MiB total; 512 local hunk sides, 24 signals each. One shared historical pass reads at most 20,000 hunks/64 MiB payload text (256 KiB per hunk), retains at most 128 verified commits and 16 match excerpts per commit (240 bytes each). Limits and skipped content are reported separately from cache coverage and output truncation. Lockfiles and generated-looking paths are not blanket-excluded.
 
@@ -189,6 +191,12 @@ Examples:
         /// Expand candidates with ready local semantic resources; never falls back.
         #[arg(long)]
         hybrid: bool,
+        /// Disable historical follow-up analysis; it is enabled by default.
+        #[arg(long)]
+        no_historical_followup: bool,
+        /// Per-origin historical follow-up observation window in days (default: 7).
+        #[arg(long = "followup-days", default_value = "7", value_parser = parse_followup_days)]
+        followup_days: usize,
         /// Total ceiling; the three-per-category ceiling remains fixed.
         #[arg(long, default_value = "8", value_parser = parse_limit)]
         limit: usize,
@@ -765,6 +773,22 @@ fn parse_limit(value: &str) -> Result<usize, String> {
         .ok_or_else(|| "limit must be greater than zero".to_owned())
 }
 
+fn parse_followup_days(value: &str) -> Result<usize, String> {
+    const SECONDS_PER_DAY: i64 = 24 * 60 * 60;
+    let days = value
+        .parse::<usize>()
+        .map_err(|_| "follow-up days must be a positive representable integer".to_owned())?;
+    if days == 0
+        || i64::try_from(days)
+            .ok()
+            .and_then(|days| days.checked_mul(SECONDS_PER_DAY))
+            .is_none()
+    {
+        return Err("follow-up days must be positive and fit a signed timestamp window".to_owned());
+    }
+    Ok(days)
+}
+
 fn parse_code_query(value: &str) -> Result<String, String> {
     if value.is_empty()
         || value
@@ -787,5 +811,12 @@ mod tests {
             assert_eq!(cli.command.usage_name(), Some("update"));
             assert!(matches!(cli.command, Command::Update));
         }
+    }
+
+    #[test]
+    fn followup_days_require_a_positive_representable_window() {
+        assert_eq!(parse_followup_days("7"), Ok(7));
+        assert!(parse_followup_days("0").is_err());
+        assert!(parse_followup_days("106751991168000").is_err());
     }
 }

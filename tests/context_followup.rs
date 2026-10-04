@@ -70,14 +70,137 @@ fn context_returns_repeated_historical_followup_with_traceable_statistics() {
     let rendered = repo.run(["context"]);
     assert!(rendered.status.success());
     let rendered = String::from_utf8(rendered.stdout).unwrap();
-    assert!(rendered.contains(&format!(
-        "Historical follow-up: supporting origins 2/2, 2 independent chains; candidate baseline 2/{sample_size}"
-    )));
+    assert!(rendered.contains("Historical follow-up: supporting origins 2/2 (100.0%)"));
     assert!(rendered.contains(&format!(
         "Historical chain: {} -> {}",
         chains[0]["origin_oid"].as_str().unwrap(),
         chains[0]["later_oid"].as_str().unwrap()
     )));
+}
+
+#[test]
+fn context_merges_cochange_and_followup_with_one_result_slot() {
+    let repo = TestRepo::new();
+    let help = repo.run(["context", "--help"]);
+    assert!(help.status.success());
+    let help = String::from_utf8(help.stdout).unwrap();
+    assert!(help.contains("--followup-days"));
+    assert!(help.contains("--no-historical-followup"));
+    assert!(help.contains("observational associations"));
+    assert!(help.contains("baseline lift"));
+    complete_context_fixture(&repo, false);
+
+    let report = json(repo.run(["context", "--json"]));
+    let suggestions = report["suggestions"].as_array().unwrap();
+    let candidate = suggestions
+        .iter()
+        .find(|suggestion| suggestion["path"] == "candidate.rs")
+        .expect("candidate should be returned");
+    assert_eq!(
+        suggestions
+            .iter()
+            .filter(|suggestion| suggestion["path"] == "candidate.rs")
+            .count(),
+        1,
+        "co-change and follow-up must occupy one result slot"
+    );
+    assert_eq!(candidate["co_change"]["category"], "co_changing_file");
+    assert_eq!(candidate["co_change"]["supporting_count"], 1);
+    assert_eq!(candidate["historical_followup"]["supporting_origins"], 2);
+    assert_eq!(candidate["historical_followup"]["support_proportion"], 1.0);
+    assert!(
+        candidate["historical_followup"]["baseline_lift"]
+            .as_f64()
+            .unwrap()
+            .is_finite()
+    );
+    assert_eq!(candidate["historical_followup"]["observation_days"], 7);
+    assert_eq!(candidate["supporting_count"], 2);
+    assert!(candidate["co_change"]["basis"].as_array().unwrap().len() >= 3);
+    assert!(
+        !candidate["historical_followup"]["basis"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        candidate["selection_routes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|route| route == "co_change")
+    );
+    assert_eq!(report["historical_followup_enabled"], true);
+    assert_eq!(report["historical_followup_days"], 7);
+    let followup_paths = suggestions
+        .iter()
+        .filter(|suggestion| suggestion["category"] == "historical_followup")
+        .map(|suggestion| suggestion["path"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        followup_paths,
+        ["candidate.rs", "candidate1.rs", "candidate2.rs"]
+    );
+    assert!(report["truncated"].as_bool().unwrap());
+    let limited = json(repo.run(["context", "--limit", "1", "--json"]));
+    assert_eq!(limited["suggestions"].as_array().unwrap().len(), 1);
+    assert_eq!(limited["matched_count"], report["matched_count"]);
+    assert!(limited["truncated"].as_bool().unwrap());
+
+    let rendered = String::from_utf8(repo.run(["context"]).stdout).unwrap();
+    assert_eq!(
+        rendered
+            .matches("historical_followup: candidate.rs")
+            .count(),
+        1
+    );
+    assert!(
+        rendered.contains("Co-change basis: co-change count 1"),
+        "{rendered}"
+    );
+    assert!(rendered.contains("Historical follow-up: supporting origins 2/2"));
+
+    let disabled = json(repo.run(["context", "--no-historical-followup", "--json"]));
+    let disabled_candidate = disabled["suggestions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|suggestion| suggestion["path"] == "candidate.rs")
+        .expect("disabling follow-up must preserve co-change material");
+    assert!(disabled_candidate["historical_followup"].is_null());
+    assert_eq!(disabled_candidate["category"], "co_changing_file");
+    assert_eq!(disabled_candidate["supporting_count"], 1);
+    assert!(disabled_candidate["co_change"].is_null());
+    assert!(
+        disabled_candidate["basis"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|basis| basis == "co-change count 1")
+    );
+    assert_eq!(disabled["historical_followup_enabled"], false);
+
+    let one_day = json(repo.run(["context", "--followup-days", "1", "--json"]));
+    assert!(
+        one_day["suggestions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|suggestion| suggestion["path"]
+                .as_str()
+                .unwrap()
+                .starts_with("candidate"))
+            .all(|suggestion| suggestion["historical_followup"].is_null())
+    );
+    assert_eq!(one_day["historical_followup_days"], 1);
+    for days in ["0", "106751991168000"] {
+        let invalid = repo.run(["context", "--followup-days", days]);
+        assert!(
+            !invalid.status.success(),
+            "invalid follow-up days {days} must fail"
+        );
+        assert!(String::from_utf8_lossy(&invalid.stderr).contains("follow-up days"));
+    }
 }
 
 #[test]
@@ -464,7 +587,8 @@ fn context_rejects_symlink_candidate_materialized_as_regular_file() {
             .as_array()
             .unwrap()
             .iter()
-            .all(|suggestion| suggestion["category"] != "historical_followup"),
+            .all(|suggestion| suggestion["path"] != "candidate.rs"
+                || suggestion["category"] != "historical_followup"),
         "symlinks must not be emitted as regular-file candidates"
     );
 }
@@ -501,7 +625,8 @@ fn context_does_not_link_scoped_origins_to_a_recreated_current_file() {
             .as_array()
             .unwrap()
             .iter()
-            .all(|suggestion| suggestion["category"] != "historical_followup"),
+            .all(|suggestion| suggestion["path"] != "candidate.rs"
+                || suggestion["category"] != "historical_followup"),
         "out-of-scope delete/re-add boundaries must invalidate old file origins"
     );
 }
@@ -515,6 +640,9 @@ fn complete_context_fixture(
         &[
             ("current.rs", "fn placeholder() {}\n"),
             ("candidate.rs", "fn candidate_start() {}\n"),
+            ("candidate1.rs", "fn candidate1_start() {}\n"),
+            ("candidate2.rs", "fn candidate2_start() {}\n"),
+            ("candidate3.rs", "fn candidate3_start() {}\n"),
             ("candidate-link-target.txt", "candidate-target.rs\n"),
             (
                 "historical-a.rs",
@@ -549,9 +677,14 @@ fn complete_context_fixture(
     );
     let first_later = commit_at(
         repo,
-        &[("candidate.rs", "fn candidate_first_followup() {}\n")],
+        &[
+            ("candidate.rs", "fn candidate_first_followup() {}\n"),
+            ("candidate1.rs", "fn candidate1_first_followup() {}\n"),
+            ("candidate2.rs", "fn candidate2_first_followup() {}\n"),
+            ("candidate3.rs", "fn candidate3_first_followup() {}\n"),
+        ],
         "first candidate follow-up",
-        "2025-02-02T00:00:00+0000",
+        "2025-02-03T00:00:00+0000",
     );
     commit_at(
         repo,
@@ -561,7 +694,12 @@ fn complete_context_fixture(
     );
     let second_later = commit_at(
         repo,
-        &[("candidate.rs", "fn candidate_second_followup() {}\n")],
+        &[
+            ("candidate.rs", "fn candidate_second_followup() {}\n"),
+            ("candidate1.rs", "fn candidate1_second_followup() {}\n"),
+            ("candidate2.rs", "fn candidate2_second_followup() {}\n"),
+            ("candidate3.rs", "fn candidate3_second_followup() {}\n"),
+        ],
         "second candidate follow-up",
         "2025-02-04T00:00:00+0000",
     );

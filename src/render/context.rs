@@ -13,6 +13,15 @@ pub(super) fn format_report(report: &ContextReport) -> String {
         "HEAD-to-worktree + unignored untracked"
     };
     let mut lines = vec![format!("Current-change context ({mode})")];
+    lines.push(format!(
+        "Historical follow-up analysis: {}; observation window: {} days.",
+        if report.historical_followup_enabled {
+            "enabled"
+        } else {
+            "disabled"
+        },
+        report.historical_followup_days
+    ));
     if let Some(head) = &report.input.head {
         lines.push(format!("Input HEAD: {head}"));
     }
@@ -80,6 +89,36 @@ pub(super) fn format_report(report: &ContextReport) -> String {
         for basis in &suggestion.basis {
             lines.push(format!("  Basis: {}", escape::subject(basis)));
         }
+        if let Some(co_change) = &suggestion.co_change {
+            lines.push(format!(
+                "  Co-change relationship ({}): {} supporting commits",
+                co_change.category.as_str(),
+                co_change.supporting_count
+            ));
+            lines.push(format!(
+                "    Associated current paths: {}",
+                co_change
+                    .associated_current_paths
+                    .iter()
+                    .map(|path| escape::path(path))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+            for basis in &co_change.basis {
+                lines.push(format!("    Co-change basis: {}", escape::subject(basis)));
+            }
+            for citation in &co_change.citations {
+                lines.push(format!(
+                    "    Co-change citation: {} {}",
+                    citation.oid,
+                    escape::subject(&citation.subject)
+                ));
+            }
+            lines.push(format!(
+                "    Co-change citations truncated: {}",
+                co_change.citations_truncated
+            ));
+        }
         for citation in &suggestion.citations {
             lines.push(format!(
                 "  Citation: {} {}",
@@ -109,13 +148,20 @@ pub(super) fn format_report(report: &ContextReport) -> String {
             ));
         }
         if let Some(followup) = &suggestion.historical_followup {
+            let baseline_lift = followup
+                .baseline_lift()
+                .map(|lift| format!("{lift:.2}x"))
+                .unwrap_or_else(|| "no observed baseline".to_owned());
             lines.push(format!(
-                "  Historical follow-up: supporting origins {}/{}, {} independent chains; candidate baseline {}/{}",
+                "  Historical follow-up: supporting origins {}/{} ({:.1}%); {} independent chains; candidate baseline {}/{}; baseline lift {} ({} days)",
                 followup.supporting_origins,
                 followup.complete_origins,
+                followup.support_proportion() * 100.0,
                 followup.independent_chains,
                 followup.baseline_occurrences,
                 followup.baseline_sample_size,
+                baseline_lift,
+                followup.observation_days,
             ));
             for chain in &followup.chains {
                 lines.push(format!(
@@ -191,6 +237,8 @@ pub(super) fn format_json_report(
         } else {
             "available_published_cache"
         },
+        historical_followup_enabled: report.historical_followup_enabled,
+        historical_followup_days: report.historical_followup_days,
         suggestions: report
             .suggestions
             .iter()
@@ -231,6 +279,8 @@ struct JsonReport<'a> {
     cache_tip: Option<&'a str>,
     scope: Option<JsonSearchScope<'a>>,
     historical_eligibility: &'static str,
+    historical_followup_enabled: bool,
+    historical_followup_days: usize,
     suggestions: Vec<JsonSuggestion<'a>>,
     matched_count: usize,
     truncated: bool,
@@ -280,6 +330,7 @@ struct JsonSuggestion<'a> {
     content_matches_truncated: bool,
     abandonment: Option<JsonAbandonment<'a>>,
     historical_followup: Option<JsonHistoricalFollowup<'a>>,
+    co_change: Option<JsonCoChange<'a>>,
 }
 #[derive(Serialize)]
 struct JsonAbandonment<'a> {
@@ -295,11 +346,26 @@ struct JsonHistoricalFollowup<'a> {
     baseline_sample_size: usize,
     undisplayed_supporting_origins: usize,
     chains: Vec<JsonHistoricalFollowupChain<'a>>,
+    support_proportion: f64,
+    baseline_lift: Option<f64>,
+    observation_days: usize,
+    basis: &'a [String],
 }
 #[derive(Serialize)]
 struct JsonHistoricalFollowupChain<'a> {
     origin_oid: &'a str,
     later_oid: &'a str,
+}
+
+#[derive(Serialize)]
+struct JsonCoChange<'a> {
+    category: &'static str,
+    associated_current_paths: Vec<JsonPath<'a>>,
+    basis: &'a [String],
+    selection_routes: &'a [&'static str],
+    citations: Vec<JsonCitation<'a>>,
+    supporting_count: usize,
+    citations_truncated: bool,
 }
 #[derive(Serialize)]
 struct JsonContentMatch<'a> {
@@ -342,6 +408,10 @@ impl<'a> From<&'a ContextSuggestion> for JsonSuggestion<'a> {
                     baseline_occurrences: detail.baseline_occurrences,
                     baseline_sample_size: detail.baseline_sample_size,
                     undisplayed_supporting_origins: detail.undisplayed_supporting_origins,
+                    support_proportion: detail.support_proportion(),
+                    baseline_lift: detail.baseline_lift(),
+                    observation_days: detail.observation_days,
+                    basis: &detail.basis,
                     chains: detail
                         .chains
                         .iter()
@@ -351,6 +421,27 @@ impl<'a> From<&'a ContextSuggestion> for JsonSuggestion<'a> {
                         })
                         .collect(),
                 }
+            }),
+            co_change: suggestion.co_change.as_ref().map(|detail| JsonCoChange {
+                category: detail.category.as_str(),
+                associated_current_paths: detail
+                    .associated_current_paths
+                    .iter()
+                    .map(|path| json::json_path(path))
+                    .collect(),
+                basis: &detail.basis,
+                selection_routes: &detail.selection_routes,
+                citations: detail
+                    .citations
+                    .iter()
+                    .map(|citation| JsonCitation {
+                        oid: &citation.oid,
+                        subject: &citation.subject,
+                        note: citation.note,
+                    })
+                    .collect(),
+                supporting_count: detail.supporting_count,
+                citations_truncated: detail.citations_truncated,
             }),
             path: json::json_path(&suggestion.path),
             associated_current_paths: suggestion

@@ -140,7 +140,7 @@ pub(super) fn discover(
                     category: Category::HistoricalChange, path: path.clone(),
                     associated_current_paths: Vec::new(), basis: vec!["Exact distinctive identities verified in historical changed-code lines; direction is material, not a same-kind or review conclusion.".to_owned()],
                     selection_routes: vec!["changed_code"], citations: Vec::new(), supporting_count: 1,
-                    abandonment: None, historical_followup: None, citations_truncated: false, content_matches: Vec::new(), content_matches_truncated: false,
+                    abandonment: None, historical_followup: None, co_change: None, citations_truncated: false, content_matches: Vec::new(), content_matches_truncated: false,
                 }, BTreeSet::new()));
                 if semantic_oids.contains(hunk.oid.as_str())
                     && !suggestion.selection_routes.contains(&"local_semantic")

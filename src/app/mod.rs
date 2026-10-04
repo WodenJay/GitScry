@@ -253,11 +253,18 @@ pub(crate) fn execute(
         Command::Context {
             staged,
             hybrid,
+            no_historical_followup,
+            followup_days,
             limit,
             scope,
             ..
         } => (
-            Request::Context { staged, hybrid },
+            Request::Context {
+                staged,
+                hybrid,
+                historical_followup: !no_historical_followup,
+                followup_days,
+            },
             limit,
             false,
             scope.into(),

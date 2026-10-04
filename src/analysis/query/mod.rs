@@ -34,6 +34,8 @@ pub(crate) enum Request {
     Context {
         staged: bool,
         hybrid: bool,
+        historical_followup: bool,
+        followup_days: usize,
     },
     Search {
         words: Vec<String>,
@@ -151,9 +153,18 @@ pub(crate) fn execute(request: Request, options: Options) -> Result<Outcome, App
             days,
             max_commits,
         } => capabilities::followups::run(revision, paths, to_rev, days, max_commits, options),
-        Request::Context { staged, hybrid } => {
-            capabilities::context::execute(staged, hybrid, options)
-        }
+        Request::Context {
+            staged,
+            hybrid,
+            historical_followup,
+            followup_days,
+        } => capabilities::context::execute(
+            staged,
+            hybrid,
+            historical_followup,
+            followup_days,
+            options,
+        ),
         Request::Hotspots { path_prefix } => capabilities::hotspots::execute(options, path_prefix),
         Request::Search { words, hybrid } => {
             if hybrid {

@@ -10,7 +10,7 @@ use std::{
     path::Path,
 };
 
-const WINDOW_SECONDS: i64 = 7 * 24 * 60 * 60;
+const SECONDS_PER_DAY: i64 = 24 * 60 * 60;
 const MAX_PARENT_DISTANCE: usize = 20;
 const BASELINE_SAMPLE_LIMIT: usize = 100;
 
@@ -19,14 +19,29 @@ struct Origin {
     associated_paths: BTreeSet<Vec<u8>>,
 }
 
+struct FollowupHistory<'a> {
+    children: &'a HashMap<String, Vec<String>>,
+    commit_times: &'a HashMap<String, i64>,
+    eligible: &'a HashSet<String>,
+    parents: &'a HashMap<String, Vec<String>>,
+    window_seconds: i64,
+}
 pub(super) fn discover(
     session: &QuerySession,
     repository: &Repository,
     root: &Path,
     input: &CurrentChange,
     content_origins: &[(usize, i64, Suggestion)],
+    observation_days: usize,
     scope: Option<&SearchFilter>,
 ) -> Result<Vec<(usize, i64, Suggestion)>, AppError> {
+    let window_seconds = i64::try_from(observation_days)
+        .ok()
+        .and_then(|days| days.checked_mul(SECONDS_PER_DAY))
+        .filter(|seconds| *seconds > 0)
+        .ok_or_else(|| {
+            AppError::input("historical follow-up days must be a positive timestamp window")
+        })?;
     let Some(target) = scope
         .map(|scope| scope.to_oid.as_str())
         .or(input.head.as_deref())
@@ -81,6 +96,13 @@ pub(super) fn discover(
         .cloned()
         .collect::<HashSet<_>>();
 
+    let followup_history = FollowupHistory {
+        children: &children,
+        commit_times: &commit_times,
+        eligible: &eligible,
+        parents: &parents,
+        window_seconds,
+    };
     let incomplete_origins = incomplete_windows(
         &parents,
         &commit_times,
@@ -88,6 +110,7 @@ pub(super) fn discover(
         &eligible,
         &excluded,
         scope,
+        window_seconds,
     );
     let mut unique_origins = BTreeMap::<String, Origin>::new();
     for (_, _, suggestion) in content_origins {
@@ -117,7 +140,7 @@ pub(super) fn discover(
         let Some(&commit_time) = commit_times.get(&origin.oid) else {
             continue;
         };
-        if observation_window_complete(commit_time, target_time, scope)
+        if observation_window_complete(commit_time, target_time, scope, window_seconds)
             && !incomplete_origins.contains(&origin.oid)
         {
             complete_content_origins.push(origin);
@@ -135,7 +158,7 @@ pub(super) fn discover(
         let Some(&commit_time) = commit_times.get(oid) else {
             continue;
         };
-        if observation_window_complete(commit_time, target_time, scope)
+        if observation_window_complete(commit_time, target_time, scope, window_seconds)
             && !incomplete_origins.contains(oid)
         {
             complete_baseline_origins.push(oid.clone());
@@ -146,7 +169,9 @@ pub(super) fn discover(
     let mut scanned_descendants = HashSet::new();
     for origin in &complete_content_origins {
         let origin_time = commit_times[&origin.oid];
-        let end = origin_time + WINDOW_SECONDS;
+        let Some(end) = origin_time.checked_add(window_seconds) else {
+            continue;
+        };
         for (oid, distance) in descendant_distances(&origin.oid, &children) {
             if distance == 0
                 || !eligible.contains(&oid)
@@ -218,11 +243,8 @@ pub(super) fn discover(
             let later = later_changes(
                 &origin.oid,
                 commit_times[&origin.oid],
-                &children,
-                &commit_times,
-                &eligible,
-                &parents,
                 &scoped_changes,
+                &followup_history,
             );
             if !later.is_empty() {
                 support_edges.insert(origin.oid.clone(), later);
@@ -230,7 +252,9 @@ pub(super) fn discover(
             }
         }
         let supporting_origins = support_edges.len();
-        if complete_origin_count == 0 || supporting_origins * 2 < complete_origin_count {
+        if complete_origin_count == 0
+            || supporting_origins as u128 * 2 < complete_origin_count as u128
+        {
             continue;
         }
         let chains = independent_chains(&support_edges);
@@ -253,16 +277,7 @@ pub(super) fn discover(
                 let Some(&commit_time) = commit_times.get(oid) else {
                     return false;
                 };
-                !later_changes(
-                    oid,
-                    commit_time,
-                    &children,
-                    &commit_times,
-                    &eligible,
-                    &parents,
-                    &scoped_changes,
-                )
-                .is_empty()
+                !later_changes(oid, commit_time, &scoped_changes, &followup_history).is_empty()
             })
             .count();
         if !twice_baseline_is_met(
@@ -292,11 +307,10 @@ pub(super) fn discover(
         let mut basis = vec![
             "same-file historical association through detected renames; not a causal conclusion"
                 .to_owned(),
-            "proper descendants within 7 days and 20 parent edges; merge diffs do not count as support"
-                .to_owned(),
             format!(
-                "supporting content origins: {supporting_origins}/{complete_origin_count}"
+                "proper descendants within {observation_days} days and {MAX_PARENT_DISTANCE} parent edges; merge diffs do not count as support"
             ),
+            format!("supporting content origins: {supporting_origins}/{complete_origin_count}"),
             format!(
                 "candidate baseline: {baseline_occurrences}/{} sampled complete origins",
                 sample_indices.len()
@@ -308,8 +322,9 @@ pub(super) fn discover(
                 support_edges.len() - displayed_chains.len()
             ));
         }
+        let followup_basis = basis.clone();
         results.push((
-            supporting_origins,
+            chains.len(),
             latest_support_time,
             Suggestion {
                 category: Category::HistoricalFollowup,
@@ -333,7 +348,10 @@ pub(super) fn discover(
                         .len()
                         .saturating_sub(displayed_chains.len()),
                     chains: displayed_chains,
+                    observation_days,
+                    basis: followup_basis,
                 }),
+                co_change: None,
             },
         ));
     }
@@ -426,8 +444,9 @@ fn observation_window_complete(
     origin_time: i64,
     target_time: i64,
     scope: Option<&SearchFilter>,
+    window_seconds: i64,
 ) -> bool {
-    let Some(end) = origin_time.checked_add(WINDOW_SECONDS) else {
+    let Some(end) = origin_time.checked_add(window_seconds) else {
         return false;
     };
     target_time >= end && scope.is_none_or(|scope| scope.until.is_none_or(|until| until >= end))
@@ -440,6 +459,7 @@ fn incomplete_windows(
     eligible: &HashSet<String>,
     excluded: &HashSet<String>,
     scope: Option<&SearchFilter>,
+    window_seconds: i64,
 ) -> HashSet<String> {
     let mut incomplete = HashSet::new();
     for missing in parents.keys().filter(|oid| !cached.contains(*oid)) {
@@ -464,7 +484,7 @@ fn incomplete_windows(
                 continue;
             };
             let in_window = missing_time.is_none_or(|time| {
-                let earliest = time.saturating_sub(WINDOW_SECONDS);
+                let earliest = time.saturating_sub(window_seconds);
                 origin_time >= earliest && origin_time <= time
             });
             if in_window {
@@ -512,23 +532,23 @@ fn within_window(
 fn later_changes(
     origin: &str,
     origin_time: i64,
-    children: &HashMap<String, Vec<String>>,
-    commit_times: &HashMap<String, i64>,
-    eligible: &HashSet<String>,
-    parents: &HashMap<String, Vec<String>>,
     path_changes: &BTreeSet<String>,
+    history: &FollowupHistory<'_>,
 ) -> BTreeSet<String> {
-    let Some(end) = origin_time.checked_add(WINDOW_SECONDS) else {
+    let Some(end) = origin_time.checked_add(history.window_seconds) else {
         return BTreeSet::new();
     };
-    descendant_distances(origin, children)
+    descendant_distances(origin, history.children)
         .into_iter()
         .filter_map(|(oid, distance)| {
             (distance > 0
-                && eligible.contains(&oid)
-                && parents.get(&oid).is_some_and(|parents| parents.len() <= 1)
+                && history.eligible.contains(&oid)
+                && history
+                    .parents
+                    .get(&oid)
+                    .is_some_and(|parents| parents.len() <= 1)
                 && path_changes.contains(&oid)
-                && within_window(&oid, origin_time, end, commit_times))
+                && within_window(&oid, origin_time, end, history.commit_times))
             .then_some(oid)
         })
         .collect()
