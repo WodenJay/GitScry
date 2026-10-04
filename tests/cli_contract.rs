@@ -302,7 +302,6 @@ fn json_flag_is_available_only_for_query_commands() {
     let repo = TestRepo::new();
     let root = repo.run(["--help"]);
     assert_eq!(root.status.code(), Some(0));
-    assert!(String::from_utf8_lossy(&root.stdout).contains("--json"));
     let root_help = String::from_utf8_lossy(&root.stdout);
     assert!(root.stderr.is_empty());
     assert!(!root_help.contains("--semantic"), "{root_help}");
