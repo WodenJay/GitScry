@@ -11,6 +11,7 @@ mod followups;
 mod github_links;
 mod json;
 mod material;
+mod output;
 mod prune;
 
 mod hotspots;
@@ -285,7 +286,7 @@ fn write_outcome(outcome: Outcome, json_output: bool) -> io::Result<()> {
         })?;
         let json = format_json_report(report, &outcome.warnings, outcome.github_links.as_ref())
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        writeln!(io::stdout().lock(), "{json}")
+        write_query_output(&format!("{json}\n"), &mut stderr)
     } else {
         for warning in &outcome.warnings {
             writeln!(stderr, "{warning}")?;
@@ -302,8 +303,22 @@ fn write_outcome(outcome: Outcome, json_output: bool) -> io::Result<()> {
             || outcome.message.clone(),
             |report| format_report(report, outcome.github_links.as_ref()),
         );
-        writeln!(io::stdout().lock(), "{message}")
+        if outcome.report.is_some() {
+            write_query_output(&format!("{message}\n"), &mut stderr)
+        } else {
+            writeln!(io::stdout().lock(), "{message}")
+        }
     }
+}
+
+fn write_query_output(original: &str, stderr: &mut impl Write) -> io::Result<()> {
+    output::write_query(
+        original,
+        &mut io::stdout().lock(),
+        stderr,
+        std::env::var_os("GITSCRY_FULL_OUTPUT").is_some_and(|value| value == "1"),
+        &std::env::temp_dir(),
+    )
 }
 
 pub(crate) fn display(text: &str) -> i32 {

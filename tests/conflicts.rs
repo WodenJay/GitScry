@@ -729,7 +729,13 @@ fn rename_does_not_claim_same_commit_reintroduction() {
 #[test]
 fn reports_same_commit_callers_tests_and_bounded_matching_hunks() {
     let repo = associated_fixture();
-    let report = json(repo.run(["conflicts", "--json"]));
+    let report = json(
+        TestRepo::command_at(repo.dir.path(), repo.user_data_dir())
+            .args(["conflicts", "--json"])
+            .env("GITSCRY_FULL_OUTPUT", "1")
+            .output()
+            .unwrap(),
+    );
     let materials = report["associated_materials"].as_array().unwrap();
     assert_eq!(materials.len(), 2);
     assert_eq!(report["schema_version"], 4);
@@ -1105,7 +1111,13 @@ fn discloses_non_utf8_commit_message_decoding() {
     );
     git(repo.dir.path(), ["checkout", "main"]);
     merge(&repo, "other");
-    let report = json(repo.run(["conflicts", "--json"]));
+    let report = json(
+        TestRepo::command_at(repo.dir.path(), repo.user_data_dir())
+            .args(["conflicts", "--json"])
+            .env("GITSCRY_FULL_OUTPUT", "1")
+            .output()
+            .unwrap(),
+    );
     assert_eq!(
         report["files"][0]["sides"][1]["leads"][0]["message_lossy"],
         true
