@@ -26,6 +26,7 @@ pub(in crate::analysis) fn execute(
     hybrid: bool,
     historical_followup_enabled: bool,
     historical_followup_days: usize,
+    max_followup_checks: Option<usize>,
     options: Options,
 ) -> Result<Outcome, AppError> {
     let repository = Repository::discover()?;
@@ -36,7 +37,7 @@ pub(in crate::analysis) fn execute(
     };
     if input.changes.is_empty() {
         scope::validate_time_bounds(&options.scope)?;
-        let mut report = Report::empty(input, historical_followup);
+        let mut report = Report::empty(input, historical_followup, max_followup_checks);
         report.semantic_requested = hybrid;
         return Ok(Outcome {
             progress: Vec::new(),
@@ -44,13 +45,18 @@ pub(in crate::analysis) fn execute(
             report: QueryReport::Context(report),
         });
     }
-    let context = Context::open(options.scope)?;
+    let head = input
+        .head
+        .clone()
+        .map(Ok)
+        .unwrap_or_else(|| Context::pin_current_head(&repository))?;
+    let context = Context::open_pinned(&repository, head, options.scope)?;
     if hybrid {
         context.session.require_semantic_ready(context.filter())?;
     }
     let report = run(
         &context,
-        input,
+        Report::empty(input, historical_followup, max_followup_checks),
         &repository,
         &repository.root,
         options.limit,
@@ -67,6 +73,7 @@ const CATEGORY_LIMIT: usize = 3;
 pub(crate) struct Report {
     pub(crate) input: CurrentChange,
     pub(crate) cache_tip: Option<String>,
+    pub(crate) historical_followup_coverage: historical_followup::Coverage,
     pub(crate) scope: Option<SearchScopeInfo>,
     pub(crate) suggestions: Vec<Suggestion>,
     pub(crate) matched_count: usize,
@@ -218,9 +225,14 @@ fn compare_ranked_suggestions(a: &RankedSuggestion, b: &RankedSuggestion) -> Ord
         })
 }
 impl Report {
-    fn empty(input: CurrentChange, historical_followup: HistoricalFollowupOptions) -> Self {
+    fn empty(
+        input: CurrentChange,
+        historical_followup: HistoricalFollowupOptions,
+        max_followup_checks: Option<usize>,
+    ) -> Self {
         Self {
             input, cache_tip: None, scope: None, suggestions: Vec::new(), matched_count: 0,
+            historical_followup_coverage: historical_followup::Coverage::new(max_followup_checks),
             truncated: false, omitted_input_paths: 0, warnings: Vec::new(),
             omitted_content_bases: 0, omitted_content_signals: 0,
             historical_content_truncated: false, omitted_historical_hunks: 0,
@@ -248,7 +260,7 @@ struct RankedSuggestion {
 
 fn run(
     context: &Context,
-    input: CurrentChange,
+    mut report: Report,
     repository: &Repository,
     root: &Path,
     limit: usize,
@@ -257,11 +269,10 @@ fn run(
 ) -> Result<Report, AppError> {
     let session = &context.session;
     let scope = context.filter();
-    let paths = input.paths();
+    let paths = report.input.paths();
     let excluded = paths.iter().cloned().collect::<HashSet<_>>();
     let selected_paths = &paths[..paths.len().min(INPUT_PATH_LIMIT)];
     let history = session.exact_relation_history(selected_paths, 50, scope)?;
-    let mut report = Report::empty(input, historical_followup);
     report.cache_tip = Some(session.completed_tip()?);
     if let Some(head) = &report.input.head
         && !session.contains_revision(head)?
@@ -363,11 +374,11 @@ fn run(
         for (strength, time, suggestion) in historical_followup::discover(
             session,
             repository,
-            root,
             &report.input,
             &changes,
             historical_followup.days,
             scope,
+            &mut report.historical_followup_coverage,
         )? {
             ranked.push(RankedSuggestion {
                 strength,
@@ -377,6 +388,15 @@ fn run(
                 co_change_supporting: Vec::new(),
             });
         }
+    }
+    if report.historical_followup_coverage.limited {
+        let budget = report
+            .historical_followup_coverage
+            .budget
+            .unwrap_or_default();
+        report.limitations.push(format!(
+            "Historical follow-up budget limited coverage at {budget} relationship checks; incomplete candidate-origin and baseline observation windows were excluded from support statistics."
+        ));
     }
     for (strength, time, suggestion) in abandonment::compose(session, changes, scope)? {
         ranked.push(RankedSuggestion {

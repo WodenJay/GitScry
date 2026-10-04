@@ -255,6 +255,7 @@ pub(crate) fn execute(
             hybrid,
             no_historical_followup,
             followup_days,
+            max_followup_checks,
             limit,
             scope,
             ..
@@ -264,6 +265,7 @@ pub(crate) fn execute(
                 hybrid,
                 historical_followup: !no_historical_followup,
                 followup_days,
+                max_followup_checks,
             },
             limit,
             false,

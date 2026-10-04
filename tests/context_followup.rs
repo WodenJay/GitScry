@@ -85,6 +85,7 @@ fn context_merges_cochange_and_followup_with_one_result_slot() {
     assert!(help.status.success());
     let help = String::from_utf8(help.stdout).unwrap();
     assert!(help.contains("--followup-days"));
+    assert!(help.contains("configured observation window (default seven days)"));
     assert!(help.contains("--no-historical-followup"));
     assert!(help.contains("observational associations"));
     assert!(help.contains("baseline lift"));
@@ -201,6 +202,308 @@ fn context_merges_cochange_and_followup_with_one_result_slot() {
         );
         assert!(String::from_utf8_lossy(&invalid.stderr).contains("follow-up days"));
     }
+}
+
+#[test]
+fn context_refreshes_history_before_budgeted_and_unbudgeted_followup() {
+    let repo = TestRepo::new();
+    complete_context_fixture(&repo, false);
+    empty_commit_at(
+        &repo,
+        "unpublished later commit",
+        "2025-02-12T00:00:00+0000",
+    );
+
+    // Budget exhaustion limits analysis, not publication of the new HEAD.
+    let budgeted = json(repo.run(["context", "--max-followup-checks", "1", "--json"]));
+    assert_eq!(budgeted["cache_tip"], repo.head());
+    assert_eq!(budgeted["historical_followup_coverage"]["budget"], 1);
+    assert_eq!(budgeted["historical_followup_coverage"]["limited"], true);
+
+    let report = json(repo.run(["context", "--json"]));
+    let coverage = &report["historical_followup_coverage"];
+    assert_eq!(report["cache_tip"], repo.head());
+    assert_eq!(coverage["budget"], Value::Null);
+    assert_eq!(coverage["limited"], false);
+
+    let rendered = repo.run(["context"]);
+    let rendered = String::from_utf8(rendered.stdout).unwrap();
+    assert!(rendered.contains("Historical follow-up coverage:"));
+    assert!(rendered.contains("budget: unlimited; limited: false"));
+}
+
+#[test]
+fn refreshed_history_contributes_followup_chains_despite_filtered_budgeted_query() {
+    let repo = TestRepo::new();
+    commit_at(
+        &repo,
+        &[
+            ("current.rs", "fn placeholder() {}\n"),
+            ("candidate.rs", "fn start() {}\n"),
+        ],
+        "base",
+        "2025-01-01T00:00:00+0000",
+    );
+    for day in 2..=8 {
+        empty_commit_at(
+            &repo,
+            "baseline",
+            &format!("2025-01-{day:02}T00:00:00+0000"),
+        );
+    }
+    repo.index();
+    let alpha = "fn alpha_feature() { let outcome = identityAlpha(); }\n";
+    let beta = "fn beta_feature() { let outcome = identityBeta(); }\n";
+    commit_at(
+        &repo,
+        &[("historical-a.rs", alpha)],
+        "alpha",
+        "2025-02-01T00:00:00+0000",
+    );
+    let first_later = commit_at(
+        &repo,
+        &[("candidate.rs", "fn first_followup() {}\n")],
+        "first follow-up",
+        "2025-02-02T00:00:00+0000",
+    );
+    commit_at(
+        &repo,
+        &[("historical-b.rs", beta)],
+        "beta",
+        "2025-02-03T00:00:00+0000",
+    );
+    let second_later = commit_at(
+        &repo,
+        &[("candidate.rs", "fn second_followup() {}\n")],
+        "second follow-up",
+        "2025-02-04T00:00:00+0000",
+    );
+    empty_commit_at(&repo, "complete windows", "2025-02-11T00:00:00+0000");
+    fs::write(repo.dir.path().join("current.rs"), format!("{alpha}{beta}")).unwrap();
+
+    // Neither the relationship budget nor the historical scope narrows refresh.
+    // The explicit upper revision was not published before this invocation.
+    let head = repo.head();
+    let filtered = json(repo.run([
+        "context",
+        "--json",
+        "--to-rev",
+        &head,
+        "--until",
+        "2025-01-31",
+        "--max-followup-checks",
+        "1",
+        "--limit",
+        "1",
+    ]));
+    assert_eq!(filtered["cache_tip"], head);
+    assert!(
+        filtered["suggestions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["historical_followup"].is_null())
+    );
+
+    let report = json(repo.run(["context", "--json"]));
+    let followup = report["suggestions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["category"] == "historical_followup")
+        .expect("freshly ingested origins and later commits should qualify");
+    assert_eq!(followup["path"], "candidate.rs");
+    assert_eq!(followup["historical_followup"]["independent_chains"], 2);
+    let later_oids = [first_later, second_later];
+    for chain in followup["historical_followup"]["chains"]
+        .as_array()
+        .unwrap()
+    {
+        assert!(later_oids.iter().any(|oid| chain["later_oid"] == *oid));
+    }
+}
+
+#[test]
+fn context_discloses_persistently_incomplete_local_history() {
+    let repo = TestRepo::new();
+    commit_at(
+        &repo,
+        &[("current.rs", "fn before() {}\n")],
+        "cached base",
+        "2025-01-01T00:00:00+0000",
+    );
+    let published_tip = repo.head();
+    fs::write(
+        repo.dir.path().join(".git/shallow"),
+        format!("{published_tip}\n"),
+    )
+    .unwrap();
+    repo.index();
+    fs::write(repo.dir.path().join("current.rs"), "fn after() {}\n").unwrap();
+
+    let report = json(repo.run(["context", "--json"]));
+
+    assert_eq!(report["cache_tip"], published_tip);
+    assert!(
+        report["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|warning| {
+                warning
+                    .as_str()
+                    .unwrap()
+                    .contains("incomplete history coverage for")
+            }),
+        "{report}"
+    );
+}
+
+#[test]
+fn budget_covers_candidate_origin_descendants_before_paths_are_known() {
+    let repo = TestRepo::new();
+    commit_at(
+        &repo,
+        &[("current.rs", "fn placeholder() {}\n")],
+        "base",
+        "2025-01-01T00:00:00+0000",
+    );
+    let alpha = "fn alpha_feature() { let outcome = identityAlpha(); }\n";
+    commit_at(
+        &repo,
+        &[("current.rs", alpha)],
+        "content origin alpha",
+        "2025-02-01T00:00:00+0000",
+    );
+    let beta = format!("{alpha}fn beta_feature() {{ let outcome = identityBeta(); }}\n");
+    commit_at(
+        &repo,
+        &[("current.rs", &beta)],
+        "content origin beta",
+        "2025-02-02T00:00:00+0000",
+    );
+    commit_at(
+        &repo,
+        &[("current.rs", &format!("{beta}fn later_change() {{}}\n"))],
+        "same-path descendant",
+        "2025-02-04T00:00:00+0000",
+    );
+    commit_at(
+        &repo,
+        &[("current.rs", "fn placeholder() {}\n")],
+        "restore current baseline",
+        "2025-02-10T00:00:00+0000",
+    );
+    repo.index();
+    fs::write(repo.dir.path().join("current.rs"), beta).unwrap();
+
+    let report = json(repo.run(["context", "--max-followup-checks", "1", "--json"]));
+    let coverage = &report["historical_followup_coverage"];
+    assert_eq!(coverage["relationship_checks"], 1, "{report}");
+    assert_eq!(coverage["candidate_checks"], 1, "{report}");
+    assert_eq!(coverage["baseline_checks"], 0, "{report}");
+    assert_eq!(coverage["limited"], true, "{report}");
+    assert!(
+        report["suggestions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|suggestion| suggestion["category"] != "historical_followup"),
+        "{report}"
+    );
+}
+
+#[test]
+fn context_budget_exhaustion_discards_incomplete_content_origin_window() {
+    let repo = TestRepo::new();
+    complete_context_fixture(&repo, false);
+
+    let report = json(repo.run(["context", "--json", "--max-followup-checks", "1"]));
+    let coverage = &report["historical_followup_coverage"];
+    assert_eq!(coverage["relationship_checks"], 1);
+    assert_eq!(coverage["candidate_checks"], 1);
+    assert_eq!(coverage["baseline_checks"], 0);
+    assert_eq!(coverage["budget"], 1);
+    assert_eq!(coverage["limited"], true);
+    assert!(
+        report["suggestions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|suggestion| suggestion["category"] != "historical_followup")
+    );
+    assert!(
+        report["suggestions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|suggestion| suggestion["category"] == "historical_change")
+    );
+    assert!(
+        report["limitations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|limitation| limitation.as_str().unwrap().contains("follow-up budget"))
+    );
+    let human = repo.run(["context", "--max-followup-checks", "1"]);
+    assert!(human.status.success());
+    let human = String::from_utf8(human.stdout).unwrap();
+    assert!(human.contains("budget: 1; limited: true"));
+    assert!(human.contains("Historical follow-up budget limited coverage"));
+}
+
+#[test]
+fn context_budget_exhaustion_discards_incomplete_baseline_window() {
+    let repo = TestRepo::new();
+    complete_context_fixture(&repo, false);
+
+    let report = json(repo.run(["context", "--json", "--max-followup-checks", "45"]));
+    let coverage = &report["historical_followup_coverage"];
+    assert_eq!(coverage["relationship_checks"], 45, "{coverage:?}");
+    assert_eq!(coverage["candidate_checks"], 4, "{coverage:?}");
+    assert_eq!(coverage["baseline_checks"], 41);
+    assert_eq!(coverage["budget"], 45);
+    assert_eq!(coverage["limited"], true);
+    let followup = report["suggestions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|suggestion| suggestion["category"] == "historical_followup")
+        .unwrap_or_else(|| panic!("completed windows still support the follow-up: {report}"));
+    let statistics = &followup["historical_followup"];
+    assert_eq!(statistics["complete_origins"], 2);
+    assert_eq!(statistics["baseline_occurrences"], 0);
+    assert_eq!(statistics["baseline_sample_size"], 8);
+
+    let repeated = json(repo.run(["context", "--json", "--max-followup-checks", "45"]));
+    assert_eq!(
+        repeated["historical_followup_coverage"],
+        report["historical_followup_coverage"]
+    );
+    assert_eq!(repeated["suggestions"], report["suggestions"]);
+}
+
+#[test]
+fn context_followup_budget_requires_positive_value_and_is_documented() {
+    let repo = TestRepo::new();
+    let help = repo.run(["context", "--help"]);
+    assert!(help.status.success());
+    let help = String::from_utf8_lossy(&help.stdout);
+    for expected in [
+        "--max-followup-checks",
+        "no maximum or timeout applies by default",
+        "One check is a distinct eligible, non-merge descendant commit",
+        "Stronger content origins run first",
+        "baseline origins use stable graph order",
+        "completed candidate window reused for baseline statistics is counted once",
+    ] {
+        assert!(help.contains(expected), "missing {expected:?} in:\n{help}");
+    }
+
+    let invalid = repo.run(["context", "--max-followup-checks", "0"]);
+    assert!(!invalid.status.success());
+    assert!(!invalid.stderr.is_empty());
 }
 
 #[test]

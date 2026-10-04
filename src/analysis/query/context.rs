@@ -61,7 +61,16 @@ impl Context {
     pub(in crate::analysis) fn open(options: SearchScopeOptions) -> Result<Self, AppError> {
         let repository = Repository::discover()?;
         let head = Self::pin_current_head(&repository)?;
-        let session = cache::refresh_query(&repository, &head)?;
+        Self::open_pinned(&repository, head, options)
+    }
+
+    /// Refresh and query the history target already pinned by the capability.
+    pub(in crate::analysis) fn open_pinned(
+        repository: &Repository,
+        head: String,
+        options: SearchScopeOptions,
+    ) -> Result<Self, AppError> {
+        let session = cache::refresh_query(repository, &head)?;
         let scope = scope::resolve_for_query(&session, options, &head)?;
         Ok(Self {
             session,

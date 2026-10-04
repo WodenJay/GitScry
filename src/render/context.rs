@@ -54,6 +54,15 @@ pub(super) fn format_report(report: &ContextReport) -> String {
     }
     lines.push(format!("Showing {} of {} eligible context items; output truncated: {}; input paths omitted from retrieval: {}.", report.suggestions.len(), report.matched_count, report.truncated, report.omitted_input_paths));
     lines.push(format!("Content coverage: current truncated {}; omitted files {}; omitted local bases {}; omitted signals {}; historical scan truncated {}; oversized historical hunks omitted {}.", !report.input.content_omissions.is_empty(), report.input.content_omissions.len(), report.omitted_content_bases, report.omitted_content_signals, report.historical_content_truncated, report.omitted_historical_hunks));
+    let coverage = &report.historical_followup_coverage;
+    lines.push(format!(
+        "Historical follow-up coverage: {} relationship checks (candidate: {}, baseline: {}); budget: {}; limited: {}.",
+        coverage.relationship_checks,
+        coverage.candidate_checks,
+        coverage.baseline_checks,
+        coverage.budget.map_or_else(|| "unlimited".to_owned(), |budget| budget.to_string()),
+        coverage.limited
+    ));
     if report.semantic_requested {
         lines.push(format!("Local semantic coverage: {} eligible vector candidates (bounded to 64); omitted local bases {}; target content truncated {}.", report.semantic_candidates, report.omitted_semantic_bases, report.semantic_content_truncated));
     }
@@ -239,6 +248,13 @@ pub(super) fn format_json_report(
         },
         historical_followup_enabled: report.historical_followup_enabled,
         historical_followup_days: report.historical_followup_days,
+        historical_followup_coverage: JsonHistoricalFollowupCoverage {
+            relationship_checks: report.historical_followup_coverage.relationship_checks,
+            candidate_checks: report.historical_followup_coverage.candidate_checks,
+            baseline_checks: report.historical_followup_coverage.baseline_checks,
+            budget: report.historical_followup_coverage.budget,
+            limited: report.historical_followup_coverage.limited,
+        },
         suggestions: report
             .suggestions
             .iter()
@@ -281,6 +297,7 @@ struct JsonReport<'a> {
     historical_eligibility: &'static str,
     historical_followup_enabled: bool,
     historical_followup_days: usize,
+    historical_followup_coverage: JsonHistoricalFollowupCoverage,
     suggestions: Vec<JsonSuggestion<'a>>,
     matched_count: usize,
     truncated: bool,
@@ -298,6 +315,15 @@ struct JsonReport<'a> {
     content_omissions: Vec<JsonContentOmission<'a>>,
     limitations: &'a [String],
     warnings: Vec<&'a String>,
+}
+
+#[derive(Serialize)]
+struct JsonHistoricalFollowupCoverage {
+    relationship_checks: usize,
+    candidate_checks: usize,
+    baseline_checks: usize,
+    budget: Option<usize>,
+    limited: bool,
 }
 #[derive(Serialize)]
 struct JsonContentOmission<'a> {

@@ -5,35 +5,70 @@ use crate::{
     cache::{HistoryCommit, QuerySession, SearchFilter},
     git::{CurrentChange, Repository, current_regular_file},
 };
-use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
-    path::Path,
-};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 const SECONDS_PER_DAY: i64 = 24 * 60 * 60;
 const MAX_PARENT_DISTANCE: usize = 20;
 const BASELINE_SAMPLE_LIMIT: usize = 100;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Coverage {
+    pub(crate) relationship_checks: usize,
+    pub(crate) candidate_checks: usize,
+    pub(crate) baseline_checks: usize,
+    pub(crate) budget: Option<usize>,
+    pub(crate) limited: bool,
+}
+
+impl Coverage {
+    pub(crate) fn new(budget: Option<usize>) -> Self {
+        Self {
+            relationship_checks: 0,
+            candidate_checks: 0,
+            baseline_checks: 0,
+            budget,
+            limited: false,
+        }
+    }
+
+    fn check(&mut self, kind: RelationshipKind) -> bool {
+        if self
+            .budget
+            .is_some_and(|budget| self.relationship_checks >= budget)
+        {
+            self.limited = true;
+            return false;
+        }
+        self.relationship_checks += 1;
+        match kind {
+            RelationshipKind::Candidate => self.candidate_checks += 1,
+            RelationshipKind::Baseline => self.baseline_checks += 1,
+        }
+        true
+    }
+}
+
+#[derive(Clone, Copy)]
+enum RelationshipKind {
+    Candidate,
+    Baseline,
+}
+
 struct Origin {
     oid: String,
+    strength: usize,
+    time: i64,
     associated_paths: BTreeSet<Vec<u8>>,
 }
 
-struct FollowupHistory<'a> {
-    children: &'a HashMap<String, Vec<String>>,
-    commit_times: &'a HashMap<String, i64>,
-    eligible: &'a HashSet<String>,
-    parents: &'a HashMap<String, Vec<String>>,
-    window_seconds: i64,
-}
 pub(super) fn discover(
     session: &QuerySession,
     repository: &Repository,
-    root: &Path,
     input: &CurrentChange,
     content_origins: &[(usize, i64, Suggestion)],
     observation_days: usize,
     scope: Option<&SearchFilter>,
+    coverage: &mut Coverage,
 ) -> Result<Vec<(usize, i64, Suggestion)>, AppError> {
     let window_seconds = i64::try_from(observation_days)
         .ok()
@@ -96,13 +131,6 @@ pub(super) fn discover(
         .cloned()
         .collect::<HashSet<_>>();
 
-    let followup_history = FollowupHistory {
-        children: &children,
-        commit_times: &commit_times,
-        eligible: &eligible,
-        parents: &parents,
-        window_seconds,
-    };
     let incomplete_origins = incomplete_windows(
         &parents,
         &commit_times,
@@ -113,7 +141,7 @@ pub(super) fn discover(
         window_seconds,
     );
     let mut unique_origins = BTreeMap::<String, Origin>::new();
-    for (_, _, suggestion) in content_origins {
+    for (strength, time, suggestion) in content_origins {
         let Some(citation) = suggestion.citations.first() else {
             continue;
         };
@@ -121,13 +149,16 @@ pub(super) fn discover(
             .entry(citation.oid.clone())
             .or_insert_with(|| Origin {
                 oid: citation.oid.clone(),
+                strength: *strength,
+                time: *time,
                 associated_paths: BTreeSet::new(),
             });
+        origin.strength = origin.strength.max(*strength);
+        origin.time = origin.time.max(*time);
         origin
             .associated_paths
             .extend(suggestion.associated_current_paths.iter().cloned());
     }
-
     let mut complete_content_origins = Vec::new();
     for origin in unique_origins.into_values() {
         if !eligible.contains(&origin.oid)
@@ -146,6 +177,12 @@ pub(super) fn discover(
             complete_content_origins.push(origin);
         }
     }
+    complete_content_origins.sort_by(|a, b| {
+        b.strength
+            .cmp(&a.strength)
+            .then_with(|| b.time.cmp(&a.time))
+            .then_with(|| a.oid.cmp(&b.oid))
+    });
     if complete_content_origins.is_empty() {
         return Ok(Vec::new());
     }
@@ -165,27 +202,36 @@ pub(super) fn discover(
         }
     }
 
+    let relationships = RelationshipGraph {
+        children: &children,
+        commit_times: &commit_times,
+        eligible: &eligible,
+        parents: &parents,
+        window_seconds,
+    };
+    let mut relationship_windows = HashMap::<String, BTreeSet<String>>::new();
+    let mut checked_content_origins = Vec::new();
     let mut candidate_seeds = BTreeSet::new();
     let mut scanned_descendants = HashSet::new();
     for origin in &complete_content_origins {
-        let origin_time = commit_times[&origin.oid];
-        let Some(end) = origin_time.checked_add(window_seconds) else {
-            continue;
+        let Some(descendants) = relationships.later_descendants(
+            &origin.oid,
+            commit_times[&origin.oid],
+            coverage,
+            RelationshipKind::Candidate,
+        ) else {
+            break;
         };
-        for (oid, distance) in descendant_distances(&origin.oid, &children) {
-            if distance == 0
-                || !eligible.contains(&oid)
-                || parents.get(&oid).is_none_or(|parents| parents.len() > 1)
-                || !within_window(&oid, origin_time, end, &commit_times)
-                || !scanned_descendants.insert(oid.clone())
-            {
-                continue;
-            }
-            for change in session.changes(&oid)? {
-                candidate_seeds.extend(change.old_path);
-                candidate_seeds.extend(change.new_path);
+        for oid in &descendants {
+            if scanned_descendants.insert(oid.clone()) {
+                for change in session.changes(oid)? {
+                    candidate_seeds.extend(change.old_path);
+                    candidate_seeds.extend(change.new_path);
+                }
             }
         }
+        relationship_windows.insert(origin.oid.clone(), descendants);
+        checked_content_origins.push(origin);
     }
     if candidate_seeds.is_empty() {
         return Ok(Vec::new());
@@ -202,7 +248,7 @@ pub(super) fn discover(
             for path in commit.paths {
                 if tracked_paths.contains(&path)
                     && !selected_paths.contains(&path)
-                    && current_regular_file(root, &path)
+                    && current_regular_file(&repository.root, &path)
                 {
                     candidate_paths.insert(path);
                 }
@@ -211,6 +257,7 @@ pub(super) fn discover(
     }
 
     let mut results = Vec::new();
+
     for path in candidate_paths {
         let history = session.timeline_history(&path, &identity_cached)?;
         let incarnation_changes = incarnation_changes(
@@ -235,17 +282,17 @@ pub(super) fn discover(
         let mut support_edges = BTreeMap::<String, BTreeSet<String>>::new();
         let mut complete_origin_count = 0;
         let mut associated_paths = BTreeSet::new();
-        for origin in &complete_content_origins {
+        for origin in &checked_content_origins {
             if incarnation_changes.contains(&origin.oid) {
                 continue;
             }
+            let later = relationship_windows
+                .get(&origin.oid)
+                .expect("complete content origin has a checked window")
+                .intersection(&scoped_changes)
+                .cloned()
+                .collect::<BTreeSet<_>>();
             complete_origin_count += 1;
-            let later = later_changes(
-                &origin.oid,
-                commit_times[&origin.oid],
-                &scoped_changes,
-                &followup_history,
-            );
             if !later.is_empty() {
                 support_edges.insert(origin.oid.clone(), later);
                 associated_paths.extend(origin.associated_paths.iter().cloned());
@@ -270,21 +317,45 @@ pub(super) fn discover(
         if sample_indices.is_empty() {
             continue;
         }
-        let baseline_occurrences = sample_indices
-            .iter()
-            .filter(|&&index| {
-                let oid = baseline_pool[index];
-                let Some(&commit_time) = commit_times.get(oid) else {
-                    return false;
+        let mut baseline_occurrences = 0;
+        let mut baseline_sample_size = 0;
+        for index in sample_indices.iter().copied() {
+            let oid = baseline_pool[index];
+            let Some(&commit_time) = commit_times.get(oid) else {
+                continue;
+            };
+            let has_later = if let Some(later) = relationship_windows.get(oid) {
+                later
+                    .iter()
+                    .any(|descendant| scoped_changes.contains(descendant))
+            } else {
+                let Some(later) = relationships.later_descendants(
+                    oid,
+                    commit_time,
+                    coverage,
+                    RelationshipKind::Baseline,
+                ) else {
+                    break;
                 };
-                !later_changes(oid, commit_time, &scoped_changes, &followup_history).is_empty()
-            })
-            .count();
+                let has_later = later
+                    .iter()
+                    .any(|descendant| scoped_changes.contains(descendant));
+                relationship_windows.insert(oid.clone(), later);
+                has_later
+            };
+            baseline_sample_size += 1;
+            if has_later {
+                baseline_occurrences += 1;
+            }
+        }
+        if baseline_sample_size == 0 {
+            continue;
+        }
         if !twice_baseline_is_met(
             supporting_origins,
             complete_origin_count,
             baseline_occurrences,
-            sample_indices.len(),
+            baseline_sample_size,
         ) {
             continue;
         }
@@ -313,7 +384,7 @@ pub(super) fn discover(
             format!("supporting content origins: {supporting_origins}/{complete_origin_count}"),
             format!(
                 "candidate baseline: {baseline_occurrences}/{} sampled complete origins",
-                sample_indices.len()
+                baseline_sample_size
             ),
         ];
         if support_edges.len() > displayed_chains.len() {
@@ -343,7 +414,7 @@ pub(super) fn discover(
                     complete_origins: complete_origin_count,
                     independent_chains: chains.len(),
                     baseline_occurrences,
-                    baseline_sample_size: sample_indices.len(),
+                    baseline_sample_size,
                     undisplayed_supporting_origins: support_edges
                         .len()
                         .saturating_sub(displayed_chains.len()),
@@ -415,29 +486,6 @@ fn stable_topological_order(parents: &HashMap<String, Vec<String>>) -> Vec<Strin
         }
     }
     order
-}
-
-fn descendant_distances(
-    origin: &str,
-    children: &HashMap<String, Vec<String>>,
-) -> HashMap<String, usize> {
-    let mut distances = HashMap::from([(origin.to_owned(), 0)]);
-    let mut pending = VecDeque::from([(origin.to_owned(), 0)]);
-    while let Some((oid, distance)) = pending.pop_front() {
-        if distance == MAX_PARENT_DISTANCE {
-            continue;
-        }
-        if let Some(child_oids) = children.get(&oid) {
-            for child in child_oids {
-                if !distances.contains_key(child) {
-                    let child_distance = distance + 1;
-                    distances.insert(child.clone(), child_distance);
-                    pending.push_back((child.clone(), child_distance));
-                }
-            }
-        }
-    }
-    distances
 }
 
 fn observation_window_complete(
@@ -528,30 +576,57 @@ fn within_window(
         .get(oid)
         .is_some_and(|time| *time >= origin_time && *time <= end)
 }
+struct RelationshipGraph<'a> {
+    children: &'a HashMap<String, Vec<String>>,
+    commit_times: &'a HashMap<String, i64>,
+    eligible: &'a HashSet<String>,
+    parents: &'a HashMap<String, Vec<String>>,
+    window_seconds: i64,
+}
 
-fn later_changes(
-    origin: &str,
-    origin_time: i64,
-    path_changes: &BTreeSet<String>,
-    history: &FollowupHistory<'_>,
-) -> BTreeSet<String> {
-    let Some(end) = origin_time.checked_add(history.window_seconds) else {
-        return BTreeSet::new();
-    };
-    descendant_distances(origin, history.children)
-        .into_iter()
-        .filter_map(|(oid, distance)| {
-            (distance > 0
-                && history.eligible.contains(&oid)
-                && history
-                    .parents
-                    .get(&oid)
-                    .is_some_and(|parents| parents.len() <= 1)
-                && path_changes.contains(&oid)
-                && within_window(&oid, origin_time, end, history.commit_times))
-            .then_some(oid)
-        })
-        .collect()
+impl RelationshipGraph<'_> {
+    fn later_descendants(
+        &self,
+        origin: &str,
+        origin_time: i64,
+        coverage: &mut Coverage,
+        kind: RelationshipKind,
+    ) -> Option<BTreeSet<String>> {
+        let Some(end) = origin_time.checked_add(self.window_seconds) else {
+            return Some(BTreeSet::new());
+        };
+        let mut seen = HashSet::from([origin.to_owned()]);
+        let mut pending = VecDeque::from([(origin.to_owned(), 0usize)]);
+        let mut later = BTreeSet::new();
+        while let Some((oid, distance)) = pending.pop_front() {
+            if distance == MAX_PARENT_DISTANCE {
+                continue;
+            }
+            let Some(child_oids) = self.children.get(&oid) else {
+                continue;
+            };
+            for child in child_oids {
+                if !seen.insert(child.clone()) {
+                    continue;
+                }
+                let child_distance = distance + 1;
+                pending.push_back((child.clone(), child_distance));
+                if self.eligible.contains(child)
+                    && self
+                        .parents
+                        .get(child)
+                        .is_some_and(|parents| parents.len() <= 1)
+                    && within_window(child, origin_time, end, self.commit_times)
+                {
+                    if !coverage.check(kind) {
+                        return None;
+                    }
+                    later.insert(child.clone());
+                }
+            }
+        }
+        Some(later)
+    }
 }
 
 fn incarnation_changes(
