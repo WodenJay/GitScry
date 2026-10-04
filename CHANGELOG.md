@@ -1,3 +1,34 @@
+## [0.9.0] - 2026-10-04
+
+### 🚀 Features
+
+- *(conflicts)* Add two-side cached leads
+- *(conflicts)* Add conflict leads
+- *(conflicts)* Trace leads across renames
+- *(conflicts)* Surface associated material
+- *(conflicts)* Include shared history
+- *(conflicts)* Integrate shared history
+- *(conflicts)* Trace file-level histories
+
+### 🐛 Bug Fixes
+
+- *(git)* Share declaration recognition
+- *(context)* Preserve sparse index flags
+- *(conflicts)* Disclose evidence limits
+- *(cache)* Restore pruned commits
+- *(conflicts)* Escape output, scope truncation
+- *(conflicts)* Prioritize reverted history
+
+### 📚 Documentation
+
+- Clean README
+- Add gitscry DOGFOODING.md
+- Update DOGFOODING rule
+- Define material-first agent boundary
+- Prohibit LLM integration
+- Keep cache updates out of queries
+- Make query execution budgets opt-in
+- Refine DOGFOODING rule
 ## [0.8.0] - 2026-10-03
 
 ### 🚀 Features
