@@ -48,6 +48,10 @@ impl InputPreprocessor {
         Self::from_file(resources::ensure_tokenizer()?)
     }
 
+    pub(crate) fn load_local_only() -> Result<Self, AppError> {
+        Self::from_file(resources::existing_tokenizer()?)
+    }
+
     fn from_file(path: PathBuf) -> Result<Self, AppError> {
         let tokenizer = Tokenizer::from_file(path).map_err(|error| {
             AppError::operational(format!(
@@ -103,6 +107,14 @@ impl Encoder {
     pub(crate) fn load(preprocessor: Option<InputPreprocessor>) -> Result<Self, AppError> {
         let runtime = load_pinned_runtime()?;
         let assets = resources::ensure()?;
+        Self::with_assets(assets, runtime, CPU_THREADS, preprocessor)
+    }
+
+    pub(crate) fn load_local_only(
+        preprocessor: Option<InputPreprocessor>,
+    ) -> Result<Self, AppError> {
+        let assets = resources::existing()?;
+        let runtime = load_pinned_runtime()?;
         Self::with_assets(assets, runtime, CPU_THREADS, preprocessor)
     }
 

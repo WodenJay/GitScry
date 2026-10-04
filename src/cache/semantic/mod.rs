@@ -9,7 +9,7 @@ pub(super) use retrieval::semantic_top_k;
 use std::collections::HashMap;
 use vectors::{valid_embedding, valid_fingerprint};
 
-use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params, params_from_iter};
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -34,13 +34,28 @@ pub(crate) enum SemanticPreference {
     Disable,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum SemanticResourcePolicy {
+    Ensure,
+    ExistingOnly,
+}
+
 pub(crate) fn maintain(
     repository: &Repository,
     pinned_tip: &str,
     preference: SemanticPreference,
+    resource_policy: SemanticResourcePolicy,
     report: &mut dyn FnMut(IndexStage),
 ) -> Result<(), AppError> {
     let common_dir = &repository.common_dir;
+    // History and semantic writers clear this marker when coverage changes; avoid re-tokenizing ready history on every query.
+
+    if matches!(preference, SemanticPreference::Preserve)
+        && matches!(resource_policy, SemanticResourcePolicy::ExistingOnly)
+        && semantic_ready_for_tip(common_dir, pinned_tip)?
+    {
+        return Ok(());
+    }
     let mut progress = Vec::new();
     let _lock = super::acquire_exclusive(common_dir, &mut progress, true)?;
     let path = super::cache_path(common_dir);
@@ -65,12 +80,7 @@ pub(crate) fn maintain(
         return Ok(());
     }
 
-    let (cache_tip, _) = completed_generation(&connection)?;
-    if cache_tip != pinned_tip {
-        return Err(AppError::operational(
-            "error: the published cache changed after HEAD was pinned; retry `gitscry index`",
-        ));
-    }
+    validate_completed_generation(&connection)?;
     let reachable_oids = repository.reachable_commits(pinned_tip)?;
     let commit_count = set_coverage_scope(&connection, &reachable_oids)?;
     if usize::try_from(commit_count).ok() != Some(reachable_oids.len()) {
@@ -82,12 +92,13 @@ pub(crate) fn maintain(
     let tip = pinned_tip;
     let encoder_fingerprint = semantic::encoder_fingerprint();
     let mut preprocessor = None;
-    let ready = match is_ready(
+    let ready = match is_ready_with_policy(
         &connection,
         tip,
         commit_count,
         &encoder_fingerprint,
         &mut preprocessor,
+        resource_policy,
     ) {
         Ok(ready) => ready,
         Err(error) => {
@@ -117,6 +128,7 @@ pub(crate) fn maintain(
         &mut connection,
         &encoder_fingerprint,
         report,
+        resource_policy,
         &mut preprocessor,
     )
     .map_err(|error| {
@@ -183,18 +195,20 @@ fn semantic_enabled(connection: &Connection) -> Result<bool, AppError> {
     }
 }
 
-fn completed_generation(connection: &Connection) -> Result<(String, i64), AppError> {
-    let tip = metadata(connection, "completed_tip")?.ok_or_else(|| {
-        AppError::operational("error: ordinary cache has no completed tip; rerun `gitscry index`")
-    })?;
-    let count = metadata(connection, "completed_commit_count")?
+fn validate_completed_generation(connection: &Connection) -> Result<(), AppError> {
+    if metadata(connection, "completed_tip")?.is_none() {
+        return Err(AppError::operational(
+            "error: ordinary cache has no completed tip; rerun `gitscry index`",
+        ));
+    }
+    metadata(connection, "completed_commit_count")?
         .and_then(|value| value.parse::<i64>().ok())
         .ok_or_else(|| {
             AppError::operational(
                 "error: ordinary cache has invalid completion metadata; rerun `gitscry index`",
             )
         })?;
-    Ok((tip, count))
+    Ok(())
 }
 
 fn set_coverage_scope(connection: &Connection, reachable_oids: &[String]) -> Result<i64, AppError> {
@@ -237,6 +251,30 @@ fn commit_document(message: &[u8], paths: &[Vec<u8>]) -> CommitDocument {
     }
 }
 
+fn semantic_ready_for_tip(common_dir: &std::path::Path, tip: &str) -> Result<bool, AppError> {
+    let mut progress = Vec::new();
+    let _lock = super::acquire_shared(common_dir, &mut progress)?;
+    let path = super::cache_path(common_dir);
+    let connection = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|error| cache_error("opening cache to check semantic readiness", error))?;
+    ready_marker_matches(&connection, tip, &semantic::encoder_fingerprint())
+}
+
+fn ready_marker_matches(
+    connection: &Connection,
+    tip: &str,
+    encoder_fingerprint: &str,
+) -> Result<bool, AppError> {
+    let coverage_count = metadata(connection, "semantic_coverage_count")?
+        .and_then(|value| value.parse::<i64>().ok());
+    Ok(semantic_enabled(connection)?
+        && metadata(connection, "semantic_ready")?.as_deref() == Some("1")
+        && metadata(connection, "semantic_coverage_tip")?.as_deref() == Some(tip)
+        && coverage_count.is_some_and(|count| count >= 0)
+        && metadata(connection, "semantic_encoder_fingerprint")?.as_deref()
+            == Some(encoder_fingerprint))
+}
+
 fn ready_metadata_matches(
     connection: &Connection,
     tip: &str,
@@ -244,23 +282,37 @@ fn ready_metadata_matches(
     encoder_fingerprint: &str,
 ) -> Result<bool, AppError> {
     let coverage_count = commit_count.to_string();
-    Ok(
-        metadata(connection, "semantic_ready")?.as_deref() == Some("1")
-            && metadata(connection, "semantic_coverage_tip")?.as_deref() == Some(tip)
-            && metadata(connection, "semantic_coverage_count")?.as_deref()
-                == Some(coverage_count.as_str())
-            && metadata(connection, "semantic_encoder_fingerprint")?.as_deref()
-                == Some(encoder_fingerprint)
-            && count_coverage_vectors(connection)? == commit_count,
-    )
+    Ok(ready_marker_matches(connection, tip, encoder_fingerprint)?
+        && metadata(connection, "semantic_coverage_count")?.as_deref()
+            == Some(coverage_count.as_str())
+        && count_coverage_vectors(connection)? == commit_count)
 }
 
+#[cfg(test)]
 fn is_ready(
     connection: &Connection,
     tip: &str,
     commit_count: i64,
     encoder_fingerprint: &str,
     preprocessor: &mut Option<InputPreprocessor>,
+) -> Result<bool, AppError> {
+    is_ready_with_policy(
+        connection,
+        tip,
+        commit_count,
+        encoder_fingerprint,
+        preprocessor,
+        SemanticResourcePolicy::Ensure,
+    )
+}
+
+fn is_ready_with_policy(
+    connection: &Connection,
+    tip: &str,
+    commit_count: i64,
+    encoder_fingerprint: &str,
+    preprocessor: &mut Option<InputPreprocessor>,
+    resource_policy: SemanticResourcePolicy,
 ) -> Result<bool, AppError> {
     if !ready_metadata_matches(connection, tip, commit_count, encoder_fingerprint)? {
         return Ok(false);
@@ -285,7 +337,7 @@ fn is_ready(
             }
             let document = commit_document(&message, &commit_paths);
             if preprocessor.is_none() {
-                *preprocessor = Some(InputPreprocessor::load()?);
+                *preprocessor = Some(load_preprocessor(resource_policy)?);
             }
             let prepared = preprocessor
                 .as_ref()
@@ -440,6 +492,7 @@ fn maintain_vectors(
     connection: &mut Connection,
     encoder_fingerprint: &str,
     report: &mut dyn FnMut(IndexStage),
+    resource_policy: SemanticResourcePolicy,
     preprocessor: &mut Option<InputPreprocessor>,
 ) -> Result<Option<String>, AppError> {
     let mut last_position = -1_i64;
@@ -466,9 +519,9 @@ fn maintain_vectors(
             if encoder.is_none() && preprocessor.is_none() {
                 report_semantic_index(report, &mut stage_reported);
                 if vector_is_reusable {
-                    *preprocessor = Some(InputPreprocessor::load()?);
+                    *preprocessor = Some(load_preprocessor(resource_policy)?);
                 } else {
-                    encoder = Some(Encoder::load(None)?);
+                    encoder = Some(load_encoder(None, resource_policy)?);
                 }
             }
             let prepared = if let Some(preprocessor) = preprocessor.as_ref() {
@@ -508,6 +561,7 @@ fn maintain_vectors(
                 connection,
                 &mut encoder,
                 preprocessor,
+                resource_policy,
                 &mut batch,
                 encoder_fingerprint,
             )?;
@@ -515,6 +569,23 @@ fn maintain_vectors(
         flush_source_updates(connection, &mut source_updates)?;
     }
     Ok(encoder.map(|encoder: Encoder| encoder.runtime_provenance().to_owned()))
+}
+
+fn load_preprocessor(policy: SemanticResourcePolicy) -> Result<InputPreprocessor, AppError> {
+    match policy {
+        SemanticResourcePolicy::Ensure => InputPreprocessor::load(),
+        SemanticResourcePolicy::ExistingOnly => InputPreprocessor::load_local_only(),
+    }
+}
+
+fn load_encoder(
+    preprocessor: Option<InputPreprocessor>,
+    policy: SemanticResourcePolicy,
+) -> Result<Encoder, AppError> {
+    match policy {
+        SemanticResourcePolicy::Ensure => Encoder::load(preprocessor),
+        SemanticResourcePolicy::ExistingOnly => Encoder::load_local_only(preprocessor),
+    }
 }
 
 struct PendingVector {
@@ -609,6 +680,7 @@ fn flush_batch(
     connection: &mut Connection,
     encoder: &mut Option<Encoder>,
     preprocessor: &mut Option<InputPreprocessor>,
+    resource_policy: SemanticResourcePolicy,
     batch: &mut Vec<PendingVector>,
     encoder_fingerprint: &str,
 ) -> Result<(), AppError> {
@@ -616,7 +688,7 @@ fn flush_batch(
         return Ok(());
     }
     if encoder.is_none() {
-        *encoder = Some(Encoder::load(preprocessor.take())?);
+        *encoder = Some(load_encoder(preprocessor.take(), resource_policy)?);
     }
     let encoder = encoder.as_mut().expect("encoder was initialized");
     let inputs = batch.iter().map(|item| &item.input).collect::<Vec<_>>();
@@ -789,6 +861,37 @@ mod tests {
         tokenizer.with_pre_tokenizer(Some(Whitespace));
         InputPreprocessor::from_tokenizer(tokenizer).unwrap()
     }
+
+    #[test]
+    fn ready_marker_matches_enabled_generation_without_scanning_vectors() {
+        let directory = tempfile::tempdir().unwrap();
+        let common_dir = directory.path();
+        let cache_directory = common_dir.join("gitscry");
+        std::fs::create_dir_all(&cache_directory).unwrap();
+        let cache_path = cache_directory.join("cache.sqlite");
+        let connection = Connection::open(&cache_path).unwrap();
+        connection
+            .execute_batch("CREATE TABLE metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);")
+            .unwrap();
+        let encoder_fingerprint = semantic::encoder_fingerprint();
+        for (key, value) in [
+            ("semantic_enabled", "1"),
+            ("semantic_ready", "1"),
+            ("semantic_coverage_tip", "tip"),
+            ("semantic_coverage_count", "1"),
+            ("semantic_encoder_fingerprint", encoder_fingerprint.as_str()),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO metadata(key, value) VALUES (?1, ?2)",
+                    params![key, value],
+                )
+                .unwrap();
+        }
+        drop(connection);
+        assert!(semantic_ready_for_tip(common_dir, "tip").unwrap());
+        assert!(!semantic_ready_for_tip(common_dir, "other").unwrap());
+    }
     #[test]
     fn ready_semantic_index_validates_vectors_not_runtime_provenance() {
         let directory = tempfile::tempdir().unwrap();
@@ -898,6 +1001,7 @@ mod tests {
                 &mut connection,
                 &encoder_fingerprint,
                 &mut |_| {},
+                SemanticResourcePolicy::Ensure,
                 &mut preprocessor,
             )
             .unwrap()
@@ -951,6 +1055,7 @@ mod tests {
                 &mut rebuilt,
                 &encoder_fingerprint,
                 &mut |_| {},
+                SemanticResourcePolicy::Ensure,
                 &mut preprocessor
             )
             .unwrap()

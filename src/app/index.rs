@@ -17,7 +17,13 @@ pub(super) fn run(
         (true, true) => unreachable!("clap prevents conflicting semantic options"),
     };
     if !matches!(preference, cache::SemanticPreference::Preserve) || semantic_enabled {
-        cache::maintain_semantic(&repository, &pinned_tip, preference, report)?;
+        cache::maintain_semantic(
+            &repository,
+            &pinned_tip,
+            preference,
+            cache::SemanticResourcePolicy::Ensure,
+            report,
+        )?;
     }
     report(IndexStage::Complete);
 

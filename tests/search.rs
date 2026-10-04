@@ -223,6 +223,19 @@ fn search_help_documents_historical_scope() {
 }
 
 #[test]
+fn context_help_explains_local_semantic_maintenance() {
+    let repo = TestRepo::new();
+    let output = repo.run(["context", "--help"]);
+    assert!(output.status.success());
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(help.contains("local-only best-effort update"), "{help}");
+    assert!(
+        help.contains("never download model or runtime resources"),
+        "{help}"
+    );
+}
+
+#[test]
 fn hybrid_search_help_documents_chunking_limits_and_quality_caveat() {
     let repo = TestRepo::new();
     let output = repo.run(["search", "--help"]);
@@ -230,6 +243,8 @@ fn hybrid_search_help_documents_chunking_limits_and_quality_caveat() {
     let help = String::from_utf8_lossy(&output.stdout);
     for expected in [
         "--hybrid",
+        "local-only best-effort update",
+        "never download model or runtime resources",
         "256 total tokens",
         "special tokens",
         "220 content tokens",

@@ -26,7 +26,9 @@ use payload::HunkReader;
 pub(crate) use prune::{PruneReport, prune};
 pub(crate) use query::{RelationHistory, SearchCandidate, SearchMaterial};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
-pub(crate) use semantic::{SemanticCandidate, SemanticPreference, maintain as maintain_semantic};
+pub(crate) use semantic::{
+    SemanticCandidate, SemanticPreference, SemanticResourcePolicy, maintain as maintain_semantic,
+};
 use std::{
     fs::{self, File, OpenOptions},
     path::{Path, PathBuf},
