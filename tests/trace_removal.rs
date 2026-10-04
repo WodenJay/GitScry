@@ -37,6 +37,21 @@ fn query(repo: &TestRepo, args: &[&str]) -> Value {
 }
 
 #[test]
+fn shared_query_help_distinguishes_refresh_from_initialization() {
+    let repo = TestRepo::new();
+    let output = repo.run(["trace-removal", "--help"]);
+    assert!(output.status.success());
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(help.contains("initialize"), "{help}");
+    assert!(help.contains("automatically refreshes"), "{help}");
+    assert!(!help.contains("Run `gitscry index` explicitly to refresh"));
+    let output = repo.run(["hotspots", "--help"]);
+    assert!(output.status.success());
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(help.contains("does not index or fetch"), "{help}");
+}
+
+#[test]
 fn groups_deleted_lines_into_events_with_complete_historical_locators() {
     let repo = TestRepo::new();
     let parent = commit(
