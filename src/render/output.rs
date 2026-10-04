@@ -4,6 +4,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[cfg(windows)]
+mod windows;
+
 const BYTE_LIMIT: usize = 32_768;
 const LINE_LIMIT: usize = 400;
 
@@ -50,10 +53,12 @@ fn preserve(original: &str, temporary_directory: &Path) -> io::Result<PathBuf> {
     let directory = temporary_directory.join("gitscry");
     std::fs::create_dir_all(&directory)?;
     // NamedTempFile uses exclusive creation and owner-only permissions on Unix.
-    let mut file = tempfile::Builder::new()
-        .prefix("query-")
-        .suffix(".txt")
-        .tempfile_in(directory)?;
+    let mut builder = tempfile::Builder::new();
+    builder.prefix("query-").suffix(".txt");
+    #[cfg(windows)]
+    let mut file = builder.make_in(&directory, windows::create)?;
+    #[cfg(not(windows))]
+    let mut file = builder.tempfile_in(&directory)?;
     file.write_all(original.as_bytes())?;
     file.flush()?;
     let (_, path) = file.keep().map_err(|error| error.error)?;

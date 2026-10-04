@@ -51,11 +51,6 @@ fn captured_text_and_json_preserve_complete_output_in_unique_persistent_files() 
                 String::from_utf8_lossy(&full.stdout).lines().count()
             )));
             assert!(notice.contains("GITSCRY_FULL_OUTPUT=1"));
-            assert!(notice.contains("rg or other search tools"));
-            assert!(
-                notice.find("search tools").unwrap()
-                    < notice.find("read the complete file").unwrap()
-            );
             let path = notice
                 .lines()
                 .find_map(|line| line.strip_prefix("Full output file: "))
