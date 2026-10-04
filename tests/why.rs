@@ -1041,7 +1041,7 @@ fn why_rejects_explicit_out_of_cache_targets() {
 }
 
 #[test]
-fn why_defaults_to_current_head_with_cached_ancestors_on_feature_branch() {
+fn why_refreshes_current_head_before_target_history() {
     let repo = TestRepo::new();
     repo.commit("target.txt", b"main\n", "Main target", None);
     let cache_tip = repo.head();
@@ -1058,14 +1058,10 @@ fn why_defaults_to_current_head_with_cached_ancestors_on_feature_branch() {
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(
-        String::from_utf8_lossy(&output.stdout)
-            .contains(&format!("Why at line 1 at revision {head}"))
-    );
-    assert!(
-        String::from_utf8_lossy(&output.stderr)
-            .contains(&format!("incomplete history coverage for {head}"))
-    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains(&format!("Why at line 1 at revision {head}")));
+    assert!(stdout.contains("Feature target"));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("incomplete history coverage"));
 }
 
 #[test]
@@ -1435,9 +1431,9 @@ fn why_scope_intersects_target_and_filters_target_modifications() {
         Some("Because the target line establishes the behavior."),
     );
     let initial = repo.head();
+    repo.index();
     repo.commit("target.txt", b"later\n", "Later target history", None);
     let later = repo.head();
-    repo.index();
 
     let scoped = json(
         &repo,

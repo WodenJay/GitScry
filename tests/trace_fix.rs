@@ -460,10 +460,10 @@ fn trace_fix_follows_renamed_code_before_the_fix() {
     let repo = TestRepo::new();
     repo.commit("old.txt", b"safe\n", "Initial app", None);
     repo.commit("old.txt", b"buggy\n", "Introduce bug", None);
+    repo.index();
     git(repo.dir.path(), ["mv", "old.txt", "new.txt"]);
     git(repo.dir.path(), ["commit", "-m", "Move app code"]);
     repo.commit("new.txt", b"fixed\n", "Fix moved app", None);
-    repo.index();
 
     let output = repo.run(["trace-fix", "HEAD", "--path", "new.txt"]);
     assert_eq!(output.status.code(), Some(0));
@@ -475,7 +475,7 @@ fn trace_fix_follows_renamed_code_before_the_fix() {
 }
 
 #[test]
-fn trace_fix_rejects_an_explicit_fix_outside_the_default_cache() {
+fn trace_fix_accepts_a_fix_reachable_from_current_head_after_refresh() {
     let repo = TestRepo::new();
     repo.commit("app.txt", b"safe\n", "Initial app", None);
     repo.commit("app.txt", b"buggy\n", "Introduce bug", None);
@@ -489,10 +489,8 @@ fn trace_fix_rejects_an_explicit_fix_outside_the_default_cache() {
     );
 
     let output = repo.run(["trace-fix", "HEAD", "--path", "app.txt"]);
-    assert_eq!(output.status.code(), Some(1));
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("outside the published cache generation")
-    );
+    assert_eq!(output.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Fix branch failure"));
 }
 
 #[test]

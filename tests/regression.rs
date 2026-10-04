@@ -431,7 +431,7 @@ fn regression_rejects_out_of_cache_bad_revision() {
 }
 
 #[test]
-fn regression_defaults_to_current_head_with_cached_ancestors_on_feature_branch() {
+fn regression_refreshes_current_head_before_target_history() {
     let repo = TestRepo::new();
     repo.commit("target.txt", b"main\n", "Main target", None);
     repo.index();
@@ -448,12 +448,9 @@ fn regression_defaults_to_current_head_with_cached_ancestors_on_feature_branch()
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("Main target"));
-    assert!(!stdout.contains("Feature target"));
+    assert!(stdout.contains("Feature target"));
     assert!(stdout.contains(&format!("commits reachable from {head}")));
-    assert!(
-        String::from_utf8_lossy(&output.stderr)
-            .contains(&format!("incomplete history coverage for {head}"))
-    );
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("incomplete history coverage"));
 }
 
 #[test]

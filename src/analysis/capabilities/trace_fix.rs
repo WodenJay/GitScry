@@ -10,7 +10,7 @@ use super::super::provenance;
 use super::super::retrieval;
 use super::super::{Citation, Confidence, Detail, Material, Report, ReportKind, patch};
 use crate::analysis::query::{Context, Options, Outcome, QueryReport};
-use crate::{cache, git::Repository};
+use crate::git::Repository;
 
 pub(in crate::analysis) fn execute(
     revision: String,
@@ -18,10 +18,11 @@ pub(in crate::analysis) fn execute(
     options: Options,
 ) -> Result<Outcome, AppError> {
     let repository = Repository::discover()?;
+    let head = Context::pin_current_head(&repository)?;
     let target = repository.pin_trace_fix(&revision, &paths)?;
-    let session = cache::open_query(&repository)?;
+    let session = Context::refresh_query(&repository, &head)?;
     session.require_revision(&target.revision)?;
-    let context = Context::for_target(session, options.scope, &target.revision)?;
+    let context = Context::for_target(session, options.scope, &target.revision, &head)?;
     let mut reachable = context.session.ancestors(&target.revision)?;
     context.intersect(&target.revision, &mut reachable)?;
     let mut report = run(

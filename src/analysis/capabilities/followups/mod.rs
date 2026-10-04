@@ -3,12 +3,8 @@ mod regions;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use crate::analysis::query::{Options, Outcome, QueryReport, scope};
-use crate::{
-    app::AppError,
-    cache::{self, followups::ForwardCommit},
-    git::Repository,
-};
+use crate::analysis::query::{Context, Options, Outcome, QueryReport, scope};
+use crate::{app::AppError, cache::followups::ForwardCommit, git::Repository};
 /// Cache positions are the published reverse-topological Git order, not timestamps.
 /// Mark descendants using all parents, excluding parallel endpoint-reachable work.
 fn descendants(graph: &[ForwardCommit], seed: &str) -> HashSet<String> {
@@ -192,23 +188,26 @@ pub(in crate::analysis) fn run(
         })
         .collect::<Result<Vec<_>, AppError>>()?;
     let repository = Repository::discover()?;
-    let session = cache::open_query(&repository)?;
+    let head = Context::pin_current_head(&repository)?;
     let seed = repository.resolve_commit(&revision)?;
+    let requested_endpoint = to_rev
+        .as_deref()
+        .map(|revision| repository.resolve_commit(revision))
+        .transpose()?;
+    let session = Context::refresh_query(&repository, &head)?;
     session.require_revision(&seed)?;
     let cache_tip = session.completed_tip()?;
-    let (endpoint, coverage_complete) = match to_rev {
-        Some(revision) => {
-            let endpoint = repository.resolve_commit(&revision)?;
+    let (endpoint, coverage_complete) = match requested_endpoint {
+        Some(endpoint) => {
             session.require_revision(&endpoint)?;
             let history = scope::reachable_history(&session, &repository, &endpoint)?;
             (endpoint, history.coverage_complete)
         }
         None => {
-            let head = repository.resolve_commit("HEAD")?;
             let history = scope::reachable_history(&session, &repository, &head)?;
             let endpoint = history.revisions.first().cloned().ok_or_else(|| {
                 AppError::input(
-                    "no commits reachable from current HEAD are present in the published cache; run `gitscry index` first",
+                    "no commits reachable from current HEAD are available after query refresh; run `gitscry index` to publish reachable history",
                 )
             })?;
             (endpoint, history.coverage_complete)
@@ -294,7 +293,7 @@ pub(in crate::analysis) fn run(
     selected_paths.dedup();
 
     let mut warnings = vec![
-        "Coverage is limited to endpoint-reachable published cache history, not all refs; no fetch or index was performed.".into(),
+        "Coverage is limited to endpoint-reachable local history, not all refs; no fetch, initialization, repair, or upgrade was performed.".into(),
         "Explicit revert references are commit-message declarations only. Tracked regions begin at seed-added lines and continue only through complete cached text patches and detected renames; unrelated same-file edits remain same-file-only. Pure deletions establish no region; copies and same-path recreation do not continue an incarnation. Incomplete or ambiguous correspondence is downgraded. Neither association basis establishes causality or stability.".into(),
         "Cached merge diffs are relative to the first parent; region coordinates must agree across parents or tracking downgrades, and merge-imported work is not described as a fresh correction.".into(),
     ];

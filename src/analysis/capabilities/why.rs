@@ -10,7 +10,7 @@ use super::super::patch::{self, HunkPriorities};
 use super::super::retrieval;
 use super::super::{PatchExcerpt, Report, ReportKind, SearchScopeInfo};
 use crate::analysis::query::{Context, Options, Outcome, QueryReport, scope};
-use crate::{cache, git::Repository};
+use crate::git::Repository;
 
 pub(in crate::analysis) fn execute(
     revision: Option<String>,
@@ -19,20 +19,21 @@ pub(in crate::analysis) fn execute(
     options: Options,
 ) -> Result<Outcome, AppError> {
     let repository = Repository::discover()?;
-    let session = cache::open_query(&repository)?;
+    let head = Context::pin_current_head(&repository)?;
     let implicit_target = revision.is_none();
     let revision = match revision {
         Some(revision) => revision,
-        None => repository.resolve_commit("HEAD")?,
+        None => head.clone(),
     };
     let target = repository.pin_why_target(&revision, &path, anchor)?;
+    let session = Context::refresh_query(&repository, &head)?;
     if !implicit_target {
         session.require_revision(&target.revision)?;
     }
     let context = if implicit_target {
-        Context::for_head_target(session, options.scope, &target.revision)?
+        Context::for_head_target(session, options.scope, &target.revision, &head)?
     } else {
-        Context::for_target(session, options.scope, &target.revision)?
+        Context::for_target(session, options.scope, &target.revision, &head)?
     };
     let reachable = if implicit_target {
         scope::reachable_history(&context.session, &repository, &target.revision)?

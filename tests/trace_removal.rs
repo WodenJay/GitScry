@@ -48,7 +48,10 @@ fn shared_query_help_distinguishes_refresh_from_initialization() {
     let output = repo.run(["hotspots", "--help"]);
     assert!(output.status.success());
     let help = String::from_utf8_lossy(&output.stdout);
-    assert!(help.contains("does not index or fetch"), "{help}");
+    assert!(
+        help.contains("never initialize, repair, upgrade, or fetch"),
+        "{help}"
+    );
 }
 
 #[test]

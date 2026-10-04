@@ -2,11 +2,7 @@
 use super::timeline::format_timestamp;
 use crate::analysis::SearchScopeInfo;
 use crate::analysis::query::{Context, Options, Outcome, QueryReport, scope};
-use crate::{
-    app::AppError,
-    cache::{self, FileTouches},
-    git::Repository,
-};
+use crate::{app::AppError, cache::FileTouches, git::Repository};
 
 fn normalize_hotspot_path_prefix(prefix: Option<String>) -> Result<Option<String>, AppError> {
     let Some(prefix) = prefix else {
@@ -37,22 +33,23 @@ pub(in crate::analysis) fn execute(
 ) -> Result<Outcome, AppError> {
     let path_prefix = normalize_hotspot_path_prefix(path_prefix)?;
     let repository = Repository::discover()?;
-    let session = cache::open_query(&repository)?;
+    let head = Context::pin_current_head(&repository)?;
     let implicit_target = options.scope.to_rev.is_none();
     let target = match options.scope.to_rev.as_deref() {
         Some(revision) => repository.resolve_commit(revision)?,
-        None => repository.resolve_commit("HEAD")?,
+        None => head.clone(),
     };
+    let session = Context::refresh_query(&repository, &head)?;
     if !implicit_target {
         session.require_revision(&target)?;
     }
     let context = if implicit_target {
-        Context::for_head_target(session, options.scope, &target)?
+        Context::for_head_target(session, options.scope, &target, &head)?
     } else {
-        Context::for_target(session, options.scope, &target)?
+        Context::for_target(session, options.scope, &target, &head)?
     };
     let history_targets = if implicit_target {
-        scope::cached_head_history_frontier(&context.session, &repository)?
+        scope::cached_head_history_frontier(&context.session, &repository, &context.pinned_head)?
     } else {
         vec![target.clone()]
     };

@@ -17,8 +17,9 @@ pub(in crate::analysis) fn execute(
     Intent::paths(&paths)?;
     let context = Context::open(options.scope)?;
     let repository = Repository::discover()?;
-    let target_revision = repository.resolve_commit("HEAD")?;
-    let cached_targets = scope::cached_head_history_frontier(&context.session, &repository)?;
+    let target_revision = context.pinned_head.clone();
+    let cached_targets =
+        scope::cached_head_history_frontier(&context.session, &repository, &context.pinned_head)?;
     let report = run(
         &context.session,
         &paths,

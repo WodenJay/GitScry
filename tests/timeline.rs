@@ -208,25 +208,49 @@ fn timeline_json_pages_topologically_and_follows_renames() {
         "Unindexed change",
         "2023-01-01T00:00:00+0000",
     );
+    let scoped_target = json(&repo.run([
+        "timeline",
+        "src/new.rs",
+        "--at",
+        unindexed.as_str(),
+        "--to-rev",
+        added.as_str(),
+        "--json",
+    ]));
+    assert_eq!(scoped_target["target_revision"], unindexed);
+    assert_eq!(scoped_target["scope"]["to_rev"], added);
+    assert_eq!(scoped_target["scope"]["cache_tip"], unindexed);
+    assert_eq!(scoped_target["scope"]["coverage_complete"], true);
+    assert!(
+        scoped_target["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry["commit_id"] != unindexed)
+    );
+
     let default_target = json(&repo.run(["timeline", "src/new.rs", "--json"]));
     assert_eq!(default_target["target_revision"], unindexed);
     assert_eq!(default_target["scope"]["to_rev"], unindexed);
-    assert_eq!(default_target["scope"]["coverage_complete"], false);
-    assert_eq!(default_target["total"], 4);
+    assert_eq!(default_target["scope"]["coverage_complete"], true);
+    assert_eq!(default_target["total"], 5);
     assert!(
-        !default_target["entries"]
+        default_target["entries"]
             .as_array()
             .unwrap()
             .iter()
             .any(|entry| entry["commit_id"] == unindexed)
     );
 
-    let outside_cache = repo.run(["timeline", "src/new.rs", "--at", unindexed.as_str()]);
-    assert!(!outside_cache.status.success());
-    assert!(
-        String::from_utf8_lossy(&outside_cache.stderr)
-            .contains("outside the published cache generation")
-    );
+    let explicit_target = json(&repo.run([
+        "timeline",
+        "src/new.rs",
+        "--at",
+        unindexed.as_str(),
+        "--json",
+    ]));
+    assert_eq!(explicit_target["target_revision"], unindexed);
+    assert_eq!(explicit_target["total"], 5);
 
     let conflicting_page = repo.run(["timeline", "src/new.rs", "--last", "--offset", "0"]);
     assert_eq!(conflicting_page.status.code(), Some(2));

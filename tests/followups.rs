@@ -39,6 +39,7 @@ fn json(repo: &TestRepo, args: &[&str]) -> Value {
 fn followups_reports_inspected_file_material_by_region_priority() {
     let repo = TestRepo::new();
     let seed = commit(&repo, "a", "seed\n", "Seed", "2020-01-01T00:00:00Z");
+    repo.index();
     commit(
         &repo,
         "other",
@@ -48,7 +49,6 @@ fn followups_reports_inspected_file_material_by_region_priority() {
     );
     let early = commit(&repo, "a", "early\n", "Early", "2019-12-31T00:00:00Z");
     let later = commit(&repo, "a", "later\n", "Later", "2020-01-03T00:00:00Z");
-    repo.index();
     let report = json(&repo, &["followups", &seed, "--max-commits", "2", "--json"]);
     assert_eq!(report["kind"], "followups");
     assert_eq!(report["inspected_count"], 2);
@@ -430,13 +430,12 @@ fn followups_validates_inputs_and_explains_scope_in_help() {
         "Outside cache",
         "2020-01-02T00:00:00Z",
     );
-    assert!(!repo.run(["followups", &unindexed]).status.success());
-    assert!(
-        !repo
-            .run(["followups", &seed, "--to-rev", &unindexed])
-            .status
-            .success()
+    let explicit_endpoint = json(
+        &repo,
+        &["followups", &seed, "--to-rev", &unindexed, "--json"],
     );
+    assert_eq!(explicit_endpoint["scope"]["endpoint"], unindexed);
+    assert_eq!(explicit_endpoint["inspected_count"], 1);
     let help = repo.run(["followups", "--help"]);
     assert!(help.status.success());
     let help = String::from_utf8(help.stdout).unwrap();

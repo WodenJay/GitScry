@@ -13,39 +13,69 @@ use crate::{
 pub(in crate::analysis) struct Context {
     pub(in crate::analysis) session: QuerySession,
     pub(in crate::analysis) scope: Option<scope::ResolvedSearchScope>,
+    pub(in crate::analysis) pinned_head: String,
 }
 
 impl Context {
     pub(in crate::analysis) fn open(options: SearchScopeOptions) -> Result<Self, AppError> {
         let repository = Repository::discover()?;
-        let head = match repository.resolve_commit("HEAD") {
-            Ok(head) => head,
-            Err(error) => {
-                cache::open_query(&repository)?;
-                return Err(error);
-            }
-        };
-        let session = cache::refresh_query(&repository, &head)?;
+        let head = Self::pin_current_head(&repository)?;
+        let session = Self::refresh_query(&repository, &head)?;
         let scope = scope::resolve_for_query(&session, options, &head)?;
-        Ok(Self { session, scope })
+        Ok(Self {
+            session,
+            scope,
+            pinned_head: head,
+        })
+    }
+
+    /// Pin HEAD while preserving the initialized-cache prerequisite on failure.
+    pub(in crate::analysis) fn pin_current_head(
+        repository: &Repository,
+    ) -> Result<String, AppError> {
+        match repository.resolve_commit("HEAD") {
+            Ok(head) => Ok(head),
+            Err(error) => {
+                cache::open_query(repository)?;
+                Err(error)
+            }
+        }
+    }
+
+    /// Refresh the initialized cache against this invocation's pinned HEAD.
+    pub(in crate::analysis) fn refresh_query(
+        repository: &Repository,
+        pinned_head: &str,
+    ) -> Result<QuerySession, AppError> {
+        cache::refresh_query(repository, pinned_head)
     }
 
     pub(in crate::analysis) fn for_target(
         session: QuerySession,
         options: SearchScopeOptions,
         revision: &str,
+        pinned_head: &str,
     ) -> Result<Self, AppError> {
         let scope = scope::resolve_for_target(&session, options, revision)?;
-        Ok(Self { session, scope })
+        Ok(Self {
+            session,
+            scope,
+            pinned_head: pinned_head.to_owned(),
+        })
     }
 
     pub(in crate::analysis) fn for_head_target(
         session: QuerySession,
         options: SearchScopeOptions,
         revision: &str,
+        pinned_head: &str,
     ) -> Result<Self, AppError> {
         let scope = scope::resolve_for_head_target(&session, options, revision)?;
-        Ok(Self { session, scope })
+        Ok(Self {
+            session,
+            scope,
+            pinned_head: pinned_head.to_owned(),
+        })
     }
 
     pub(in crate::analysis) fn filter(&self) -> Option<&SearchFilter> {
@@ -80,7 +110,7 @@ impl Context {
             && !scope.report.coverage_complete
         {
             warnings.push(format!(
-                "incomplete history coverage for {}: results include only cached reachable commits; run `gitscry index` to index more history",
+                "incomplete history coverage for {}: results include only reachable commits available in the published cache; run `gitscry index` after making more local history available",
                 scope.report.to_rev
             ));
         }

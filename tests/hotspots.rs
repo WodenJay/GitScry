@@ -38,7 +38,7 @@ fn report(repo: &TestRepo, args: &[&str]) -> Value {
     serde_json::from_slice(&output.stdout).unwrap()
 }
 #[test]
-fn ranks_repeated_touches_at_current_head_with_cached_ancestors() {
+fn ranks_repeated_touches_after_refreshing_current_head() {
     let repo = TestRepo::new();
     commit(&repo, "often", "one\n");
     commit(&repo, "once", &"large rewrite\n".repeat(100));
@@ -47,27 +47,32 @@ fn ranks_repeated_touches_at_current_head_with_cached_ancestors() {
     let cache_tip = repo.head();
     commit(&repo, "unindexed", "ignored\n");
     let target = repo.head();
+    assert_ne!(cache_tip, target);
     fs::remove_file(repo.dir.path().join("often")).unwrap();
     let json = report(&repo, &["hotspots", "--json"]);
     assert_eq!(json["scope"]["target_rev"], target);
-    assert_eq!(json["scope"]["cache_tip"], cache_tip);
-    assert_eq!(json["scope"]["coverage_complete"], false);
+    assert_eq!(json["scope"]["cache_tip"], target);
+    assert_eq!(json["scope"]["coverage_complete"], true);
     assert!(
-        json["coverage"]["warnings"]
+        !json["coverage"]["warnings"]
             .as_array()
             .unwrap()
             .iter()
-            .any(|warning| {
-                warning
-                    .as_str()
-                    .unwrap()
-                    .contains("incomplete history coverage")
-            })
+            .any(|warning| warning
+                .as_str()
+                .unwrap()
+                .contains("incomplete history coverage"))
     );
-    assert_eq!(json["files"].as_array().unwrap().len(), 2);
+    assert_eq!(json["files"].as_array().unwrap().len(), 3);
     assert_eq!(json["files"][0]["path"], "often");
     assert_eq!(json["files"][0]["touching_commits"], 2);
-    assert_eq!(json["files"][1]["touching_commits"], 1);
+    assert!(
+        json["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|file| file["path"] == "unindexed")
+    );
     assert_eq!(
         report(&repo, &["hotspots", "--json", "--limit", "1"])["files"]
             .as_array()
@@ -424,29 +429,14 @@ fn empty_results_default_top_twenty_and_validation() {
     git(repo.dir.path(), ["checkout", "-b", "uncached"]);
     commit(&repo, "uncached", "revision not in published cache\n");
     let uncached = repo.head();
-    let uncached_output = repo.run(["hotspots", "--to-rev", &uncached]);
-    assert_eq!(uncached_output.status.code(), Some(1));
-    assert!(
-        String::from_utf8_lossy(&uncached_output.stderr)
-            .contains("outside the published cache generation")
+    let after_uncached = report(
+        &repo,
+        &["hotspots", "--to-rev", &uncached, "--json", "--limit", "30"],
     );
-    let after_uncached = report(&repo, &["hotspots", "--json"]);
     assert_eq!(after_uncached["scope"]["target_rev"], uncached);
-    assert_eq!(
-        after_uncached["scope"]["cache_tip"],
-        json["scope"]["cache_tip"]
-    );
-    assert_eq!(after_uncached["scope"]["coverage_complete"], false);
-    assert!(
-        after_uncached["coverage"]["warnings"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|warning| warning
-                .as_str()
-                .unwrap()
-                .contains("incomplete history coverage"))
-    );
+    assert_eq!(after_uncached["scope"]["cache_tip"], uncached);
+    assert_eq!(after_uncached["scope"]["coverage_complete"], true);
+    assert_eq!(count(&after_uncached, "uncached"), 1);
 }
 
 #[test]
@@ -681,8 +671,8 @@ fn includes_cached_histories_from_both_parents_of_uncached_head_merge() {
 
     let json = report(&repo, &["hotspots", "--json"]);
     assert_eq!(json["scope"]["target_rev"], head);
-    assert_eq!(json["scope"]["cache_tip"], cache_tip);
-    assert_eq!(json["scope"]["coverage_complete"], false);
+    assert_eq!(json["scope"]["cache_tip"], head);
+    assert_eq!(json["scope"]["coverage_complete"], true);
     assert_eq!(count(&json, "feature-only.rs"), 1);
     assert_eq!(count(&json, "main-only.rs"), 1);
     assert_eq!(count(&json, "root.rs"), 1);

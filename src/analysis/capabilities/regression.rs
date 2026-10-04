@@ -6,7 +6,7 @@ use super::super::patch::{self, HunkPriorities};
 use super::super::retrieval;
 use super::super::{Citation, Confidence, Intent, Material, Report, ReportKind};
 use crate::analysis::query::{Context, Options, Outcome, QueryReport, scope};
-use crate::{cache, git::Repository};
+use crate::git::Repository;
 
 pub(in crate::analysis) fn execute(
     words: Vec<String>,
@@ -18,14 +18,15 @@ pub(in crate::analysis) fn execute(
 ) -> Result<Outcome, AppError> {
     let intent = Intent::symptom(&words, &path)?;
     let repository = Repository::discover()?;
-    let session = cache::open_query(&repository)?;
+    let head = Context::pin_current_head(&repository)?;
     let implicit_bad = bad.is_none();
     let bad = match bad {
         Some(revision) => revision,
-        None => repository.resolve_commit("HEAD")?,
+        None => head.clone(),
     };
     let target =
         repository.pin_regression_target(&bad, good.as_deref(), &path, symbol.as_deref())?;
+    let session = Context::refresh_query(&repository, &head)?;
     if !implicit_bad {
         session.require_revision(&target.bad_revision)?;
     }
@@ -33,9 +34,9 @@ pub(in crate::analysis) fn execute(
         session.require_revision(good_revision)?;
     }
     let context = if implicit_bad {
-        Context::for_head_target(session, options.scope, &target.bad_revision)?
+        Context::for_head_target(session, options.scope, &target.bad_revision, &head)?
     } else {
-        Context::for_target(session, options.scope, &target.bad_revision)?
+        Context::for_target(session, options.scope, &target.bad_revision, &head)?
     };
     let bad_reachable = if implicit_bad {
         scope::reachable_history(&context.session, &repository, &target.bad_revision)?

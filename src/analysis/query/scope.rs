@@ -153,11 +153,11 @@ pub(in crate::analysis) fn reachable_history(
 pub(in crate::analysis) fn cached_head_history_frontier(
     session: &QuerySession,
     repository: &Repository,
+    pinned_head: &str,
 ) -> Result<Vec<String>, AppError> {
-    let head = repository.resolve_commit("HEAD")?;
-    let graph = repository.reachable_commit_parents(&head)?;
+    let graph = repository.reachable_commit_parents(pinned_head)?;
     let cached_oids = session.commit_oids()?;
-    let mut pending = vec![head];
+    let mut pending = vec![pinned_head.to_owned()];
     let mut visited = HashSet::new();
     let mut frontier = BTreeSet::new();
     while let Some(oid) = pending.pop() {
@@ -174,7 +174,7 @@ pub(in crate::analysis) fn cached_head_history_frontier(
     }
     if frontier.is_empty() {
         return Err(AppError::input(
-            "no commits reachable from current HEAD are present in the published cache; run `gitscry index` first",
+            "no commits reachable from pinned current HEAD are available after query refresh; run `gitscry index` to publish reachable history",
         ));
     }
     Ok(frontier.into_iter().collect())
