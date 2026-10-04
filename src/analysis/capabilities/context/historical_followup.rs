@@ -59,14 +59,15 @@ pub(super) fn discover(
         coverage,
     )?;
     Ok(observations.into_iter().map(|observation| {
+        let undisplayed_supporting_origins = observation.supporting_origins.saturating_sub(observation.chains.len());
         let mut basis = vec![
             "same-file historical association through detected renames; not a causal conclusion".to_owned(),
             format!("proper descendants within {observation_days} days and {} parent edges; merge diffs do not count as support", follow_on::MAX_PARENT_DISTANCE),
             format!("supporting content origins: {}/{}", observation.supporting_origins, observation.eligible_origins),
             format!("candidate baseline: {}/{} sampled complete origins", observation.baseline_occurrences, observation.baseline_sample_size),
         ];
-        if observation.omitted_examples > 0 {
-            basis.push(format!("{} additional supporting origins not shown as chains", observation.omitted_examples));
+        if undisplayed_supporting_origins > 0 {
+            basis.push(format!("{} additional supporting origins not shown as chains", undisplayed_supporting_origins));
         }
         let detail = HistoricalFollowup {
             supporting_origins: observation.supporting_origins,
@@ -74,7 +75,7 @@ pub(super) fn discover(
             independent_chains: observation.independent_chains,
             baseline_occurrences: observation.baseline_occurrences,
             baseline_sample_size: observation.baseline_sample_size,
-            undisplayed_supporting_origins: observation.omitted_examples,
+            undisplayed_supporting_origins,
             chains: observation.chains.into_iter().map(|chain| HistoricalFollowupChain { origin_oid: chain.origin_oid, later_oid: chain.later_oid }).collect(),
             observation_days, basis: basis.clone(),
         };

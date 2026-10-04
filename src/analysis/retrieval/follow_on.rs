@@ -596,10 +596,18 @@ pub(crate) fn discover(
             .collect(),
         None => HashSet::new(),
     };
+    // Boundary parent links are truncated, so their diffs cannot establish an
+    // origin or fresh support event (a hidden merge could import existing work).
+    // Keep boundaries in the traversal graph, but out of every event pool.
+    let boundaries = repository
+        .shallow_boundaries()?
+        .into_iter()
+        .collect::<HashSet<_>>();
     let eligible = reachable_cached
         .iter()
         .filter(|oid| {
             !excluded.contains(*oid)
+                && !boundaries.contains(*oid)
                 && scope.is_none_or(|scope| {
                     commit_times.get(*oid).is_some_and(|time| {
                         scope.since.is_none_or(|since| *time >= since)
@@ -864,7 +872,7 @@ pub(crate) fn discover(
             independent_chains: chains.len(),
             baseline_occurrences,
             baseline_sample_size,
-            omitted_examples: support_edges.len().saturating_sub(displayed_chains.len()),
+            omitted_examples: chains.len().saturating_sub(displayed_chains.len()),
             observation_days,
             chains: displayed_chains,
             latest_support_time,
