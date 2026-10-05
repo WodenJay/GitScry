@@ -11,6 +11,21 @@ fn commit(repo: &TestRepo, path: &str, text: &str, message: &str) -> String {
     git(repo.dir.path(), ["commit", "-m", message]);
     repo.head()
 }
+
+fn commit_symlink(repo: &TestRepo, path: &str, target: &str, message: &str) -> String {
+    let target_path = repo.dir.path().join(".symlink-target");
+    fs::write(&target_path, target).unwrap();
+    let blob = git_stdout(repo.dir.path(), ["hash-object", "-w", ".symlink-target"]);
+    fs::remove_file(target_path).unwrap();
+    let cacheinfo = format!("120000,{blob},{path}");
+    git(
+        repo.dir.path(),
+        ["update-index", "--add", "--cacheinfo", &cacheinfo],
+    );
+    fs::write(repo.dir.path().join(path), target).unwrap();
+    git(repo.dir.path(), ["commit", "-m", message]);
+    repo.head()
+}
 fn json(output: Output) -> Value {
     assert!(
         output.status.success(),
@@ -443,6 +458,467 @@ fn bounds_shared_history_per_conflicted_file() {
     assert_eq!(file["related_history_truncated"], true);
     assert_eq!(report["limits"]["related_history_per_file"], 3);
 }
+fn historical_conflict_fixture(
+    historical_path: &str,
+    custom_driver: bool,
+) -> (TestRepo, String, String, String, String) {
+    historical_conflict_fixture_with(historical_path, custom_driver, false, false)
+}
+
+fn historical_conflict_fixture_with(
+    historical_path: &str,
+    custom_driver: bool,
+    one_sided: bool,
+    symlink_conflict: bool,
+) -> (TestRepo, String, String, String, String) {
+    let repo = TestRepo::new();
+    let mut base = commit(
+        &repo,
+        historical_path,
+        "setting=base\nunique-context=anchor\n",
+        "shared base",
+    );
+    if symlink_conflict {
+        git(repo.dir.path(), ["config", "core.symlinks", "false"]);
+        base = commit(&repo, "symlink.txt", "base-target\n", "base symlink path");
+    }
+    if custom_driver {
+        fs::write(
+            repo.dir.path().join(".gitattributes"),
+            "unselected.txt merge=external-sentinel\n",
+        )
+        .unwrap();
+        fs::write(repo.dir.path().join("unselected.txt"), "content\n").unwrap();
+        git(repo.dir.path(), ["add", ".gitattributes", "unselected.txt"]);
+        git(
+            repo.dir.path(),
+            ["commit", "-m", "add unrelated custom merge attribute"],
+        );
+        base = repo.head();
+    }
+    git(repo.dir.path(), ["branch", "historical-theirs"]);
+    let mut historical_ours = commit(
+        &repo,
+        historical_path,
+        "setting=ours-old\nunique-context=anchor\n",
+        "historical ours",
+    );
+    if custom_driver {
+        fs::write(repo.dir.path().join("unselected.txt"), "ours\n").unwrap();
+        git(repo.dir.path(), ["add", "unselected.txt"]);
+        git(repo.dir.path(), ["commit", "-m", "change unrelated ours"]);
+        historical_ours = repo.head();
+    }
+    repo.index();
+    git(repo.dir.path(), ["checkout", "historical-theirs"]);
+    let mut historical_theirs = commit(
+        &repo,
+        historical_path,
+        "setting=theirs-old\nunique-context=anchor\n",
+        "historical theirs",
+    );
+    if custom_driver {
+        fs::write(repo.dir.path().join("unselected.txt"), "theirs\n").unwrap();
+        git(repo.dir.path(), ["add", "unselected.txt"]);
+        git(repo.dir.path(), ["commit", "-m", "change unrelated theirs"]);
+        historical_theirs = repo.head();
+    }
+    git(repo.dir.path(), ["checkout", "main"]);
+    merge(&repo, "historical-theirs");
+    if custom_driver {
+        fs::write(repo.dir.path().join("unselected.txt"), "resolved\n").unwrap();
+        git(repo.dir.path(), ["add", "unselected.txt"]);
+    }
+    let historical_merge = commit(
+        &repo,
+        historical_path,
+        "setting=ours-old\nunique-context=anchor\n",
+        "historical resolution equals first parent",
+    );
+    repo.index();
+    if custom_driver {
+        git(repo.dir.path(), ["rm", ".gitattributes"]);
+        git(
+            repo.dir.path(),
+            ["commit", "-m", "remove unrelated custom merge attribute"],
+        );
+    }
+
+    if one_sided {
+        git(repo.dir.path(), ["branch", "current-theirs", &base]);
+    } else {
+        git(repo.dir.path(), ["branch", "current-theirs"]);
+    }
+    if historical_path != "conflict.txt" {
+        git(repo.dir.path(), ["mv", historical_path, "conflict.txt"]);
+    }
+    commit(
+        &repo,
+        "conflict.txt",
+        "setting=ours-now\nunique-context=anchor\n",
+        "current ours",
+    );
+    if symlink_conflict {
+        commit_symlink(
+            &repo,
+            "symlink.txt",
+            "ours-target\n",
+            "current ours symlink",
+        );
+    }
+    git(repo.dir.path(), ["checkout", "current-theirs"]);
+    if historical_path != "conflict.txt" {
+        git(repo.dir.path(), ["mv", historical_path, "conflict.txt"]);
+    }
+    commit(
+        &repo,
+        "conflict.txt",
+        "setting=theirs-now\nunique-context=anchor\n",
+        "current theirs",
+    );
+    if symlink_conflict {
+        commit_symlink(
+            &repo,
+            "symlink.txt",
+            "theirs-target\n",
+            "current theirs symlink",
+        );
+    }
+    git(repo.dir.path(), ["checkout", "main"]);
+    merge(&repo, "current-theirs");
+
+    (
+        repo,
+        base,
+        historical_ours,
+        historical_theirs,
+        historical_merge,
+    )
+}
+
+#[test]
+fn reports_a_shared_historical_conflict_even_when_its_result_matches_first_parent() {
+    let (repo, base, historical_ours, historical_theirs, historical_merge) =
+        historical_conflict_fixture("conflict.txt", false);
+    let before = state_with_paths(&repo, &["conflict.txt"]);
+
+    let report = json(repo.run(["conflicts", "--json"]));
+    let history = &report["historical_cases"];
+    assert_eq!(
+        history["status"], "complete",
+        "historical report: {history}"
+    );
+    assert!(history["git_version"].as_str().is_some());
+    let cases = history["files"][0]["cases"].as_array().unwrap();
+    assert_eq!(cases.len(), 1, "historical report: {history}");
+    let case = &cases[0];
+    assert_eq!(case["merge_commit"], historical_merge);
+    assert_eq!(case["merge_base"]["commit"], base);
+    assert_eq!(case["parents"][0]["commit"], historical_ours);
+    assert_eq!(case["parents"][1]["commit"], historical_theirs);
+    assert_eq!(case["related_sides"], serde_json::json!(["ours", "theirs"]));
+    assert_eq!(
+        case["result"]["excerpt"],
+        "setting=ours-old\nunique-context=anchor\n"
+    );
+    assert!(
+        case["reconstructed_conflict"]["excerpt"]
+            .as_str()
+            .unwrap()
+            .contains("<<<<<<<")
+    );
+
+    let human = repo.run(["conflicts"]);
+    assert!(human.status.success());
+    let human = String::from_utf8_lossy(&human.stdout);
+    assert!(human.contains("Historical merge cases"));
+    assert!(human.contains(&historical_merge));
+    for evidence in [
+        &case["merge_base"],
+        &case["parents"][0],
+        &case["parents"][1],
+        &case["reconstructed_conflict"],
+        &case["result"],
+    ] {
+        for field in ["path", "blob", "excerpt"] {
+            let value = evidence[field].as_str().unwrap();
+            let needle = if field == "excerpt" {
+                value.lines().next().unwrap_or(value)
+            } else {
+                value
+            };
+            assert!(
+                human.contains(needle),
+                "human output omits {field}: {needle}"
+            );
+        }
+    }
+    assert_eq!(state_with_paths(&repo, &["conflict.txt"]), before);
+}
+
+#[test]
+fn finds_a_historical_conflict_reachable_from_only_one_side() {
+    let (repo, _, _, _, historical_merge) =
+        historical_conflict_fixture_with("conflict.txt", false, true, false);
+    let history = json(repo.run(["conflicts", "--json"]))["historical_cases"].clone();
+    assert_eq!(
+        history["status"], "complete",
+        "historical report: {history}"
+    );
+    let cases = history["files"][0]["cases"].as_array().unwrap();
+    assert_eq!(cases.len(), 1, "historical report: {history}");
+    assert_eq!(cases[0]["merge_commit"], historical_merge);
+    assert_eq!(cases[0]["related_sides"], serde_json::json!(["ours"]));
+}
+
+#[test]
+fn non_regular_conflict_stages_do_not_hide_text_historical_cases() {
+    let (repo, _, _, _, historical_merge) =
+        historical_conflict_fixture_with("conflict.txt", false, false, true);
+    let history = json(repo.run(["conflicts", "--json"]))["historical_cases"].clone();
+    assert_eq!(history["status"], "partial", "historical report: {history}");
+    let text_file = history["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|file| file["path"] == "conflict.txt")
+        .unwrap();
+    assert_eq!(text_file["cases"][0]["merge_commit"], historical_merge);
+}
+
+#[test]
+fn skips_a_clean_historical_merge_candidate() {
+    let repo = TestRepo::new();
+    let base = commit(
+        &repo,
+        "conflict.txt",
+        "setting=base\nunique-context=anchor\n",
+        "base",
+    );
+    git(repo.dir.path(), ["branch", "clean-side"]);
+    commit(
+        &repo,
+        "conflict.txt",
+        "setting=ours\nunique-context=anchor\n",
+        "ours change",
+    );
+    git(repo.dir.path(), ["checkout", "clean-side"]);
+    commit(&repo, "unrelated.txt", "safe\n", "clean side change");
+    git(repo.dir.path(), ["checkout", "main"]);
+    git(repo.dir.path(), ["merge", "clean-side"]);
+    let clean_merge = repo.head();
+
+    git(repo.dir.path(), ["branch", "current-theirs", &base]);
+    git(repo.dir.path(), ["checkout", "current-theirs"]);
+    commit(
+        &repo,
+        "conflict.txt",
+        "setting=theirs\nunique-context=anchor\n",
+        "theirs change",
+    );
+    git(repo.dir.path(), ["checkout", "main"]);
+    merge(&repo, "current-theirs");
+    repo.index();
+
+    let history = json(repo.run(["conflicts", "--json"]))["historical_cases"].clone();
+    assert_eq!(
+        history["status"], "complete",
+        "historical report: {history}"
+    );
+    assert_eq!(
+        history["files_with_cases"], 0,
+        "historical report: {history}"
+    );
+    assert!(history["files"].as_array().unwrap().is_empty());
+    assert_eq!(
+        git_stdout(
+            repo.dir.path(),
+            ["rev-list", "--parents", "-n", "1", &clean_merge],
+        )
+        .split_whitespace()
+        .count(),
+        3
+    );
+}
+
+#[test]
+fn maps_a_historical_conflict_through_a_later_file_rename() {
+    let (repo, _, _, _, historical_merge) = historical_conflict_fixture("legacy.txt", false);
+    let before = state_with_paths(&repo, &["conflict.txt", "legacy.txt"]);
+    let report = json(repo.run(["conflicts", "--json"]));
+    let history = &report["historical_cases"];
+    assert_eq!(
+        history["status"], "complete",
+        "historical report: {history}"
+    );
+    let file = &history["files"][0];
+    assert_eq!(file["path"], "conflict.txt");
+    let case = &file["cases"][0];
+    assert_eq!(case["merge_commit"], historical_merge);
+    assert_eq!(case["merge_base"]["path"], "legacy.txt");
+    assert_eq!(case["parents"][0]["path"], "legacy.txt");
+    assert_eq!(case["parents"][1]["path"], "legacy.txt");
+    assert_eq!(case["reconstructed_conflict"]["path"], "legacy.txt");
+    assert_eq!(case["result"]["path"], "legacy.txt");
+    assert_eq!(
+        state_with_paths(&repo, &["conflict.txt", "legacy.txt"]),
+        before
+    );
+}
+
+#[test]
+fn ignores_user_global_merge_attributes_during_historical_replay() {
+    let (repo, _, _, _, historical_merge) = historical_conflict_fixture("conflict.txt", false);
+    let xdg_config = repo.user_data_dir().join("xdg-config");
+    let attributes = xdg_config.join("git/attributes");
+    fs::create_dir_all(attributes.parent().unwrap()).unwrap();
+    fs::write(&attributes, "conflict.txt merge=union\n").unwrap();
+
+    let output = TestRepo::command_at(repo.dir.path(), repo.user_data_dir())
+        .env("XDG_CONFIG_HOME", &xdg_config)
+        .args(["conflicts", "--json"])
+        .output()
+        .expect("run gitscry with isolated user-global attributes");
+    let history = json(output)["historical_cases"].clone();
+    assert_eq!(
+        history["status"], "complete",
+        "historical report: {history}"
+    );
+    assert_eq!(
+        history["files"][0]["cases"][0]["merge_commit"],
+        historical_merge
+    );
+}
+
+#[test]
+fn skips_custom_attributes_without_running_an_external_driver() {
+    let (repo, base, historical_ours, historical_theirs, _) =
+        historical_conflict_fixture("conflict.txt", true);
+    assert_eq!(
+        git_stdout(
+            repo.dir.path(),
+            ["show", format!("{historical_ours}:unselected.txt").as_str()],
+        ),
+        "ours",
+    );
+    assert_eq!(
+        git_stdout(
+            repo.dir.path(),
+            [
+                "show",
+                format!("{historical_theirs}:unselected.txt").as_str()
+            ],
+        ),
+        "theirs",
+    );
+    let sentinel = repo.dir.path().join("external-driver-ran");
+    let sentinel_path = sentinel.display().to_string().replace('\\', "/");
+    let driver = format!("echo invoked > \"{}\"", sentinel_path.replace('"', "\\\""));
+    git(
+        repo.dir.path(),
+        [
+            "config",
+            "--local",
+            "merge.external-sentinel.driver",
+            driver.as_str(),
+        ],
+    );
+    assert_eq!(
+        git_stdout(
+            repo.dir.path(),
+            [
+                "check-attr",
+                &format!("--source={base}"),
+                "merge",
+                "--",
+                "unselected.txt",
+            ],
+        ),
+        "unselected.txt: merge: external-sentinel",
+    );
+    assert_eq!(
+        git_stdout(
+            repo.dir.path(),
+            [
+                "config",
+                "--local",
+                "--get",
+                "merge.external-sentinel.driver"
+            ],
+        ),
+        driver
+    );
+    git(repo.dir.path(), ["merge", "--abort"]);
+    git(
+        repo.dir.path(),
+        ["checkout", "--detach", historical_ours.as_str()],
+    );
+    let baseline = git_command(repo.dir.path())
+        .args(["merge", "--no-edit", historical_theirs.as_str()])
+        .output()
+        .unwrap();
+    assert!(!baseline.status.success());
+    assert!(
+        sentinel.exists(),
+        "configured custom driver should be executable"
+    );
+    fs::remove_file(&sentinel).unwrap();
+    git(repo.dir.path(), ["merge", "--abort"]);
+    git(repo.dir.path(), ["checkout", "main"]);
+    let current_merge = git_command(repo.dir.path())
+        .args(["merge", "--no-edit", "current-theirs"])
+        .output()
+        .unwrap();
+    assert!(!current_merge.status.success());
+
+    let before = state_with_paths(&repo, &["conflict.txt", "unselected.txt", ".gitattributes"]);
+    let object_count_before = git_stdout(repo.dir.path(), ["count-objects", "-v"]);
+    let config_before = git_stdout(
+        repo.dir.path(),
+        [
+            "config",
+            "--local",
+            "--get",
+            "merge.external-sentinel.driver",
+        ],
+    );
+    let report = json(repo.run(["conflicts", "--json"]));
+    let history = &report["historical_cases"];
+    assert_eq!(history["status"], "partial", "historical report: {history}");
+    assert_eq!(history["files_analyzed"], 1);
+    assert_eq!(history["files_with_cases"], 0);
+    assert!(history["files"].as_array().unwrap().is_empty());
+    assert!(
+        history["reasons"][0]
+            .as_str()
+            .unwrap()
+            .contains("external drivers are disabled")
+    );
+    assert!(
+        !sentinel.exists(),
+        "query invoked the external merge driver"
+    );
+    assert_eq!(
+        state_with_paths(&repo, &["conflict.txt", "unselected.txt", ".gitattributes"]),
+        before
+    );
+    assert_eq!(
+        git_stdout(repo.dir.path(), ["count-objects", "-v"]),
+        object_count_before
+    );
+    assert_eq!(
+        git_stdout(
+            repo.dir.path(),
+            [
+                "config",
+                "--local",
+                "--get",
+                "merge.external-sentinel.driver"
+            ],
+        ),
+        config_before
+    );
+}
 fn state(repo: &TestRepo) -> Vec<Vec<u8>> {
     state_with_paths(repo, &["a.txt", "b.txt"])
 }
@@ -738,7 +1214,7 @@ fn reports_same_commit_callers_tests_and_bounded_matching_hunks() {
     );
     let materials = report["associated_materials"].as_array().unwrap();
     assert_eq!(materials.len(), 2);
-    assert_eq!(report["schema_version"], 4);
+    assert_eq!(report["schema_version"], 5);
     assert_eq!(report["associated_materials_truncated"], false);
 
     let caller = materials

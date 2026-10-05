@@ -1,5 +1,5 @@
 use super::escape::subject as display;
-use crate::analysis::capabilities::conflicts::{Region, Report};
+use crate::analysis::capabilities::conflicts::{HistoricalObject, Region, Report};
 use std::fmt::Write;
 
 fn display_identities(identities: &[String]) -> String {
@@ -8,6 +8,24 @@ fn display_identities(identities: &[String]) -> String {
         .map(|identity| display(identity))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn write_historical_object(output: &mut String, label: &str, object: &HistoricalObject) {
+    write!(
+        output,
+        "      {label}: {} [{}]",
+        display(&object.path),
+        object.blob
+    )
+    .unwrap();
+    if let Some(commit) = &object.commit {
+        write!(output, " at {commit}").unwrap();
+    }
+    writeln!(output).unwrap();
+    writeln!(output, "        {}", display(&object.excerpt)).unwrap();
+    if object.excerpt_truncated {
+        writeln!(output, "        (excerpt truncated)").unwrap();
+    }
 }
 
 pub(super) fn format_report(report: &Report) -> String {
@@ -247,6 +265,59 @@ pub(super) fn format_report(report: &Report) -> String {
                     writeln!(output, "      Regions truncated").unwrap();
                 }
             }
+        }
+    }
+    writeln!(
+        output,
+        "\nHistorical merge cases: {} (Git {})",
+        report.historical_cases.status, report.historical_cases.git_version
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "  Rules: {}",
+        display(report.historical_cases.reconstruction_rules)
+    )
+    .unwrap();
+    for reason in &report.historical_cases.reasons {
+        writeln!(output, "  Coverage: {}", display(reason)).unwrap();
+    }
+    for file in &report.historical_cases.files {
+        writeln!(
+            output,
+            "  {} — {} of {} cases{} ({})",
+            display(&file.path),
+            file.cases.len(),
+            file.cases_total,
+            if file.cases_truncated {
+                " (truncated)"
+            } else {
+                ""
+            },
+            file.status
+        )
+        .unwrap();
+        for reason in &file.reasons {
+            writeln!(output, "    Skipped: {}", display(reason)).unwrap();
+        }
+        for case in &file.cases {
+            writeln!(output, "    Merge: {}", case.merge_commit).unwrap();
+            write_historical_object(&mut output, "Base", &case.merge_base);
+            write_historical_object(&mut output, "Parent 1", &case.parents[0]);
+            write_historical_object(&mut output, "Parent 2", &case.parents[1]);
+            writeln!(
+                output,
+                "      Related sides: {}",
+                case.related_sides.join(", ")
+            )
+            .unwrap();
+            writeln!(output, "      Association: {}", case.association).unwrap();
+            write_historical_object(
+                &mut output,
+                "Reconstructed conflict",
+                &case.reconstructed_conflict,
+            );
+            write_historical_object(&mut output, "Recorded result", &case.result);
         }
     }
     if !report.associated_materials.is_empty() {
