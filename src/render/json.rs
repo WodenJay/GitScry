@@ -44,6 +44,14 @@ pub(crate) fn format_json_report(
         github_links,
         scope: report.scope.as_ref().map(json_scope),
         symbol_summary: report.symbol_summary.as_ref().map(json_symbol_summary),
+        target: report.target.as_ref().map(|target| JsonRelationTarget {
+            path: json_path(&target.path),
+            line: target.line,
+            revision: &target.revision,
+            status: target.status,
+            eligible_target_touch_commits: target.eligible_target_touch_commits,
+            limitations: &target.limitations,
+        }),
     })
 }
 
@@ -69,8 +77,19 @@ struct JsonReport<'a> {
     scope: Option<JsonSearchScope<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     symbol_summary: Option<JsonSymbolSummary<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target: Option<JsonRelationTarget<'a>>,
 }
 
+#[derive(Serialize)]
+struct JsonRelationTarget<'a> {
+    path: JsonPath<'a>,
+    line: usize,
+    revision: &'a str,
+    status: &'a str,
+    eligible_target_touch_commits: Option<usize>,
+    limitations: &'a [String],
+}
 #[derive(Serialize)]
 struct JsonSymbolSummary<'a> {
     introduction: JsonSymbolFact<'a>,

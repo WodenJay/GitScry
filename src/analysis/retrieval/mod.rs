@@ -10,6 +10,7 @@ mod lexical;
 mod line_history;
 mod rank;
 mod reverts;
+pub(in crate::analysis) mod target_history;
 mod text;
 
 use super::Step;

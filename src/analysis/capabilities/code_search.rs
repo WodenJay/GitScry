@@ -246,6 +246,7 @@ fn run_with_scope(
         notices: Vec::new(),
         patch_mode: false,
         why: None,
+        target: None,
         scope: None,
         symbol_summary: None,
     })

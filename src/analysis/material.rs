@@ -13,8 +13,17 @@ pub(crate) struct Report {
     pub(crate) warnings: Vec<String>,
     pub(crate) notices: Vec<String>,
     pub(crate) why: Option<Box<WhySummary>>,
+    pub(crate) target: Option<RelationTarget>,
     pub(crate) scope: Option<SearchScopeInfo>,
     pub(crate) symbol_summary: Option<SymbolSummary>,
+}
+pub(crate) struct RelationTarget {
+    pub(crate) path: Vec<u8>,
+    pub(crate) line: usize,
+    pub(crate) revision: String,
+    pub(crate) status: &'static str,
+    pub(crate) eligible_target_touch_commits: Option<usize>,
+    pub(crate) limitations: Vec<String>,
 }
 #[derive(Clone, Debug)]
 pub(crate) struct SearchScopeInfo {
@@ -186,6 +195,7 @@ pub(crate) fn report(
         warnings: Vec::new(),
         notices: Vec::new(),
         why: None,
+        target: None,
         scope: None,
         patch_mode: false,
         symbol_summary: None,
@@ -202,6 +212,7 @@ pub(crate) fn empty_report(kind: ReportKind) -> Report {
         warnings: Vec::new(),
         notices: Vec::new(),
         why: None,
+        target: None,
         scope: None,
         patch_mode: false,
         symbol_summary: None,

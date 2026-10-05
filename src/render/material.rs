@@ -298,6 +298,24 @@ pub(crate) fn format_report(report: &Report) -> String {
         }
         lines
     };
+    if let Some(target) = &report.target {
+        let denominator = target
+            .eligible_target_touch_commits
+            .map_or_else(|| "unavailable".to_owned(), |count| count.to_string());
+        lines.insert(
+            0,
+            format!(
+                "Target: {} --line {} at {} ({})\nEligible target-touch commits: {denominator}",
+                escape::path(&target.path),
+                target.line,
+                target.revision,
+                target.status
+            ),
+        );
+        for limitation in &target.limitations {
+            lines.push(format!("Limitation: {limitation}"));
+        }
+    }
     if let Some(summary) = &report.symbol_summary {
         lines.splice(0..0, format_symbol_summary(summary));
     }

@@ -14,7 +14,7 @@ pub(crate) mod hotspots;
 pub(in crate::analysis) mod hybrid;
 pub(crate) mod patterns;
 pub(in crate::analysis) mod regression;
-mod relations;
+pub(in crate::analysis) mod relations;
 pub(in crate::analysis) mod search;
 pub(crate) mod timeline;
 pub(in crate::analysis) mod trace_fix;
