@@ -62,13 +62,21 @@ fn run(
     limit: usize,
     with_patch: bool,
 ) -> Result<Report, AppError> {
-    // Scope selects material, not the history needed to map the bad revision's coordinates.
-    let reachable = if target.symbol_line.is_some() {
-        pinned_reachable_revisions.clone()
-    } else {
-        eligible_revisions.clone()
-    };
-    let mut history = session.path_history(&target.path, &reachable)?;
+    // Scope selects material, not the history needed to establish identity or map coordinates.
+    let incarnations = session.file_incarnations(
+        std::slice::from_ref(&target.bad_revision),
+        std::slice::from_ref(&target.path),
+    )?;
+    let identity = incarnations.identity_at(&target.bad_revision, &target.path);
+    let mut history = session.path_history(&target.path, pinned_reachable_revisions)?;
+    history.retain_mut(|commit| {
+        commit.anchored_ordinals.retain(|ordinal| {
+            identity.is_some_and(|identity| {
+                incarnations.change_has_identity(&commit.oid, *ordinal, identity)
+            })
+        });
+        !commit.anchored_ordinals.is_empty()
+    });
     let history_len = history
         .iter()
         .filter(|commit| eligible_revisions.contains(&commit.oid))
