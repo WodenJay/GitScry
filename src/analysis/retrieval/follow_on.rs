@@ -587,20 +587,21 @@ pub(crate) struct PathAnalysis {
     pub(crate) incomplete_origin_windows: usize,
 }
 /// Each source is evaluated independently; no union of source events is an origin.
+/// `identity_revision` pins source identity; `scope` bounds historical evidence.
 pub(crate) fn paths(
     session: &QuerySession,
     repository: &Repository,
+    identity_revision: Option<&str>,
     sources: &[Vec<u8>],
     selected_paths: &[Vec<u8>],
     scope: Option<&SearchFilter>,
 ) -> Result<PathAnalysis, AppError> {
-    let revision = scope
-        .ok_or_else(|| AppError::operational("missing pinned history scope"))?
-        .to_oid
-        .as_str();
-    let parents = repository.reachable_commit_parents(revision)?;
+    let identity_revision = identity_revision
+        .or_else(|| scope.map(|scope| scope.to_oid.as_str()))
+        .ok_or_else(|| AppError::operational("missing pinned history scope"))?;
+    let parents = repository.reachable_commit_parents(identity_revision)?;
     let cached = session.commit_oids()?;
-    let reachable = parents
+    let identity_cached = parents
         .keys()
         .filter(|oid| cached.contains(*oid))
         .cloned()
@@ -611,8 +612,14 @@ pub(crate) fn paths(
         incomplete_origin_windows: 0,
     };
     for source in sources {
-        let history = session.timeline_history(source, &reachable)?;
-        let changes = incarnation_changes(&history, source, revision, &parents, &cached);
+        let history = session.timeline_history(source, &identity_cached)?;
+        let changes = incarnation_changes(
+            &history,
+            source,
+            identity_revision,
+            &parents,
+            &identity_cached,
+        );
         let events = history
             .iter()
             .filter(|commit| changes.contains(&commit.oid))
@@ -634,7 +641,7 @@ pub(crate) fn paths(
             session,
             repository,
             Origins {
-                revision,
+                revision: identity_revision,
                 selected_paths: selected_paths.iter().cloned().collect(),
                 events,
                 require_current_file: false,

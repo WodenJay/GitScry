@@ -225,3 +225,96 @@ fn context_keeps_three_relationship_bases_and_individual_sources_in_one_slot() {
     assert_eq!(limited["suggestions"].as_array().unwrap().len(), 1);
     assert_eq!(limited["truncated"], true);
 }
+
+#[test]
+fn context_keeps_current_path_identity_when_scope_ends_before_rename() {
+    let repo = TestRepo::new();
+    event(&repo, "source.rs", 0, "2025-01-01T12:00:00Z");
+    event(&repo, "candidate.rs", 0, "2025-01-02T12:00:00Z");
+    event(&repo, "source.rs", 1, "2025-01-20T12:00:00Z");
+    event(&repo, "candidate.rs", 1, "2025-01-21T12:00:00Z");
+    // Keep unrelated commits for the negative baseline and let every
+    // seven-day follow-on window expire before pinning the scope.
+    for day in 1..=2 {
+        event(
+            &repo,
+            "noise.txt",
+            day,
+            &format!("2025-02-{day:02}T12:00:00Z"),
+        );
+    }
+    event(&repo, "noise.txt", 99, "2025-02-20T12:00:00Z");
+    repo.index();
+    fs::write(
+        repo.dir.path().join("source.rs"),
+        "unique_unseen_content_214();\n",
+    )
+    .unwrap();
+    let scoped_revision = repo.head();
+
+    let before_rename = json(&repo, &["context", "--json", "--to-rev", &scoped_revision]);
+    assert!(
+        before_rename["suggestions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| {
+                item["path"] == "candidate.rs"
+                    && item["follow_on"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|follow_on| {
+                            follow_on["source"] == "source.rs"
+                                && follow_on["supporting_origins"] == 2
+                        })
+            }),
+        "{before_rename}"
+    );
+
+    support::git(repo.dir.path(), ["checkout", "HEAD", "--", "source.rs"]);
+    support::git(repo.dir.path(), ["mv", "source.rs", "new.rs"]);
+    support::git(repo.dir.path(), ["add", "--all"]);
+    let rename = support::git_command(repo.dir.path())
+        .args(["commit", "-m", "rename source"])
+        .env("GIT_AUTHOR_DATE", "2025-02-21T12:00:00Z")
+        .env("GIT_COMMITTER_DATE", "2025-02-21T12:00:00Z")
+        .output()
+        .unwrap();
+    assert!(
+        rename.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rename.stderr)
+    );
+    fs::write(
+        repo.dir.path().join("new.rs"),
+        "unique_unseen_content_214();\n",
+    )
+    .unwrap();
+
+    let unscoped = json(&repo, &["context", "--json"]);
+    assert!(
+        unscoped["suggestions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["path"] == "candidate.rs"),
+        "{unscoped}"
+    );
+    let report = json(&repo, &["context", "--json", "--to-rev", &scoped_revision]);
+    let candidate = report["suggestions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["path"] == "candidate.rs")
+        .unwrap_or_else(|| {
+            panic!("historical candidate should remain associated with the current file: {report}")
+        });
+    let follow_on = candidate["follow_on"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["source"] == "new.rs")
+        .expect("follow-on should retain the current path after its historical rename");
+    assert_eq!(follow_on["supporting_origins"], 2);
+}

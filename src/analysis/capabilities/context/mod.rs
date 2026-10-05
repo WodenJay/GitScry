@@ -480,6 +480,7 @@ fn merge_path_follow_on(
     let analysis = retrieval::follow_on::paths(
         &context.session,
         repository,
+        Some(context.pinned_head.as_str()),
         sources,
         sources,
         context.filter(),
