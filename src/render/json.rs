@@ -420,6 +420,8 @@ struct JsonFollowOnExample<'a> {
     origin_oid: &'a str,
     later_oid: &'a str,
     origin_path: JsonPath<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    origin_paths: Option<Vec<JsonPath<'a>>>,
     later_path: JsonPath<'a>,
     parent_distance: usize,
     elapsed_seconds: i64,
@@ -450,6 +452,13 @@ pub(super) fn json_follow_on(evidence: &crate::analysis::PathObservation) -> Jso
                 origin_oid: &chain.origin_oid,
                 later_oid: &chain.later_oid,
                 origin_path: json_path(&chain.origin_path),
+                origin_paths: (chain.origin_paths.len() > 1).then(|| {
+                    chain
+                        .origin_paths
+                        .iter()
+                        .map(|path| json_path(path))
+                        .collect()
+                }),
                 later_path: json_path(&chain.later_path),
                 parent_distance: chain.parent_distance,
                 elapsed_seconds: chain.elapsed_seconds,

@@ -15,6 +15,8 @@ pub(crate) struct Coverage {
     pub(crate) baseline_checks: usize,
     pub(crate) budget: Option<usize>,
     pub(crate) limited: bool,
+    pub(crate) complete_origin_windows: usize,
+    pub(crate) incomplete_origin_windows: usize,
 }
 
 impl Coverage {
@@ -25,6 +27,8 @@ impl Coverage {
             baseline_checks: 0,
             budget,
             limited: false,
+            complete_origin_windows: 0,
+            incomplete_origin_windows: 0,
         }
     }
 
@@ -461,6 +465,7 @@ pub(crate) struct Chain {
     pub(crate) origin_oid: String,
     pub(crate) later_oid: String,
     pub(crate) origin_path: Vec<u8>,
+    pub(crate) origin_paths: Vec<Vec<u8>>,
     pub(crate) later_path: Vec<u8>,
     pub(crate) parent_distance: usize,
     pub(crate) elapsed_seconds: i64,
@@ -485,13 +490,19 @@ pub(crate) struct PathObservation {
     pub(crate) observation: Observation,
 }
 
+pub(crate) struct PathAnalysis {
+    pub(crate) observations: Vec<PathObservation>,
+    pub(crate) complete_origin_windows: usize,
+    pub(crate) incomplete_origin_windows: usize,
+}
 /// Each source is evaluated independently; no union of source events is an origin.
 pub(crate) fn paths(
     session: &QuerySession,
     repository: &Repository,
     sources: &[Vec<u8>],
+    selected_paths: &[Vec<u8>],
     scope: Option<&SearchFilter>,
-) -> Result<Vec<PathObservation>, AppError> {
+) -> Result<PathAnalysis, AppError> {
     let revision = scope
         .ok_or_else(|| AppError::operational("missing pinned history scope"))?
         .to_oid
@@ -503,7 +514,11 @@ pub(crate) fn paths(
         .filter(|oid| cached.contains(*oid))
         .cloned()
         .collect();
-    let mut results = Vec::new();
+    let mut results = PathAnalysis {
+        observations: Vec::new(),
+        complete_origin_windows: 0,
+        incomplete_origin_windows: 0,
+    };
     for source in sources {
         let history = session.timeline_history(source, &reachable)?;
         let changes = incarnation_changes(&history, source, revision, &parents, &cached);
@@ -523,23 +538,28 @@ pub(crate) fn paths(
                     .unwrap_or_else(|| source.clone()),
             })
             .collect();
+        let mut coverage = Coverage::new(None);
         let observations = discover(
             session,
             repository,
             Origins {
                 revision,
-                selected_paths: sources.iter().cloned().collect(),
+                selected_paths: selected_paths.iter().cloned().collect(),
                 events,
                 require_current_file: false,
             },
             7,
             scope,
-            &mut Coverage::new(None),
+            &mut coverage,
         )?;
-        results.extend(observations.into_iter().map(|observation| PathObservation {
-            source: source.clone(),
-            observation,
-        }));
+        results.complete_origin_windows += coverage.complete_origin_windows;
+        results.incomplete_origin_windows += coverage.incomplete_origin_windows;
+        results
+            .observations
+            .extend(observations.into_iter().map(|observation| PathObservation {
+                source: source.clone(),
+                observation,
+            }));
     }
     Ok(results)
 }
@@ -638,12 +658,16 @@ pub(crate) fn discover(
             continue;
         }
         let Some(&commit_time) = commit_times.get(&origin.oid) else {
+            coverage.incomplete_origin_windows += 1;
             continue;
         };
         if observation_window_complete(commit_time, target_time, scope, window_seconds)
             && !incomplete_origins.contains(&origin.oid)
         {
+            coverage.complete_origin_windows += 1;
             complete_content_origins.push(origin);
+        } else {
+            coverage.incomplete_origin_windows += 1;
         }
     }
     complete_content_origins.sort_by(|a, b| {
@@ -740,6 +764,26 @@ pub(crate) fn discover(
         if incarnation_changes.is_empty() {
             continue;
         }
+        let is_selected_source = history.iter().any(|commit| {
+            incarnation_changes.contains(&commit.oid)
+                && commit
+                    .changes
+                    .iter()
+                    .filter(|change| commit.anchored_ordinals.contains(&change.ordinal))
+                    .any(|change| {
+                        change
+                            .old_path
+                            .as_deref()
+                            .is_some_and(|path| selected_paths.contains(path))
+                            || change
+                                .new_path
+                                .as_deref()
+                                .is_some_and(|path| selected_paths.contains(path))
+                    })
+        });
+        if is_selected_source {
+            continue;
+        }
         let scoped_changes = incarnation_changes
             .iter()
             .filter(|oid| {
@@ -833,28 +877,30 @@ pub(crate) fn discover(
         let displayed_chains = chains
             .iter()
             .take(2)
-            .map(|(origin_oid, later_oid)| Chain {
-                origin_oid: origin_oid.clone(),
-                later_oid: later_oid.clone(),
-                origin_path: checked_content_origins
+            .map(|(origin_oid, later_oid)| {
+                let origin = checked_content_origins
                     .iter()
                     .find(|origin| &origin.oid == origin_oid)
-                    .unwrap()
-                    .path
-                    .clone(),
-                later_path: history
-                    .iter()
-                    .find(|commit| &commit.oid == later_oid)
-                    .and_then(|commit| {
-                        commit
-                            .changes
-                            .iter()
-                            .find(|change| commit.anchored_ordinals.contains(&change.ordinal))
-                    })
-                    .and_then(|change| change.new_path.clone())
-                    .unwrap_or_else(|| path.clone()),
-                parent_distance: ancestor_distances(later_oid, &parents)[origin_oid],
-                elapsed_seconds: commit_times[later_oid] - commit_times[origin_oid],
+                    .expect("support edge has a complete origin");
+                Chain {
+                    origin_oid: origin_oid.clone(),
+                    later_oid: later_oid.clone(),
+                    origin_path: origin.path.clone(),
+                    origin_paths: origin.associated_paths.iter().cloned().collect(),
+                    later_path: history
+                        .iter()
+                        .find(|commit| &commit.oid == later_oid)
+                        .and_then(|commit| {
+                            commit
+                                .changes
+                                .iter()
+                                .find(|change| commit.anchored_ordinals.contains(&change.ordinal))
+                        })
+                        .and_then(|change| change.new_path.clone())
+                        .unwrap_or_else(|| path.clone()),
+                    parent_distance: ancestor_distances(later_oid, &parents)[origin_oid],
+                    elapsed_seconds: commit_times[later_oid] - commit_times[origin_oid],
+                }
             })
             .collect::<Vec<_>>();
         let latest_support_time = chains

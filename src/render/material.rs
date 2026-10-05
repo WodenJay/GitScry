@@ -322,7 +322,7 @@ pub(crate) fn format_report(report: &Report) -> String {
         .any(|source| source.kind == "directory")
     {
         lines.push(
-            "Directory material covers co-change only; follow-on relations are not evaluated."
+            "Directory follow-on uses independent per-input module-touch origins; incomplete observation windows are disclosed separately."
                 .to_owned(),
         );
     }
@@ -650,10 +650,20 @@ pub(super) fn render_follow_on(
     lines.push("    denominator: candidate-touching origins excluded from source and background pools; incomplete/unobserved windows excluded".to_owned());
     lines.push("    identity: detected renames only; copies and recreation start new incarnations; historical association, not causation".to_owned());
     for chain in &observation.chains {
+        let origin_paths = if chain.origin_paths.len() > 1 {
+            chain
+                .origin_paths
+                .iter()
+                .map(|path| escape::path(path))
+                .collect::<Vec<_>>()
+                .join(", ")
+        } else {
+            escape::path(&chain.origin_path)
+        };
         lines.push(format!(
             "    example: {} {} -> {} {}; {} parent edges, {} seconds",
             chain.origin_oid,
-            escape::path(&chain.origin_path),
+            origin_paths,
             chain.later_oid,
             escape::path(&chain.later_path),
             chain.parent_distance,

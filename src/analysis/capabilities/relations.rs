@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     path::Path,
 };
 
@@ -50,7 +50,7 @@ fn current_path_is_file(root: &Path, path: &[u8]) -> bool {
 fn current_path_is_file(root: &Path, path: &[u8]) -> bool {
     root.join(String::from_utf8_lossy(path).as_ref()).is_file()
 }
-struct RankedCandidate {
+pub(super) struct RankedCandidate {
     score: f64,
     latest_support_time: i64,
     key: Vec<u8>,
@@ -181,7 +181,19 @@ pub(crate) fn related(
                 session.relation_source_matched(&source.path, scope)?
             };
         }
-        return directory::run(session, observations, sources, limit);
+        let selected_paths = directory::selected_paths(&sources, &observations)
+            .into_iter()
+            .collect::<Vec<_>>();
+        let repository = crate::git::Repository::discover()?;
+        let follow_on = directory_follow_on(
+            session,
+            &repository,
+            &observations,
+            &sources,
+            &selected_paths,
+            scope,
+        )?;
+        return directory::run(session, observations, sources, follow_on, limit);
     }
     for source in &mut sources {
         source.matched = session.relation_source_matched(&source.path, scope)?;
@@ -189,6 +201,79 @@ pub(crate) fn related(
     let mut report = run(session, intent, worktree_root, limit, false, scope, None)?;
     report.relation_sources = sources;
     Ok(report)
+}
+
+fn directory_follow_on(
+    session: &QuerySession,
+    repository: &crate::git::Repository,
+    observations: &[crate::cache::PatternObservation],
+    sources: &[RelationSource],
+    selected_paths: &[Vec<u8>],
+    scope: Option<&SearchFilter>,
+) -> Result<retrieval::follow_on::PathAnalysis, AppError> {
+    let mut analysis = retrieval::follow_on::paths(
+        session,
+        repository,
+        &sources
+            .iter()
+            .filter(|source| source.kind == "file")
+            .map(|source| source.path.as_bytes().to_vec())
+            .collect::<Vec<_>>(),
+        selected_paths,
+        scope,
+    )?;
+    let revision = scope
+        .ok_or_else(|| AppError::operational("missing pinned history scope"))?
+        .to_oid
+        .as_str();
+    for source in sources.iter().filter(|source| source.kind == "directory") {
+        let events = observations
+            .iter()
+            .filter_map(|commit| {
+                let associated_paths = commit
+                    .paths
+                    .iter()
+                    .filter(|path| directory::contains(&source.path, path))
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
+                let path = associated_paths.first()?.clone();
+                Some(retrieval::follow_on::Origin {
+                    oid: commit.oid.clone(),
+                    strength: 1,
+                    time: commit.commit_time,
+                    associated_paths,
+                    path,
+                })
+            })
+            .collect();
+        let mut coverage = retrieval::follow_on::Coverage::new(None);
+        let origins = retrieval::follow_on::discover(
+            session,
+            repository,
+            retrieval::follow_on::Origins {
+                revision,
+                selected_paths: selected_paths.iter().cloned().collect(),
+                events,
+                require_current_file: false,
+            },
+            7,
+            scope,
+            &mut coverage,
+        )?;
+        analysis.complete_origin_windows += coverage.complete_origin_windows;
+        analysis.incomplete_origin_windows += coverage.incomplete_origin_windows;
+        analysis
+            .observations
+            .extend(
+                origins
+                    .into_iter()
+                    .map(|observation| retrieval::follow_on::PathObservation {
+                        source: source.path.as_bytes().to_vec(),
+                        observation,
+                    }),
+            );
+    }
+    Ok(analysis)
 }
 
 pub(crate) fn tests(
@@ -328,53 +413,105 @@ fn run(
             .iter()
             .map(|path| path.as_bytes().to_vec())
             .collect::<Vec<_>>();
-        for evidence in retrieval::follow_on::paths(session, &repository, &sources, scope)? {
-            let path = evidence.observation.path.clone();
-            let latest = evidence.observation.latest_support_time;
-            let score = evidence.observation.independent_chains as f64;
-            let index = ranked.iter().position(|candidate| candidate.key == path);
-            let candidate = if let Some(index) = index {
-                &mut ranked[index]
-            } else {
-                ranked.push(RankedCandidate {
-                    score,
-                    latest_support_time: latest,
-                    key: path.clone(),
-                    citation_oids: Vec::new(),
-                    material: Material {
-                        subject: String::new(),
-                        paths: vec![path],
-                        confidence: Confidence::Medium,
-                        basis: Vec::new(),
-                        citations: Vec::new(),
-                        patch: None,
-                        detail: Some(Detail::Relation(Relation {
-                            co_change_count: 0,
-                            proportion: 0.0,
-                            supporting_count: 0,
-                            module: None,
-                            follow_on: Vec::new(),
-                            co_change_citations: Vec::new(),
-                        })),
-                    },
-                });
-                ranked.last_mut().unwrap()
-            };
-            candidate.score = candidate.score.max(score);
-            candidate.latest_support_time = candidate.latest_support_time.max(latest);
-            for chain in &evidence.observation.chains {
-                for oid in [&chain.origin_oid, &chain.later_oid] {
-                    if !candidate.citation_oids.contains(oid) {
-                        candidate.citation_oids.push(oid.clone());
-                    }
-                }
-            }
-            if let Some(Detail::Relation(relation)) = &mut candidate.material.detail {
-                relation.follow_on.push(evidence);
-            }
-        }
+        let follow_on =
+            retrieval::follow_on::paths(session, &repository, &sources, &sources, scope)?;
+        merge_follow_on(&mut ranked, follow_on.observations);
     }
 
+    let kind = if tests_only {
+        ReportKind::Tests
+    } else {
+        ReportKind::Related
+    };
+    let mut report = finish(session, ranked, limit, kind)?;
+    if tests_only && omitted_test_path {
+        report.warnings.push(
+            "warning: historical test paths absent from the current worktree may include unresolved renames."
+                .to_owned(),
+        );
+    }
+    Ok(report)
+}
+
+pub(super) fn add_follow_on_coverage_warning(
+    report: &mut Report,
+    complete_windows: usize,
+    incomplete_windows: usize,
+) {
+    if incomplete_windows == 0 {
+        return;
+    }
+    let detail = if complete_windows == 0 {
+        format!(
+            "no complete follow-on source observation windows were available ({incomplete_windows} incomplete)"
+        )
+    } else {
+        format!(
+            "{incomplete_windows} follow-on source observation window(s) were incomplete and excluded"
+        )
+    };
+    report.warnings.push(format!(
+        "warning: {detail}; an empty follow-on result does not establish that no relationship exists."
+    ));
+}
+
+pub(super) fn merge_follow_on(
+    ranked: &mut Vec<RankedCandidate>,
+    evidence: Vec<retrieval::follow_on::PathObservation>,
+) {
+    for evidence in evidence {
+        let path = evidence.observation.path.clone();
+        let latest = evidence.observation.latest_support_time;
+        let score = evidence.observation.independent_chains as f64;
+        let index = if let Some(index) = ranked.iter().position(|candidate| candidate.key == path) {
+            index
+        } else {
+            ranked.push(RankedCandidate {
+                score,
+                latest_support_time: latest,
+                key: path.clone(),
+                citation_oids: Vec::new(),
+                material: Material {
+                    subject: String::new(),
+                    paths: vec![path],
+                    confidence: Confidence::Medium,
+                    basis: Vec::new(),
+                    citations: Vec::new(),
+                    patch: None,
+                    detail: Some(Detail::Relation(Relation {
+                        co_change_count: 0,
+                        proportion: 0.0,
+                        supporting_count: 0,
+                        module: None,
+                        follow_on: Vec::new(),
+                        co_change_citations: Vec::new(),
+                    })),
+                },
+            });
+            ranked.len() - 1
+        };
+        let candidate = &mut ranked[index];
+        candidate.score = candidate.score.max(score);
+        candidate.latest_support_time = candidate.latest_support_time.max(latest);
+        for chain in &evidence.observation.chains {
+            for oid in [&chain.origin_oid, &chain.later_oid] {
+                if !candidate.citation_oids.contains(oid) {
+                    candidate.citation_oids.push(oid.clone());
+                }
+            }
+        }
+        if let Some(Detail::Relation(relation)) = &mut candidate.material.detail {
+            relation.follow_on.push(evidence);
+        }
+    }
+}
+
+pub(super) fn finish(
+    session: &QuerySession,
+    mut ranked: Vec<RankedCandidate>,
+    limit: usize,
+    kind: ReportKind,
+) -> Result<Report, AppError> {
     ranked.sort_by(|left, right| {
         right
             .score
@@ -408,20 +545,7 @@ fn run(
         materials.push(material);
     }
     retrieval::assign_citations(&mut materials);
-
-    let kind = if tests_only {
-        ReportKind::Tests
-    } else {
-        ReportKind::Related
-    };
-    let mut report = super::super::report(kind, materials, matched_count, limit);
-    if tests_only && omitted_test_path {
-        report.warnings.push(
-            "warning: historical test paths absent from the current worktree may include unresolved renames."
-                .to_owned(),
-        );
-    }
-    Ok(report)
+    Ok(super::super::report(kind, materials, matched_count, limit))
 }
 
 pub(super) fn relation_score(

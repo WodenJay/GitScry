@@ -477,9 +477,14 @@ fn merge_path_follow_on(
     excluded: &HashSet<Vec<u8>>,
     ranked: &mut Vec<RankedSuggestion>,
 ) -> Result<(), AppError> {
-    for evidence in
-        retrieval::follow_on::paths(&context.session, repository, sources, context.filter())?
-    {
+    let analysis = retrieval::follow_on::paths(
+        &context.session,
+        repository,
+        sources,
+        sources,
+        context.filter(),
+    )?;
+    for evidence in analysis.observations {
         let path = &evidence.observation.path;
         if excluded.contains(path) {
             continue;
