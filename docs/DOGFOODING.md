@@ -9,8 +9,9 @@ Record a case only when it did not—for example, its output was not useful, it 
 ### [Date] Short description
 
 - **Command:** `gitscry ...`
+- **Context:** GitScry version and invocation HEAD; relevant working-tree state if the query depends on it.
 - **Goal:** What I wanted to learn or accomplish.
-- **Actual:** What GitScry returned or failed to do.
+- **Actual:** What GitScry returned or failed to do. Include the key output and relevant scope, coverage, or warnings; omit unrelated output.
 - **Expected:** What would have been useful instead.
 
 <!-- DO NOT EDIT ABOVE THIS LINE. APPEND NEW ENTRIES BELOW. -->
