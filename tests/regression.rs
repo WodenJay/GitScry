@@ -41,6 +41,146 @@ fn set_head_date(repo: &TestRepo, date: &str) {
 }
 
 #[test]
+fn regression_excludes_previous_file_incarnation_without_good() {
+    let repo = TestRepo::new();
+    repo.commit(
+        "src/a.rs",
+        b"fn timeout() {}\n",
+        "Old timeout introduction",
+        None,
+    );
+    git(repo.dir.path(), ["rm", "src/a.rs"]);
+    git(repo.dir.path(), ["commit", "-m", "Delete old timeout file"]);
+    repo.commit("src/a.rs", b"fn fresh() {}\n", "Create fresh file", None);
+    repo.index();
+
+    let output = repo.run(["regression", "timeout", "--path", "src/a.rs", "--json"]);
+    assert_eq!(output.status.code(), Some(0));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["materials"], serde_json::json!([]));
+}
+
+#[test]
+fn regression_reports_current_incarnation_suspect_after_recreation() {
+    let repo = TestRepo::new();
+    repo.commit("src/a.rs", b"fn timeout() {}\n", "Old timeout", None);
+    git(repo.dir.path(), ["rm", "src/a.rs"]);
+    git(repo.dir.path(), ["commit", "-m", "Delete old file"]);
+    repo.commit("src/a.rs", b"fn fresh() {}\n", "Create fresh file", None);
+    repo.commit(
+        "src/a.rs",
+        b"fn fresh() { panic!(\"timeout\"); }\n",
+        "Current timeout",
+        None,
+    );
+    let suspect = repo.head();
+    repo.index();
+
+    let output = repo.run(["regression", "timeout", "--path", "src/a.rs", "--json"]);
+    assert_eq!(output.status.code(), Some(0));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let materials = report["materials"].as_array().unwrap();
+    assert_eq!(materials.len(), 1);
+    assert_eq!(materials[0]["citations"][0]["oid"], suspect);
+}
+
+#[test]
+fn regression_follows_renames_within_the_selected_bad_incarnation() {
+    let repo = TestRepo::new();
+    repo.commit("src/old.rs", b"fn timeout() {}\n", "Old timeout", None);
+    git(repo.dir.path(), ["rm", "src/old.rs"]);
+    git(repo.dir.path(), ["commit", "-m", "Delete old file"]);
+    repo.commit("src/old.rs", b"fn fresh() {}\n", "Create fresh file", None);
+    let creation = repo.head();
+    repo.commit(
+        "src/old.rs",
+        b"fn fresh() { panic!(\"timeout\"); }\n",
+        "Current timeout",
+        None,
+    );
+    let suspect = repo.head();
+    repo.rename("src/old.rs", "src/new.rs", "Move current file");
+    let bad = repo.head();
+    git(repo.dir.path(), ["rm", "src/new.rs"]);
+    git(repo.dir.path(), ["commit", "-m", "Delete current file"]);
+    repo.commit("src/new.rs", b"fn later() {}\n", "Create later file", None);
+    repo.index();
+
+    // Scope excludes the rename, but identity still belongs to --bad, not HEAD.
+    for symbol in [None, Some("fresh")] {
+        let mut args = vec![
+            "regression",
+            "timeout",
+            "--path",
+            "src/new.rs",
+            "--bad",
+            &bad,
+            "--to-rev",
+            &suspect,
+            "--json",
+        ];
+        if let Some(symbol) = symbol {
+            args.extend(["--symbol", symbol]);
+        }
+        let output = repo.run(args);
+        assert_eq!(output.status.code(), Some(0));
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        let materials = report["materials"].as_array().unwrap();
+        let mut returned = materials
+            .iter()
+            .map(|material| material["citations"][0]["oid"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        let mut expected = if symbol.is_some() {
+            vec![creation.as_str(), suspect.as_str()]
+        } else {
+            vec![suspect.as_str()]
+        };
+        returned.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(returned, expected);
+    }
+}
+
+#[test]
+fn regression_discloses_unresolved_incarnation_after_failed_refresh() {
+    let repo = TestRepo::new();
+    repo.commit("src/a.rs", b"fn timeout() {}\n", "Cached timeout", None);
+    repo.index();
+    let cache = rusqlite::Connection::open(repo.cache_dir().join("cache.sqlite")).unwrap();
+    cache
+        .execute_batch(
+            "CREATE TRIGGER reject_hunk BEFORE INSERT ON hunks BEGIN
+         SELECT RAISE(ABORT, 'injected regression refresh failure'); END;",
+        )
+        .unwrap();
+    drop(cache);
+    repo.commit(
+        "src/a.rs",
+        b"fn timeout() { panic!(\"timeout\"); }\n",
+        "Uncached timeout",
+        None,
+    );
+
+    let output = repo.run(["regression", "timeout", "--path", "src/a.rs", "--json"]);
+    assert_eq!(output.status.code(), Some(0));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["scope"]["coverage_complete"], false);
+    assert!(
+        report["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|warning| {
+                warning
+                    .as_str()
+                    .unwrap()
+                    .contains("file incarnation could not be established")
+            })
+    );
+    assert_eq!(report["materials"], serde_json::json!([]));
+}
+
+#[test]
 fn regression_reports_a_historical_suspect() {
     let repo = TestRepo::new();
     repo.commit(
