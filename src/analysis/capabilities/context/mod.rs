@@ -539,7 +539,10 @@ fn merge_path_follow_on(
                 .push(evidence.source.clone());
             item.suggestion.associated_current_paths.sort();
         }
-        item.strength = item.suggestion.associated_current_paths.len();
+        // Path-only suggestions have no stronger primary ranking basis.
+        if item.suggestion.category == Category::PathFollowOn {
+            item.strength = item.suggestion.associated_current_paths.len();
+        }
         item.time = item.time.max(evidence.observation.latest_support_time);
         item.suggestion.follow_on.push(evidence);
     }
