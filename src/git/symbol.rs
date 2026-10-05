@@ -23,20 +23,23 @@ pub(super) fn locate_unique(content: &[u8], name: &str, path: &str) -> Result<Lo
     if name.trim().is_empty() {
         return Err(AppError::input("symbol must not be empty"));
     }
-    let mut matches = declarations(content, path)
+    let mut matches = declaration_positions(content, path.ends_with(".rs"))
         .into_iter()
-        .filter(|declaration| declaration.name == name)
+        .filter(|(declared, _, _)| declared == name)
         .collect::<Vec<_>>();
     match matches.len() {
         0 => Err(AppError::input(format!(
             "symbol {name} has no supported declaration in {path} at the target revision"
         ))),
-        1 => Ok(matches.pop().unwrap()),
+        1 => {
+            let (name, line, column) = matches.pop().unwrap();
+            Ok(location(content, name, line, column, path))
+        }
         _ => Err(AppError::input(format!(
             "symbol {name} is ambiguous in {path} at the target revision; declarations found at lines {}",
             matches
                 .iter()
-                .map(|location| location.identifier_line.to_string())
+                .map(|(_, line, _)| line.to_string())
                 .collect::<Vec<_>>()
                 .join(", ")
         ))),
@@ -44,34 +47,42 @@ pub(super) fn locate_unique(content: &[u8], name: &str, path: &str) -> Result<Lo
 }
 
 pub(super) fn declaration_lines(content: &[u8], name: &str) -> Vec<usize> {
-    content
-        .split(|byte| *byte == b'\n')
-        .enumerate()
-        .filter_map(|(index, line)| {
-            let (declared, _) = declaration(line)?;
-            (declared == name).then_some(index + 1)
-        })
+    declaration_positions(content, true)
+        .into_iter()
+        .filter_map(|(declared, line, _)| (declared == name).then_some(line))
         .collect()
 }
 
 /// Enumerate supported declarations for conservative same-change correspondence.
 pub(super) fn declarations(content: &[u8], path: &str) -> Vec<Location> {
-    content
-        .split(|byte| *byte == b'\n')
-        .enumerate()
-        .filter_map(|(index, line)| {
-            let (name, column) = declaration(line)?;
-            Some(Location {
-                name: name.to_owned(),
-                identifier_line: index + 1,
-                identifier_column: column,
-                span: Span {
-                    start: index + 1,
-                    end: symbol_span_end(content, index + 1, path.ends_with(".rs")),
-                },
-            })
-        })
+    declaration_positions(content, path.ends_with(".rs"))
+        .into_iter()
+        .map(|(name, line, column)| location(content, name, line, column, path))
         .collect()
+}
+fn location(content: &[u8], name: String, line: usize, column: usize, path: &str) -> Location {
+    Location {
+        name,
+        identifier_line: line,
+        identifier_column: column,
+        span: Span {
+            start: line,
+            end: symbol_span_end(content, line, path.ends_with(".rs")),
+        },
+    }
+}
+
+fn declaration_positions(content: &[u8], rust_source: bool) -> Vec<(String, usize, usize)> {
+    let mut positions = Vec::new();
+    let mut state = BraceState::Code;
+    for (index, line) in content.split(|byte| *byte == b'\n').enumerate() {
+        for start in scan_line(line, &mut state, rust_source).declaration_starts {
+            if let Some((name, column)) = declaration(&line[start..]) {
+                positions.push((name.to_owned(), index + 1, start + column));
+            }
+        }
+    }
+    positions
 }
 
 /// Ignore only the declaration's identifier and outer indentation, not body tokens.
@@ -199,26 +210,26 @@ fn symbol_span_end(content: &[u8], start: usize, rust_source: bool) -> usize {
     let start_index = start.saturating_sub(1).min(lines.len().saturating_sub(1));
     let start_line = lines.get(start_index).copied().unwrap_or_default();
     let start_indent = leading_indent(start_line);
+    let indentation_body = start_line.trim_ascii_end().ends_with(b":");
     let mut state = BraceState::Code;
-    let (mut braces, has_brace) = brace_delta(start_line, &mut state, rust_source);
-    if has_brace && braces <= 0 {
+    let scan = scan_line(start_line, &mut state, rust_source);
+    let mut braces = scan.braces;
+    if (scan.has_brace || (scan.statement_end && !indentation_body)) && braces <= 0 {
         return start;
     }
-    if braces > 0 {
-        for (index, line) in lines.iter().enumerate().skip(start_index + 1) {
-            let (delta, has_brace) = brace_delta(line, &mut state, rust_source);
-            braces += delta;
-            if has_brace && braces <= 0 {
-                return index + 1;
-            }
-        }
-    }
     for (index, line) in lines.iter().enumerate().skip(start_index + 1) {
-        if line.is_empty() || leading_indent(line) > start_indent {
-            continue;
-        }
-        if is_declaration_start(line) {
+        if braces <= 0
+            && !line.is_empty()
+            && leading_indent(line) <= start_indent
+            && matches!(state, BraceState::Code)
+            && is_declaration_start(line)
+        {
             return index.max(start_index);
+        }
+        let scan = scan_line(line, &mut state, rust_source);
+        braces += scan.braces;
+        if (scan.has_brace || (scan.statement_end && !indentation_body)) && braces <= 0 {
+            return index + 1;
         }
     }
     lines.len().max(start)
@@ -238,9 +249,24 @@ enum BraceState {
     BlockComment(usize),
 }
 
-fn brace_delta(line: &[u8], state: &mut BraceState, rust_source: bool) -> (i32, bool) {
-    let mut balance = 0;
-    let mut has_brace = false;
+struct LineScan {
+    braces: i32,
+    has_brace: bool,
+    statement_end: bool,
+    declaration_starts: Vec<usize>,
+}
+
+fn scan_line(line: &[u8], state: &mut BraceState, rust_source: bool) -> LineScan {
+    let mut scan = LineScan {
+        braces: 0,
+        has_brace: false,
+        statement_end: false,
+        declaration_starts: if matches!(state, BraceState::Code) {
+            vec![0]
+        } else {
+            Vec::new()
+        },
+    };
     let mut index = 0;
     while index < line.len() {
         match *state {
@@ -277,12 +303,18 @@ fn brace_delta(line: &[u8], state: &mut BraceState, rust_source: bool) -> (i32, 
                         }
                     }
                     b'{' => {
-                        balance += 1;
-                        has_brace = true;
+                        scan.braces += 1;
+                        scan.has_brace = true;
+                        scan.declaration_starts.push(index + 1);
                     }
                     b'}' => {
-                        balance -= 1;
-                        has_brace = true;
+                        scan.braces -= 1;
+                        scan.has_brace = true;
+                        scan.declaration_starts.push(index + 1);
+                    }
+                    b';' => {
+                        scan.statement_end = true;
+                        scan.declaration_starts.push(index + 1);
                     }
                     _ => {}
                 }
@@ -332,7 +364,7 @@ fn brace_delta(line: &[u8], state: &mut BraceState, rust_source: bool) -> (i32, 
         }
         index += 1;
     }
-    (balance, has_brace)
+    scan
 }
 
 fn raw_string_start(line: &[u8], index: usize) -> Option<(usize, usize)> {
@@ -408,6 +440,7 @@ fn is_declaration_start(line: &[u8]) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use super::declaration_lines;
     use super::locate_unique as locate;
 
     #[test]
@@ -543,6 +576,47 @@ mod tests {
     #[test]
     fn mention_only_symbols_are_rejected() {
         assert!(locate(b"parse(value)\n", "parse", "source.py").is_err());
+    }
+
+    #[test]
+    fn every_same_line_declaration_is_considered() {
+        let source = b"const other = 1; const target = 2;\n";
+        let location = locate(source, "target", "source.js").unwrap();
+        assert_eq!(location.identifier_column, 23);
+        assert_eq!((location.span.start, location.span.end), (1, 1));
+        assert!(
+            locate(
+                b"let target = 1; { let target = 2; }\n",
+                "target",
+                "source.js"
+            )
+            .is_err()
+        );
+        assert_eq!(
+            declaration_lines(b"fn target() {} fn target() {}\n", "target"),
+            vec![1, 1]
+        );
+    }
+
+    #[test]
+    fn declaration_shapes_in_strings_and_comments_are_not_candidates() {
+        for source in [
+            "const other = \"; const target = 2;\";\n",
+            "/*\nfn target() {}\n*/\n",
+            "const text = `\nfunction target() {}\n`;\n",
+        ] {
+            assert!(locate(source.as_bytes(), "target", "source.js").is_err());
+        }
+    }
+
+    #[test]
+    fn statement_ends_preserve_complete_ranges() {
+        let source = b"const target = [\n    1,\n    2,\n];\nconsole.log(target);\n";
+        let location = locate(source, "target", "source.js").unwrap();
+        assert_eq!((location.span.start, location.span.end), (1, 4));
+        let source = b"def target():\n    first(); second()\n    finish()\ndef next():\n    pass\n";
+        let location = locate(source, "target", "source.py").unwrap();
+        assert_eq!((location.span.start, location.span.end), (1, 3));
     }
 
     #[test]

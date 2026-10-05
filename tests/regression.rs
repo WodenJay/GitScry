@@ -45,6 +45,8 @@ fn symbol_queries_reject_ambiguity_and_mentions_at_the_pinned_revision() {
     let repo = TestRepo::new();
     for contents in [
         b"fn target() {}\nfn target() {}\n".as_slice(),
+        b"fn target() {} fn target() {}\n".as_slice(),
+        b"/*\nfn target() {}\n*/\n".as_slice(),
         b"// target is mentioned\nfn other() { target(); }\n".as_slice(),
     ] {
         repo.commit("src/a.rs", contents, "Invalid symbol target", None);
