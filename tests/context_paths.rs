@@ -225,3 +225,100 @@ fn context_keeps_three_relationship_bases_and_individual_sources_in_one_slot() {
     assert_eq!(limited["suggestions"].as_array().unwrap().len(), 1);
     assert_eq!(limited["truncated"], true);
 }
+
+#[test]
+fn path_follow_on_merge_preserves_historical_followup_rank() {
+    let repo = TestRepo::new();
+    let commit = |files: &[(&str, &str)], date: &str| {
+        for (path, content) in files {
+            fs::write(repo.dir.path().join(path), content).unwrap();
+        }
+        support::git(repo.dir.path(), ["add", "--all"]);
+        let output = support::git_command(repo.dir.path())
+            .args(["commit", "-m", "change"])
+            .env("GIT_AUTHOR_DATE", date)
+            .env("GIT_COMMITTER_DATE", date)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+
+    commit(
+        &[
+            ("strong.rs", "fn strong_start() {}\n"),
+            ("weak.rs", "fn weak_start() {}\n"),
+        ],
+        "2024-12-31T12:00:00Z",
+    );
+
+    let mut current_content = String::new();
+    for index in 1..=5 {
+        let origin = format!("fn origin_{index}() {{ uniqueValue{index}(); }}\n");
+        let origin_path = format!("origin-{index}.rs");
+        let date = format!("2025-01-01T12:00:{index:02}Z");
+        current_content.push_str(&origin);
+        commit(&[(&origin_path, &origin)], &date);
+    }
+
+    commit(
+        &[("weak.rs", "fn weak_followup_one() {}\n")],
+        "2025-01-01T12:01:00Z",
+    );
+    commit(
+        &[("weak.rs", "fn weak_followup_two() {}\n")],
+        "2025-01-01T12:01:10Z",
+    );
+    commit(
+        &[("current.rs", "fn path_marker_one() {}\n")],
+        "2025-01-01T12:02:00Z",
+    );
+    commit(
+        &[("current.rs", "fn path_marker_two() {}\n")],
+        "2025-01-01T12:02:10Z",
+    );
+
+    for index in 1..=5 {
+        let followup = format!("fn strong_followup_{index}() {{}}\n");
+        let date = format!("2025-01-01T12:03:{index:02}Z");
+        commit(&[("strong.rs", &followup)], &date);
+    }
+    for day in 1..=16 {
+        let date = format!("2025-03-{day:02}T12:00:00Z");
+        let noise = format!("{day}\n");
+        commit(&[("noise.txt", &noise)], &date);
+    }
+
+    repo.index();
+    fs::write(repo.dir.path().join("current.rs"), &current_content).unwrap();
+
+    let report = json(&repo, &["context", "--limit", "100", "--json"]);
+    let suggestions = report["suggestions"].as_array().unwrap();
+    let strong = suggestions
+        .iter()
+        .find(|item| item["path"] == "strong.rs" && item["category"] == "historical_followup")
+        .expect("strong historical follow-up");
+    let weak = suggestions
+        .iter()
+        .find(|item| item["path"] == "weak.rs" && item["category"] == "historical_followup")
+        .expect("weak historical follow-up");
+    let strong_chains = strong["historical_followup"]["independent_chains"]
+        .as_u64()
+        .unwrap();
+    let weak_chains = weak["historical_followup"]["independent_chains"]
+        .as_u64()
+        .unwrap();
+    assert_eq!(strong_chains, 5, "{report}");
+    assert_eq!(weak_chains, 2, "{report}");
+    assert!(
+        !strong["follow_on"].as_array().unwrap().is_empty(),
+        "{report}"
+    );
+    assert!(weak["follow_on"].as_array().unwrap().is_empty(), "{report}");
+
+    let limited = json(&repo, &["context", "--limit", "1", "--json"]);
+    assert_eq!(limited["suggestions"][0]["path"], "strong.rs", "{report}");
+}
