@@ -79,6 +79,11 @@ pub(crate) enum Request {
         anchor: WhyAnchor,
         at: Option<String>,
     },
+    TestsTarget {
+        paths: Vec<String>,
+        anchor: WhyAnchor,
+        at: Option<String>,
+    },
     Patterns {
         paths: Vec<String>,
         min_support: usize,
@@ -229,7 +234,10 @@ pub(crate) fn execute(request: Request, options: Options) -> Result<Outcome, App
         }
         Request::Related(paths) => run_paths(paths, options, capabilities::related),
         Request::RelatedTarget { paths, anchor, at } => {
-            capabilities::relations::execute_target(paths, anchor, at, options)
+            capabilities::relations::execute_target(paths, anchor, at, options, false)
+        }
+        Request::TestsTarget { paths, anchor, at } => {
+            capabilities::relations::execute_target(paths, anchor, at, options, true)
         }
         Request::Patterns { paths, min_support } => {
             capabilities::patterns::execute(paths, min_support, options)

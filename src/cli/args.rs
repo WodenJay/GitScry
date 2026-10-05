@@ -21,7 +21,8 @@ Your Git history is a treasure trove. GitScry uncovers the implementation exampl
 
 Pick one command by intent, then run `gitscry <command> --help` for inputs, options, and examples.";
 
-// Derive the command map from clap metadata so descriptions stay owned by each command.
+const TESTS_ABOUT: &str = "Find current test paths changed alongside seeds, a line, or a symbol";
+// Keep the overview grouped without rebuilding every command for help generation.
 fn root_help_template() -> String {
     use std::fmt::Write;
 
@@ -80,6 +81,19 @@ pub(crate) struct GithubLinkArgs {
     /// GitHub repository to query; does not enable link fetching by itself.
     #[arg(long = "github-repo", value_name = "OWNER/REPO")]
     pub(crate) github_repo: Option<String>,
+}
+
+#[derive(Debug, Args, Default)]
+pub(crate) struct TestsTargetArgs {
+    /// Select actual changed-line history for one one-based line in a file.
+    #[arg(long, value_parser = parse_line)]
+    pub(crate) line: Option<usize>,
+    /// Select actual changes throughout one uniquely resolved symbol in a file.
+    #[arg(long)]
+    pub(crate) symbol: Option<String>,
+    /// Revision containing the selected target; defaults to current HEAD.
+    #[arg(long, requires = "tests_anchor", value_name = "REV")]
+    pub(crate) at: Option<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -541,14 +555,21 @@ Examples:
     },
 
     #[command(
-        about = "Find current test paths historically changed alongside one or more seed paths",
-        long_about = "Find current test paths historically changed alongside one or more seed paths.\n\nUse `gitscry tests` when you changed code and want the test files that historically changed with it: it returns existing test paths ranked by co-change history.\n\nRequired input: one or more repository-relative seed PATHS.\n\nTest candidates remain current test paths in the working tree; scope narrows historical support, not the current test-path target set. `--from-rev REV` excludes that commit and its ancestors; `--to-rev REV` includes that commit and its ancestors and defaults to current HEAD's reachable history, intersected with cached commits. Explicit scope revisions must exist in the published cache, and the lower revision must be an ancestor of the upper revision. `--since` and `--until` filter committer time: `YYYY-MM-DD` means an inclusive UTC calendar day, while RFC 3339 timestamps with `Z` or an explicit offset mean inclusive instants. Timezone-free timestamps are rejected. All bounds intersect. Historical support and scoring are filtered before ranking and `--limit`; scoped output reports resolved bounds and the published cache tip and coverage status. Without scope flags, current HEAD's reachable history intersected with cached commits is used; incomplete coverage is warned and can be improved with `gitscry index`.\n\nExamples:\n\n  gitscry tests src/lib.rs --from-rev <base> --to-rev release\n\n  gitscry tests src/cli.rs --since 2025-01-01 --until 2025-01-31"
+        group(
+            ArgGroup::new("tests_anchor")
+                .args(["line", "symbol"])
+                .multiple(false),
+        ),
+        about = TESTS_ABOUT,
+        long_about = "Find current test paths historically changed alongside seed paths or actual changes to one selected line or symbol.\n\nWithout `--line` or `--symbol`, `gitscry tests` ranks current test paths using commits touching any seed path. Target mode instead traces actual changes for one selected file target and ranks only current test paths that co-changed with target-touch commits. Target mode requires exactly one seed file; directories and multiple seeds are not accepted. `--line` is one-based, and `--symbol` selects actual changes throughout one uniquely resolved symbol. The selectors are mutually exclusive. `--at REV` selects target content at that revision, defaults to current HEAD, requires a selector, and is independent of historical scope. Target history is reported as available, partial, or unavailable. An empty result does not mean that no tests exist. These results are historical associations, not coverage assertions or test recommendations.\n\nTest candidates remain current test paths in the working tree; scope narrows historical support, not the current test-path target set. Target mode excludes whole-file-only and ordinary related-path changes from target support. Deleted test paths are omitted, and unresolved historical renames may be reported as a warning. `--from-rev REV` excludes that commit and its ancestors; `--to-rev REV` includes that commit and its ancestors and defaults to current HEAD's reachable history, intersected with cached commits. Explicit scope revisions must exist in the published cache, and the lower revision must be an ancestor of the upper revision. `--since` and `--until` filter committer time: `YYYY-MM-DD` means an inclusive UTC calendar day, while RFC 3339 timestamps with `Z` or an explicit offset mean inclusive instants. Timezone-free timestamps are rejected. All bounds intersect. Historical support and scoring are filtered before ranking and `--limit`; scoped output reports resolved bounds and the published cache tip and coverage status. Without scope flags, current HEAD's reachable history intersected with cached commits is used; incomplete coverage is warned and can be improved with `gitscry index`.\n\nExamples:\n\n  gitscry tests src/lib.rs --line 12\n\n  gitscry tests src/engine.rs --symbol Engine::run --at release --from-rev <base>\n\n  gitscry tests src/lib.rs src/cli.rs --to-rev release"
     )]
     #[command(after_long_help = MATERIAL_LINKS_LONG_HELP)]
     Tests {
         /// Repository-relative seed paths matched against history.
         #[arg(required = true, num_args = 1..)]
         paths: Vec<String>,
+        #[command(flatten)]
+        target: TestsTargetArgs,
         #[command(flatten)]
         scope: HistoricalScopeArgs,
         #[command(flatten)]
