@@ -11,8 +11,8 @@
 
 ## Cargo Rules
 
-- Limit cargo thread: `--jobs 1`.
-- Before completing a Rust task, run `cargo fmt --all -- --check` and `cargo clippy --all-targets --all-features --jobs 1 -- -D warnings`. No warnings should be emitted.
+- Limit cargo thread: `--jobs 1` during development.
+- Before completing a Rust task, run `cargo fmt --all` and `cargo clippy --all-targets --all-features --jobs 1 -- -D warnings`. No warnings should be emitted.
 
 ## Agent skills
 
