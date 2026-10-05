@@ -100,6 +100,7 @@ pub(crate) enum Category {
     HistoricalFollowup,
     Test,
     CoChangingFile,
+    PathFollowOn,
 }
 impl Category {
     pub(crate) fn as_str(self) -> &'static str {
@@ -109,6 +110,7 @@ impl Category {
             Self::CoChangingFile => "co_changing_file",
             Self::HistoricalChange => "historical_change",
             Self::HistoricalFollowup => "historical_followup",
+            Self::PathFollowOn => "path_follow_on",
         }
     }
     fn index(self) -> usize {
@@ -118,6 +120,7 @@ impl Category {
             Self::HistoricalFollowup => 2,
             Self::Test => 3,
             Self::CoChangingFile => 4,
+            Self::PathFollowOn => 5,
         }
     }
 }
@@ -180,6 +183,7 @@ pub(crate) struct Suggestion {
     pub(crate) content_matches_truncated: bool,
     pub(crate) abandonment: Option<crate::analysis::Failure>,
     pub(crate) historical_followup: Option<HistoricalFollowup>,
+    pub(crate) follow_on: Vec<crate::analysis::PathObservation>,
     pub(crate) co_change: Option<CoChange>,
 }
 
@@ -360,6 +364,7 @@ fn run(
                 content_matches_truncated: false,
                 abandonment: None,
                 historical_followup: None,
+                follow_on: Vec::new(),
                 co_change: None,
             },
             supporting,
@@ -408,9 +413,10 @@ fn run(
         });
     }
     merge_cochange_followups(&mut ranked);
+    merge_path_follow_on(context, repository, selected_paths, &excluded, &mut ranked)?;
     ranked.sort_by(compare_ranked_suggestions);
     report.matched_count = ranked.len();
-    let mut category_counts = [0; 5];
+    let mut category_counts = [0; 6];
     for mut ranked_suggestion in ranked {
         let category = ranked_suggestion.suggestion.category;
         let co_change_category = ranked_suggestion
@@ -460,6 +466,79 @@ fn run(
     }
     report.truncated = report.suggestions.len() < report.matched_count;
     Ok(report)
+}
+
+// Path origins are evaluated per source by the shared engine. Merge only file
+// relationships, not historical change/abandonment items representing commits.
+fn merge_path_follow_on(
+    context: &Context,
+    repository: &Repository,
+    sources: &[Vec<u8>],
+    excluded: &HashSet<Vec<u8>>,
+    ranked: &mut Vec<RankedSuggestion>,
+) -> Result<(), AppError> {
+    for evidence in
+        retrieval::follow_on::paths(&context.session, repository, sources, context.filter())?
+    {
+        let path = &evidence.observation.path;
+        if excluded.contains(path) {
+            continue;
+        }
+        let index = ranked.iter().position(|item| {
+            item.suggestion.path == *path
+                && matches!(
+                    item.suggestion.category,
+                    Category::Test
+                        | Category::CoChangingFile
+                        | Category::HistoricalFollowup
+                        | Category::PathFollowOn
+                )
+        });
+        let item = if let Some(index) = index {
+            &mut ranked[index]
+        } else {
+            ranked.push(RankedSuggestion {
+                strength: 0,
+                time: evidence.observation.latest_support_time,
+                suggestion: Suggestion {
+                    category: Category::PathFollowOn,
+                    path: path.clone(),
+                    associated_current_paths: Vec::new(),
+                    basis: Vec::new(),
+                    selection_routes: Vec::new(),
+                    citations: Vec::new(),
+                    supporting_count: 0,
+                    citations_truncated: false,
+                    content_matches: Vec::new(),
+                    content_matches_truncated: false,
+                    abandonment: None,
+                    historical_followup: None,
+                    follow_on: Vec::new(),
+                    co_change: None,
+                },
+                supporting: Vec::new(),
+                co_change_supporting: Vec::new(),
+            });
+            ranked.last_mut().unwrap()
+        };
+        if !item.suggestion.selection_routes.contains(&"path_follow_on") {
+            item.suggestion.selection_routes.push("path_follow_on");
+        }
+        if !item
+            .suggestion
+            .associated_current_paths
+            .contains(&evidence.source)
+        {
+            item.suggestion
+                .associated_current_paths
+                .push(evidence.source.clone());
+            item.suggestion.associated_current_paths.sort();
+        }
+        item.strength = item.suggestion.associated_current_paths.len();
+        item.time = item.time.max(evidence.observation.latest_support_time);
+        item.suggestion.follow_on.push(evidence);
+    }
+    Ok(())
 }
 
 fn merge_cochange_followups(ranked: &mut Vec<RankedSuggestion>) {
@@ -611,6 +690,7 @@ mod tests {
                 content_matches_truncated: false,
                 abandonment: None,
                 historical_followup,
+                follow_on: Vec::new(),
                 co_change: None,
             },
             supporting: Vec::new(),

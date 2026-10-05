@@ -86,6 +86,7 @@ pub(super) fn discover(
             supporting_count: observation.supporting_origins, citations_truncated: false,
             content_matches: Vec::new(), content_matches_truncated: false,
             abandonment: None, historical_followup: Some(detail), co_change: None,
+            follow_on: Vec::new(),
         })
     }).collect())
 }

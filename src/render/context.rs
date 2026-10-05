@@ -156,6 +156,9 @@ pub(super) fn format_report(report: &ContextReport) -> String {
                     .unwrap_or_else(|| "unknown".to_owned())
             ));
         }
+        for evidence in &suggestion.follow_on {
+            material::render_follow_on(&mut lines, evidence);
+        }
         if let Some(followup) = &suggestion.historical_followup {
             let baseline_lift = followup
                 .baseline_lift()
@@ -357,6 +360,7 @@ struct JsonSuggestion<'a> {
     abandonment: Option<JsonAbandonment<'a>>,
     historical_followup: Option<JsonHistoricalFollowup<'a>>,
     co_change: Option<JsonCoChange<'a>>,
+    follow_on: Vec<json::JsonFollowOn<'a>>,
 }
 #[derive(Serialize)]
 struct JsonAbandonment<'a> {
@@ -419,6 +423,11 @@ impl<'a> From<&'a ContextSuggestion> for JsonSuggestion<'a> {
     fn from(suggestion: &'a ContextSuggestion) -> Self {
         Self {
             category: suggestion.category.as_str(),
+            follow_on: suggestion
+                .follow_on
+                .iter()
+                .map(json::json_follow_on)
+                .collect(),
             abandonment: suggestion
                 .abandonment
                 .as_ref()

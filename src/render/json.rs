@@ -323,7 +323,7 @@ pub(super) enum JsonPath<'a> {
 }
 
 #[derive(Serialize)]
-struct JsonFollowOn<'a> {
+pub(super) struct JsonFollowOn<'a> {
     source: JsonPath<'a>,
     candidate: JsonPath<'a>,
     supporting_origins: usize,
@@ -352,7 +352,7 @@ struct JsonFollowOnExample<'a> {
     elapsed_seconds: i64,
 }
 
-fn json_follow_on(evidence: &crate::analysis::PathObservation) -> JsonFollowOn<'_> {
+pub(super) fn json_follow_on(evidence: &crate::analysis::PathObservation) -> JsonFollowOn<'_> {
     let observation = &evidence.observation;
     JsonFollowOn {
         source: json_path(&evidence.source),

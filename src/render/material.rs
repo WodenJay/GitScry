@@ -444,40 +444,7 @@ fn render_relation(lines: &mut Vec<String>, material: &Material, relation: &Rela
         ));
     }
     for evidence in &relation.follow_on {
-        let observation = &evidence.observation;
-        lines.push(format!(
-            "  follow-on: {} -> {}",
-            escape::path(&evidence.source),
-            escape::path(&observation.path)
-        ));
-        lines.push(format!(
-            "    supporting origins: {}/{} eligible complete origins; {} independent chains",
-            observation.supporting_origins,
-            observation.eligible_origins,
-            observation.independent_chains
-        ));
-        lines.push(format!(
-            "    background: {}/{} uniformly sampled complete origins (at most 100)",
-            observation.baseline_occurrences, observation.baseline_sample_size
-        ));
-        lines.push(format!("    window: {} days and {} shortest parent edges, inclusive; proper descendants; non-merge events", observation.observation_days, crate::analysis::FOLLOW_ON_MAX_PARENT_DISTANCE));
-        lines.push("    denominator: candidate-touching origins excluded from source and background pools; incomplete/unobserved windows excluded".to_owned());
-        lines.push("    identity: detected renames only; copies and recreation start new incarnations; historical association, not causation".to_owned());
-        for chain in &observation.chains {
-            lines.push(format!(
-                "    example: {} {} -> {} {}; {} parent edges, {} seconds",
-                chain.origin_oid,
-                escape::path(&chain.origin_path),
-                chain.later_oid,
-                escape::path(&chain.later_path),
-                chain.parent_distance,
-                chain.elapsed_seconds
-            ));
-        }
-        lines.push(format!(
-            "    omitted examples: {}",
-            observation.omitted_examples
-        ));
+        render_follow_on(lines, evidence);
     }
     lines.push(format!("  confidence: {}", material.confidence.as_str()));
     lines.push(format!("  basis: {}", material.basis.join(", ")));
@@ -565,4 +532,44 @@ fn render_related_commits(lines: &mut Vec<String>, material: &Material) {
             None => lines.push(format!("  commit: {} {}", citation.abbreviation, subject)),
         }
     }
+}
+
+pub(super) fn render_follow_on(
+    lines: &mut Vec<String>,
+    evidence: &crate::analysis::PathObservation,
+) {
+    let observation = &evidence.observation;
+    lines.push(format!(
+        "  follow-on: {} -> {}",
+        escape::path(&evidence.source),
+        escape::path(&observation.path)
+    ));
+    lines.push(format!(
+        "    supporting origins: {}/{} eligible complete origins; {} independent chains",
+        observation.supporting_origins,
+        observation.eligible_origins,
+        observation.independent_chains
+    ));
+    lines.push(format!(
+        "    background: {}/{} uniformly sampled complete origins (at most 100)",
+        observation.baseline_occurrences, observation.baseline_sample_size
+    ));
+    lines.push(format!("    window: {} days and {} shortest parent edges, inclusive; proper descendants; non-merge events", observation.observation_days, crate::analysis::FOLLOW_ON_MAX_PARENT_DISTANCE));
+    lines.push("    denominator: candidate-touching origins excluded from source and background pools; incomplete/unobserved windows excluded".to_owned());
+    lines.push("    identity: detected renames only; copies and recreation start new incarnations; historical association, not causation".to_owned());
+    for chain in &observation.chains {
+        lines.push(format!(
+            "    example: {} {} -> {} {}; {} parent edges, {} seconds",
+            chain.origin_oid,
+            escape::path(&chain.origin_path),
+            chain.later_oid,
+            escape::path(&chain.later_path),
+            chain.parent_distance,
+            chain.elapsed_seconds
+        ));
+    }
+    lines.push(format!(
+        "    omitted examples: {}",
+        observation.omitted_examples
+    ));
 }
