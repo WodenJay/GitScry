@@ -374,6 +374,12 @@ fn related_directory_retains_deleted_and_moved_history_but_not_later_outside_edi
     assert!(
         !materials
             .iter()
+            .any(|material| material["paths"][0] == "moved.rs"),
+        "moved source incarnation leaked as a co-change candidate: {json}"
+    );
+    assert!(
+        !materials
+            .iter()
             .any(|material| material["paths"][0] == "later-only.rs"),
         "{json}"
     );
@@ -470,16 +476,9 @@ fn related_directory_follow_on_does_not_reclassify_moved_source_edits() {
     assert!(output.status.success(), "{}", stderr(&output));
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     let materials = json["materials"].as_array().unwrap();
-    let moved = materials
-        .iter()
-        .find(|item| item["paths"][0] == "moved.rs")
-        .expect("move boundary should keep the moved file as co-change material");
-    assert!(moved["detail"]["co_change_count"].as_u64().unwrap() > 0);
     assert!(
-        moved["detail"]["follow_on"]
-            .as_array()
-            .is_none_or(|evidence| evidence.is_empty()),
-        "moved source file leaked as follow-on material: {json}"
+        !materials.iter().any(|item| item["paths"][0] == "moved.rs"),
+        "moved source file leaked into related candidates: {json}"
     );
 
     let control = materials

@@ -193,7 +193,19 @@ pub(crate) fn related(
             &selected_paths,
             scope,
         )?;
-        return directory::run(session, observations, sources, follow_on, limit);
+        let revision = scope
+            .ok_or_else(|| AppError::operational("missing pinned history scope"))?
+            .to_oid
+            .as_str();
+        return directory::run(
+            session,
+            &repository,
+            revision,
+            observations,
+            sources,
+            follow_on,
+            limit,
+        );
     }
     for source in &mut sources {
         source.matched = session.relation_source_matched(&source.path, scope)?;

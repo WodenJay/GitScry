@@ -343,6 +343,97 @@ fn incarnation_changes(
     changes
 }
 
+fn is_selected_source_incarnation(
+    history: &[HistoryCommit],
+    incarnation_changes: &HashSet<String>,
+    selected_paths: &HashSet<Vec<u8>>,
+) -> bool {
+    history.iter().any(|commit| {
+        incarnation_changes.contains(&commit.oid)
+            && commit
+                .changes
+                .iter()
+                .filter(|change| commit.anchored_ordinals.contains(&change.ordinal))
+                .any(|change| {
+                    change
+                        .old_path
+                        .as_deref()
+                        .is_some_and(|path| selected_paths.contains(path))
+                        || change
+                            .new_path
+                            .as_deref()
+                            .is_some_and(|path| selected_paths.contains(path))
+                })
+    })
+}
+
+pub(crate) fn selected_source_incarnations(
+    session: &QuerySession,
+    repository: &Repository,
+    revision: &str,
+    selected_paths: &HashSet<Vec<u8>>,
+    candidates: &[(Vec<u8>, String)],
+) -> Result<HashSet<Vec<u8>>, AppError> {
+    if selected_paths.is_empty() || candidates.is_empty() {
+        return Ok(HashSet::new());
+    }
+
+    let parents = repository.reachable_commit_parents(revision)?;
+    let cached_commits = session.commit_oids()?;
+    let identity_cached = parents
+        .keys()
+        .filter(|oid| cached_commits.contains(*oid))
+        .cloned()
+        .collect::<HashSet<_>>();
+    let mut histories = HashMap::<Vec<u8>, Vec<HistoryCommit>>::new();
+    let mut excluded = HashSet::new();
+    let mut checked_incarnations = HashMap::<Vec<u8>, HashSet<String>>::new();
+
+    for (path, oid) in candidates {
+        if excluded.contains(path) {
+            continue;
+        }
+        if selected_paths.contains(path) {
+            excluded.insert(path.clone());
+            continue;
+        }
+        let checked = checked_incarnations.entry(path.clone()).or_default();
+        if checked.contains(oid) {
+            continue;
+        }
+        let history = match histories.entry(path.clone()) {
+            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(session.timeline_history(path, &identity_cached)?)
+            }
+        };
+        let history_by_oid = history
+            .iter()
+            .enumerate()
+            .map(|(index, commit)| (commit.oid.clone(), index))
+            .collect::<HashMap<_, _>>();
+        let Some(change) = path_change(history, &history_by_oid, oid, path) else {
+            continue;
+        };
+        let target = if change.new_path.as_deref() == Some(path.as_slice()) {
+            oid.as_str()
+        } else if let Some(parent) = parents.get(oid).and_then(|parents| parents.first()) {
+            parent.as_str()
+        } else {
+            continue;
+        };
+        let incarnation_changes =
+            incarnation_changes(history, path, target, &parents, &identity_cached);
+        checked.extend(incarnation_changes.iter().cloned());
+        checked.insert(oid.clone());
+        if is_selected_source_incarnation(history, &incarnation_changes, selected_paths) {
+            excluded.insert(path.clone());
+        }
+    }
+
+    Ok(excluded)
+}
+
 fn path_change<'a>(
     history: &'a [HistoryCommit],
     history_by_oid: &HashMap<String, usize>,
@@ -764,24 +855,7 @@ pub(crate) fn discover(
         if incarnation_changes.is_empty() {
             continue;
         }
-        let is_selected_source = history.iter().any(|commit| {
-            incarnation_changes.contains(&commit.oid)
-                && commit
-                    .changes
-                    .iter()
-                    .filter(|change| commit.anchored_ordinals.contains(&change.ordinal))
-                    .any(|change| {
-                        change
-                            .old_path
-                            .as_deref()
-                            .is_some_and(|path| selected_paths.contains(path))
-                            || change
-                                .new_path
-                                .as_deref()
-                                .is_some_and(|path| selected_paths.contains(path))
-                    })
-        });
-        if is_selected_source {
+        if is_selected_source_incarnation(&history, &incarnation_changes, &selected_paths) {
             continue;
         }
         let scoped_changes = incarnation_changes

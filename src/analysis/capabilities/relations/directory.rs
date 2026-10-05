@@ -1,5 +1,5 @@
-//! Directory co-change uses historical path membership, not file lineage.
-use std::collections::{BTreeSet, HashMap};
+//! Directory co-change excludes historical source paths and their file incarnations.
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use super::{
     Detail, MASS_CHANGE_PATH_LIMIT, Material, ModuleCoChange, ModuleSourceSupport, ModuleSupport,
@@ -90,6 +90,8 @@ struct SourceCommit {
 
 pub(super) fn run(
     session: &QuerySession,
+    repository: &crate::git::Repository,
+    revision: &str,
     observations: Vec<crate::cache::PatternObservation>,
     sources: Vec<RelationSource>,
     follow_on: super::retrieval::follow_on::PathAnalysis,
@@ -101,6 +103,8 @@ pub(super) fn run(
     let mut mass_changes_filtered = false;
     let mut totals = HashMap::<Vec<u8>, usize>::new();
     let mut support = HashMap::<Vec<u8>, Vec<SourceCommit>>::new();
+    let selected_paths = selected_paths(&sources, &observations);
+    let selected_path_set = selected_paths.iter().cloned().collect::<HashSet<_>>();
     for commit in observations {
         let source_support = sources
             .iter()
@@ -136,7 +140,7 @@ pub(super) fn run(
         }
         eligible += 1;
         for path in &commit.paths {
-            if !internal.contains(path) {
+            if !internal.contains(path) && !selected_paths.contains(path) {
                 *totals.entry(path.clone()).or_default() += 1;
             }
         }
@@ -145,7 +149,11 @@ pub(super) fn run(
         }
         touches += 1;
         let internal_paths = internal.iter().cloned().collect::<Vec<_>>();
-        for path in commit.paths.iter().filter(|path| !internal.contains(*path)) {
+        for path in commit
+            .paths
+            .iter()
+            .filter(|path| !internal.contains(*path) && !selected_paths.contains(*path))
+        {
             support.entry(path.clone()).or_default().push(SourceCommit {
                 oid: commit.oid.clone(),
                 commit_time: commit.commit_time,
@@ -154,6 +162,22 @@ pub(super) fn run(
             });
         }
     }
+    let candidate_occurrences = support
+        .iter()
+        .flat_map(|(path, commits)| {
+            commits
+                .iter()
+                .map(move |commit| (path.clone(), commit.oid.clone()))
+        })
+        .collect::<Vec<_>>();
+    let excluded_source_paths = super::retrieval::follow_on::selected_source_incarnations(
+        session,
+        repository,
+        revision,
+        &selected_path_set,
+        &candidate_occurrences,
+    )?;
+    support.retain(|path, _| !excluded_source_paths.contains(path));
     let mut ranked = Vec::new();
     for (path, mut commits) in support {
         commits.sort_by(|left, right| {
