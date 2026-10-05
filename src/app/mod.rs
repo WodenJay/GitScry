@@ -282,6 +282,7 @@ pub(crate) fn execute(
             patterns,
             min_support,
             line,
+            symbol,
             at,
             limit,
             scope,
@@ -293,7 +294,20 @@ pub(crate) fn execute(
                     min_support: min_support.unwrap_or(3),
                 }
             } else if let Some(line) = line {
-                Request::RelatedLine { paths, line, at }
+                Request::RelatedTarget {
+                    paths,
+                    anchor: WhyAnchor::Line { number: line },
+                    at,
+                }
+            } else if let Some(symbol) = symbol {
+                Request::RelatedTarget {
+                    paths,
+                    anchor: WhyAnchor::Symbol {
+                        name: symbol,
+                        number: 0,
+                    },
+                    at,
+                }
             } else {
                 Request::Related(paths)
             },

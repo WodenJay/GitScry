@@ -1,6 +1,6 @@
 use crate::analysis::{
-    Detail, Failure, Material, PatchExcerpt, PatchStatus, Relation, Report, ReportKind,
-    SearchScopeInfo, Step, SymbolFact, SymbolSummary, WhyAttribution,
+    Detail, Failure, Material, PatchExcerpt, PatchStatus, Relation, RelationSelector, Report,
+    ReportKind, SearchScopeInfo, Step, SymbolFact, SymbolSummary, WhyAttribution,
 };
 
 /// Printed when history does not state why an approach failed.
@@ -330,12 +330,22 @@ pub(crate) fn format_report(report: &Report) -> String {
         let denominator = target
             .eligible_target_touch_commits
             .map_or_else(|| "unavailable".to_owned(), |count| count.to_string());
+        let selector = match &target.selector {
+            RelationSelector::Line { line } => format!("--line {line}"),
+            RelationSelector::Symbol {
+                name,
+                start_line,
+                end_line,
+            } => format!(
+                "--symbol {} (lines {start_line}-{end_line})",
+                escape::subject(name)
+            ),
+        };
         lines.insert(
             0,
             format!(
-                "Target: {} --line {} at {} ({})\nEligible target-touch commits: {denominator}",
+                "Target: {} {selector} at {} ({})\nEligible target-touch commits: {denominator}",
                 escape::path(&target.path),
-                target.line,
                 target.revision,
                 target.status
             ),

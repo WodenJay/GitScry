@@ -50,33 +50,36 @@ struct RankedCandidate {
     material: Material,
 }
 
-pub(in crate::analysis) fn execute_line(
+pub(in crate::analysis) fn execute_target(
     paths: Vec<String>,
-    line: usize,
+    anchor: crate::git::WhyAnchor,
     at: Option<String>,
     options: crate::analysis::query::Options,
 ) -> Result<crate::analysis::query::Outcome, AppError> {
     use crate::{
         analysis::{
-            material::RelationTarget,
+            material::{RelationSelector, RelationTarget},
             query::{Context, QueryReport},
         },
         git::{Repository, WhyAnchor},
     };
     if paths.len() != 1 {
-        return Err(AppError::input("--line requires exactly one file path"));
+        let option = match &anchor {
+            WhyAnchor::Line { .. } => "--line",
+            WhyAnchor::Symbol { .. } => "--symbol",
+        };
+        return Err(AppError::input(format!(
+            "{option} requires exactly one file path"
+        )));
     }
     let repository = Repository::discover()?;
     let head = Context::pin_current_head(&repository)?;
-    let target = repository.pin_why_target(
-        at.as_deref().unwrap_or(&head),
-        &paths[0],
-        WhyAnchor::Line { number: line },
-    )?;
+    let target = repository.pin_why_target(at.as_deref().unwrap_or(&head), &paths[0], anchor)?;
     if !target.anchor_valid {
-        return Err(AppError::input(
-            "--line requires a regular file with a valid line",
-        ));
+        return Err(AppError::input(match &target.anchor {
+            WhyAnchor::Line { .. } => "--line requires a regular file with a valid line",
+            WhyAnchor::Symbol { .. } => "--symbol requires one unambiguous declaration",
+        }));
     }
     let context = Context::open_pinned(&repository, head, options.scope)?;
     if at.is_some() {
@@ -106,6 +109,14 @@ pub(in crate::analysis) fn execute_line(
     } else {
         "partial"
     };
+    let selector = match &target.anchor {
+        WhyAnchor::Line { number } => RelationSelector::Line { line: *number },
+        WhyAnchor::Symbol { name, number } => RelationSelector::Symbol {
+            name: name.clone(),
+            start_line: *number,
+            end_line: target.symbol_end.unwrap_or(*number),
+        },
+    };
     let intent = Intent::paths(&paths)?;
     let mut report = run(
         &context.session,
@@ -118,7 +129,7 @@ pub(in crate::analysis) fn execute_line(
     )?;
     report.target = Some(RelationTarget {
         path: target.path,
-        line,
+        selector,
         revision: target.revision,
         status,
         eligible_target_touch_commits: (status != "unavailable").then_some(denominator),

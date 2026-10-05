@@ -70,9 +70,9 @@ pub(crate) enum Request {
         paths: Vec<String>,
     },
     Related(Vec<String>),
-    RelatedLine {
+    RelatedTarget {
         paths: Vec<String>,
-        line: usize,
+        anchor: WhyAnchor,
         at: Option<String>,
     },
     Patterns {
@@ -214,8 +214,8 @@ pub(crate) fn execute(request: Request, options: Options) -> Result<Outcome, App
             run_text(words, paths, options, capabilities::failures)
         }
         Request::Related(paths) => run_paths(paths, options, capabilities::related),
-        Request::RelatedLine { paths, line, at } => {
-            capabilities::relations::execute_line(paths, line, at, options)
+        Request::RelatedTarget { paths, anchor, at } => {
+            capabilities::relations::execute_target(paths, anchor, at, options)
         }
         Request::Patterns { paths, min_support } => {
             capabilities::patterns::execute(paths, min_support, options)
