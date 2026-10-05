@@ -248,7 +248,6 @@ fn fragment_search_context_breaks_continuity_and_scope_filters_history() {
     assert_eq!(value["matched_count"], 0);
 }
 
-
 #[test]
 fn fragment_search_matches_lf_query_against_crlf_history() {
     let repo = TestRepo::new();
