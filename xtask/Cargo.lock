@@ -559,7 +559,7 @@ dependencies = [
 
 [[package]]
 name = "gitscry"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "base64 0.23.1",
  "clap",
@@ -576,6 +576,7 @@ dependencies = [
  "tempfile",
  "tokenizers",
  "ureq",
+ "windows-sys 0.61.2",
  "zip",
 ]
 

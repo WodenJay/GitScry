@@ -1,3 +1,32 @@
+## [0.11.0] - 2026-10-05
+
+### 🚀 Features
+
+- *(context)* Rank historical follow-ups
+- *(context)* Add follow-up check budget
+- *(render)* Bound query stdout, persist overflow
+- *(render)* Merge bounded query output
+- *(related)* Add directional follow-on material
+- *(related)* Merge directional follow-on material
+- *(context)* Add shared path follow-on material
+
+### 🐛 Bug Fixes
+
+- *(release)* Strip blank checksum lines
+- *(context)* Merge budget with auto refresh
+- *(render)* Restrict Windows spill file access
+- *(related)* Exclude ambiguous boundary events
+- *(context)* Clarify follow-on counts and controls
+- *(release)* Normalize checksums before announce
+
+### 📚 Documentation
+
+- Record context dogfooding
+- Add cli rule for assertions about output
+- Centralize test contract rules
+- Protect README
+- *(related)* Explain follow-on material
+- Capture dogfooding runtime context
 ## [0.10.0] - 2026-10-04
 
 ### 🚀 Features
