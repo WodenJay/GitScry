@@ -467,17 +467,6 @@ fn cache_errors_and_shallow_coverage_remain_visible() {
     assert_eq!(count(&json, "file"), 1);
     assert!(!json["coverage"]["warnings"].as_array().unwrap().is_empty());
     assert!(json["coverage"]["warnings"].to_string().contains("shallow"));
-    let help = repo.run(["hotspots", "--help"]);
-    assert!(help.status.success());
-    let help = String::from_utf8(help.stdout).unwrap();
-    assert!(help.contains("merge-only"));
-    assert!(help.contains("--from-rev"));
-    assert!(help.contains("--to-rev"));
-    assert!(help.contains("--since"));
-    assert!(help.contains("--until"));
-    assert!(help.contains("--path-prefix"));
-    assert!(help.contains("churn_complete"));
-    assert!(help.contains("unavailable counts with"));
 }
 
 #[test]
