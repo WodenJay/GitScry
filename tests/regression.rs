@@ -41,6 +41,42 @@ fn set_head_date(repo: &TestRepo, date: &str) {
 }
 
 #[test]
+fn symbol_queries_reject_ambiguity_and_mentions_at_the_pinned_revision() {
+    let repo = TestRepo::new();
+    for contents in [
+        b"fn target() {}\nfn target() {}\n".as_slice(),
+        b"// target is mentioned\nfn other() { target(); }\n".as_slice(),
+    ] {
+        repo.commit("src/a.rs", contents, "Invalid symbol target", None);
+        let bad = repo.head();
+        repo.index();
+        fs::write(repo.dir.path().join("src/a.rs"), b"fn target() {}\n").unwrap();
+        for args in [
+            vec!["why", "src/a.rs", "--symbol", "target", "--at", &bad],
+            vec!["tests", "src/a.rs", "--symbol", "target", "--at", &bad],
+            vec!["related", "src/a.rs", "--symbol", "target", "--at", &bad],
+            vec![
+                "regression",
+                "failure",
+                "--path",
+                "src/a.rs",
+                "--symbol",
+                "target",
+                "--bad",
+                &bad,
+            ],
+        ] {
+            let output = repo.run(&args);
+            assert_eq!(
+                output.status.code(),
+                Some(2),
+                "{args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+}
+#[test]
 fn regression_excludes_previous_file_incarnation_without_good() {
     let repo = TestRepo::new();
     repo.commit(
