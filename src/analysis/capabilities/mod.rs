@@ -25,6 +25,7 @@ pub(in crate::analysis) mod why;
 
 pub(crate) use examples::run as examples;
 pub(crate) use failures::run as failures;
+pub(crate) use relations::{ModuleCoChange, RelationSource};
 pub(crate) use relations::{related, tests};
 
 /// Normalize user-provided paths using Git's shared path canonicalizer.

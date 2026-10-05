@@ -13,6 +13,24 @@ use super::super::{Citation, Confidence, Detail, Intent, Material, Relation, Rep
 
 const MASS_CHANGE_PATH_LIMIT: usize = 50;
 
+mod directory;
+
+#[derive(serde::Serialize)]
+pub(crate) struct RelationSource {
+    pub(crate) path: String,
+    pub(crate) kind: &'static str,
+    pub(crate) matched: bool,
+}
+
+pub(crate) struct ModuleCoChange {
+    pub(crate) touch_commits: usize,
+    pub(crate) support: Vec<ModuleSupport>,
+}
+
+pub(crate) struct ModuleSupport {
+    pub(crate) oid: String,
+    pub(crate) paths: Vec<Vec<u8>>,
+}
 #[cfg(unix)]
 fn current_path_is_file(root: &Path, path: &[u8]) -> bool {
     use std::os::unix::ffi::OsStrExt;
@@ -39,7 +57,42 @@ pub(crate) fn related(
     limit: usize,
     scope: Option<&SearchFilter>,
 ) -> Result<Report, AppError> {
-    run(session, intent, worktree_root, limit, false, scope)
+    let mut sources = intent
+        .anchors()
+        .iter()
+        .map(|path| RelationSource {
+            path: intent.source_spelling(path).to_owned(),
+            kind: if intent.requests_directory(path)
+                || worktree_root.join(intent.source_spelling(path)).is_dir()
+            {
+                "directory"
+            } else {
+                "file"
+            },
+            matched: false,
+        })
+        .collect::<Vec<_>>();
+    if sources.iter().any(|source| source.kind == "directory") {
+        if sources.len() != 1 {
+            return Err(AppError::input(
+                "directory queries currently require a single source path",
+            ));
+        }
+        let observations = session.pattern_observations(scope)?;
+        sources[0].matched = observations.iter().any(|commit| {
+            commit
+                .paths
+                .iter()
+                .any(|path| directory::contains(&sources[0].path, path))
+        });
+        return directory::run(session, observations, sources, limit);
+    }
+    for source in &mut sources {
+        source.matched = session.relation_source_matched(&source.path, scope)?;
+    }
+    let mut report = run(session, intent, worktree_root, limit, false, scope)?;
+    report.relation_sources = sources;
+    Ok(report)
 }
 
 pub(crate) fn tests(
@@ -153,6 +206,7 @@ fn run(
                 co_change_count: support_count,
                 proportion,
                 supporting_count: support_count,
+                module: None,
                 follow_on: Vec::new(),
                 co_change_citations: citation_oids.clone(),
             })),
@@ -197,6 +251,7 @@ fn run(
                             co_change_count: 0,
                             proportion: 0.0,
                             supporting_count: 0,
+                            module: None,
                             follow_on: Vec::new(),
                             co_change_citations: Vec::new(),
                         })),

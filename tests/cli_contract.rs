@@ -151,10 +151,16 @@ fn ordinary_commands_have_a_byte_exact_cli_contract() {
             "{name}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+        // Source interpretation is checked behaviorally in relations.rs, not as prose.
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stdout = stdout
+            .split_inclusive('\n')
+            .filter(|line| !line.starts_with("Source: "))
+            .collect::<String>();
         observed.push_str(&format!(
             "[{name}]\nstatus={:?}\nstdout={}\nstderr={}\n",
             output.status.code(),
-            escaped(&output.stdout),
+            escaped(stdout.as_bytes()),
             escaped(&output.stderr),
         ));
     }

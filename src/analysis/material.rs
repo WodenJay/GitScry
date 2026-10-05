@@ -15,6 +15,7 @@ pub(crate) struct Report {
     pub(crate) why: Option<Box<WhySummary>>,
     pub(crate) scope: Option<SearchScopeInfo>,
     pub(crate) symbol_summary: Option<SymbolSummary>,
+    pub(crate) relation_sources: Vec<super::capabilities::RelationSource>,
 }
 #[derive(Clone, Debug)]
 pub(crate) struct SearchScopeInfo {
@@ -120,6 +121,7 @@ pub(crate) struct Relation {
     pub(crate) supporting_count: usize,
     pub(crate) follow_on: Vec<super::retrieval::follow_on::PathObservation>,
     pub(crate) co_change_citations: Vec<String>,
+    pub(crate) module: Option<super::capabilities::ModuleCoChange>,
 }
 
 /// What history records about why an approach failed. Absent text stays absent, so
@@ -181,6 +183,7 @@ pub(crate) fn report(
         kind,
         materials,
         code_matches: Vec::new(),
+        relation_sources: Vec::new(),
         matched_count,
         truncated: matched_count > limit,
         warnings: Vec::new(),
@@ -197,6 +200,7 @@ pub(crate) fn empty_report(kind: ReportKind) -> Report {
         kind,
         materials: Vec::new(),
         code_matches: Vec::new(),
+        relation_sources: Vec::new(),
         matched_count: 0,
         truncated: false,
         warnings: Vec::new(),

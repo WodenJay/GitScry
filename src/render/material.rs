@@ -298,6 +298,34 @@ pub(crate) fn format_report(report: &Report) -> String {
         }
         lines
     };
+    for source in report.relation_sources.iter().rev() {
+        lines.insert(
+            0,
+            format!(
+                "Source: {} ({}, {})",
+                escape::subject(&source.path),
+                source.kind,
+                if source.matched {
+                    "matched historical paths"
+                } else {
+                    "no matched historical paths in selected scope"
+                }
+            ),
+        );
+    }
+    if report.materials.is_empty() && report.relation_sources.iter().any(|source| source.matched) {
+        lines.push("Matched inputs have no qualifying relations in the selected scope.".to_owned());
+    }
+    if report
+        .relation_sources
+        .iter()
+        .any(|source| source.kind == "directory")
+    {
+        lines.push(
+            "Directory material covers co-change only; follow-on relations are not evaluated."
+                .to_owned(),
+        );
+    }
     if let Some(summary) = &report.symbol_summary {
         lines.splice(0..0, format_symbol_summary(summary));
     }
@@ -416,6 +444,29 @@ fn render_relation(lines: &mut Vec<String>, material: &Material, relation: &Rela
     lines.push(format!("- candidate path: {path}"));
     lines.push(format!("  co-change count: {}", relation.co_change_count));
     lines.push(format!("  proportion: {:.1}%", relation.proportion * 100.0));
+    if let Some(module) = &relation.module {
+        lines.push(format!("  module-touch commits: {}", module.touch_commits));
+        for support in &module.support {
+            let citation = material
+                .citations
+                .iter()
+                .find(|citation| citation.oid == support.oid);
+            let label = citation
+                .map(|citation| citation.abbreviation.as_str())
+                .unwrap_or("");
+            lines.push(format!(
+                "  module paths at {} [{}]: {}",
+                short_oid(&support.oid),
+                label,
+                support
+                    .paths
+                    .iter()
+                    .map(|path| escape::path(path))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+    }
     lines.push(format!(
         "  supporting commits: {}",
         relation.supporting_count

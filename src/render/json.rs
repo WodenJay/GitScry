@@ -44,6 +44,7 @@ pub(crate) fn format_json_report(
         github_links,
         scope: report.scope.as_ref().map(json_scope),
         symbol_summary: report.symbol_summary.as_ref().map(json_symbol_summary),
+        sources: &report.relation_sources,
     })
 }
 
@@ -69,8 +70,21 @@ struct JsonReport<'a> {
     scope: Option<JsonSearchScope<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     symbol_summary: Option<JsonSymbolSummary<'a>>,
+    #[serde(skip_serializing_if = "<[crate::analysis::capabilities::RelationSource]>::is_empty")]
+    sources: &'a [crate::analysis::capabilities::RelationSource],
 }
 
+#[derive(Serialize)]
+struct JsonModule<'a> {
+    touch_commits: usize,
+    support: Vec<JsonModuleSupport<'a>>,
+}
+
+#[derive(Serialize)]
+struct JsonModuleSupport<'a> {
+    oid: &'a str,
+    paths: Vec<JsonPath<'a>>,
+}
 #[derive(Serialize)]
 struct JsonSymbolSummary<'a> {
     introduction: JsonSymbolFact<'a>,
@@ -402,6 +416,8 @@ enum JsonDetail<'a> {
         #[serde(skip_serializing_if = "Vec::is_empty")]
         follow_on: Vec<JsonFollowOn<'a>>,
         co_change_citations: &'a [String],
+        #[serde(skip_serializing_if = "Option::is_none")]
+        module: Option<JsonModule<'a>>,
     },
     TraceFix {
         role: &'a str,
@@ -517,12 +533,24 @@ fn json_detail(detail: &Detail) -> JsonDetail<'_> {
             supporting_count,
             follow_on,
             co_change_citations,
+            module,
         }) => JsonDetail::Relation {
             co_change_count: *co_change_count,
             proportion: *proportion,
             supporting_count: *supporting_count,
             follow_on: follow_on.iter().map(json_follow_on).collect(),
             co_change_citations,
+            module: module.as_ref().map(|module| JsonModule {
+                touch_commits: module.touch_commits,
+                support: module
+                    .support
+                    .iter()
+                    .map(|support| JsonModuleSupport {
+                        oid: &support.oid,
+                        paths: support.paths.iter().map(|path| json_path(path)).collect(),
+                    })
+                    .collect(),
+            }),
         },
         Detail::TraceFix(trace) => JsonDetail::TraceFix {
             role: trace.role,

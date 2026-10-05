@@ -179,6 +179,227 @@ fn related_keeps_case_distinct_paths_as_distinct_history() {
 }
 
 #[test]
+fn related_directory_deduplicates_commits_and_reports_material() {
+    let repo = TestRepo::new();
+    repo.commit_files(
+        &[
+            ("module/a.rs", b"a\n"),
+            ("module/nested/b.rs", b"b\n"),
+            ("outside.rs", b"one\n"),
+        ],
+        "module integration",
+    );
+    let first = repo.head();
+    repo.commit_files(
+        &[("module/a.rs", b"aa\n"), ("module/nested/b.rs", b"bb\n")],
+        "internal change",
+    );
+    repo.commit_files(
+        &[
+            ("module-other/a.rs", b"sibling\n"),
+            ("sibling-only.rs", b"sibling\n"),
+        ],
+        "sibling integration",
+    );
+    repo.index();
+    for input in ["module", "module/"] {
+        let output = repo.run(["related", input, "--json"]);
+        assert!(output.status.success(), "{}", stderr(&output));
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(json["sources"][0]["kind"], "directory");
+        assert_eq!(json["sources"][0]["matched"], true);
+        let materials = json["materials"].as_array().unwrap();
+        assert_eq!(materials.len(), 1, "{json}");
+        assert_eq!(materials[0]["paths"][0], "outside.rs");
+        let detail = &materials[0]["detail"];
+        assert_eq!(detail["co_change_count"], 1);
+        assert_eq!(detail["proportion"], 0.5);
+        assert_eq!(detail["module"]["touch_commits"], 2);
+        assert_eq!(detail["module"]["support"][0]["oid"], first);
+        assert_eq!(
+            detail["module"]["support"][0]["paths"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+    let output = repo.run(["related", "module"]);
+    let text = stdout(&output);
+    assert!(text.contains("outside.rs"), "{text}");
+    assert!(text.contains("module/nested/b.rs"), "{text}");
+    assert!(text.contains(&first[..12]), "{text}");
+}
+
+#[test]
+fn related_directory_retains_deleted_and_moved_history_but_not_later_outside_edits() {
+    let repo = TestRepo::new();
+    repo.commit_files(
+        &[
+            ("old/deleted.rs", b"delete me\n"),
+            ("old/moved.rs", b"move me\n"),
+            ("integration.rs", b"initial\n"),
+        ],
+        "introduce module",
+    );
+    let introduction = repo.head();
+    git(repo.dir.path(), ["mv", "old/moved.rs", "moved.rs"]);
+    git(repo.dir.path(), ["rm", "old/deleted.rs"]);
+    repo.commit_files(&[("integration.rs", b"boundary\n")], "remove module");
+    let boundary = repo.head();
+    repo.commit_files(
+        &[("moved.rs", b"later\n"), ("later-only.rs", b"outside\n")],
+        "outside edits",
+    );
+    repo.index();
+    let output = repo.run(["related", "old/", "--json"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["sources"][0]["kind"], "directory");
+    assert_eq!(json["sources"][0]["matched"], true);
+    let materials = json["materials"].as_array().unwrap();
+    assert!(
+        !materials
+            .iter()
+            .any(|material| material["paths"][0] == "later-only.rs"),
+        "{json}"
+    );
+    let integration = materials
+        .iter()
+        .find(|material| material["paths"][0] == "integration.rs")
+        .unwrap();
+    assert_eq!(integration["detail"]["co_change_count"], 2);
+    assert_eq!(integration["detail"]["module"]["touch_commits"], 2);
+    let support = integration["detail"]["module"]["support"]
+        .as_array()
+        .unwrap();
+    for oid in [&introduction, &boundary] {
+        let commit = support.iter().find(|commit| commit["oid"] == *oid).unwrap();
+        assert!(
+            commit["paths"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("old/moved.rs")),
+            "{json}"
+        );
+    }
+    // Without explicit directory syntax a removed directory remains a file input.
+    let output = repo.run(["related", "old", "--json"]);
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["sources"][0]["kind"], "file");
+    assert_eq!(json["sources"][0]["matched"], false);
+}
+
+#[test]
+fn related_sources_distinguish_unmatched_inputs_from_no_qualifying_relations() {
+    let repo = TestRepo::new();
+    repo.commit_files(&[("lonely/a.rs", b"one\n")], "singleton module");
+    repo.commit_files(
+        &[("paired/a.rs", b"one\n"), ("outside.rs", b"one\n")],
+        "paired module",
+    );
+    repo.index();
+    for (input, kind, matched) in [
+        ("lonely/", "directory", true),
+        ("missing/", "directory", false),
+        ("missing", "file", false),
+    ] {
+        let output = repo.run(["related", input, "--json"]);
+        assert!(output.status.success(), "{}", stderr(&output));
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(json["sources"][0]["kind"], kind);
+        assert_eq!(json["sources"][0]["matched"], matched);
+        assert_eq!(json["matched_count"], 0);
+    }
+    let output = repo.run(["related", "paired/a.rs", "missing", "--json"]);
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(
+        json["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|source| source["path"] == "missing" && source["matched"] == false)
+    );
+    assert!(
+        json["materials"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|material| material["paths"][0] == "outside.rs")
+    );
+    let output = repo.run(["related", "paired/", "--patterns", "--json"]);
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        json["matched_count"], 0,
+        "pattern directories must not expand: {json}"
+    );
+}
+#[test]
+fn related_directory_scope_and_limit_preserve_support_and_eligibility() {
+    let repo = TestRepo::new();
+    repo.commit_files(
+        &[
+            ("module/a.rs", b"base\n"),
+            ("x.rs", b"base\n"),
+            ("y.rs", b"base\n"),
+        ],
+        "base",
+    );
+    let base = repo.head();
+    repo.commit_files(
+        &[
+            ("module/a.rs", b"one\n"),
+            ("x.rs", b"one\n"),
+            ("y.rs", b"one\n"),
+        ],
+        "eligible",
+    );
+    let eligible = repo.head();
+    let mut files = vec![("module/a.rs".to_owned(), b"mass\n".to_vec())];
+    files.extend((0..50).map(|n| (format!("mass/{n}.rs"), b"mass\n".to_vec())));
+    let refs = files
+        .iter()
+        .map(|(path, bytes)| (path.as_str(), bytes.as_slice()))
+        .collect::<Vec<_>>();
+    repo.commit_files(&refs, "mass change");
+    repo.index();
+    let output = repo.run([
+        "related",
+        "module/",
+        "--from-rev",
+        &base,
+        "--json",
+        "--limit",
+        "1",
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let limited: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(limited["matched_count"], 2);
+    assert_eq!(limited["truncated"], true);
+    let material = &limited["materials"][0];
+    assert_eq!(material["detail"]["co_change_count"], 1);
+    assert_eq!(material["detail"]["module"]["touch_commits"], 1);
+    assert_eq!(material["detail"]["module"]["support"][0]["oid"], eligible);
+    let output = repo.run([
+        "related",
+        "module/",
+        "--from-rev",
+        &base,
+        "--json",
+        "--limit",
+        "10",
+    ]);
+    let all: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(all["materials"][0], *material);
+    let output = repo.run(["related", "module/", "--to-rev", &base, "--json"]);
+    let historical: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        historical["materials"][0]["detail"]["module"]["support"][0]["oid"],
+        base
+    );
+}
+
+#[test]
 fn related_discovers_separate_commit_follow_on_by_default() {
     let repo = TestRepo::new();
     for cycle in 0..2 {
@@ -885,6 +1106,61 @@ fn related_does_not_double_count_merge_replays() {
 }
 
 #[test]
+fn related_reports_case_fallback_sources_as_matched() {
+    let repo = TestRepo::new();
+    repo.commit_files(
+        &[("src/Widget.rs", b"widget\n"), ("outside.rs", b"one\n")],
+        "pair",
+    );
+    repo.index();
+    for source in ["Widget.rs", "src/widget.rs"] {
+        let output = repo.run(["related", source, "--json"]);
+        assert!(output.status.success(), "{}", stderr(&output));
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(json["sources"][0]["matched"], true, "{json}");
+        assert!(
+            json["materials"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|material| material["paths"][0] == "outside.rs")
+        );
+    }
+}
+
+#[test]
+fn related_directory_preserves_basename_case_for_membership() {
+    let repo = TestRepo::new();
+    repo.commit_files(
+        &[("Module/a.rs", b"one\n"), ("outside.rs", b"one\n")],
+        "pair",
+    );
+    repo.index();
+    for source in ["Module", "Module/"] {
+        let output = repo.run(["related", source, "--json"]);
+        assert!(output.status.success(), "{}", stderr(&output));
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(json["sources"][0]["kind"], "directory");
+        assert_eq!(json["sources"][0]["matched"], true, "{json}");
+        assert_eq!(json["sources"][0]["path"], "Module");
+        assert_eq!(json["materials"][0]["paths"][0], "outside.rs");
+    }
+}
+
+#[test]
+fn related_repository_root_directory_matches_history_without_external_candidates() {
+    let repo = TestRepo::new();
+    repo.commit_files(&[("src/a.rs", b"one\n"), ("outside.rs", b"one\n")], "pair");
+    repo.index();
+    let output = repo.run(["related", ".", "--json"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["sources"][0]["kind"], "directory");
+    assert_eq!(json["sources"][0]["matched"], true, "{json}");
+    assert_eq!(json["matched_count"], 0);
+}
+
+#[test]
 fn relation_commands_have_fixed_empty_results() {
     let repo = TestRepo::new();
     repo.commit_files(&[("src/only.rs", b"only\n")], "only");
@@ -899,7 +1175,12 @@ fn relation_commands_have_fixed_empty_results() {
         "{related_text}"
     );
     assert!(related_text.contains("coverage complete"), "{related_text}");
-    assert!(related_text.ends_with("No historical relations found.\n"));
+    assert!(!related_text.contains("candidate path:"), "{related_text}");
+    let json_output = repo.run(["related", "src/only.rs", "--json"]);
+    let json: serde_json::Value = serde_json::from_slice(&json_output.stdout).unwrap();
+    assert_eq!(json["sources"][0]["kind"], "file");
+    assert_eq!(json["sources"][0]["matched"], true);
+    assert_eq!(json["matched_count"], 0);
 
     let tests = repo.run(["tests", "src/only.rs"]);
     assert_eq!(tests.status.code(), Some(0));
