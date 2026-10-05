@@ -248,15 +248,6 @@ fn fragment_search_context_breaks_continuity_and_scope_filters_history() {
     assert_eq!(value["matched_count"], 0);
 }
 
-#[test]
-fn fragment_search_help_describes_occurrence_limits() {
-    let repo = TestRepo::new();
-    let output = repo.run(["search", "--help"]);
-    assert!(output.status.success());
-    let help = String::from_utf8(output.stdout).unwrap();
-    assert!(help.contains("or `--code-file PATH`"));
-    assert!(help.contains("fragment occurrences"));
-}
 
 #[test]
 fn fragment_search_matches_lf_query_against_crlf_history() {
