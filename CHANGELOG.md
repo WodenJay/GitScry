@@ -1,3 +1,42 @@
+## [0.12.0] - 2026-10-05
+
+### 🚀 Features
+
+- *(search)* Add exact code fragment lookup
+- *(related)* Add directory co-change
+- *(related)* Merge directory co-change
+- *(related)* Scope history to selected line
+- *(related)* Merge line-scoped history
+- *(relations)* Support mixed sources
+- *(relations)* Merge mixed-source support
+- *(trace-removal)* Trace deleted fragments
+- *(related)* Add symbol targeting
+- *(related)* Merge symbol targeting
+- *(tests)* Scope associations to targets
+- *(related)* Add directory follow-on
+- *(related)* Merge directory follow-on
+
+### 🐛 Bug Fixes
+
+- *(regression)* Respect file incarnations
+- *(regression)* Disclose unresolved identity
+- *(regression)* Merge incarnation boundary fix
+- *(search)* Clarify fragment limits and coverage
+- *(related)* Align source resolution diagnostics
+- *(related)* Preserve degraded line history
+- *(related)* Exclude moved source candidates
+
+### 📚 Documentation
+
+- Add cli rule about simple and direct
+- Add CODING_STANDARDS.md
+- *(dogfooding)* Distill code fragment search to issue
+- *(cli)* Define concise help rules
+- Remove wrong dogfooding
+- Refine cargo fmt rule in AGENTS.md
+- Refine usage of gitscry in DOGFOODING.md
+- *(cli)* Trim help into a usage manual
+- Replace command to real --help output in README
 ## [0.11.0] - 2026-10-05
 
 ### 🚀 Features
