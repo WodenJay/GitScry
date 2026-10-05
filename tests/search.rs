@@ -249,6 +249,66 @@ fn fragment_search_context_breaks_continuity_and_scope_filters_history() {
 }
 
 #[test]
+fn fragment_search_help_describes_occurrence_limits() {
+    let repo = TestRepo::new();
+    let output = repo.run(["search", "--help"]);
+    assert!(output.status.success());
+    let help = String::from_utf8(output.stdout).unwrap();
+    assert!(help.contains("or `--code-file PATH`"));
+    assert!(help.contains("fragment occurrences"));
+}
+
+#[test]
+fn fragment_search_matches_lf_query_against_crlf_history() {
+    let repo = TestRepo::new();
+    repo.commit("block", b"first\r\nsecond\r\n", "CRLF history");
+    repo.index();
+    fs::write(repo.dir.path().join("fragment"), b"first\nsecond\n").unwrap();
+    let output = repo.run(["search", "--code-file", "fragment", "--json"]);
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["matched_count"], 1);
+    assert_eq!(value["occurrences"][0]["content"], "first\r\nsecond\r\n");
+}
+
+#[test]
+fn fragment_search_keeps_replacement_side_contiguous_but_never_joins_hunks() {
+    let repo = TestRepo::new();
+    let middle = (0..12)
+        .map(|n| format!("context {n}\n"))
+        .collect::<String>();
+    repo.commit(
+        "block",
+        format!("first\nsecond\n{middle}first\nsecond\n").as_bytes(),
+        "Original",
+    );
+    repo.commit(
+        "block",
+        format!("other\nreplacement\n{middle}other\nreplacement\n").as_bytes(),
+        "Replace both spans",
+    );
+    let removed = repo.head();
+    repo.index();
+    fs::write(repo.dir.path().join("fragment"), b"first\nsecond\n").unwrap();
+    let output = repo.run([
+        "search",
+        "--code-file",
+        "fragment",
+        "--change",
+        "removed",
+        "--json",
+    ]);
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["matched_count"], 2);
+    assert_eq!(value["occurrences"][0]["commit_id"], removed);
+    assert_eq!(value["occurrences"][0]["start_line"], 1);
+    assert_eq!(value["occurrences"][1]["start_line"], 15);
+    fs::write(repo.dir.path().join("fragment"), b"second\nfirst\n").unwrap();
+    let output = repo.run(["search", "--code-file", "fragment", "--json"]);
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["matched_count"], 0);
+}
+
+#[test]
 fn search_refreshes_new_head_before_resolving_scope() {
     let repo = TestRepo::new();
     repo.commit("old.txt", b"old\n", "Existing history");

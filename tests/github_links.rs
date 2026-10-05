@@ -1478,6 +1478,55 @@ mod unix {
     }
 
     #[test]
+    fn fragment_search_links_only_distinct_returned_commits() {
+        let repo = TestRepo::new();
+        commit(
+            &repo,
+            "Add repeated fragments",
+            "first\nsecond\nfirst\nsecond\n",
+        );
+        repo.index();
+        std::fs::write(repo.dir.path().join("fragment"), b"first\nsecond\n").unwrap();
+        let baseline = repo.run(["search", "--code-file", "fragment", "--json"]);
+        assert!(baseline.status.success());
+        let baseline: serde_json::Value = serde_json::from_slice(&baseline.stdout).unwrap();
+        let gh = FakeGh::new(&successful_response());
+        let output = gh.run(
+            &repo,
+            &[
+                "search",
+                "--code-file",
+                "fragment",
+                "--github-links",
+                "--github-repo",
+                "acme/widget",
+                "--json",
+            ],
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["schema_version"], 6);
+        assert_eq!(value["occurrences"], baseline["occurrences"]);
+        assert_eq!(value["matched_count"], 2);
+        assert_eq!(value["github_links"]["status"], "complete");
+        assert_eq!(
+            value["github_links"]["commit_associations"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            value["github_links"]["commit_associations"][0]["commit_sha"],
+            repo.head()
+        );
+        assert_eq!(gh.calls(), 2);
+    }
+    #[test]
     fn timeline_links_only_the_scoped_current_page() {
         let repo = TestRepo::new();
         commit(&repo, "first timeline entry", "first");
