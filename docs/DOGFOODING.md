@@ -20,3 +20,11 @@ Record a case only when it did not—for example, its output was not useful, it 
 <!-- DO NOT EDIT ABOVE THIS LINE. APPEND NEW ENTRIES BELOW. -->
 
 ## Entries
+
+### 2026-10-05 Directory move-out exclusion
+
+- **Command:** `cargo run --quiet -- related src/analysis/retrieval/ --json --limit 5`
+- **Context:** Development build at HEAD `aae1b41` on `feat/related-directory-follow-on`, with uncommitted candidate-exclusion changes.
+- **Goal:** Check whether a repository-level directory query would expose moved-out source paths as candidates.
+- **Actual:** The query refreshed history and returned 85 matches; its leading co-change candidates included `src/analysis/mod.rs`. It completed successfully but provided no specific moved-out-source evidence, so it did not validate the exclusion bug.
+- **Expected:** A controlled move-out history or surfaced candidate/path attribution that distinguishes the moved source incarnation from independent candidates.

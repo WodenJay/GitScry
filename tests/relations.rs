@@ -374,6 +374,12 @@ fn related_directory_retains_deleted_and_moved_history_but_not_later_outside_edi
     assert!(
         !materials
             .iter()
+            .any(|material| material["paths"][0] == "moved.rs"),
+        "moved source incarnation leaked as a co-change candidate: {json}"
+    );
+    assert!(
+        !materials
+            .iter()
             .any(|material| material["paths"][0] == "later-only.rs"),
         "{json}"
     );
@@ -401,6 +407,99 @@ fn related_directory_retains_deleted_and_moved_history_but_not_later_outside_edi
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(json["sources"][0]["kind"], "file");
     assert_eq!(json["sources"][0]["matched"], false);
+}
+
+#[test]
+fn related_directory_follow_on_does_not_reclassify_moved_source_edits() {
+    let repo = TestRepo::new();
+    repo.commit_files_at(
+        &[
+            ("module/a.rs", b"source one\n"),
+            ("module/moved.rs", b"candidate one\n"),
+        ],
+        "module origin",
+        "2025-01-01T12:00:00Z",
+        "2025-01-01T12:00:00Z",
+    );
+    for (source, date) in [
+        (b"source two\n".as_slice(), "2025-01-20T12:00:00Z"),
+        (b"source three\n".as_slice(), "2025-01-21T12:00:00Z"),
+    ] {
+        repo.commit_files_at(&[("module/a.rs", source)], "module origin", date, date);
+    }
+    git(repo.dir.path(), ["mv", "module/moved.rs", "moved.rs"]);
+    repo.commit_files_at(
+        &[("module/a.rs", b"source four\n")],
+        "move source out",
+        "2025-01-22T12:00:00Z",
+        "2025-01-22T12:00:00Z",
+    );
+    repo.commit_files_at(
+        &[("outside.rs", b"outside one\n")],
+        "outside origin",
+        "2025-01-23T12:00:00Z",
+        "2025-01-23T12:00:00Z",
+    );
+    for (day, moved, outside) in [
+        (
+            24,
+            b"candidate two\n".as_slice(),
+            b"outside two\n".as_slice(),
+        ),
+        (
+            25,
+            b"candidate three\n".as_slice(),
+            b"outside three\n".as_slice(),
+        ),
+    ] {
+        let date = format!("2025-01-{day}T12:00:00Z");
+        repo.commit_files_at(
+            &[("moved.rs", moved), ("outside.rs", outside)],
+            "outside updates",
+            &date,
+            &date,
+        );
+    }
+    for day in 1..=8 {
+        let date = format!("2025-02-{day:02}T12:00:00Z");
+        let noise = format!("background {day}\n");
+        repo.commit_files_at(
+            &[("noise.txt", noise.as_bytes())],
+            "background",
+            &date,
+            &date,
+        );
+    }
+    finish_follow_on_history(&repo);
+
+    let output = repo.run(["related", "module/", "--json"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let materials = json["materials"].as_array().unwrap();
+    assert!(
+        !materials.iter().any(|item| item["paths"][0] == "moved.rs"),
+        "moved source file leaked into related candidates: {json}"
+    );
+
+    let control = materials
+        .iter()
+        .find(|item| item["paths"][0] == "outside.rs")
+        .expect("qualifying outside follow-on control should be reported");
+    assert_eq!(control["detail"]["co_change_count"], 0, "{json}");
+    let control_evidence = control["detail"]["follow_on"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|evidence| evidence["source"] == "module")
+        .unwrap();
+    assert!(
+        control_evidence["supporting_origins"].as_u64().unwrap() >= 2,
+        "{json}"
+    );
+    assert!(
+        control_evidence["independent_chains"].as_u64().unwrap() >= 2,
+        "{json}"
+    );
 }
 
 #[test]
@@ -447,6 +546,36 @@ fn related_sources_distinguish_unmatched_inputs_from_no_qualifying_relations() {
         "pattern directories must not expand: {json}"
     );
 }
+#[test]
+fn related_directory_reports_incomplete_follow_on_observation() {
+    let repo = TestRepo::new();
+    repo.commit_files_at(
+        &[("module/a.rs", b"only source touch\n")],
+        "module touch",
+        "2025-01-01T12:00:00Z",
+        "2025-01-01T12:00:00Z",
+    );
+    let origin = repo.head();
+    finish_follow_on_history(&repo);
+
+    let complete = follow_on_json(&repo, &["related", "module/", "--json"]);
+    assert_eq!(complete["matched_count"], 0, "{complete}");
+    assert_eq!(complete["sources"][0]["matched"], true);
+    assert!(complete["warnings"].as_array().unwrap().is_empty());
+
+    let scoped = follow_on_json(
+        &repo,
+        &["related", "module/", "--to-rev", &origin, "--json"],
+    );
+    assert_eq!(scoped["matched_count"], 0, "{scoped}");
+    assert_eq!(scoped["sources"][0]["matched"], true);
+    assert_eq!(scoped["warnings"].as_array().unwrap().len(), 1);
+
+    let output = repo.run(["related", "module/", "--to-rev", &origin]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(!stderr(&output).trim().is_empty());
+}
+
 #[test]
 fn related_directory_scope_and_limit_preserve_support_and_eligibility() {
     let repo = TestRepo::new();
@@ -512,6 +641,77 @@ fn related_directory_scope_and_limit_preserve_support_and_eligibility() {
     );
 }
 
+#[test]
+fn related_follows_each_mixed_source_independently() {
+    let repo = TestRepo::new();
+    for (cycle, start, later) in [
+        (0, "2025-01-01", "2025-01-02"),
+        (1, "2025-01-20", "2025-01-21"),
+    ] {
+        let start = format!("{start}T12:00:00Z");
+        let later = format!("{later}T12:00:00Z");
+        let source = format!("source {cycle}\n");
+        let source_paths = [
+            ("module/a.rs", source.as_bytes()),
+            ("module/b.rs", source.as_bytes()),
+            ("other/a.rs", source.as_bytes()),
+            ("source.rs", source.as_bytes()),
+        ];
+        repo.commit_files_at(&source_paths, "source touch", &start, &start);
+        repo.commit_files_at(
+            &[("candidate.rs", source.as_bytes())],
+            "candidate update",
+            &later,
+            &later,
+        );
+    }
+    finish_follow_on_history(&repo);
+
+    let json = follow_on_json(
+        &repo,
+        &["related", "module/", "other/", "source.rs", "--json"],
+    );
+    let item = json["materials"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["paths"][0] == "candidate.rs")
+        .unwrap();
+    assert_eq!(item["detail"]["co_change_count"], 0, "{json}");
+    let evidence = item["detail"]["follow_on"].as_array().unwrap();
+    assert_eq!(evidence.len(), 3, "{json}");
+    let sources = evidence
+        .iter()
+        .map(|item| item["source"].as_str().unwrap().to_owned())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        sources,
+        ["module", "other", "source.rs"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+    );
+    let module = evidence
+        .iter()
+        .find(|observation| observation["source"] == "module")
+        .unwrap();
+    for example in module["examples"].as_array().unwrap() {
+        assert_eq!(
+            example["origin_paths"],
+            serde_json::json!(["module/a.rs", "module/b.rs"]),
+            "{json}"
+        );
+    }
+    for observation in evidence {
+        assert_eq!(observation["supporting_origins"], 2, "{json}");
+        assert_eq!(observation["eligible_origins"], 2, "{json}");
+        assert_eq!(observation["independent_chains"], 2, "{json}");
+    }
+    let output = repo.run(["related", "module/"]);
+    let text = stdout(&output);
+    assert!(text.contains("module/a.rs"), "{text}");
+    assert!(text.contains("module/b.rs"), "{text}");
+}
 #[test]
 fn related_discovers_separate_commit_follow_on_by_default() {
     let repo = TestRepo::new();
