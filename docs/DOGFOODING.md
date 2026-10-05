@@ -2,9 +2,10 @@
 
 Whenever GitScry is used, briefly assess whether it meaningfully helped with the intended task.
 
-Record a case only when it did not—for example, its output was not useful, it failed to provide needed information, or its behavior materially differed from what was reasonably expected. Do not record merely imperfect uses or create entries just for the sake of dogfooding.
+- Functionality **already available** in the installed GitScry version -> use `gitscry`
+- Functionality **currently under development** -> use `cargo run`, because the feature is not in installed `gitscry` yet.
 
-Only dogfood functionality **already available** in the installed GitScry version; do not test or record failures for features **currently under development**.
+Record a case only when it did not—for example, its output was not useful, it failed to provide needed information, or its behavior materially differed from what was reasonably expected. Do not record merely imperfect uses or create entries just for the sake of dogfooding.
 
 ## Template
 
