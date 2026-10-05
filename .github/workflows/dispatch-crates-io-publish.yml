@@ -8,7 +8,33 @@ on:
         type: string
 
 jobs:
+  normalize-checksums:
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        artifact:
+          - artifacts-build-local-aarch64-apple-darwin
+          - artifacts-build-local-x86_64-unknown-linux-gnu
+          - artifacts-build-local-x86_64-pc-windows-msvc
+          - artifacts-build-global
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ matrix.artifact }}
+          path: artifacts
+      - name: Remove blank checksum lines
+        run: |
+          find artifacts -type f \( -name '*.sha256' -o -name 'sha256.sum' \) \
+            -exec sed -i '/^$/d' {} +
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.artifact }}
+          path: artifacts/
+          overwrite: true
+
   dispatch:
+    needs: normalize-checksums
     runs-on: ubuntu-22.04
     permissions:
       actions: write

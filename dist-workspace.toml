@@ -18,6 +18,8 @@ include = ["runtime/"]
 hosting = "github"
 # Upload all assets to the prepared draft before publishing an immutable release.
 create-release = false
+# Normalize checksum artifacts in the publish job before uploading the draft.
+github-release = "announce"
 publish-jobs = ["./dispatch-crates-io-publish"]
 github-custom-job-permissions = { "dispatch-crates-io-publish" = { actions = "write" } }
 # Whether to install an updater program
