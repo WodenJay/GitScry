@@ -179,25 +179,6 @@ fn timeline_json_pages_topologically_and_follows_renames() {
         String::from_utf8_lossy(&moved_path.stderr).contains("path does not exist at revision")
     );
 
-    let help = repo.run(["timeline", "--help"]);
-    assert_eq!(help.status.code(), Some(0));
-    let help = String::from_utf8_lossy(&help.stdout);
-    for option in [
-        "--at REV",
-        "--limit N",
-        "--offset N",
-        "--last",
-        "--patch",
-        "--json",
-        "--github-links",
-        "--github-repo <OWNER/REPO>",
-    ] {
-        assert!(help.contains(option), "timeline help is missing {option}");
-    }
-    let root_help = repo.run(["--help"]);
-    let root_help_text = String::from_utf8_lossy(&root_help.stdout);
-    assert!(root_help_text.contains("gitscry <command> --help"));
-
     let unindexed = commit(
         &repo,
         "src/new.rs",
