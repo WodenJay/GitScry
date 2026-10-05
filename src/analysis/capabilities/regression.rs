@@ -63,15 +63,23 @@ fn run(
     with_patch: bool,
 ) -> Result<Report, AppError> {
     // Scope selects material, not the history needed to establish identity or map coordinates.
-    let incarnations = session.file_incarnations(
-        std::slice::from_ref(&target.bad_revision),
-        std::slice::from_ref(&target.path),
-    )?;
-    let identity = incarnations.identity_at(&target.bad_revision, &target.path);
+    let incarnations = if session.contains_revision(&target.bad_revision)? {
+        Some(session.file_incarnations(
+            std::slice::from_ref(&target.bad_revision),
+            std::slice::from_ref(&target.path),
+        )?)
+    } else {
+        None
+    };
+    let identity = incarnations.as_ref().and_then(|incarnations| {
+        incarnations
+            .identity_at(&target.bad_revision, &target.path)
+            .map(|identity| (incarnations, identity))
+    });
     let mut history = session.path_history(&target.path, pinned_reachable_revisions)?;
     history.retain_mut(|commit| {
         commit.anchored_ordinals.retain(|ordinal| {
-            identity.is_some_and(|identity| {
+            identity.is_some_and(|(incarnations, identity)| {
                 incarnations.change_has_identity(&commit.oid, *ordinal, identity)
             })
         });
@@ -230,6 +238,12 @@ fn run(
 
     let mut report = super::super::report(ReportKind::Regression, materials, matched_count, limit);
     report.warnings.extend(target.warnings.iter().cloned());
+    if identity.is_none() {
+        report.warnings.push(
+            "warning: file incarnation could not be established at the pinned bad revision; regression suspects are withheld because cached history is incomplete."
+                .to_owned(),
+        );
+    }
     if rename_boundary {
         report.warnings.push(
             "warning: path history crossed a move/rename boundary; suspects may be incomplete."

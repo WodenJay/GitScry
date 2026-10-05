@@ -142,6 +142,45 @@ fn regression_follows_renames_within_the_selected_bad_incarnation() {
 }
 
 #[test]
+fn regression_discloses_unresolved_incarnation_after_failed_refresh() {
+    let repo = TestRepo::new();
+    repo.commit("src/a.rs", b"fn timeout() {}\n", "Cached timeout", None);
+    repo.index();
+    let cache = rusqlite::Connection::open(repo.cache_dir().join("cache.sqlite")).unwrap();
+    cache
+        .execute_batch(
+            "CREATE TRIGGER reject_hunk BEFORE INSERT ON hunks BEGIN
+         SELECT RAISE(ABORT, 'injected regression refresh failure'); END;",
+        )
+        .unwrap();
+    drop(cache);
+    repo.commit(
+        "src/a.rs",
+        b"fn timeout() { panic!(\"timeout\"); }\n",
+        "Uncached timeout",
+        None,
+    );
+
+    let output = repo.run(["regression", "timeout", "--path", "src/a.rs", "--json"]);
+    assert_eq!(output.status.code(), Some(0));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["scope"]["coverage_complete"], false);
+    assert!(
+        report["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|warning| {
+                warning
+                    .as_str()
+                    .unwrap()
+                    .contains("file incarnation could not be established")
+            })
+    );
+    assert_eq!(report["materials"], serde_json::json!([]));
+}
+
+#[test]
 fn regression_reports_a_historical_suspect() {
     let repo = TestRepo::new();
     repo.commit(
