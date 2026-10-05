@@ -281,6 +281,8 @@ pub(crate) fn execute(
             paths,
             patterns,
             min_support,
+            line,
+            at,
             limit,
             scope,
             ..
@@ -290,6 +292,8 @@ pub(crate) fn execute(
                     paths,
                     min_support: min_support.unwrap_or(3),
                 }
+            } else if let Some(line) = line {
+                Request::RelatedLine { paths, line, at }
             } else {
                 Request::Related(paths)
             },

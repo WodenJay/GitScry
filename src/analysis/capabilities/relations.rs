@@ -50,6 +50,82 @@ struct RankedCandidate {
     material: Material,
 }
 
+pub(in crate::analysis) fn execute_line(
+    paths: Vec<String>,
+    line: usize,
+    at: Option<String>,
+    options: crate::analysis::query::Options,
+) -> Result<crate::analysis::query::Outcome, AppError> {
+    use crate::{
+        analysis::{
+            material::RelationTarget,
+            query::{Context, QueryReport},
+        },
+        git::{Repository, WhyAnchor},
+    };
+    if paths.len() != 1 {
+        return Err(AppError::input("--line requires exactly one file path"));
+    }
+    let repository = Repository::discover()?;
+    let head = Context::pin_current_head(&repository)?;
+    let target = repository.pin_why_target(
+        at.as_deref().unwrap_or(&head),
+        &paths[0],
+        WhyAnchor::Line { number: line },
+    )?;
+    if !target.anchor_valid {
+        return Err(AppError::input(
+            "--line requires a regular file with a valid line",
+        ));
+    }
+    let context = Context::open_pinned(&repository, head, options.scope)?;
+    if at.is_some() {
+        context.session.require_revision(&target.revision)?;
+    }
+    let selection = retrieval::target_history::select(
+        &context.session,
+        &target,
+        &repository.shallow_boundaries()?,
+    )?;
+    let mut history = context.session.selected_relation_history(
+        &selection.paths,
+        &selection.touches,
+        MASS_CHANGE_PATH_LIMIT,
+        context.filter(),
+        true,
+    )?;
+    // Historical path incarnations are one logical target, not independent seeds.
+    for candidate in history.candidates.values_mut() {
+        candidate.seed_keys = HashSet::from([target.path.clone()]);
+    }
+    let denominator = history.seed_touch_commits;
+    let status = if selection.complete {
+        "available"
+    } else if selection.touches.is_empty() {
+        "unavailable"
+    } else {
+        "partial"
+    };
+    let intent = Intent::paths(&paths)?;
+    let mut report = run(
+        &context.session,
+        &intent,
+        context.session.root(),
+        options.limit,
+        false,
+        context.filter(),
+        Some(history),
+    )?;
+    report.target = Some(RelationTarget {
+        path: target.path,
+        line,
+        revision: target.revision,
+        status,
+        eligible_target_touch_commits: (status != "unavailable").then_some(denominator),
+        limitations: selection.limitations,
+    });
+    Ok(context.finish(QueryReport::Analysis(report)))
+}
 pub(crate) fn related(
     session: &QuerySession,
     intent: &Intent,
@@ -90,7 +166,7 @@ pub(crate) fn related(
     for source in &mut sources {
         source.matched = session.relation_source_matched(&source.path, scope)?;
     }
-    let mut report = run(session, intent, worktree_root, limit, false, scope)?;
+    let mut report = run(session, intent, worktree_root, limit, false, scope, None)?;
     report.relation_sources = sources;
     Ok(report)
 }
@@ -102,7 +178,7 @@ pub(crate) fn tests(
     limit: usize,
     scope: Option<&SearchFilter>,
 ) -> Result<Report, AppError> {
-    run(session, intent, worktree_root, limit, true, scope)
+    run(session, intent, worktree_root, limit, true, scope, None)
 }
 
 fn run(
@@ -112,16 +188,21 @@ fn run(
     limit: usize,
     tests_only: bool,
     scope: Option<&SearchFilter>,
+    target_history: Option<retrieval::RelationHistory>,
 ) -> Result<Report, AppError> {
     let seed_keys = intent.anchors().iter().cloned().collect::<HashSet<_>>();
     let mut seed_list = seed_keys.iter().cloned().collect::<Vec<_>>();
     seed_list.sort();
+    let target_scoped = target_history.is_some();
     let retrieval::RelationHistory {
         candidates,
         seed_touch_commits,
         eligible_commits,
         mass_changes_filtered,
-    } = session.relation_history(&seed_list, MASS_CHANGE_PATH_LIMIT, scope)?;
+    } = match target_history {
+        Some(history) => history,
+        None => session.relation_history(&seed_list, MASS_CHANGE_PATH_LIMIT, scope)?,
+    };
     let mut omitted_test_path = false;
     let mut ranked = Vec::new();
 
@@ -221,7 +302,7 @@ fn run(
         });
     }
 
-    if !tests_only {
+    if !tests_only && !target_scoped {
         let repository = crate::git::Repository::discover()?;
         let sources = seed_list
             .iter()

@@ -45,6 +45,14 @@ pub(crate) fn format_json_report(
         scope: report.scope.as_ref().map(json_scope),
         symbol_summary: report.symbol_summary.as_ref().map(json_symbol_summary),
         sources: &report.relation_sources,
+        target: report.target.as_ref().map(|target| JsonRelationTarget {
+            path: json_path(&target.path),
+            line: target.line,
+            revision: &target.revision,
+            status: target.status,
+            eligible_target_touch_commits: target.eligible_target_touch_commits,
+            limitations: &target.limitations,
+        }),
     })
 }
 
@@ -72,6 +80,8 @@ struct JsonReport<'a> {
     symbol_summary: Option<JsonSymbolSummary<'a>>,
     #[serde(skip_serializing_if = "<[crate::analysis::capabilities::RelationSource]>::is_empty")]
     sources: &'a [crate::analysis::capabilities::RelationSource],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target: Option<JsonRelationTarget<'a>>,
 }
 
 #[derive(Serialize)]
@@ -84,6 +94,16 @@ struct JsonModule<'a> {
 struct JsonModuleSupport<'a> {
     oid: &'a str,
     paths: Vec<JsonPath<'a>>,
+}
+
+#[derive(Serialize)]
+struct JsonRelationTarget<'a> {
+    path: JsonPath<'a>,
+    line: usize,
+    revision: &'a str,
+    status: &'a str,
+    eligible_target_touch_commits: Option<usize>,
+    limitations: &'a [String],
 }
 #[derive(Serialize)]
 struct JsonSymbolSummary<'a> {

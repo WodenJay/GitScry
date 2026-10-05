@@ -55,16 +55,44 @@ impl QuerySession {
             mass_change_path_limit,
             scope,
             false,
+            None,
+            false,
         )
     }
 
+    pub(crate) fn selected_relation_history(
+        &self,
+        paths: &[Vec<u8>],
+        commits: &HashSet<String>,
+        mass_change_path_limit: usize,
+        scope: Option<&SearchFilter>,
+        include_single_path: bool,
+    ) -> Result<RelationHistory, AppError> {
+        relation_history(
+            &self.connection,
+            paths,
+            mass_change_path_limit,
+            scope,
+            true,
+            Some(commits),
+            include_single_path,
+        )
+    }
     pub(crate) fn exact_relation_history(
         &self,
         paths: &[Vec<u8>],
         mass_change_path_limit: usize,
         scope: Option<&SearchFilter>,
     ) -> Result<RelationHistory, AppError> {
-        relation_history(&self.connection, paths, mass_change_path_limit, scope, true)
+        relation_history(
+            &self.connection,
+            paths,
+            mass_change_path_limit,
+            scope,
+            true,
+            None,
+            false,
+        )
     }
 }
 /// One cached commit's deduplicated changed paths, in cache order.
@@ -99,6 +127,8 @@ fn relation_history(
     mass_change_path_limit: usize,
     scope: Option<&SearchFilter>,
     exact: bool,
+    commits: Option<&HashSet<String>>,
+    include_single_path: bool,
 ) -> Result<RelationHistory, AppError> {
     if seed_keys.is_empty() {
         return Ok(RelationHistory {
@@ -115,7 +145,33 @@ fn relation_history(
         )
     })?;
     let eligible_commits = relation_count(connection, limit, scope)?;
-    let seed_matches = relation_seed_matches(connection, seed_keys, limit, scope, exact)?;
+    let mut seed_matches = relation_seed_matches(
+        connection,
+        seed_keys,
+        limit,
+        scope,
+        exact,
+        include_single_path,
+    )?;
+    if let Some(commits) = commits {
+        let mut statement = connection
+            .prepare("SELECT commit_id, oid FROM commits")
+            .map_err(|error| search_error("preparing selected relation history", error))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|error| search_error("reading selected relation history", error))?;
+        let mut selected = HashSet::new();
+        for row in rows {
+            let (id, oid) =
+                row.map_err(|error| search_error("reading selected relation history", error))?;
+            if commits.contains(&oid) {
+                selected.insert(id);
+            }
+        }
+        seed_matches.retain(|id, _| selected.contains(id));
+    }
     let seed_touch_commits = seed_matches.len();
     let mass_changes_filtered =
         relation_has_mass_change(connection, seed_keys, limit, scope, exact)?;
@@ -358,6 +414,7 @@ fn relation_seed_matches(
     limit: i64,
     scope: Option<&SearchFilter>,
     exact: bool,
+    include_single_path: bool,
 ) -> Result<HashMap<i64, SeedMatches>, AppError> {
     let query_bindings = RelationQueryBindings::new(scope, seed_keys, limit, exact);
     let scope_cte = &query_bindings.cte_prefix;
@@ -365,12 +422,13 @@ fn relation_seed_matches(
     let values_clause = seed_values_clause(seed_keys, query_bindings.first_seed_parameter);
     let scope_predicate = query_bindings.scope_predicate;
     let seed_scope_predicate = query_bindings.seed_scope_predicate;
+    let minimum_paths = if include_single_path { 0 } else { 1 };
     let query = format!(
         "{scope_cte}\n\
          relation_eligible AS (\n\
              SELECT pc.commit_id\n\
              FROM commit_path_counts AS pc\n\
-             WHERE pc.path_count > 1 AND pc.path_count <= ?{limit_parameter}\n\
+             WHERE pc.path_count > {minimum_paths} AND pc.path_count <= ?{limit_parameter}\n\
                {scope_predicate}\n\
                AND NOT EXISTS (\n\
                    SELECT 1 FROM commit_parents AS parents\n\
