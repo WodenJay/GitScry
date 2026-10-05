@@ -30,6 +30,14 @@ pub(crate) struct ModuleCoChange {
 pub(crate) struct ModuleSupport {
     pub(crate) oid: String,
     pub(crate) paths: Vec<Vec<u8>>,
+    pub(crate) sources: Vec<ModuleSourceSupport>,
+}
+
+#[derive(Clone)]
+pub(crate) struct ModuleSourceSupport {
+    pub(crate) path: String,
+    pub(crate) kind: &'static str,
+    pub(crate) paths: Vec<Vec<u8>>,
 }
 #[cfg(unix)]
 fn current_path_is_file(root: &Path, path: &[u8]) -> bool {
@@ -149,18 +157,19 @@ pub(crate) fn related(
         })
         .collect::<Vec<_>>();
     if sources.iter().any(|source| source.kind == "directory") {
-        if sources.len() != 1 {
-            return Err(AppError::input(
-                "directory queries currently require a single source path",
-            ));
-        }
         let observations = session.pattern_observations(scope)?;
-        sources[0].matched = observations.iter().any(|commit| {
-            commit
-                .paths
-                .iter()
-                .any(|path| directory::contains(&sources[0].path, path))
-        });
+        for source in &mut sources {
+            source.matched = if source.kind == "directory" {
+                observations.iter().any(|commit| {
+                    commit
+                        .paths
+                        .iter()
+                        .any(|path| directory::contains(&source.path, path))
+                })
+            } else {
+                session.relation_source_matched(&source.path, scope)?
+            };
+        }
         return directory::run(session, observations, sources, limit);
     }
     for source in &mut sources {

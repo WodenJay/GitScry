@@ -230,6 +230,119 @@ fn related_directory_deduplicates_commits_and_reports_material() {
     assert!(text.contains("module/nested/b.rs"), "{text}");
     assert!(text.contains(&first[..12]), "{text}");
 }
+#[test]
+fn related_mixed_sources_deduplicate_history_and_preserve_source_ownership() {
+    let repo = TestRepo::new();
+    repo.commit_files(
+        &[
+            ("alpha/a.rs", b"base\n"),
+            ("alpha/nested/b.rs", b"base\n"),
+            ("beta/b.rs", b"base\n"),
+        ],
+        "source files",
+    );
+    repo.commit_files(
+        &[
+            ("alpha/a.rs", b"all sources\n"),
+            ("alpha/nested/b.rs", b"all sources\n"),
+            ("beta/b.rs", b"all sources\n"),
+            ("outside.rs", b"first support\n"),
+        ],
+        "all sources co-change",
+    );
+    let all_sources = repo.head();
+    repo.commit_files(
+        &[
+            ("alpha/a.rs", b"alpha only\n"),
+            ("outside.rs", b"second support\n"),
+        ],
+        "alpha co-change",
+    );
+    repo.commit_files(
+        &[
+            ("beta/b.rs", b"beta only\n"),
+            ("outside.rs", b"third support\n"),
+        ],
+        "beta co-change",
+    );
+    repo.index();
+
+    let args = [
+        "related",
+        "alpha/",
+        "alpha",
+        "alpha/nested/",
+        "beta/b.rs",
+        "missing/",
+    ];
+    let mut json_args = args.to_vec();
+    json_args.push("--json");
+    let output = repo.run(json_args);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+
+    let sources = json["sources"].as_array().unwrap();
+    assert_eq!(
+        sources.len(),
+        4,
+        "duplicate directory inputs must collapse: {json}"
+    );
+    assert_eq!(
+        sources
+            .iter()
+            .map(|source| (
+                source["path"].as_str().unwrap(),
+                source["kind"].as_str().unwrap(),
+                source["matched"].as_bool().unwrap()
+            ))
+            .collect::<Vec<_>>(),
+        [
+            ("alpha", "directory", true),
+            ("alpha/nested", "directory", true),
+            ("beta/b.rs", "file", true),
+            ("missing", "directory", false),
+        ]
+    );
+    let materials = json["materials"].as_array().unwrap();
+    assert_eq!(materials.len(), 1, "{json}");
+    assert_eq!(materials[0]["paths"][0], "outside.rs");
+    let detail = &materials[0]["detail"];
+    assert_eq!(detail["co_change_count"], 3);
+    assert_eq!(detail["proportion"], 0.75);
+    assert_eq!(detail["supporting_count"], 3);
+    assert_eq!(detail["module"]["touch_commits"], 4);
+    assert_eq!(detail["module"]["support"].as_array().unwrap().len(), 3);
+
+    let support = detail["module"]["support"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|support| support["oid"] == all_sources)
+        .unwrap();
+    assert_eq!(
+        support["paths"],
+        serde_json::json!(["alpha/a.rs", "alpha/nested/b.rs", "beta/b.rs"])
+    );
+    assert_eq!(
+        support["sources"],
+        serde_json::json!([
+            {"path": "alpha", "kind": "directory", "paths": ["alpha/a.rs", "alpha/nested/b.rs"]},
+            {"path": "alpha/nested", "kind": "directory", "paths": ["alpha/nested/b.rs"]},
+            {"path": "beta/b.rs", "kind": "file", "paths": ["beta/b.rs"]},
+        ])
+    );
+
+    let output = repo.run(args);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(text.contains("candidate path: outside.rs"), "{text}");
+    assert!(text.contains("source input: alpha (directory)"), "{text}");
+    assert!(text.contains("alpha/nested/b.rs"), "{text}");
+    assert!(
+        text.contains("Source: missing (directory, no matched historical paths"),
+        "{text}"
+    );
+}
 
 #[test]
 fn related_directory_retains_deleted_and_moved_history_but_not_later_outside_edits() {
