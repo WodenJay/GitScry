@@ -634,7 +634,7 @@ fn failures_excludes_candidates_from_unmatched_paths() {
     ]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     let text = stdout(&output);
-    assert!(text.contains("Failed approaches (2 matches):"), "{text}");
+    assert!(text.contains("Failed approaches (1 match):"), "{text}");
     assert!(text.contains(&matching[..12]), "{text}");
     assert!(
         !text
@@ -803,6 +803,91 @@ fn examples_and_failures_report_their_fixed_empty_results() {
     let failures = repo.run(["failures", "term-that-does-not-exist"]);
     assert_eq!(failures.status.code(), Some(0));
     assert!(stdout(&failures).ends_with("No failed approaches found.\n"));
+}
+
+#[test]
+fn failures_report_counts_only_eligible_results_and_truncates_against_them() {
+    let repo = TestRepo::new();
+    let widget = repo.commit_at(
+        "src/widget.rs",
+        b"widget strategy enabled\n",
+        "Try widget strategy",
+        "2020-01-01T00:00:00+0000",
+    );
+    repo.commit_at(
+        "src/widget.rs",
+        b"widget strategy reverted\n",
+        &format!("revert: try widget strategy\n\nThis reverts commit {widget}.\n"),
+        "2020-01-02T00:00:00+0000",
+    );
+    repo.commit_at(
+        "docs/widget.md",
+        b"Widget compatibility notes\n",
+        "Document widget compatibility",
+        "2020-01-03T00:00:00+0000",
+    );
+
+    let sandbox_one = repo.commit_at(
+        "src/sandbox/one.rs",
+        b"sandbox approach one\n",
+        "Try sandbox approach one",
+        "2020-01-04T00:00:00+0000",
+    );
+    repo.commit_at(
+        "src/sandbox/one.rs",
+        b"sandbox approach one reverted\n",
+        &format!("revert: try sandbox approach one\n\nThis reverts commit {sandbox_one}.\n"),
+        "2020-01-05T00:00:00+0000",
+    );
+    let sandbox_two = repo.commit_at(
+        "src/sandbox/two.rs",
+        b"sandbox approach two\n",
+        "Try sandbox approach two",
+        "2020-01-06T00:00:00+0000",
+    );
+    repo.commit_at(
+        "src/sandbox/two.rs",
+        b"sandbox approach two reverted\n",
+        &format!("revert: try sandbox approach two\n\nThis reverts commit {sandbox_two}.\n"),
+        "2020-01-07T00:00:00+0000",
+    );
+    repo.commit_at(
+        "docs/sandbox.md",
+        b"Sandbox compatibility notes\n",
+        "Document sandbox compatibility",
+        "2020-01-08T00:00:00+0000",
+    );
+    repo.commit_at(
+        "docs/ghost-one.md",
+        b"Ghost compatibility notes\n",
+        "Document ghost compatibility one",
+        "2020-01-09T00:00:00+0000",
+    );
+    repo.commit_at(
+        "docs/ghost-two.md",
+        b"Ghost compatibility notes\n",
+        "Document ghost compatibility two",
+        "2020-01-10T00:00:00+0000",
+    );
+    repo.index();
+
+    for (query, limit, matched_count, truncated, material_count) in [
+        ("ghost", "1", 0, false, 0),
+        ("widget", "100", 1, false, 1),
+        ("sandbox", "1", 2, true, 1),
+    ] {
+        let output = repo.run(["failures", query, "--limit", limit, "--json"]);
+        assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+        let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+
+        assert_eq!(report["matched_count"], matched_count, "{query}: {report}");
+        assert_eq!(report["truncated"], truncated, "{query}: {report}");
+        assert_eq!(
+            report["materials"].as_array().unwrap().len(),
+            material_count,
+            "{query}: {report}"
+        );
+    }
 }
 
 #[test]

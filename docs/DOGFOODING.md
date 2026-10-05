@@ -28,3 +28,11 @@ Record a case only when it did not—for example, its output was not useful, it 
 - **Goal:** Check whether a repository-level directory query would expose moved-out source paths as candidates.
 - **Actual:** The query refreshed history and returned 85 matches; its leading co-change candidates included `src/analysis/mod.rs`. It completed successfully but provided no specific moved-out-source evidence, so it did not validate the exclusion bug.
 - **Expected:** A controlled move-out history or surfaced candidate/path attribution that distinguishes the moved source incarnation from independent candidates.
+
+### 2026-10-06 Failure count diagnosis
+
+- **Command:** `cargo run --quiet -- failures report count --path src/analysis/capabilities/failures.rs --limit 5 --json`; `cargo run --quiet -- failures sandbox --limit 100 --json`
+- **Context:** Development build of GitScry 0.12.0 at HEAD `38ae025` on `fix/issue-242`.
+- **Goal:** Find relevant failure-count history and reproduce issue #242 using GitScry on this repository.
+- **Actual:** Both queries returned `matched_count=0` with no materials; this repository offered no relevant history or candidates, so dogfooding did not identify prior implementation guidance or reproduce the issue. A controlled test-repository CLI fixture was needed.
+- **Expected:** Failure history or matching candidates that expose the mismatch between retrieval candidates and eligible failed approaches.
