@@ -10,6 +10,7 @@ pub(crate) struct Intent {
     anchors: Vec<String>,
     explicit_paths: Vec<String>,
     directory_requests: Vec<String>,
+    source_spellings: Vec<String>,
 }
 
 impl Intent {
@@ -27,6 +28,7 @@ impl Intent {
         let (terms, matching_terms) = query_terms(&input);
         Ok(Self {
             directory_requests: Vec::new(),
+            source_spellings: Vec::new(),
             terms,
             matching_terms,
             anchors,
@@ -42,6 +44,7 @@ impl Intent {
         let (terms, matching_terms) = query_terms(&input);
         Ok(Self {
             directory_requests: Vec::new(),
+            source_spellings: Vec::new(),
             terms,
             matching_terms,
             anchors: normalize_anchors([path.to_owned()])?,
@@ -54,6 +57,7 @@ impl Intent {
             return Err(AppError::input("at least one path is required"));
         }
         Ok(Self {
+            source_spellings: paths.iter().map(|path| canonical_path(path)).collect(),
             directory_requests: normalize_anchors(
                 paths
                     .iter()
@@ -89,6 +93,17 @@ impl Intent {
     /// Paths passed explicitly by the caller, not inferred from query words.
     pub(crate) fn explicit_paths(&self) -> &[String] {
         &self.explicit_paths
+    }
+    /// Preserve basename case for filesystem directory resolution; file matching stays normalized.
+    pub(in crate::analysis) fn source_spelling<'a>(&'a self, anchor: &'a str) -> &'a str {
+        self.source_spellings
+            .iter()
+            .find(|path| {
+                path.as_str() == anchor
+                    || (!path.contains('/') && normalize_path(path.as_bytes()) == anchor)
+            })
+            .map(String::as_str)
+            .unwrap_or(anchor)
     }
     pub(in crate::analysis) fn requests_directory(&self, path: &str) -> bool {
         self.directory_requests

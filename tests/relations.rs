@@ -1106,6 +1106,61 @@ fn related_does_not_double_count_merge_replays() {
 }
 
 #[test]
+fn related_reports_case_fallback_sources_as_matched() {
+    let repo = TestRepo::new();
+    repo.commit_files(
+        &[("src/Widget.rs", b"widget\n"), ("outside.rs", b"one\n")],
+        "pair",
+    );
+    repo.index();
+    for source in ["Widget.rs", "src/widget.rs"] {
+        let output = repo.run(["related", source, "--json"]);
+        assert!(output.status.success(), "{}", stderr(&output));
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(json["sources"][0]["matched"], true, "{json}");
+        assert!(
+            json["materials"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|material| material["paths"][0] == "outside.rs")
+        );
+    }
+}
+
+#[test]
+fn related_directory_preserves_basename_case_for_membership() {
+    let repo = TestRepo::new();
+    repo.commit_files(
+        &[("Module/a.rs", b"one\n"), ("outside.rs", b"one\n")],
+        "pair",
+    );
+    repo.index();
+    for source in ["Module", "Module/"] {
+        let output = repo.run(["related", source, "--json"]);
+        assert!(output.status.success(), "{}", stderr(&output));
+        let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(json["sources"][0]["kind"], "directory");
+        assert_eq!(json["sources"][0]["matched"], true, "{json}");
+        assert_eq!(json["sources"][0]["path"], "Module");
+        assert_eq!(json["materials"][0]["paths"][0], "outside.rs");
+    }
+}
+
+#[test]
+fn related_repository_root_directory_matches_history_without_external_candidates() {
+    let repo = TestRepo::new();
+    repo.commit_files(&[("src/a.rs", b"one\n"), ("outside.rs", b"one\n")], "pair");
+    repo.index();
+    let output = repo.run(["related", ".", "--json"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(json["sources"][0]["kind"], "directory");
+    assert_eq!(json["sources"][0]["matched"], true, "{json}");
+    assert_eq!(json["matched_count"], 0);
+}
+
+#[test]
 fn relation_commands_have_fixed_empty_results() {
     let repo = TestRepo::new();
     repo.commit_files(&[("src/only.rs", b"only\n")], "only");

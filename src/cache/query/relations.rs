@@ -9,6 +9,36 @@ use crate::cache::QuerySession;
 use crate::cache::scope::{SEARCH_SCOPE_CTE, SearchFilter};
 
 impl QuerySession {
+    /// Match diagnostics include ineligible commits, but retain file lookup semantics.
+    pub(crate) fn relation_source_matched(
+        &self,
+        path: &str,
+        scope: Option<&SearchFilter>,
+    ) -> Result<bool, AppError> {
+        let (prefix, predicate, mut values) = if let Some(scope) = scope {
+            (
+                format!("{SEARCH_SCOPE_CTE} "),
+                "AND cp.commit_id IN (SELECT commit_id FROM eligible)",
+                crate::cache::scope::scope_values(scope).to_vec(),
+            )
+        } else {
+            (String::new(), "", Vec::new())
+        };
+        let parameter = values.len() + 1;
+        let column = if path.contains('/') {
+            "path_search_key"
+        } else {
+            "path_basename"
+        };
+        values.push(Value::Text(path.to_owned()));
+        let sql = format!(
+            "{prefix} SELECT EXISTS (SELECT 1 FROM commit_paths cp WHERE cp.{column} = lower(?{parameter}) {predicate})"
+        );
+        self.connection
+            .query_row(&sql, params_from_iter(values), |row| row.get(0))
+            .map_err(|error| search_error("checking relation source match", error))
+    }
+
     pub(crate) fn relation_history(
         &self,
         seed_keys: &[String],

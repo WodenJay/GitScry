@@ -57,29 +57,19 @@ pub(crate) fn related(
     limit: usize,
     scope: Option<&SearchFilter>,
 ) -> Result<Report, AppError> {
-    let observations = session.pattern_observations(scope)?;
-    let sources = intent
+    let mut sources = intent
         .anchors()
         .iter()
-        .map(|path| {
-            let directory = intent.requests_directory(path) || worktree_root.join(path).is_dir();
-            let matched = observations.iter().any(|commit| {
-                commit.paths.iter().any(|historical| {
-                    if directory {
-                        directory::contains(path, historical)
-                    } else if path.contains('/') {
-                        historical == path.as_bytes()
-                    } else {
-                        retrieval::normalize_path(historical).rsplit('/').next()
-                            == Some(path.as_str())
-                    }
-                })
-            });
-            RelationSource {
-                path: path.clone(),
-                kind: if directory { "directory" } else { "file" },
-                matched,
-            }
+        .map(|path| RelationSource {
+            path: intent.source_spelling(path).to_owned(),
+            kind: if intent.requests_directory(path)
+                || worktree_root.join(intent.source_spelling(path)).is_dir()
+            {
+                "directory"
+            } else {
+                "file"
+            },
+            matched: false,
         })
         .collect::<Vec<_>>();
     if sources.iter().any(|source| source.kind == "directory") {
@@ -88,7 +78,17 @@ pub(crate) fn related(
                 "directory queries currently require a single source path",
             ));
         }
+        let observations = session.pattern_observations(scope)?;
+        sources[0].matched = observations.iter().any(|commit| {
+            commit
+                .paths
+                .iter()
+                .any(|path| directory::contains(&sources[0].path, path))
+        });
         return directory::run(session, observations, sources, limit);
+    }
+    for source in &mut sources {
+        source.matched = session.relation_source_matched(&source.path, scope)?;
     }
     let mut report = run(session, intent, worktree_root, limit, false, scope)?;
     report.relation_sources = sources;

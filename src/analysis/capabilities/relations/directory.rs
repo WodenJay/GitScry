@@ -8,8 +8,10 @@ use super::{
 use crate::{app::AppError, cache::QuerySession};
 
 pub(super) fn contains(directory: &str, path: &[u8]) -> bool {
-    path.strip_prefix(directory.as_bytes())
-        .is_some_and(|suffix| suffix.starts_with(b"/"))
+    directory == "."
+        || path
+            .strip_prefix(directory.as_bytes())
+            .is_some_and(|suffix| suffix.starts_with(b"/"))
 }
 
 pub(super) fn run(
