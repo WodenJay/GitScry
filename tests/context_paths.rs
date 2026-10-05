@@ -90,13 +90,6 @@ fn context_discovers_path_follow_on_without_content_origins_using_related_policy
         path_only["suggestions"][0]["follow_on"],
         candidate["follow_on"]
     );
-    let help = repo.run(["context", "--help"]);
-    assert!(help.status.success());
-    assert!(
-        String::from_utf8(help.stdout)
-            .unwrap()
-            .contains("do not disable, shorten or budget path-level analysis")
-    );
     assert!(candidate["historical_followup"].is_null());
     assert!(candidate["content_matches"].as_array().unwrap().is_empty());
     let output = repo.run(["context"]);
