@@ -3027,3 +3027,364 @@ fn symbol_related_reports_path_moves_as_partial_history() {
         "{report}"
     );
 }
+
+#[test]
+fn tests_line_target_uses_target_touch_statistics_and_current_test_candidates() {
+    let repo = TestRepo::new();
+    for index in 0..8 {
+        let source = format!("target {index}\nunrelated 0\n");
+        let test = format!("test {index}\n");
+        let coupled = format!("coupled {index}\n");
+        let mut files = vec![("src/seed.rs", source.as_bytes())];
+        if index < 6 {
+            files.extend([
+                ("tests/test_seed.rs", test.as_bytes()),
+                ("src/coupled.rs", coupled.as_bytes()),
+            ]);
+        }
+        repo.commit_files(&files, &format!("target touch {index}"));
+    }
+    repo.commit_files(
+        &[
+            ("src/seed.rs", b"target 7\nunrelated 1\n"),
+            ("tests/test_other_line.rs", b"other line changed\n"),
+        ],
+        "change an unselected line and test",
+    );
+    repo.index();
+
+    let output = repo.run(["tests", "src/seed.rs", "--line", "1", "--json"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+
+    assert_eq!(report["kind"], "tests", "{report}");
+    assert_eq!(report["target"]["path"], "src/seed.rs", "{report}");
+    assert_eq!(report["target"]["line"], 1, "{report}");
+    assert_eq!(report["target"]["revision"], repo.head(), "{report}");
+    assert_eq!(report["target"]["status"], "available", "{report}");
+    assert_eq!(
+        report["target"]["eligible_target_touch_commits"], 8,
+        "{report}"
+    );
+
+    let materials = report["materials"].as_array().unwrap();
+    assert_eq!(materials.len(), 1, "{report}");
+    assert_eq!(materials[0]["paths"][0], "tests/test_seed.rs", "{report}");
+    assert_eq!(materials[0]["detail"]["co_change_count"], 6, "{report}");
+    assert_eq!(materials[0]["detail"]["proportion"], 0.75, "{report}");
+    assert_eq!(
+        materials[0]["citations"].as_array().unwrap().len(),
+        6,
+        "{report}"
+    );
+}
+
+#[test]
+fn tests_symbol_target_uses_full_symbol_history_scope_and_current_test_paths() {
+    let repo = TestRepo::new();
+    repo.commit_files(
+        &[
+            (
+                "src/seed.rs",
+                b"fn target() {\n    0\n}\n\nfn other() {\n    0\n}\n",
+            ),
+            ("tests/test_current.rs", b"target introduced\n"),
+            ("tests/test_deleted.rs", b"target introduced\n"),
+        ],
+        "introduce target and tests",
+    );
+    let introduction = repo.head();
+    repo.commit_files(
+        &[
+            (
+                "src/seed.rs",
+                b"fn target() {\n    1\n}\n\nfn other() {\n    0\n}\n",
+            ),
+            ("tests/test_current.rs", b"target changed\n"),
+            ("tests/test_deleted.rs", b"target changed\n"),
+        ],
+        "change target and tests",
+    );
+    let target_revision = repo.head();
+    repo.commit_files(
+        &[
+            (
+                "src/seed.rs",
+                b"fn target() {\n    1\n}\n\nfn other() {\n    1\n}\n",
+            ),
+            ("tests/test_unrelated.rs", b"other changed\n"),
+        ],
+        "change unrelated symbol",
+    );
+    repo.remove("tests/test_deleted.rs", "delete historical test");
+    repo.index();
+
+    let output = repo.run([
+        "tests",
+        "src/seed.rs",
+        "--symbol",
+        "target",
+        "--at",
+        target_revision.as_str(),
+        "--from-rev",
+        introduction.as_str(),
+        "--json",
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+
+    assert_eq!(report["target"]["selector"]["kind"], "symbol", "{report}");
+    assert_eq!(report["target"]["selector"]["name"], "target", "{report}");
+    assert_eq!(report["target"]["selector"]["start_line"], 1, "{report}");
+    assert_eq!(report["target"]["selector"]["end_line"], 3, "{report}");
+    assert_eq!(report["target"]["revision"], target_revision, "{report}");
+    assert_eq!(report["scope"]["from_rev"], introduction, "{report}");
+    assert_eq!(report["scope"]["to_rev"], repo.head(), "{report}");
+    assert_eq!(
+        report["target"]["eligible_target_touch_commits"], 1,
+        "{report}"
+    );
+
+    let materials = report["materials"].as_array().unwrap();
+    assert_eq!(materials.len(), 1, "{report}");
+    assert_eq!(
+        materials[0]["paths"][0], "tests/test_current.rs",
+        "{report}"
+    );
+    assert_eq!(materials[0]["detail"]["co_change_count"], 1, "{report}");
+    assert_eq!(materials[0]["detail"]["proportion"], 1.0, "{report}");
+    assert_eq!(
+        materials[0]["citations"].as_array().unwrap().len(),
+        1,
+        "{report}"
+    );
+
+    let text = repo.run([
+        "tests",
+        "src/seed.rs",
+        "--symbol",
+        "target",
+        "--at",
+        target_revision.as_str(),
+        "--from-rev",
+        introduction.as_str(),
+    ]);
+    assert!(text.status.success(), "{}", stderr(&text));
+    let text = stdout(&text);
+    assert!(text.contains("tests/test_current.rs"), "{text}");
+    assert!(text.contains("--symbol target"), "{text}");
+    assert!(text.contains("Eligible target-touch commits: 1"), "{text}");
+    assert!(!text.contains("tests/test_deleted.rs"), "{text}");
+}
+
+#[test]
+fn tests_target_distinguishes_known_empty_unavailable_and_partial_history() {
+    let repo = TestRepo::new();
+    repo.commit_files(
+        &[
+            ("src/seed.rs", b"target 0\n"),
+            ("tests/test_target.rs", b"test 0\n"),
+        ],
+        "introduce target and test",
+    );
+    let root = repo.head();
+    repo.index();
+
+    let known_empty = repo.run([
+        "tests",
+        "src/seed.rs",
+        "--line",
+        "1",
+        "--from-rev",
+        root.as_str(),
+        "--json",
+    ]);
+    assert!(known_empty.status.success(), "{}", stderr(&known_empty));
+    let known_empty: serde_json::Value = serde_json::from_slice(&known_empty.stdout).unwrap();
+    assert_eq!(
+        known_empty["target"]["status"], "available",
+        "{known_empty}"
+    );
+    assert_eq!(known_empty["target"]["eligible_target_touch_commits"], 0);
+    assert_eq!(known_empty["matched_count"], 0);
+    assert!(known_empty["materials"].as_array().unwrap().is_empty());
+
+    fs::write(repo.common_dir().join("shallow"), format!("{root}\n")).unwrap();
+    let unavailable = repo.run(["tests", "src/seed.rs", "--line", "1", "--json"]);
+    assert!(unavailable.status.success(), "{}", stderr(&unavailable));
+    let unavailable: serde_json::Value = serde_json::from_slice(&unavailable.stdout).unwrap();
+    assert_eq!(
+        unavailable["target"]["status"], "unavailable",
+        "{unavailable}"
+    );
+    assert!(unavailable["target"]["eligible_target_touch_commits"].is_null());
+    assert_eq!(unavailable["matched_count"], 0);
+
+    repo.commit_files(
+        &[
+            ("src/seed.rs", b"target 1\n"),
+            ("tests/test_target.rs", b"test 1\n"),
+        ],
+        "change target with test",
+    );
+    let partial = repo.run(["tests", "src/seed.rs", "--line", "1", "--json"]);
+    assert!(partial.status.success(), "{}", stderr(&partial));
+    let partial: serde_json::Value = serde_json::from_slice(&partial.stdout).unwrap();
+    assert_eq!(partial["target"]["status"], "partial", "{partial}");
+    assert!(
+        partial["target"]["limitations"].as_array().unwrap().len() > 1,
+        "{partial}"
+    );
+    assert_eq!(partial["target"]["eligible_target_touch_commits"], 1);
+    assert_eq!(partial["materials"][0]["paths"][0], "tests/test_target.rs");
+    assert_eq!(partial["materials"][0]["detail"]["co_change_count"], 1);
+}
+
+#[test]
+fn tests_target_rejects_invalid_selectors_and_file_sets() {
+    let repo = TestRepo::new();
+    repo.commit_files(
+        &[
+            (
+                "src/seed.rs",
+                b"fn duplicate() {\n    0\n}\n\nfn duplicate() {\n    1\n}\n",
+            ),
+            ("src/other.rs", b"fn other() {\n    0\n}\n"),
+        ],
+        "add target files and ambiguous symbol",
+    );
+    repo.index();
+
+    for args in [
+        vec!["tests", "src/seed.rs", "--line", "0"],
+        vec!["tests", "src/seed.rs", "--line", "9"],
+        vec!["tests", "src/seed.rs", "src/other.rs", "--line", "1"],
+        vec!["tests", "src", "--line", "1"],
+        vec!["tests", "src/seed.rs", "--at", "HEAD"],
+        vec![
+            "tests",
+            "src/seed.rs",
+            "--line",
+            "1",
+            "--symbol",
+            "duplicate",
+        ],
+        vec!["tests", "src/seed.rs", "--symbol", "missing"],
+        vec!["tests", "src/seed.rs", "--symbol", "duplicate"],
+    ] {
+        let output = repo.run(args);
+        assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    }
+}
+
+#[test]
+fn tests_target_mass_change_boundary_applies_to_support_and_denominator() {
+    let repo = TestRepo::new();
+    repo.commit_files(&[("src/seed.rs", b"target 0\n")], "introduce target");
+    for (value, path_count, test_path) in [
+        (1, 50, "tests/test_in_scope.rs"),
+        (2, 51, "tests/test_excluded.rs"),
+    ] {
+        let contents = format!("target {value}\n");
+        let names = (0..path_count - 2)
+            .map(|index| format!("extra-{value}-{index}.txt"))
+            .collect::<Vec<_>>();
+        let mut files = vec![
+            ("src/seed.rs", contents.as_bytes()),
+            (test_path, contents.as_bytes()),
+        ];
+        files.extend(
+            names
+                .iter()
+                .map(|name| (name.as_str(), contents.as_bytes())),
+        );
+        repo.commit_files(&files, &format!("target touch with {path_count} paths"));
+    }
+    repo.index();
+
+    let output = repo.run(["tests", "src/seed.rs", "--line", "1", "--json"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+
+    assert_eq!(
+        report["target"]["eligible_target_touch_commits"], 2,
+        "{report}"
+    );
+    let materials = report["materials"].as_array().unwrap();
+    assert_eq!(materials.len(), 1, "{report}");
+    assert_eq!(
+        materials[0]["paths"][0], "tests/test_in_scope.rs",
+        "{report}"
+    );
+    assert_eq!(materials[0]["detail"]["co_change_count"], 1, "{report}");
+    assert_eq!(materials[0]["detail"]["proportion"], 0.5, "{report}");
+    assert_eq!(
+        materials[0]["citations"][0]["subject"], "target touch with 50 paths",
+        "{report}"
+    );
+    assert!(
+        materials[0]["basis"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|basis| basis == "mass-change commits excluded")
+    );
+}
+
+#[test]
+fn tests_target_limits_preserve_support_and_denominator() {
+    let repo = TestRepo::new();
+    for index in 0..8 {
+        let source = format!("target {index}\n");
+        let test_a = format!("test a {index}\n");
+        let test_b = format!("test b {index}\n");
+        let mut files = vec![("src/seed.rs", source.as_bytes())];
+        if index < 7 {
+            files.push(("tests/test_feature_a.rs", test_a.as_bytes()));
+        }
+        if index < 6 {
+            files.push(("tests/test_feature_b.rs", test_b.as_bytes()));
+        }
+        repo.commit_files(&files, &format!("target touch {index}"));
+    }
+    repo.index();
+
+    let json = repo.run([
+        "tests",
+        "src/seed.rs",
+        "--line",
+        "1",
+        "--limit",
+        "1",
+        "--json",
+    ]);
+    assert!(json.status.success(), "{}", stderr(&json));
+    let report: serde_json::Value = serde_json::from_slice(&json.stdout).unwrap();
+    assert_eq!(
+        report["target"]["eligible_target_touch_commits"], 8,
+        "{report}"
+    );
+    assert_eq!(report["matched_count"], 2, "{report}");
+    let materials = report["materials"].as_array().unwrap();
+    assert_eq!(materials.len(), 1, "{report}");
+    assert_eq!(
+        materials[0]["paths"][0], "tests/test_feature_a.rs",
+        "{report}"
+    );
+    assert_eq!(materials[0]["detail"]["co_change_count"], 7, "{report}");
+    assert_eq!(materials[0]["detail"]["proportion"], 0.875, "{report}");
+    assert_eq!(
+        materials[0]["citations"].as_array().unwrap().len(),
+        7,
+        "{report}"
+    );
+
+    let text = repo.run(["tests", "src/seed.rs", "--line", "1", "--limit", "1"]);
+    assert!(text.status.success(), "{}", stderr(&text));
+    let text = stdout(&text);
+    assert!(text.contains("Eligible target-touch commits: 8"), "{text}");
+    assert!(text.contains("supporting commits: 7"), "{text}");
+    assert!(text.contains("2 more supporting commits"), "{text}");
+    assert!(text.contains("tests/test_feature_a.rs"), "{text}");
+    assert!(!text.contains("tests/test_feature_b.rs"), "{text}");
+}

@@ -320,10 +320,31 @@ pub(crate) fn execute(
         ),
         Command::Tests {
             paths,
+            target,
             limit,
             scope,
             ..
-        } => (Request::Tests(paths), limit, false, scope.into()),
+        } => {
+            let request = if let Some(line) = target.line {
+                Request::TestsTarget {
+                    paths,
+                    anchor: WhyAnchor::Line { number: line },
+                    at: target.at,
+                }
+            } else if let Some(symbol) = target.symbol {
+                Request::TestsTarget {
+                    paths,
+                    anchor: WhyAnchor::Symbol {
+                        name: symbol,
+                        number: 0,
+                    },
+                    at: target.at,
+                }
+            } else {
+                Request::Tests(paths)
+            };
+            (request, limit, false, scope.into())
+        }
         Command::Regression {
             symptom: words,
             path,

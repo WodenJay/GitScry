@@ -63,6 +63,7 @@ pub(in crate::analysis) fn execute_target(
     anchor: crate::git::WhyAnchor,
     at: Option<String>,
     options: crate::analysis::query::Options,
+    tests_only: bool,
 ) -> Result<crate::analysis::query::Outcome, AppError> {
     use crate::{
         analysis::{
@@ -131,7 +132,7 @@ pub(in crate::analysis) fn execute_target(
         &intent,
         context.session.root(),
         options.limit,
-        false,
+        tests_only,
         context.filter(),
         Some(history),
     )?;
