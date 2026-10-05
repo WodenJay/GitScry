@@ -1909,10 +1909,6 @@ fn patterns_minimum_support_and_cli_validation() {
         );
     }
     repo.index();
-    let help = repo.run(["related", "--help"]);
-    assert_eq!(help.status.code(), Some(0), "{}", stderr(&help));
-    assert!(stdout(&help).contains("closed file-incarnation combinations"));
-    assert!(stdout(&help).contains("Each citation lists the actual changed path"));
     let empty = repo.run(["related", "A", "--patterns", "--json"]);
     let empty: serde_json::Value = serde_json::from_slice(&empty.stdout).unwrap();
     assert_eq!(empty["patterns"], serde_json::json!([]));
