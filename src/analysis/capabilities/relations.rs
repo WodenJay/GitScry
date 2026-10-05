@@ -61,18 +61,25 @@ pub(in crate::analysis) fn execute_line(
         ));
     }
     let context = Context::open_pinned(&repository, head, options.scope)?;
-    context.session.require_revision(&target.revision)?;
+    if at.is_some() {
+        context.session.require_revision(&target.revision)?;
+    }
     let selection = retrieval::target_history::select(
         &context.session,
         &target,
         &repository.shallow_boundaries()?,
     )?;
-    let history = context.session.target_relation_history(
+    let mut history = context.session.selected_relation_history(
         &selection.paths,
         &selection.touches,
         MASS_CHANGE_PATH_LIMIT,
         context.filter(),
+        true,
     )?;
+    // Historical path incarnations are one logical target, not independent seeds.
+    for candidate in history.candidates.values_mut() {
+        candidate.seed_keys = HashSet::from([target.path.clone()]);
+    }
     let denominator = history.seed_touch_commits;
     let status = if selection.complete {
         "available"

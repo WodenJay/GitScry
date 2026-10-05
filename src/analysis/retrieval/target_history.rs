@@ -62,7 +62,7 @@ pub(in crate::analysis) fn select(
             .into_iter()
             .filter(|hunk| hunk.change_ordinal == change.ordinal)
             .collect::<Vec<_>>();
-        let Some((changed, parent_line)) =
+        let Some((changed, parent_line, introduced)) =
             super::line_history::map_line(&hunks, line, change.old_blob == change.new_blob)
         else {
             selection.limitations.push(
@@ -74,7 +74,7 @@ pub(in crate::analysis) fn select(
         if changed.is_some() {
             selection.touches.insert(commit.oid.clone());
         }
-        if change.status.starts_with('A') || parent_line.is_none() {
+        if change.status.starts_with('A') || introduced {
             selection.complete = true;
             return Ok(selection);
         }
@@ -85,7 +85,7 @@ pub(in crate::analysis) fn select(
             );
             return Ok(selection);
         }
-        line = parent_line.unwrap();
+        line = parent_line;
         blob = change.old_blob.clone();
         if let Some(old_path) = &change.old_path
             && old_path != &path

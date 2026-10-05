@@ -19,10 +19,8 @@ pub(in crate::analysis) fn trace_line(
     let relevant_hunks = hunks
         .iter()
         .filter(|hunk| relevant.contains(&hunk.change_ordinal));
-    let (changed, parent) = map_line(relevant_hunks, *line, true)?;
-    if let Some(parent) = parent {
-        *line = parent;
-    }
+    let (changed, parent, _) = map_line(relevant_hunks, *line, true)?;
+    *line = parent;
     changed
 }
 
@@ -53,15 +51,16 @@ pub(in crate::analysis) fn hunk_overlaps_symbol(hunk: &HistoryHunk, start: i64, 
     }
     false
 }
-// Return a changed-line fact and a parent coordinate. A pure insertion establishes birth.
+/// Return the changed-line fact, parent cursor and whether the line was introduced.
+/// An introduced line keeps its parent boundary cursor for callers tracing beyond birth.
 pub(in crate::analysis) fn map_line<'a>(
     hunks: impl IntoIterator<Item = &'a HistoryHunk>,
     line: i64,
     unchanged: bool,
-) -> Option<(Option<HunkId>, Option<i64>)> {
+) -> Option<(Option<HunkId>, i64, bool)> {
     let mut ordered = hunks.into_iter().collect::<Vec<_>>();
     if ordered.is_empty() {
-        return unchanged.then_some((None, Some(line)));
+        return unchanged.then_some((None, line, false));
     }
     ordered.sort_by_key(|hunk| hunk.new_start);
     let mut shift = 0;
@@ -81,14 +80,14 @@ pub(in crate::analysis) fn map_line<'a>(
                 }
                 Some(b'+') => {
                     if new == line {
-                        mapped = Some((Some(hunk.id()), deleted));
+                        mapped = Some((Some(hunk.id()), deleted.unwrap_or(old), deleted.is_none()));
                     }
                     new += 1;
                     new_count += 1;
                 }
                 Some(b' ') => {
                     if new == line {
-                        mapped = Some((None, Some(old)));
+                        mapped = Some((None, old, false));
                     }
                     old += 1;
                     new += 1;
@@ -112,5 +111,44 @@ pub(in crate::analysis) fn map_line<'a>(
             shift += hunk.old_lines - hunk.new_lines;
         }
     }
-    Some((None, Some(line + shift)))
+    Some((None, line + shift, false))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pure_insertion_keeps_the_parent_boundary_cursor_for_why() {
+        let commit = HistoryCommit {
+            position: 0,
+            oid: String::new(),
+            commit_time: 0,
+            subject: String::new(),
+            body: String::new(),
+            paths: Vec::new(),
+            changes: Vec::new(),
+            anchored_ordinals: vec![0],
+            parent_count: 1,
+            shallow_boundary: false,
+        };
+        let hunk = HistoryHunk {
+            change_ordinal: 0,
+            hunk_ordinal: 0,
+            old_start: 1,
+            old_lines: 1,
+            new_start: 1,
+            new_lines: 3,
+            text: b"+before\n+target\n original\n".to_vec(),
+        };
+        let mut line = 2;
+        assert_eq!(
+            trace_line(&commit, &[hunk], &mut line),
+            Some(HunkId {
+                change_ordinal: 0,
+                hunk_ordinal: 0
+            })
+        );
+        assert_eq!(line, 1);
+    }
 }

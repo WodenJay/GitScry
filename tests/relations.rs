@@ -2354,3 +2354,29 @@ fn line_related_mass_change_boundary_applies_to_support_and_denominator() {
         assert_eq!(material["detail"]["proportion"], 0.5);
     }
 }
+
+#[test]
+fn line_related_implicit_head_degrades_when_refresh_cannot_publish_it() {
+    let repo = TestRepo::new();
+    repo.commit_files(
+        &[("seed.txt", b"target 0\n"), ("candidate.txt", b"old\n")],
+        "cached introduction",
+    );
+    repo.index();
+    let cache = rusqlite::Connection::open(repo.cache_dir().join("cache.sqlite")).unwrap();
+    cache.execute_batch("CREATE TRIGGER reject_hunk BEFORE INSERT ON hunks BEGIN SELECT RAISE(ABORT, 'injected hunk write failure'); END;").unwrap();
+    drop(cache);
+    repo.commit_files(
+        &[("seed.txt", b"target 1\n"), ("candidate.txt", b"new\n")],
+        "unpublished target touch",
+    );
+    let output = repo.run(["related", "seed.txt", "--line", "1", "--json"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["target"]["revision"], repo.head());
+    assert_eq!(report["target"]["status"], "unavailable", "{report}");
+    assert!(report["target"]["eligible_target_touch_commits"].is_null());
+    assert_eq!(report["matched_count"], 0);
+    assert_eq!(report["scope"]["coverage_complete"], false);
+    assert!(!report["warnings"].as_array().unwrap().is_empty());
+}

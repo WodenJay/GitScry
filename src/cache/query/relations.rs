@@ -26,15 +26,17 @@ impl QuerySession {
             scope,
             false,
             None,
+            false,
         )
     }
 
-    pub(crate) fn target_relation_history(
+    pub(crate) fn selected_relation_history(
         &self,
         paths: &[Vec<u8>],
-        touches: &HashSet<String>,
+        commits: &HashSet<String>,
         mass_change_path_limit: usize,
         scope: Option<&SearchFilter>,
+        include_single_path: bool,
     ) -> Result<RelationHistory, AppError> {
         relation_history(
             &self.connection,
@@ -42,7 +44,8 @@ impl QuerySession {
             mass_change_path_limit,
             scope,
             true,
-            Some(touches),
+            Some(commits),
+            include_single_path,
         )
     }
     pub(crate) fn exact_relation_history(
@@ -58,6 +61,7 @@ impl QuerySession {
             scope,
             true,
             None,
+            false,
         )
     }
 }
@@ -93,7 +97,8 @@ fn relation_history(
     mass_change_path_limit: usize,
     scope: Option<&SearchFilter>,
     exact: bool,
-    touches: Option<&HashSet<String>>,
+    commits: Option<&HashSet<String>>,
+    include_single_path: bool,
 ) -> Result<RelationHistory, AppError> {
     if seed_keys.is_empty() {
         return Ok(RelationHistory {
@@ -116,29 +121,26 @@ fn relation_history(
         limit,
         scope,
         exact,
-        touches.is_some(),
+        include_single_path,
     )?;
-    if let Some(touches) = touches {
+    if let Some(commits) = commits {
         let mut statement = connection
             .prepare("SELECT commit_id, oid FROM commits")
-            .map_err(|error| search_error("preparing target relation history", error))?;
+            .map_err(|error| search_error("preparing selected relation history", error))?;
         let rows = statement
             .query_map([], |row| {
                 Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
             })
-            .map_err(|error| search_error("reading target relation history", error))?;
+            .map_err(|error| search_error("reading selected relation history", error))?;
         let mut selected = HashSet::new();
         for row in rows {
             let (id, oid) =
-                row.map_err(|error| search_error("reading target relation history", error))?;
-            if touches.contains(&oid) {
+                row.map_err(|error| search_error("reading selected relation history", error))?;
+            if commits.contains(&oid) {
                 selected.insert(id);
             }
         }
         seed_matches.retain(|id, _| selected.contains(id));
-        for matched in seed_matches.values_mut() {
-            matched.keys = HashSet::from([seed_keys[0].clone()]);
-        }
     }
     let seed_touch_commits = seed_matches.len();
     let mass_changes_filtered =
