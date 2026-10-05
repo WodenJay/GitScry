@@ -483,6 +483,19 @@ fn render_relation(lines: &mut Vec<String>, material: &Material, relation: &Rela
                     .collect::<Vec<_>>()
                     .join(", ")
             ));
+            for source in &support.sources {
+                lines.push(format!(
+                    "  source input: {} ({}) matched: {}",
+                    escape::path(source.path.as_bytes()),
+                    source.kind,
+                    source
+                        .paths
+                        .iter()
+                        .map(|path| escape::path(path))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
         }
     }
     lines.push(format!(

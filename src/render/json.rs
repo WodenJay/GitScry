@@ -94,8 +94,15 @@ struct JsonModule<'a> {
 struct JsonModuleSupport<'a> {
     oid: &'a str,
     paths: Vec<JsonPath<'a>>,
+    sources: Vec<JsonModuleSource<'a>>,
 }
 
+#[derive(Serialize)]
+struct JsonModuleSource<'a> {
+    path: &'a str,
+    kind: &'static str,
+    paths: Vec<JsonPath<'a>>,
+}
 #[derive(Serialize)]
 struct JsonRelationTarget<'a> {
     path: JsonPath<'a>,
@@ -568,6 +575,15 @@ fn json_detail(detail: &Detail) -> JsonDetail<'_> {
                     .map(|support| JsonModuleSupport {
                         oid: &support.oid,
                         paths: support.paths.iter().map(|path| json_path(path)).collect(),
+                        sources: support
+                            .sources
+                            .iter()
+                            .map(|source| JsonModuleSource {
+                                path: &source.path,
+                                kind: source.kind,
+                                paths: source.paths.iter().map(|path| json_path(path)).collect(),
+                            })
+                            .collect(),
                     })
                     .collect(),
             }),
