@@ -61,6 +61,10 @@ pub(crate) enum Request {
         query: String,
         path: Option<String>,
     },
+    TraceRemovalFragment {
+        input: std::path::PathBuf,
+        path: Option<String>,
+    },
     Examples {
         words: Vec<String>,
         paths: Vec<String>,
@@ -119,6 +123,7 @@ pub(crate) enum QueryReport {
     Analysis(Report),
     Timeline(super::TimelineReport),
     TraceRemoval(super::TraceRemovalReport),
+    TraceRemovalFragment(super::TraceRemovalFragmentReport),
     Hotspots(super::HotspotsReport),
 }
 
@@ -131,7 +136,10 @@ impl QueryReport {
             Self::Patterns(_) => &[],
             Self::Context(report) => &report.warnings,
             Self::Analysis(report) => &report.warnings,
-            Self::Timeline(_) | Self::Hotspots(_) | Self::TraceRemoval(_) => &[],
+            Self::Timeline(_)
+            | Self::Hotspots(_)
+            | Self::TraceRemoval(_)
+            | Self::TraceRemovalFragment(_) => &[],
         }
     }
 
@@ -143,7 +151,10 @@ impl QueryReport {
             Self::Patterns(_) => &[],
             Self::Context(_) => &[],
             Self::Analysis(report) => &report.notices,
-            Self::Timeline(_) | Self::Hotspots(_) | Self::TraceRemoval(_) => &[],
+            Self::Timeline(_)
+            | Self::Hotspots(_)
+            | Self::TraceRemoval(_)
+            | Self::TraceRemovalFragment(_) => &[],
         }
     }
 }
@@ -206,6 +217,9 @@ pub(crate) fn execute(request: Request, options: Options) -> Result<Outcome, App
         } => capabilities::code_search::execute_regex(pattern, path, direction, options),
         Request::TraceRemoval { query, path } => {
             capabilities::trace_removal::execute(query, path, options)
+        }
+        Request::TraceRemovalFragment { input, path } => {
+            capabilities::trace_removal::execute_fragment(input, path, options)
         }
         Request::Examples { words, paths } => {
             run_text(words, paths, options, capabilities::examples)

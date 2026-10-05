@@ -215,16 +215,19 @@ pub(crate) fn execute(
         }
         Command::TraceRemoval {
             code,
+            code_file,
             path,
             limit,
             scope,
             ..
-        } => (
-            Request::TraceRemoval { query: code, path },
-            limit,
-            false,
-            scope.into(),
-        ),
+        } => {
+            let request = match (code, code_file) {
+                (Some(query), None) => Request::TraceRemoval { query, path },
+                (None, Some(input)) => Request::TraceRemovalFragment { input, path },
+                _ => unreachable!("clap enforces exactly one trace-removal mode"),
+            };
+            (request, limit, false, scope.into())
+        }
         Command::Examples {
             query: words,
             paths,
@@ -422,7 +425,7 @@ pub(crate) fn execute(
         query::QueryReport::Context(_) | query::QueryReport::Followups(_) => {
             unreachable!("context has no GitHub link option")
         }
-        query::QueryReport::TraceRemoval(_) => {
+        query::QueryReport::TraceRemoval(_) | query::QueryReport::TraceRemovalFragment(_) => {
             unreachable!("trace-removal has no GitHub link option")
         }
         query::QueryReport::Patterns(_) => unreachable!("patterns has no GitHub link option"),

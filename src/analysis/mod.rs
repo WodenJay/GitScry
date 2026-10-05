@@ -16,6 +16,7 @@ pub(crate) use capabilities::hotspots::Report as HotspotsReport;
 pub(crate) use capabilities::patterns::Report as PatternsReport;
 pub(crate) use capabilities::timeline::{Entry as TimelineEntry, Report as TimelineReport};
 pub(crate) use capabilities::trace_fix::TraceFixDetail;
+pub(crate) use capabilities::trace_removal::FragmentReport as TraceRemovalFragmentReport;
 pub(crate) use capabilities::trace_removal::Report as TraceRemovalReport;
 pub(crate) use capabilities::why::{
     SymbolFact, SymbolSummary, WhyAttribution, WhyModification, WhySummary,

@@ -39,6 +39,7 @@ fn format_report(
         QueryReport::Hotspots(report) => hotspots::format_report(report),
         QueryReport::Context(report) => context::format_report(report),
         QueryReport::TraceRemoval(report) => trace_removal::format_report(report),
+        QueryReport::TraceRemovalFragment(report) => trace_removal::format_fragment_report(report),
         QueryReport::Analysis(report) => {
             let mut output = material::format_report(report);
             if let Some(github_links) = github_links {
@@ -96,6 +97,9 @@ fn format_json_report(
         QueryReport::Context(report) => context::format_json_report(report, additional_warnings),
         QueryReport::TraceRemoval(report) => {
             trace_removal::format_json_report(report, additional_warnings)
+        }
+        QueryReport::TraceRemovalFragment(report) => {
+            trace_removal::format_fragment_json_report(report, additional_warnings)
         }
         QueryReport::Analysis(report) => {
             json::format_json_report(report, additional_warnings, github_links)
