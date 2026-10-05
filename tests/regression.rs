@@ -41,6 +41,31 @@ fn set_head_date(repo: &TestRepo, date: &str) {
 }
 
 #[test]
+fn regression_excludes_previous_file_incarnation_without_good() {
+    let repo = TestRepo::new();
+    repo.commit(
+        "src/a.rs",
+        b"fn timeout() {}\n",
+        "Old timeout introduction",
+        None,
+    );
+    git(repo.dir.path(), ["rm", "src/a.rs"]);
+    git(repo.dir.path(), ["commit", "-m", "Delete old timeout file"]);
+    repo.commit(
+        "src/a.rs",
+        b"fn fresh() {}\n",
+        "Create fresh file",
+        None,
+    );
+    repo.index();
+
+    let output = repo.run(["regression", "timeout", "--path", "src/a.rs", "--json"]);
+    assert_eq!(output.status.code(), Some(0));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["materials"], serde_json::json!([]));
+}
+
+#[test]
 fn regression_reports_a_historical_suspect() {
     let repo = TestRepo::new();
     repo.commit(
