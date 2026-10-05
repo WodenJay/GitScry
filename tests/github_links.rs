@@ -524,6 +524,8 @@ mod unix {
             .unwrap();
             support::isolated_gitscry_command(repo.user_data_dir())
                 .args(args)
+                // These tests inspect complete link reports, including object-budget cases.
+                .env("GITSCRY_FULL_OUTPUT", "1")
                 .current_dir(repo.dir.path())
                 .env("GIT_CONFIG_NOSYSTEM", "1")
                 .env("GIT_CONFIG_GLOBAL", repo.dir.path().join("global-config"))
