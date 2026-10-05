@@ -21,6 +21,14 @@ Record a case only when it did not—for example, its output was not useful, it 
 
 ## Entries
 
+### 2026-10-06 Hotspot query timed out during dogfooding
+
+- **Command:** `cargo run --quiet --jobs 1 -- hotspots --limit 5 --json`
+- **Context:** Development build at HEAD `38ae0253a35b1a2ccd485f8187ce543f9c6bfd77` on `agent/issue-237-hotspots`; installed GitScry is 0.12.0.
+- **Goal:** Inspect hotspot rankings and history in the current repository before implementing issue #237.
+- **Actual:** The command produced no output and the 120-second timeout terminated it. It yielded no hotspot report. This attempt does not distinguish refresh cost from query-analysis cost.
+- **Expected:** A JSON report within an interactive wait, or progress that distinguished refresh from analysis.
+
 ### 2026-10-05 Directory move-out exclusion
 
 - **Command:** `cargo run --quiet -- related src/analysis/retrieval/ --json --limit 5`
