@@ -18,9 +18,19 @@ pub(crate) struct Report {
     pub(crate) symbol_summary: Option<SymbolSummary>,
     pub(crate) relation_sources: Vec<super::capabilities::RelationSource>,
 }
+pub(crate) enum RelationSelector {
+    Line {
+        line: usize,
+    },
+    Symbol {
+        name: String,
+        start_line: usize,
+        end_line: usize,
+    },
+}
 pub(crate) struct RelationTarget {
     pub(crate) path: Vec<u8>,
-    pub(crate) line: usize,
+    pub(crate) selector: RelationSelector,
     pub(crate) revision: String,
     pub(crate) status: &'static str,
     pub(crate) eligible_target_touch_commits: Option<usize>,

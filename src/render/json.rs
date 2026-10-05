@@ -3,8 +3,8 @@ use serde::Serialize;
 
 use crate::analysis::{
     Citation, CodeMatch, Confidence, Detail, Failure, Material, PatchExcerpt, PatchHunk, Relation,
-    Report, ReportKind, SearchScopeInfo, Step, SymbolFact, SymbolSummary, WhyAttribution,
-    WhyModification, WhySummary,
+    RelationSelector, Report, ReportKind, SearchScopeInfo, Step, SymbolFact, SymbolSummary,
+    WhyAttribution, WhyModification, WhySummary,
 };
 
 const SCHEMA_VERSION: u8 = 1;
@@ -45,13 +45,32 @@ pub(crate) fn format_json_report(
         scope: report.scope.as_ref().map(json_scope),
         symbol_summary: report.symbol_summary.as_ref().map(json_symbol_summary),
         sources: &report.relation_sources,
-        target: report.target.as_ref().map(|target| JsonRelationTarget {
-            path: json_path(&target.path),
-            line: target.line,
-            revision: &target.revision,
-            status: target.status,
-            eligible_target_touch_commits: target.eligible_target_touch_commits,
-            limitations: &target.limitations,
+        target: report.target.as_ref().map(|target| {
+            let line = match &target.selector {
+                RelationSelector::Line { line } => *line,
+                RelationSelector::Symbol { start_line, .. } => *start_line,
+            };
+            let selector = match &target.selector {
+                RelationSelector::Line { line } => JsonRelationSelector::Line { line: *line },
+                RelationSelector::Symbol {
+                    name,
+                    start_line,
+                    end_line,
+                } => JsonRelationSelector::Symbol {
+                    name,
+                    start_line: *start_line,
+                    end_line: *end_line,
+                },
+            };
+            JsonRelationTarget {
+                path: json_path(&target.path),
+                line,
+                selector,
+                revision: &target.revision,
+                status: target.status,
+                eligible_target_touch_commits: target.eligible_target_touch_commits,
+                limitations: &target.limitations,
+            }
         }),
     })
 }
@@ -107,10 +126,23 @@ struct JsonModuleSource<'a> {
 struct JsonRelationTarget<'a> {
     path: JsonPath<'a>,
     line: usize,
+    selector: JsonRelationSelector<'a>,
     revision: &'a str,
     status: &'a str,
     eligible_target_touch_commits: Option<usize>,
     limitations: &'a [String],
+}
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum JsonRelationSelector<'a> {
+    Line {
+        line: usize,
+    },
+    Symbol {
+        name: &'a str,
+        start_line: usize,
+        end_line: usize,
+    },
 }
 #[derive(Serialize)]
 struct JsonSymbolSummary<'a> {
