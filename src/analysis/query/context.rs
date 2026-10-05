@@ -170,6 +170,7 @@ impl Context {
             QueryReport::FragmentSearch(report) => report.scope = scope,
             QueryReport::Timeline(report) => report.scope = scope,
             QueryReport::TraceRemoval(report) => report.scope = scope,
+            QueryReport::TraceRemovalFragment(report) => report.scope = scope,
             QueryReport::Hotspots(report) => report.scope = scope,
         }
         Outcome {

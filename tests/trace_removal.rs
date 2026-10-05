@@ -37,6 +37,376 @@ fn query(repo: &TestRepo, args: &[&str]) -> Value {
 }
 
 #[test]
+fn fragment_queries_return_span_events_and_default_patch_context() {
+    let repo = TestRepo::new();
+    let parent = commit(
+        &repo,
+        &[("a.rs", "before\nalpha();\n\nomega();\nafter\n")],
+        "Introduce block",
+        "2000-01-01T00:00:00Z",
+    );
+    let removal = commit(
+        &repo,
+        &[("a.rs", "before\nafter\n")],
+        "Remove block",
+        "2000-01-02T00:00:00Z",
+    );
+    repo.index();
+    fs::write(repo.dir.path().join("fragment"), b"alpha();\n\nomega();\n").unwrap();
+
+    let output = repo.run(["trace-removal", "--code-file", "fragment", "--json"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["schema_version"], 2);
+    assert_eq!(report["kind"], "trace-removal-fragments");
+    assert_eq!(report["matched_count"], 1);
+    assert_eq!(report["truncated"], false);
+    assert_eq!(report["query"]["code_file"], "fragment");
+
+    let event = &report["events"][0];
+    assert_eq!(event["commit_id"], removal);
+    assert_eq!(event["first_parent_id"], parent);
+    assert_eq!(event["old_path"], "a.rs");
+    assert_eq!(event["file_change"]["status"], "M");
+    let occurrence = &event["occurrences"][0];
+    assert_eq!(occurrence["commit_id"], removal);
+    assert_eq!(occurrence["path"], "a.rs");
+    assert_eq!(occurrence["direction"], "removed");
+    assert_eq!(occurrence["start_line"], 2);
+    assert_eq!(occurrence["end_line"], 4);
+    assert_eq!(occurrence["content"], "alpha();\n\nomega();\n");
+    assert_eq!(event["patch"]["status"], "available");
+    let patch = event["patch"]["hunks"][0]["text"].as_str().unwrap();
+    assert!(patch.contains(" before\n"));
+    assert!(patch.contains(" after\n"));
+
+    let human = repo.run(["trace-removal", "--code-file", "fragment"]);
+    assert!(human.status.success());
+    let human = String::from_utf8(human.stdout).unwrap();
+    assert!(human.contains("alpha();"));
+    assert!(human.contains("a.rs:2-4"));
+}
+
+#[test]
+fn fragment_queries_apply_committer_time_scope_before_event_limits() {
+    let repo = TestRepo::new();
+    commit(
+        &repo,
+        &[("a.rs", "old()\n")],
+        "Root",
+        "2000-01-01T00:00:00Z",
+    );
+    let first = commit(
+        &repo,
+        &[("a.rs", "")],
+        "First removal",
+        "2000-01-02T00:00:00Z",
+    );
+    commit(
+        &repo,
+        &[("a.rs", "old()\n")],
+        "Restore",
+        "2000-01-03T00:00:00Z",
+    );
+    let second = commit(
+        &repo,
+        &[("a.rs", "")],
+        "Second removal",
+        "2000-01-04T00:00:00Z",
+    );
+    repo.index();
+    fs::write(repo.dir.path().join("fragment"), b"old()\n").unwrap();
+
+    let recent = repo.run([
+        "trace-removal",
+        "--code-file",
+        "fragment",
+        "--since",
+        "2000-01-04",
+        "--until",
+        "2000-01-04",
+        "--limit",
+        "1",
+        "--json",
+    ]);
+    assert!(recent.status.success());
+    let recent: Value = serde_json::from_slice(&recent.stdout).unwrap();
+    assert_eq!(recent["matched_count"], 1);
+    assert_eq!(recent["events"][0]["commit_id"], second);
+
+    let earlier = repo.run([
+        "trace-removal",
+        "--code-file",
+        "fragment",
+        "--until",
+        "2000-01-02",
+        "--json",
+    ]);
+    assert!(earlier.status.success());
+    let earlier: Value = serde_json::from_slice(&earlier.stdout).unwrap();
+    assert_eq!(earlier["matched_count"], 1);
+    assert_eq!(earlier["events"][0]["commit_id"], first);
+}
+
+#[test]
+fn fragment_queries_refresh_history_reachable_from_the_pinned_head() {
+    let repo = TestRepo::new();
+    commit(
+        &repo,
+        &[("a.rs", "old()\n")],
+        "Root",
+        "2000-01-01T00:00:00Z",
+    );
+    repo.index();
+    fs::write(repo.dir.path().join("fragment"), b"old()\n").unwrap();
+    let removal = commit(
+        &repo,
+        &[("a.rs", "")],
+        "Uncached removal",
+        "2000-01-02T00:00:00Z",
+    );
+
+    let output = repo.run(["trace-removal", "--code-file", "fragment", "--json"]);
+    assert!(output.status.success());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["matched_count"], 1);
+    assert_eq!(report["events"][0]["commit_id"], removal);
+    assert_eq!(report["scope"]["cache_tip"], removal);
+    assert_eq!(report["scope"]["coverage_complete"], true);
+    assert!(report["warnings"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn fragment_locator_ignores_inserted_rows_before_deleted_lines() {
+    let repo = TestRepo::new();
+    commit(
+        &repo,
+        &[("block.rs", "keep\nfirst()\nsecond()\n")],
+        "Introduce fragment",
+        "2000-01-01T00:00:00Z",
+    );
+    let removal = commit(
+        &repo,
+        &[("block.rs", "inserted\nkeep\n")],
+        "Replace block",
+        "2000-01-02T00:00:00Z",
+    );
+    repo.index();
+    fs::write(repo.dir.path().join("fragment"), b"first()\nsecond()\n").unwrap();
+
+    let output = repo.run(["trace-removal", "--code-file", "fragment", "--json"]);
+    assert!(output.status.success());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let event = &report["events"][0];
+    let occurrence = &event["occurrences"][0];
+    assert_eq!(event["commit_id"], removal);
+    assert_eq!(occurrence["start_line"], 2);
+    assert_eq!(occurrence["end_line"], 3);
+    assert_eq!(occurrence["content"], "first()\nsecond()\n");
+    assert!(
+        event["patch"]["hunks"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("+inserted\n")
+    );
+}
+
+#[test]
+fn fragment_matches_do_not_join_across_unchanged_rows_or_hunks() {
+    let repo = TestRepo::new();
+    let middle = (0..12)
+        .map(|index| format!("context-{index}\n"))
+        .collect::<String>();
+    let before = format!("first();\nkeep();\nlast();\n{middle}first();\nkeep();\nlast();\n");
+    let after = format!("keep();\n{middle}keep();\n");
+    commit(
+        &repo,
+        &[("block.rs", &before)],
+        "Introduce separated lines",
+        "2000-01-01T00:00:00Z",
+    );
+    commit(
+        &repo,
+        &[("block.rs", &after)],
+        "Remove separated lines",
+        "2000-01-02T00:00:00Z",
+    );
+    repo.index();
+    fs::write(repo.dir.path().join("fragment"), b"first();\nlast();\n").unwrap();
+
+    let output = repo.run(["trace-removal", "--code-file", "fragment", "--json"]);
+    assert!(output.status.success());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["matched_count"], 0);
+    assert!(report["events"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn fragment_limits_count_events_while_preserving_overlapping_occurrences_and_scope() {
+    let repo = TestRepo::new();
+    let a_content = (0..14).map(|_| "x\n").collect::<String>();
+    let b_content = (0..3).map(|_| "x\n").collect::<String>();
+    let parent = commit(
+        &repo,
+        &[("a.rs", &a_content), ("b.rs", &b_content)],
+        "Introduce repeated lines",
+        "2000-01-01T00:00:00Z",
+    );
+    let removal = commit(
+        &repo,
+        &[("a.rs", ""), ("b.rs", "")],
+        "Remove repeated lines",
+        "2000-01-02T00:00:00Z",
+    );
+    repo.index();
+    fs::write(repo.dir.path().join("fragment"), b"x\nx\n").unwrap();
+
+    let limited = repo.run([
+        "trace-removal",
+        "--code-file",
+        "fragment",
+        "--limit",
+        "1",
+        "--json",
+    ]);
+    assert!(limited.status.success());
+    let limited: Value = serde_json::from_slice(&limited.stdout).unwrap();
+    assert_eq!(limited["matched_count"], 2);
+    assert_eq!(limited["truncated"], true);
+    assert_eq!(limited["events"].as_array().unwrap().len(), 1);
+    let event = &limited["events"][0];
+    assert_eq!(event["commit_id"], removal);
+    assert_eq!(event["first_parent_id"], parent);
+    assert_eq!(event["old_path"], "a.rs");
+    let occurrences = event["occurrences"].as_array().unwrap();
+    assert_eq!(occurrences.len(), 13);
+    for (index, occurrence) in occurrences.iter().enumerate() {
+        assert_eq!(occurrence["start_line"], index + 1);
+        assert_eq!(occurrence["end_line"], index + 2);
+        assert_eq!(occurrence["content"], "x\nx\n");
+    }
+
+    let path_filtered = repo.run([
+        "trace-removal",
+        "--code-file",
+        "fragment",
+        "--path",
+        "b.rs",
+        "--json",
+    ]);
+    assert!(path_filtered.status.success());
+    let path_filtered: Value = serde_json::from_slice(&path_filtered.stdout).unwrap();
+    assert_eq!(path_filtered["matched_count"], 1);
+    assert_eq!(path_filtered["events"][0]["old_path"], "b.rs");
+    assert_eq!(
+        path_filtered["events"][0]["occurrences"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+
+    let scoped = repo.run([
+        "trace-removal",
+        "--code-file",
+        "fragment",
+        "--to-rev",
+        &parent,
+        "--json",
+    ]);
+    assert!(scoped.status.success());
+    let scoped: Value = serde_json::from_slice(&scoped.stdout).unwrap();
+    assert_eq!(scoped["matched_count"], 0);
+    assert!(scoped["events"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn fragment_stdin_preserves_non_utf8_bytes_crlf_and_missing_final_newline() {
+    use std::{io::Write, process::Stdio};
+
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+
+    let repo = TestRepo::new();
+    fs::write(
+        repo.dir.path().join("binary.dat"),
+        b"before\n\xff\r\nafter\n",
+    )
+    .unwrap();
+    git(repo.dir.path(), ["add", "binary.dat"]);
+    git(repo.dir.path(), ["commit", "-m", "Add non-UTF-8 line"]);
+    fs::write(repo.dir.path().join("binary.dat"), b"before\nafter\n").unwrap();
+    git(repo.dir.path(), ["add", "binary.dat"]);
+    git(repo.dir.path(), ["commit", "-m", "Remove non-UTF-8 line"]);
+    repo.index();
+
+    let mut child = TestRepo::command_at(repo.dir.path(), repo.user_data_dir())
+        .args(["trace-removal", "--code-file", "-", "--json"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(b"\xff").unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["query"]["code_file"], "-");
+    let occurrence = &report["events"][0]["occurrences"][0];
+    assert_eq!(occurrence["path"], "binary.dat");
+    assert_eq!(occurrence["start_line"], 2);
+    assert_eq!(
+        STANDARD
+            .decode(occurrence["content"]["base64"].as_str().unwrap())
+            .unwrap(),
+        b"\xff\r\n"
+    );
+}
+
+#[test]
+fn fragment_occurrence_survives_surrounding_excerpt_budget() {
+    let repo = TestRepo::new();
+    let content = format!("{}\n", "x".repeat(70_000));
+    commit(
+        &repo,
+        &[("large.txt", &content)],
+        "Add long line",
+        "2000-01-01T00:00:00Z",
+    );
+    commit(
+        &repo,
+        &[("large.txt", "")],
+        "Remove long line",
+        "2000-01-02T00:00:00Z",
+    );
+    repo.index();
+    fs::write(repo.dir.path().join("fragment"), content.as_bytes()).unwrap();
+
+    let output = TestRepo::command_at(repo.dir.path(), repo.user_data_dir())
+        .env("GITSCRY_FULL_OUTPUT", "1")
+        .args(["trace-removal", "--code-file", "fragment", "--json"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["matched_count"], 1);
+    assert_eq!(report["truncated"], false);
+    let event = &report["events"][0];
+    let occurrence = &event["occurrences"][0];
+    assert_eq!(occurrence["start_line"], 1);
+    assert_eq!(occurrence["end_line"], 1);
+    assert_eq!(occurrence["content"], content);
+    assert_eq!(event["patch"]["truncated"], true);
+}
+
+#[test]
 fn groups_deleted_lines_into_events_with_complete_historical_locators() {
     let repo = TestRepo::new();
     let parent = commit(
@@ -149,9 +519,23 @@ fn rejects_invalid_queries_and_execution_errors_but_empty_results_succeed() {
         vec!["trace-removal", "--code", "a\nb"],
         vec!["trace-removal", "--code", "a\rb"],
         vec!["trace-removal", "--code", "a", "--limit", "0"],
+        vec!["trace-removal", "--code", "a", "--code-file", "fragment"],
     ] {
         assert_eq!(repo.run(args).status.code(), Some(2));
     }
+    fs::write(repo.dir.path().join("empty-fragment"), b"").unwrap();
+    assert!(
+        !repo
+            .run(["trace-removal", "--code-file", "empty-fragment"])
+            .status
+            .success()
+    );
+    assert!(
+        !repo
+            .run(["trace-removal", "--code-file", "missing-fragment"])
+            .status
+            .success()
+    );
     assert_eq!(
         repo.run(["trace-removal", "--code", "a"]).status.code(),
         Some(1)
@@ -477,6 +861,23 @@ fn shallow_coverage_stays_visible_with_usable_parent_locators() {
             .iter()
             .any(|warning| warning.as_str().unwrap().contains("shallow"))
     );
+    fs::write(clone.join("fragment"), b"old()\n").unwrap();
+    let fragment = TestRepo::run_at(
+        &clone,
+        ["trace-removal", "--code-file", "fragment", "--json"],
+    );
+    assert!(fragment.status.success());
+    let fragment: Value = serde_json::from_slice(&fragment.stdout).unwrap();
+    assert_eq!(fragment["matched_count"], 1);
+    assert_eq!(fragment["events"][0]["first_parent_id"], root);
+    assert_eq!(fragment["scope"]["coverage_complete"], false);
+    assert!(
+        fragment["warnings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|warning| { warning.as_str().unwrap().contains("shallow") })
+    );
     let human = TestRepo::run_at(&clone, ["trace-removal", "--code", "old()"]);
     assert!(human.status.success());
     assert!(String::from_utf8_lossy(&human.stderr).contains("shallow"));
@@ -490,6 +891,7 @@ fn command_help_and_json_contract_are_explicit_and_extensible() {
     let text = String::from_utf8(help.stdout).unwrap();
     for option in [
         "--code",
+        "--code-file",
         "--path",
         "--from-rev",
         "--to-rev",

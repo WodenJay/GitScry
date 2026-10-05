@@ -2,12 +2,14 @@
 use std::{
     cmp::Reverse,
     collections::{BTreeMap, BTreeSet, HashSet},
+    path::PathBuf,
 };
 
+use crate::analysis::retrieval::code_fragment::{self, Fragment, Span};
 use crate::{
     analysis::{CodeDirection, CodeMatch, PatchExcerpt, SearchScopeInfo},
     app::AppError,
-    cache::{PatchHistoryHunk, QuerySession, SearchFilter},
+    cache::{CodeHunk, PatchHistoryHunk, QuerySession, SearchFilter},
 };
 
 use crate::analysis::patch::{
@@ -18,6 +20,7 @@ use crate::analysis::patch::{
 const TRACE_CONTEXT_LINES: usize = 3;
 const MAX_SAME_COMMIT_FILE_CHANGES: usize = 12;
 
+type SelectedEventGroups<T> = BTreeMap<(String, Vec<u8>), Vec<T>>;
 #[derive(Clone, Copy)]
 pub(crate) enum SameCommitFileStatus {
     Complete,
@@ -53,6 +56,39 @@ pub(crate) struct Report {
     pub(crate) matched_count: usize,
     pub(crate) truncated: bool,
     pub(crate) events: Vec<Event>,
+}
+
+pub(crate) struct FragmentReport {
+    pub(crate) query_file: Vec<u8>,
+    pub(crate) path: Option<Vec<u8>>,
+    pub(crate) cache_tip: String,
+    pub(crate) scope: Option<SearchScopeInfo>,
+    pub(crate) limit: usize,
+    pub(crate) matched_count: usize,
+    pub(crate) truncated: bool,
+    pub(crate) events: Vec<FragmentEvent>,
+}
+
+pub(crate) struct FragmentEvent {
+    pub(crate) commit_id: String,
+    pub(crate) timestamp: String,
+    pub(crate) message: Vec<u8>,
+    pub(crate) first_parent_id: String,
+    pub(crate) old_path: Vec<u8>,
+    pub(crate) status: String,
+    pub(crate) new_path: Option<Vec<u8>>,
+    pub(crate) occurrences: Vec<FragmentOccurrence>,
+    pub(crate) patch: Option<PatchExcerpt>,
+    pub(crate) same_commit_files: SameCommitFiles,
+}
+
+pub(crate) struct FragmentOccurrence {
+    pub(crate) commit_id: String,
+    pub(crate) path: Vec<u8>,
+    pub(crate) direction: CodeDirection,
+    pub(crate) start_line: usize,
+    pub(crate) end_line: usize,
+    pub(crate) content: Vec<u8>,
 }
 
 pub(crate) struct Event {
@@ -93,6 +129,15 @@ impl EventSelection {
             }
         }
     }
+    fn into_groups<T>(self) -> (usize, SelectedEventGroups<T>) {
+        let matched_count = self.seen.len();
+        let groups = self
+            .selected
+            .into_iter()
+            .map(|(_, oid, path)| ((oid, path), Vec::new()))
+            .collect();
+        (matched_count, groups)
+    }
 }
 
 pub(in crate::analysis) fn execute(
@@ -111,6 +156,187 @@ pub(in crate::analysis) fn execute(
         context.filter(),
     )?;
     Ok(context.finish(QueryReport::TraceRemoval(report)))
+}
+
+pub(in crate::analysis) fn execute_fragment(
+    input: PathBuf,
+    path: Option<String>,
+    options: crate::analysis::query::Options,
+) -> Result<crate::analysis::query::Outcome, AppError> {
+    use crate::analysis::query::{Context, QueryReport};
+
+    let fragment = Fragment::read(&input)?;
+    let context = Context::open(options.scope)?;
+    let report = run_fragments(
+        &context.session,
+        &fragment,
+        &input,
+        path.as_deref(),
+        options.limit,
+        context.filter(),
+    )?;
+    Ok(context.finish(QueryReport::TraceRemovalFragment(report)))
+}
+
+fn run_fragments(
+    session: &QuerySession,
+    fragment: &Fragment,
+    input: &std::path::Path,
+    path: Option<&str>,
+    limit: usize,
+    scope: Option<&SearchFilter>,
+) -> Result<FragmentReport, AppError> {
+    let normalized_path = path.map(super::normalize_git_path_string);
+    let path_filter = normalized_path.as_deref().map(str::as_bytes);
+    let mut selection = EventSelection::new(limit);
+    let discover = |hunk: CodeHunk| {
+        code_fragment::visit_hunk(
+            &hunk,
+            fragment,
+            path_filter,
+            Some(CodeDirection::Removed),
+            |_| {
+                let old_path = hunk
+                    .old_path
+                    .as_deref()
+                    .expect("removed fragment has an old path");
+                let key = (hunk.oid.clone(), old_path.to_vec());
+                if !selection.seen.contains(&key)
+                    && session
+                        .removal_change(&hunk.oid, old_path)?
+                        .first_parent_id
+                        .is_some()
+                {
+                    selection.record(hunk.commit_time, &hunk.oid, old_path);
+                }
+                Ok(())
+            },
+        )
+    };
+    match scope {
+        Some(scope) => session.scan_code_hunks_scoped(scope, discover)?,
+        None => session.scan_code_hunks(discover)?,
+    }
+
+    let (matched_count, mut groups) = selection.into_groups::<FragmentOccurrence>();
+    if !groups.is_empty() {
+        let collect = |hunk: CodeHunk| {
+            let Some(old_path) = hunk.old_path.as_deref() else {
+                return Ok(());
+            };
+            let Some(occurrences) = groups.get_mut(&(hunk.oid.clone(), old_path.to_vec())) else {
+                return Ok(());
+            };
+            code_fragment::visit_hunk(
+                &hunk,
+                fragment,
+                path_filter,
+                Some(CodeDirection::Removed),
+                |span| {
+                    occurrences.push(fragment_occurrence(&hunk, old_path, span));
+                    Ok(())
+                },
+            )
+        };
+        match scope {
+            Some(scope) => session.scan_code_hunks_scoped(scope, collect)?,
+            None => session.scan_code_hunks(collect)?,
+        }
+    }
+
+    let mut events = Vec::new();
+    for ((commit_id, old_path), mut occurrences) in groups {
+        let change = session.removal_change(&commit_id, &old_path)?;
+        let Some(first_parent_id) = change.first_parent_id else {
+            continue;
+        };
+        occurrences.sort_by(|a, b| {
+            a.start_line
+                .cmp(&b.start_line)
+                .then_with(|| a.end_line.cmp(&b.end_line))
+                .then_with(|| a.content.cmp(&b.content))
+        });
+        let same_commit_files = match session.other_file_changes(
+            &commit_id,
+            change.change_ordinal,
+            &old_path,
+            change.new_path.as_deref(),
+            MAX_SAME_COMMIT_FILE_CHANGES,
+        ) {
+            Ok(summary) => SameCommitFiles {
+                status: if summary.truncated {
+                    SameCommitFileStatus::Truncated
+                } else {
+                    SameCommitFileStatus::Complete
+                },
+                files: summary.changes,
+            },
+            Err(_) => SameCommitFiles {
+                status: SameCommitFileStatus::Unavailable,
+                files: Vec::new(),
+            },
+        };
+        let matching_lines = occurrences
+            .iter()
+            .flat_map(|occurrence| occurrence.start_line..=occurrence.end_line)
+            .filter_map(|line| i64::try_from(line).ok())
+            .collect::<HashSet<_>>();
+        let patch = removal_patch_excerpt_at_lines(
+            session,
+            &commit_id,
+            change.change_ordinal,
+            &old_path,
+            &matching_lines,
+        )?;
+        events.push((
+            change.commit_time,
+            FragmentEvent {
+                commit_id,
+                timestamp: super::timeline::format_timestamp(change.commit_time),
+                message: change.message,
+                first_parent_id,
+                old_path,
+                status: change.status,
+                new_path: change.new_path,
+                occurrences,
+                patch: Some(patch),
+                same_commit_files,
+            },
+        ));
+    }
+    events.sort_by(|(a_time, a), (b_time, b)| {
+        b_time
+            .cmp(a_time)
+            .then_with(|| a.commit_id.cmp(&b.commit_id))
+            .then_with(|| a.old_path.cmp(&b.old_path))
+    });
+    Ok(FragmentReport {
+        query_file: input.as_os_str().as_encoded_bytes().to_vec(),
+        path: path.map(|path| path.as_bytes().to_vec()),
+        cache_tip: session.completed_tip()?,
+        scope: None,
+        limit,
+        matched_count,
+        truncated: matched_count > limit,
+        events: events.into_iter().map(|(_, event)| event).collect(),
+    })
+}
+
+fn fragment_occurrence(hunk: &CodeHunk, path: &[u8], span: Span<'_>) -> FragmentOccurrence {
+    let first = span.rows.first().expect("non-empty fragment span");
+    let last = span.rows.last().expect("non-empty fragment span");
+    FragmentOccurrence {
+        commit_id: hunk.oid.clone(),
+        path: path.to_vec(),
+        direction: span.direction,
+        start_line: first.number,
+        end_line: last.number,
+        content: span
+            .rows
+            .iter()
+            .flat_map(|row| row.content.iter().copied())
+            .collect(),
+    }
 }
 
 fn run(
@@ -144,13 +370,7 @@ fn run(
             Ok(())
         },
     )?;
-    let matched_count = selection.seen.len();
-    let mut groups: BTreeMap<_, Vec<CodeMatch>> = selection
-        .selected
-        .iter()
-        .map(|(_, oid, path)| ((oid.clone(), path.clone()), Vec::new()))
-        .collect();
-    drop(selection);
+    let (matched_count, mut groups) = selection.into_groups::<CodeMatch>();
     // A second pass retains complete line evidence only for the selected events.
     if !groups.is_empty() {
         super::code_search::visit_matches(
@@ -265,10 +485,26 @@ fn removal_patch_excerpt(
         })
         .filter_map(|matched| i64::try_from(matched.line_number).ok())
         .collect::<HashSet<_>>();
+    removal_patch_excerpt_at_lines(
+        session,
+        commit_id,
+        change_ordinal,
+        old_path,
+        &matching_lines,
+    )
+}
+
+fn removal_patch_excerpt_at_lines(
+    session: &QuerySession,
+    commit_id: &str,
+    change_ordinal: i64,
+    old_path: &[u8],
+    matching_lines: &HashSet<i64>,
+) -> Result<PatchExcerpt, AppError> {
     let history = session.patch_history_for_change_at_lines(
         commit_id,
         change_ordinal,
-        &matching_lines,
+        matching_lines,
         MAX_SCANNED_HUNKS,
         MAX_CACHED_HUNK_BYTES,
     )?;
@@ -282,7 +518,7 @@ fn removal_patch_excerpt(
         let Some(text) = cached.text.as_deref() else {
             continue;
         };
-        for fragment in trace_removal_fragments(&cached, text, &matching_lines) {
+        for fragment in trace_removal_fragments(&cached, text, matching_lines) {
             if hunks.len() == MAX_EXCERPTS || remaining_bytes == 0 {
                 truncated = true;
                 break 'cached;

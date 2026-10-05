@@ -127,3 +127,52 @@ pub(in crate::analysis) fn visit_hunk(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cache::CodeHunk;
+
+    #[test]
+    fn opposite_direction_rows_do_not_break_removed_fragment_continuity() {
+        let fragment = Fragment {
+            lines: vec![b"first()".to_vec(), b"second()".to_vec()],
+        };
+        let hunk = CodeHunk {
+            oid: "commit".to_owned(),
+            commit_time: 0,
+            change_ordinal: 0,
+            old_path: Some(b"old.rs".to_vec()),
+            new_path: Some(b"new.rs".to_vec()),
+            hunk_ordinal: 0,
+            old_start: 4,
+            new_start: 4,
+            text: b"@@ -4,2 +4,3 @@\n-first()\n+inserted()\n-second()\n".to_vec(),
+        };
+        let mut spans = Vec::new();
+
+        visit_hunk(
+            &hunk,
+            &fragment,
+            None,
+            Some(CodeDirection::Removed),
+            |span| {
+                spans.push((
+                    span.direction,
+                    span.rows.iter().map(|row| row.number).collect::<Vec<_>>(),
+                    span.rows
+                        .iter()
+                        .flat_map(|row| row.content.iter().copied())
+                        .collect::<Vec<_>>(),
+                ));
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].0, CodeDirection::Removed);
+        assert_eq!(spans[0].1, [4, 5]);
+        assert_eq!(spans[0].2, b"first()\nsecond()\n");
+    }
+}
