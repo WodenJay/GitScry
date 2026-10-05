@@ -74,12 +74,36 @@ fn context_discovers_path_follow_on_without_content_origins_using_related_policy
     assert_eq!(candidate["follow_on"][0]["supporting_origins"], 2);
     assert_eq!(candidate["follow_on"][0]["eligible_origins"], 2);
     assert_eq!(candidate["follow_on"][0]["independent_chains"], 2);
+    let path_only = json(
+        &repo,
+        &[
+            "context",
+            "--json",
+            "--no-historical-followup",
+            "--max-followup-checks",
+            "1",
+            "--followup-days",
+            "1",
+        ],
+    );
+    assert_eq!(
+        path_only["suggestions"][0]["follow_on"],
+        candidate["follow_on"]
+    );
+    let help = repo.run(["context", "--help"]);
+    assert!(help.status.success());
+    assert!(
+        String::from_utf8(help.stdout)
+            .unwrap()
+            .contains("do not disable, shorten or budget path-level analysis")
+    );
     assert!(candidate["historical_followup"].is_null());
     assert!(candidate["content_matches"].as_array().unwrap().is_empty());
     let output = repo.run(["context"]);
     assert!(output.status.success());
     let human = String::from_utf8(output.stdout).unwrap();
     assert!(human.contains("source.rs -> candidate.rs"), "{human}");
+    assert!(!human.contains("Supporting commits: 0"), "{human}");
     for example in candidate["follow_on"][0]["examples"].as_array().unwrap() {
         assert!(human.contains(example["origin_oid"].as_str().unwrap()));
         assert!(human.contains(example["later_oid"].as_str().unwrap()));

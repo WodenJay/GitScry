@@ -207,10 +207,12 @@ pub(super) fn format_report(report: &ContextReport) -> String {
         if suggestion.content_matches_truncated {
             lines.push("  Content matches truncated.".to_owned());
         }
-        lines.push(format!(
-            "  Supporting commits: {}; citations truncated: {}",
-            suggestion.supporting_count, suggestion.citations_truncated
-        ));
+        if suggestion.supporting_count > 0 || suggestion.follow_on.is_empty() {
+            lines.push(format!(
+                "  Supporting commits: {}; citations truncated: {}",
+                suggestion.supporting_count, suggestion.citations_truncated
+            ));
+        }
     }
     lines.join("\n")
 }
