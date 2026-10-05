@@ -174,24 +174,40 @@ This is enough! GitScry intentionally uses a single lightweight instruction inst
 
 ## Commands
 
-Historical queries use current HEAD's reachable Git history intersected with the published cache. If reachable history is not fully cached, available commits are used and incomplete coverage is reported with `gitscry index` guidance. Explicit revision bounds must be cached; use `--to-rev` to investigate another cached branch.
+```bash
+$ gitscry --help
 
-| Command | What it tells you | Example |
-|---|---|---|
-| **`search`** | General-purpose history search across commit subjects, bodies, and touched paths; also supports literal `--code` and regex `--code-regex` searches over changed lines. | `gitscry search --code-regex 'Old[A-Z][A-Za-z0-9_]*' --change removed --path src/lib.rs` |
-| **`examples`** | Finds previous implementations of a similar change or migration and reconstructs the files and change steps involved. Changes that were later reverted are demoted rather than presented as good precedents. | `gitscry examples retire provider --path src/lib.rs` |
-| **`failures`** | Finds approaches that were abandoned or reverted, together with the recorded reason and retry conditions when history contains them. | `gitscry failures provider normalization` |
-| **`related`** | Finds same-commit co-change and repeated directional source → candidate follow-on material by default, including separately committed changes. Each source has its own statistics and examples; candidates supported by both bases appear once. Follow-on pairs require proper descendants within seven days and twenty shortest parent edges (inclusive), exclude merge events, and require two independent chains, at least half of complete origins supporting the candidate, and twice its uniformly sampled background rate. Incomplete windows are excluded; detected renames preserve identity, while copies and recreation do not. These are historical associations, not causal conclusions. Add `--patterns` for closed file-incarnation combinations supported by commits containing every seed (default minimum support 3; `--min-support 2` allows pairs of supporting commits). Groups contain at least three incarnations, include exact support/proportions and capped path-specific citations, and retain deleted history. Detected renames connect paths; deletion ends an incarnation, while recreation and copies start new ones. Pattern mode is local-only. | `gitscry related src/cli.rs src/render.rs` |
-| **`tests`** | Finds existing test files that historically changed alongside the code you are modifying. | `gitscry tests src/lib.rs` |
-| **`regression`** | Ranks commits that may have introduced an observed regression using affected-path history, symptom matches, diff hunks, symbols, test history, and an optional good→bad revision range. | `gitscry regression slow startup --path src/main.rs --good v0.1.0 --symbol main` |
-| **`why`** | Explains the history behind a specific line or symbol by tracing blame, diffs, path history, renames, and explanatory commit messages. | `gitscry why src/lib.rs --symbol provider` |
-| **`trace-fix`** | Starts from a known fix and traces deleted/replaced lines back to the change that introduced them. | `gitscry trace-fix HEAD --path src/lib.rs` |
-| **`trace-removal`** | Discovers literal deleted-text events grouped by commit and historical old path, with first-parent locators and complete commit messages. Limits events, not matching lines; does not infer retirement or replacement. | `gitscry trace-removal --code 'legacy()' --path src/lib.rs --json` |
-| **`hotspots`** | Ranks tracked files at current HEAD using distinct non-merge touching commits cached and reachable from HEAD; incomplete cached coverage is reported. Adds cached textual additions/deletions from those touches. JSON additions/deletions are null when no eligible diff is calculable; `churn_complete` is false if any eligible diff is unavailable. Human output marks partial counts with * and unavailable counts with —. | `gitscry hotspots --json --limit 20` |
-| **`index`** | Builds or refreshes the local cache from the repository's default-branch history. | `gitscry index` |
-| **`update`** | Updates GitScry to the latest stable release. | `gitscry update` |
-<!-- This file can only be edited by humans. Agents do NOT change this file -->
-Use `gitscry --help` to learn more.
+Usage: gitscry <COMMAND>
+
+Query commands:
+  conflicts      Find historical file changes for each side of a merge conflict
+  followups      Find later reverts and changes to a commit's files or added lines
+  hotspots       Rank files by commit count and added/deleted lines
+  context        Find historical code matches, abandoned changes, related files and tests
+  trace-removal  Find commits that deleted matching code
+  search         Search commit messages, paths, or changed code
+  examples       Find past implementations of a similar change or migration
+  failures       Find reverted or abandoned approaches and their recorded reasons
+  related        Find files changed with or shortly after seed files or directories
+  tests          Find current tests changed alongside files, a line, or a symbol
+  regression     Find commits that may have introduced a regression
+  why            Show blame attribution and changes to a line or symbol
+  trace-fix      Trace a fix to earlier changes and its recorded failure
+  timeline       Show a file's history from earliest to latest
+
+Management commands:
+  stats          Show local command counts and elapsed time
+  update         Update GitScry to the latest stable release
+  index          Build or refresh the repository history cache
+  clear          Delete the repository's GitScry cache and settings
+  prune          Remove cached commits whose Git objects no longer exist locally
+  help           Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help     Print help
+  -V, --version  Print version
+Run `gitscry <command> --help` for arguments, options, and examples.
+```
 
 ## Feedback & Issues
 
