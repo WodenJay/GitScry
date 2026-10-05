@@ -8,58 +8,35 @@ pub(super) struct Span {
     pub(super) end: usize,
 }
 
-/// Prefer a declaration over a mention, then bound its span using source heuristics.
-/// Line numbers are one-based; this does not claim compiler-level symbol resolution.
-pub(super) fn locate(content: &[u8], name: &str, path: &str) -> Result<Span, AppError> {
-    if name.trim().is_empty() {
-        return Err(AppError::input("symbol must not be empty"));
-    }
-    let lines = content
-        .split(|byte| *byte == b'\n')
-        .enumerate()
-        .filter_map(|(index, line)| contains_symbol(line, name.as_bytes()).then_some(index + 1))
-        .collect::<Vec<_>>();
-    let start = lines
-        .iter()
-        .copied()
-        .find(|line| {
-            let bytes = content
-                .split(|byte| *byte == b'\n')
-                .nth(line.saturating_sub(1))
-                .unwrap_or_default();
-            is_declaration(bytes, name.as_bytes())
-        })
-        .or_else(|| lines.first().copied())
-        .ok_or_else(|| {
-            AppError::input(format!(
-                "symbol {name} was not found in {path} at the target revision"
-            ))
-        })?;
-    Ok(Span {
-        start,
-        end: symbol_span_end(content, start, path.ends_with(".rs")),
-    })
+/// A local declaration, with its identifier kept separate from its source range.
+pub(super) struct Location {
+    pub(super) name: String,
+    /// One-based line and zero-based byte column in the original source.
+    pub(super) identifier_line: usize,
+    pub(super) identifier_column: usize,
+    pub(super) span: Span,
 }
 
-/// Require one actual declaration; unlike `locate`, never fall back to a mention.
-pub(super) fn locate_unique(content: &[u8], name: &str, path: &str) -> Result<Span, AppError> {
+/// Require exactly one supported declaration; never fall back to a text mention.
+/// This lightweight locator does not claim compiler-level symbol resolution.
+pub(super) fn locate_unique(content: &[u8], name: &str, path: &str) -> Result<Location, AppError> {
     if name.trim().is_empty() {
         return Err(AppError::input("symbol must not be empty"));
     }
-    let declarations = declaration_lines(content, name);
-    match declarations.as_slice() {
-        [] => Err(AppError::input(format!(
+    let mut matches = declarations(content, path)
+        .into_iter()
+        .filter(|declaration| declaration.name == name)
+        .collect::<Vec<_>>();
+    match matches.len() {
+        0 => Err(AppError::input(format!(
             "symbol {name} has no supported declaration in {path} at the target revision"
         ))),
-        [start] => Ok(Span {
-            start: *start,
-            end: symbol_span_end(content, *start, path.ends_with(".rs")),
-        }),
+        1 => Ok(matches.pop().unwrap()),
         _ => Err(AppError::input(format!(
             "symbol {name} is ambiguous in {path} at the target revision; declarations found at lines {}",
-            declarations
+            matches
                 .iter()
-                .map(usize::to_string)
+                .map(|location| location.identifier_line.to_string())
                 .collect::<Vec<_>>()
                 .join(", ")
         ))),
@@ -70,124 +47,81 @@ pub(super) fn declaration_lines(content: &[u8], name: &str) -> Vec<usize> {
     content
         .split(|byte| *byte == b'\n')
         .enumerate()
-        .filter_map(|(index, line)| is_declaration(line, name.as_bytes()).then_some(index + 1))
+        .filter_map(|(index, line)| {
+            let (declared, _) = declaration(line)?;
+            (declared == name).then_some(index + 1)
+        })
         .collect()
 }
 
 /// Enumerate supported declarations for conservative same-change correspondence.
-pub(super) fn declarations(content: &[u8], path: &str) -> Vec<(String, Span)> {
-    let mut declarations = Vec::new();
-    for (index, line) in content.split(|byte| *byte == b'\n').enumerate() {
-        for token in line
-            .split(|byte| !is_symbol_byte(*byte))
-            .filter(|token| !token.is_empty())
-        {
-            if is_declaration(line, token)
-                && let Ok(name) = std::str::from_utf8(token)
-            {
-                declarations.push((
-                    name.to_owned(),
-                    Span {
-                        start: index + 1,
-                        end: symbol_span_end(content, index + 1, path.ends_with(".rs")),
-                    },
-                ));
-            }
-        }
-    }
-    declarations
+pub(super) fn declarations(content: &[u8], path: &str) -> Vec<Location> {
+    content
+        .split(|byte| *byte == b'\n')
+        .enumerate()
+        .filter_map(|(index, line)| {
+            let (name, column) = declaration(line)?;
+            Some(Location {
+                name: name.to_owned(),
+                identifier_line: index + 1,
+                identifier_column: column,
+                span: Span {
+                    start: index + 1,
+                    end: symbol_span_end(content, index + 1, path.ends_with(".rs")),
+                },
+            })
+        })
+        .collect()
 }
 
 /// Ignore only the declaration's identifier and outer indentation, not body tokens.
-pub(super) fn identity(content: &[u8], name: &str, span: &Span) -> Vec<u8> {
+pub(super) fn identity(content: &[u8], location: &Location) -> Vec<u8> {
     let mut result = Vec::new();
-    for (offset, line) in content
+    for (index, line) in content
         .split(|byte| *byte == b'\n')
-        .skip(span.start - 1)
-        .take(span.end - span.start + 1)
         .enumerate()
+        .skip(location.span.start - 1)
+        .take(location.span.end - location.span.start + 1)
     {
-        let line = line.trim_ascii();
-        if offset == 0 {
-            let index = line
-                .windows(name.len())
-                .enumerate()
-                .find(|(index, token)| {
-                    *token == name.as_bytes()
-                        && (*index == 0 || !is_symbol_byte(line[*index - 1]))
-                        && (index + name.len() == line.len()
-                            || !is_symbol_byte(line[index + name.len()]))
-                })
-                .unwrap()
-                .0;
-            result.extend_from_slice(&line[..index]);
+        if index + 1 == location.identifier_line {
+            let column = location.identifier_column;
+            result.extend_from_slice(line[..column].trim_ascii_start());
             result.extend_from_slice(b"<symbol>");
-            result.extend_from_slice(&line[index + name.len()..]);
+            result.extend_from_slice(line[column + location.name.len()..].trim_ascii_end());
         } else {
-            result.extend_from_slice(line);
+            result.extend_from_slice(line.trim_ascii());
         }
         result.push(b'\n');
     }
     result
 }
-fn contains_symbol(line: &[u8], symbol: &[u8]) -> bool {
-    if symbol.is_empty() {
-        return false;
-    }
-    line.windows(symbol.len())
-        .enumerate()
-        .any(|(index, window)| {
-            window == symbol
-                && (index == 0 || !is_symbol_byte(line[index - 1]))
-                && (index + symbol.len() == line.len()
-                    || !is_symbol_byte(line[index + symbol.len()]))
-        })
-}
 
-fn is_declaration(line: &[u8], symbol: &[u8]) -> bool {
-    let trimmed = line
-        .iter()
-        .copied()
-        .skip_while(u8::is_ascii_whitespace)
-        .collect::<Vec<_>>();
-    if trimmed.starts_with(b"//")
-        || trimmed.starts_with(b"#")
-        || trimmed.starts_with(b"/*")
-        || trimmed.starts_with(b"*")
-        || trimmed.starts_with(b"\"")
-        || trimmed.starts_with(b"'")
-    {
-        return false;
-    }
-    let Some(index) = line
-        .windows(symbol.len())
-        .position(|window| window == symbol)
-    else {
-        return false;
-    };
-    if index > 0 && is_symbol_byte(line[index - 1])
-        || index + symbol.len() < line.len() && is_symbol_byte(line[index + symbol.len()])
-    {
-        return false;
-    }
-    let before = &line[..index];
-    let after = line[index + symbol.len()..]
-        .iter()
-        .copied()
-        .skip_while(u8::is_ascii_whitespace)
-        .collect::<Vec<_>>();
-    let shape = after.starts_with(b"(")
-        || after.starts_with(b"{")
-        || after.starts_with(b":")
-        || after.starts_with(b"=")
-        || after.starts_with(b"<");
-    let tokens = before
-        .split(|byte| !is_symbol_byte(*byte))
-        .filter(|token| !token.is_empty())
-        .collect::<Vec<_>>();
-    let keyword = tokens.last().is_some_and(|token| {
-        matches!(
-            *token,
+/// Read the name immediately after a supported declaration keyword, not an arbitrary
+/// occurrence of the requested name. Stop at expression punctuation so initializer
+/// functions and textual mentions cannot become declarations of their own.
+fn declaration(line: &[u8]) -> Option<(&str, usize)> {
+    let mut index = leading_indent(line);
+    while index < line.len() {
+        let start = index;
+        while line.get(index).is_some_and(|byte| is_symbol_byte(*byte)) {
+            index += 1;
+        }
+        if start == index {
+            return None;
+        }
+        let token = &line[start..index];
+        if token == b"const" && line[index..].trim_ascii_start().starts_with(b"fn ") {
+            index += line[index..]
+                .iter()
+                .take_while(|byte| byte.is_ascii_whitespace())
+                .count();
+            continue;
+        }
+        if token == b"function" && line.get(index) == Some(&b'*') {
+            index += 1;
+        }
+        if matches!(
+            token,
             b"fn"
                 | b"func"
                 | b"function"
@@ -205,9 +139,55 @@ fn is_declaration(line: &[u8], symbol: &[u8]) -> bool {
                 | b"namespace"
                 | b"macro"
                 | b"impl"
-        )
-    });
-    keyword && shape
+        ) {
+            index += line[index..]
+                .iter()
+                .take_while(|byte| byte.is_ascii_whitespace())
+                .count();
+            let name_start = index;
+            while line.get(index).is_some_and(|byte| is_symbol_byte(*byte)) {
+                index += 1;
+            }
+            if index == name_start || line[name_start].is_ascii_digit() {
+                return None;
+            }
+            let after = line[index..].trim_ascii_start();
+            if !matches!(after.first(), Some(b'(' | b'{' | b':' | b'=' | b'<')) {
+                return None;
+            }
+            return Some((
+                std::str::from_utf8(&line[name_start..index]).ok()?,
+                name_start,
+            ));
+        }
+        // Rust visibility can contain the same identifier as the declaration.
+        if token == b"pub" && line.get(index) == Some(&b'(') {
+            index += line[index..].iter().position(|byte| *byte == b')')? + 1;
+        }
+        if token == b"extern" {
+            let abi_start = index
+                + line[index..]
+                    .iter()
+                    .take_while(|byte| byte.is_ascii_whitespace())
+                    .count();
+            if line.get(abi_start) == Some(&b'"') {
+                index = abi_start
+                    + 1
+                    + line[abi_start + 1..]
+                        .iter()
+                        .position(|byte| *byte == b'"')?
+                    + 1;
+            }
+        }
+        if !line.get(index).is_some_and(u8::is_ascii_whitespace) {
+            return None;
+        }
+        index += line[index..]
+            .iter()
+            .take_while(|byte| byte.is_ascii_whitespace())
+            .count();
+    }
+    None
 }
 
 fn is_symbol_byte(byte: u8) -> bool {
@@ -423,14 +403,12 @@ fn is_rust_lifetime(line: &[u8], start: usize) -> bool {
 }
 
 fn is_declaration_start(line: &[u8]) -> bool {
-    line.split(|byte| !is_symbol_byte(*byte))
-        .filter(|token| !token.is_empty())
-        .any(|token| is_declaration(line, token))
+    declaration(line).is_some()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::locate;
+    use super::locate_unique as locate;
 
     #[test]
     fn legitimate_constants_variables_and_function_values_keep_useful_ranges() {
@@ -473,14 +451,43 @@ mod tests {
             ),
         ] {
             let span = super::locate_unique(source.as_bytes(), name, path).unwrap();
-            assert_eq!((span.start, span.end), expected, "{path}: {source}");
+            assert_eq!(
+                (span.span.start, span.span.end),
+                expected,
+                "{path}: {source}"
+            );
         }
     }
+    #[test]
+    fn modified_functions_keep_their_declaration_ranges() {
+        for source in [
+            "pub const fn parse() {\n    1\n}\n",
+            "pub unsafe extern \"C\" fn parse() {\n    1\n}\n",
+            "export function* parse() {\n    yield 1;\n}\n",
+        ] {
+            let location = locate(source.as_bytes(), "parse", "source.rs").unwrap();
+            assert_eq!((location.span.start, location.span.end), (1, 3));
+        }
+    }
+
+    #[test]
+    fn declaration_identifier_is_not_an_earlier_prefix_mention() {
+        let source = b"pub(in parse) fn parse() {}\n";
+        let renamed = b"pub(in parse) fn renamed() {}\n";
+        let original = super::locate_unique(source, "parse", "source.rs").unwrap();
+        let renamed_span = super::locate_unique(renamed, "renamed", "source.rs").unwrap();
+        assert_eq!(
+            super::identity(source, &original),
+            super::identity(renamed, &renamed_span),
+        );
+        assert_eq!(super::declaration_lines(source, "parse"), vec![1]);
+    }
+
     #[test]
     fn unbraced_declarations_end_before_the_next_declaration() {
         let source = b"const FOO: usize = 1;\nconst BAR: usize = 2;";
         let span = locate(source, "FOO", "source.rs").unwrap();
-        assert_eq!((span.start, span.end), (1, 1));
+        assert_eq!((span.span.start, span.span.end), (1, 1));
     }
 
     #[test]
@@ -500,14 +507,14 @@ mod tests {
             "}\n",
         );
         let span = locate(source.as_bytes(), "parse", "source.js").unwrap();
-        assert_eq!((span.start, span.end), (1, 12));
+        assert_eq!((span.span.start, span.span.end), (1, 12));
     }
 
     #[test]
     fn declaration_wins_over_mentions_and_longer_identifiers() {
         let source = b"// parse handles input\nfn parse_more() {}\nfn parse() {\n    parse_more();\n}\nfn next() {}\n";
         let span = locate(source, "parse", "source.rs").unwrap();
-        assert_eq!((span.start, span.end), (3, 5));
+        assert_eq!((span.span.start, span.span.end), (3, 5));
     }
 
     #[test]
@@ -523,20 +530,19 @@ mod tests {
             "fn next() {}\n",
         );
         let span = locate(source.as_bytes(), "parse", "source.rs").unwrap();
-        assert_eq!((span.start, span.end), (1, 7));
+        assert_eq!((span.span.start, span.span.end), (1, 7));
     }
 
     #[test]
     fn indentation_bounds_python_symbols() {
         let source = b"def parse():\n    return 1\n\ndef next():\n    return 2\n";
         let span = locate(source, "parse", "source.py").unwrap();
-        assert_eq!((span.start, span.end), (1, 3));
+        assert_eq!((span.span.start, span.span.end), (1, 3));
     }
 
     #[test]
-    fn mention_only_symbols_keep_the_existing_fallback() {
-        let span = locate(b"parse(value)\n", "parse", "source.py").unwrap();
-        assert_eq!((span.start, span.end), (1, 2));
+    fn mention_only_symbols_are_rejected() {
+        assert!(locate(b"parse(value)\n", "parse", "source.py").is_err());
     }
 
     #[test]
@@ -545,7 +551,7 @@ mod tests {
             ("  ", "symbol must not be empty"),
             (
                 "parse",
-                "symbol parse was not found in source.rs at the target revision",
+                "symbol parse has no supported declaration in source.rs at the target revision",
             ),
         ] {
             let error = locate(b"fn parse_more() {}\n", name, "source.rs")

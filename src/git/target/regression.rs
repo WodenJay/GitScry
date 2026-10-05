@@ -43,7 +43,7 @@ pub(in crate::git) fn pin_regression(
     let content = git.output(["cat-file", "blob", &format!("{bad_revision}:{path}")], &[])?;
     let (symbol, symbol_line, symbol_end) = match symbol {
         Some(name) => {
-            let span = symbol::locate_unique(&content, name, &path)?;
+            let span = symbol::locate_unique(&content, name, &path)?.span;
             (Some(name.to_owned()), Some(span.start), Some(span.end))
         }
         None => (None, None, None),

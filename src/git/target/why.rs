@@ -132,7 +132,7 @@ fn resolve_anchor(
             Ok((anchor.clone(), *number, None))
         }
         WhyAnchor::Symbol { name, .. } => {
-            let span = symbol::locate_unique(content, name, path)?;
+            let span = symbol::locate_unique(content, name, path)?.span;
             Ok((
                 WhyAnchor::Symbol {
                     name: name.clone(),

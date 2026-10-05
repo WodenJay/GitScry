@@ -85,13 +85,13 @@ fn walk(git: &Git, target: &WhyTarget, trace: &mut SymbolTrace) -> Result<String
                 if let Some(source) = target::read_blob_at(git, first_parent, &path)?
                     && let Ok(previous_span) = symbol::locate_unique(&source, &name, &path)
                 {
-                    if symbol::identity(&current, &name, &current_span)
-                        != symbol::identity(&source, &name, &previous_span)
+                    if symbol::identity(&current, &current_span)
+                        != symbol::identity(&source, &previous_span)
                     {
                         // Keep tracing first-parent edits, but don't claim a verified origin.
                         merge_uncertain = true;
                     }
-                    span = previous_span;
+                    span = previous_span.span;
                     revision = first_parent.clone();
                     continued = true;
                     break;
@@ -106,8 +106,8 @@ fn walk(git: &Git, target: &WhyTarget, trace: &mut SymbolTrace) -> Result<String
                     trace.modifications.push(SymbolChange {
                         oid: oid.to_owned(),
                         path: path.as_bytes().to_vec(),
-                        start: current_span.start,
-                        end: current_span.end,
+                        start: current_span.span.start,
+                        end: current_span.span.end,
                     });
                 }
                 return Err(unknown(
@@ -125,8 +125,8 @@ fn walk(git: &Git, target: &WhyTarget, trace: &mut SymbolTrace) -> Result<String
                 && let Ok(previous_span) = symbol::locate_unique(source, &name, &path)
             {
                 if native.contains(oid)
-                    && symbol::identity(&current, &name, &current_span)
-                        != symbol::identity(source, &name, &previous_span)
+                    && symbol::identity(&current, &current_span)
+                        != symbol::identity(source, &previous_span)
                 {
                     let changes = changes.as_ref().ok_or_else(|| {
                         unknown("source changes unavailable for symbol continuity")
@@ -142,14 +142,15 @@ fn walk(git: &Git, target: &WhyTarget, trace: &mut SymbolTrace) -> Result<String
                             continue;
                         };
                         let after = target::read_blob_at(git, oid, old_path)?;
-                        for (old_name, old_span) in symbol::declarations(&source, old_path) {
-                            if old_path == path && old_name == name {
+                        for old_span in symbol::declarations(&source, old_path) {
+                            let old_name = &old_span.name;
+                            if old_path == path && old_name == &name {
                                 continue;
                             }
-                            if symbol::identity(&source, &old_name, &old_span)
-                                == symbol::identity(&current, &name, &current_span)
+                            if symbol::identity(&source, &old_span)
+                                == symbol::identity(&current, &current_span)
                                 && after.as_ref().is_none_or(|after| {
-                                    symbol::declaration_lines(after, &old_name).is_empty()
+                                    symbol::declaration_lines(after, old_name).is_empty()
                                 })
                             {
                                 return Err(unknown(
@@ -161,15 +162,15 @@ fn walk(git: &Git, target: &WhyTarget, trace: &mut SymbolTrace) -> Result<String
                     trace.modifications.push(SymbolChange {
                         oid: oid.to_owned(),
                         path: path.as_bytes().to_vec(),
-                        start: current_span.start,
-                        end: current_span.end,
+                        start: current_span.span.start,
+                        end: current_span.span.end,
                     });
                 }
                 continue;
             }
             let changes = changes
                 .ok_or_else(|| unknown("source changes unavailable for symbol continuity"))?;
-            let identity = symbol::identity(&current, &name, &current_span);
+            let identity = symbol::identity(&current, &current_span);
             let mut candidates = Vec::new();
             let mut removed_declaration = false;
             // Inspect parent source, including unchanged files: an exact copy is not a creation
@@ -193,14 +194,15 @@ fn walk(git: &Git, target: &WhyTarget, trace: &mut SymbolTrace) -> Result<String
                 } else {
                     None
                 };
-                for (old_name, old_span) in symbol::declarations(&source, source_path) {
+                for old_span in symbol::declarations(&source, source_path) {
+                    let old_name = &old_span.name;
                     let survives = !changed
                         || after.as_ref().is_some_and(|after| {
-                            !symbol::declaration_lines(after, &old_name).is_empty()
+                            !symbol::declaration_lines(after, old_name).is_empty()
                         });
                     if changed
                         && !survives
-                        && (old_name == name
+                        && (old_name == &name
                             || source_path == path
                             || previous.is_some()
                             || changes.iter().any(|change| {
@@ -211,10 +213,10 @@ fn walk(git: &Git, target: &WhyTarget, trace: &mut SymbolTrace) -> Result<String
                     {
                         removed_declaration = true;
                     }
-                    if symbol::identity(&source, &old_name, &old_span) == identity {
+                    if symbol::identity(&source, &old_span) == identity {
                         candidates.push((
                             source_path.to_owned(),
-                            old_name,
+                            old_name.clone(),
                             old_span,
                             changed && !survives,
                         ));
@@ -225,8 +227,8 @@ fn walk(git: &Git, target: &WhyTarget, trace: &mut SymbolTrace) -> Result<String
                 path = old_path.clone();
                 name = old_name.clone();
                 span = symbol::Span {
-                    start: old_span.start,
-                    end: old_span.end,
+                    start: old_span.span.start,
+                    end: old_span.span.end,
                 };
                 revision = parent.clone();
                 continued = true;
