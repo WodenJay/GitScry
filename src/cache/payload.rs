@@ -1,4 +1,6 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
+use std::mem::size_of;
 
 use lz4_flex::{compress, decompress};
 use rusqlite::{Connection, Transaction, params};
@@ -6,6 +8,7 @@ use rusqlite::{Connection, Transaction, params};
 use crate::{app::AppError, git::Hunk};
 
 const MAX_HUNK_BYTES: usize = 1 << 30;
+const DECODED_BLOCK_RETENTION_BUDGET: usize = 64 * 1024 * 1024;
 #[cfg(not(test))]
 const BLOCK_BYTES: usize = 8 * 1024 * 1024;
 #[cfg(test)]
@@ -372,15 +375,35 @@ struct LineBlock {
     text_length: i64,
 }
 
+struct CachedBlock<T> {
+    contents: T,
+    retained_bytes: usize,
+    last_used: u64,
+}
+
 pub(crate) struct HunkReader<'a> {
     connection: &'a Connection,
     line_blocks: Vec<LineBlock>,
-    line_cache: HashMap<i64, Vec<Vec<u8>>>,
-    token_cache: HashMap<i64, Vec<u8>>,
+    line_cache: HashMap<i64, CachedBlock<Vec<Vec<u8>>>>,
+    token_cache: HashMap<i64, CachedBlock<Vec<u8>>>,
+    retained_bytes: usize,
+    retention_budget: usize,
+    access_clock: u64,
+    #[cfg(test)]
+    token_block_loads: usize,
+    #[cfg(test)]
+    line_block_loads: usize,
 }
 
 impl<'a> HunkReader<'a> {
     pub(crate) fn new(connection: &'a Connection) -> Result<Self, AppError> {
+        Self::new_with_budget(connection, DECODED_BLOCK_RETENTION_BUDGET)
+    }
+
+    fn new_with_budget(
+        connection: &'a Connection,
+        retention_budget: usize,
+    ) -> Result<Self, AppError> {
         let mut statement = connection
             .prepare(
                 "SELECT block_id, first_line_id, line_count, text_length
@@ -404,6 +427,13 @@ impl<'a> HunkReader<'a> {
             line_blocks,
             line_cache: HashMap::new(),
             token_cache: HashMap::new(),
+            retained_bytes: 0,
+            retention_budget,
+            access_clock: 0,
+            #[cfg(test)]
+            token_block_loads: 0,
+            #[cfg(test)]
+            line_block_loads: 0,
         })
     }
 
@@ -459,11 +489,12 @@ impl<'a> HunkReader<'a> {
         let token_end = token_offset
             .checked_add(token_length)
             .ok_or_else(|| corruption(material, "token range overflow"))?;
-        let tokens = self
-            .token_block(token_block_id, material)?
+        let token_block = self.token_block(token_block_id, material)?;
+        let tokens = token_block
             .get(token_offset..token_end)
             .ok_or_else(|| corruption(material, "truncated token block"))?
             .to_vec();
+        drop(token_block);
         let stored_length = tokens
             .get(..4)
             .and_then(|bytes| bytes.try_into().ok())
@@ -474,9 +505,10 @@ impl<'a> HunkReader<'a> {
         }
         let mut cursor = 4usize;
         let mut output = Vec::with_capacity(text_length);
+        let mut transient_line_blocks = HashMap::new();
         while output.len() < text_length {
             let line_id = read_varint(&tokens, &mut cursor, material)?;
-            let line = self.line(line_id, material)?;
+            let line = self.line(line_id, material, &mut transient_line_blocks)?;
             output.extend_from_slice(&line);
             if output.len() > text_length {
                 return Err(corruption(material, "decoded text exceeds its length"));
@@ -494,33 +526,117 @@ impl<'a> HunkReader<'a> {
     pub(crate) fn clear_decoded_blocks(&mut self) {
         self.line_cache.clear();
         self.token_cache.clear();
+        self.retained_bytes = 0;
     }
 
-    fn token_block(&mut self, block_id: i64, material: &str) -> Result<&[u8], AppError> {
-        if !self.token_cache.contains_key(&block_id) {
-            let (compressed, length): (Vec<u8>, i64) = self
-                .connection
-                .query_row(
-                    "SELECT text, text_length FROM hunk_token_blocks WHERE block_id = ?1",
-                    [block_id],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .map_err(|error| match error {
-                    rusqlite::Error::QueryReturnedNoRows => {
-                        corruption(material, "missing hunk token block")
-                    }
-                    error => storage_error("reading hunk token block", error),
-                })?;
-            let decoded = decode(&compressed, length, material)?;
-            self.token_cache.insert(block_id, decoded);
+    #[cfg(test)]
+    pub(super) fn decoded_block_load_counts(&self) -> (usize, usize) {
+        (self.token_block_loads, self.line_block_loads)
+    }
+
+    fn next_access(&mut self) -> u64 {
+        self.access_clock = self.access_clock.saturating_add(1);
+        self.access_clock
+    }
+
+    fn reserve_decoded_bytes(&mut self, bytes: usize) -> bool {
+        if bytes > self.retention_budget {
+            return false;
         }
-        Ok(self
-            .token_cache
-            .get(&block_id)
-            .expect("inserted token block"))
+        while self.retained_bytes > self.retention_budget - bytes {
+            if !self.evict_oldest_block() {
+                return false;
+            }
+        }
+        true
     }
 
-    fn line(&mut self, line_id: u32, material: &str) -> Result<Vec<u8>, AppError> {
+    fn evict_oldest_block(&mut self) -> bool {
+        let oldest = self
+            .token_cache
+            .iter()
+            .map(|(&id, block)| (block.last_used, false, id))
+            .chain(
+                self.line_cache
+                    .iter()
+                    .map(|(&id, block)| (block.last_used, true, id)),
+            )
+            .min_by_key(|(last_used, is_line, id)| (*last_used, *is_line, *id));
+        let Some((_, is_line, block_id)) = oldest else {
+            return false;
+        };
+        let retained_bytes = if is_line {
+            self.line_cache
+                .remove(&block_id)
+                .map(|block| block.retained_bytes)
+        } else {
+            self.token_cache
+                .remove(&block_id)
+                .map(|block| block.retained_bytes)
+        };
+        let Some(retained_bytes) = retained_bytes else {
+            return false;
+        };
+        self.retained_bytes -= retained_bytes;
+        true
+    }
+
+    fn token_block<'reader>(
+        &'reader mut self,
+        block_id: i64,
+        material: &str,
+    ) -> Result<Cow<'reader, [u8]>, AppError> {
+        let last_used = self.next_access();
+        let cached = self.token_cache.contains_key(&block_id);
+        if cached {
+            let block = self
+                .token_cache
+                .get_mut(&block_id)
+                .expect("cached token block exists");
+            block.last_used = last_used;
+            return Ok(Cow::Borrowed(&block.contents));
+        }
+        let (compressed, length): (Vec<u8>, i64) = self
+            .connection
+            .query_row(
+                "SELECT text, text_length FROM hunk_token_blocks WHERE block_id = ?1",
+                [block_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|error| match error {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    corruption(material, "missing hunk token block")
+                }
+                error => storage_error("reading hunk token block", error),
+            })?;
+        let decoded = decode(&compressed, length, material)?;
+        #[cfg(test)]
+        {
+            self.token_block_loads += 1;
+        }
+        let retained_bytes = token_block_retained_bytes(&decoded);
+        if self.reserve_decoded_bytes(retained_bytes) {
+            self.retained_bytes += retained_bytes;
+            self.token_cache.insert(
+                block_id,
+                CachedBlock {
+                    contents: decoded,
+                    retained_bytes,
+                    last_used,
+                },
+            );
+            Ok(Cow::Borrowed(&self.token_cache[&block_id].contents))
+        } else {
+            Ok(Cow::Owned(decoded))
+        }
+    }
+
+    fn line<'reader>(
+        &'reader mut self,
+        line_id: u32,
+        material: &str,
+        transient_blocks: &'reader mut HashMap<i64, Vec<Vec<u8>>>,
+    ) -> Result<Cow<'reader, [u8]>, AppError> {
         let Some(block_index) = self
             .line_blocks
             .iter()
@@ -537,62 +653,173 @@ impl<'a> HunkReader<'a> {
             ));
         }
         let block_id = block.block_id;
-        if !self.line_cache.contains_key(&block_id) {
-            let (compressed, length): (Vec<u8>, i64) = self
-                .connection
-                .query_row(
-                    "SELECT text, text_length FROM hunk_line_blocks WHERE block_id = ?1",
-                    [block_id],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .map_err(|error| match error {
-                    rusqlite::Error::QueryReturnedNoRows => {
-                        corruption(material, "missing hunk line dictionary block")
-                    }
-                    error => storage_error("reading hunk line dictionary", error),
-                })?;
-            if length != block.text_length {
-                return Err(corruption(
-                    material,
-                    "line dictionary length metadata disagrees",
-                ));
-            }
-            let bytes = decode(&compressed, length, material)?;
-            let mut cursor = 0usize;
-            let mut lines = Vec::with_capacity(block.line_count as usize);
-            for _ in 0..block.line_count {
-                let length = bytes
-                    .get(cursor..cursor + 4)
-                    .and_then(|bytes| bytes.try_into().ok())
-                    .map(u32::from_le_bytes)
-                    .ok_or_else(|| corruption(material, "truncated line dictionary"))?;
-                cursor += 4;
-                let length = usize::try_from(length)
-                    .map_err(|_| corruption(material, "invalid line dictionary length"))?;
-                let end = cursor
-                    .checked_add(length)
-                    .ok_or_else(|| corruption(material, "line dictionary overflow"))?;
-                lines.push(
-                    bytes
-                        .get(cursor..end)
-                        .ok_or_else(|| corruption(material, "truncated line dictionary"))?
-                        .to_vec(),
-                );
-                cursor = end;
-            }
-            if cursor != bytes.len() {
-                return Err(corruption(material, "unexpected line dictionary bytes"));
-            }
-            self.line_cache.insert(block_id, lines);
+        let line_count = block.line_count;
+        let text_length = block.text_length;
+        let offset = offset as usize;
+        let last_used = self.next_access();
+        let cached = self.line_cache.contains_key(&block_id);
+        if cached {
+            let block = self
+                .line_cache
+                .get_mut(&block_id)
+                .expect("cached line block exists");
+            block.last_used = last_used;
+            return Ok(Cow::Borrowed(&block.contents[offset]));
         }
-        Ok(self.line_cache[&block_id][offset as usize].clone())
+        if transient_blocks.contains_key(&block_id) {
+            return Ok(Cow::Borrowed(&transient_blocks[&block_id][offset]));
+        }
+        let (compressed, length): (Vec<u8>, i64) = self
+            .connection
+            .query_row(
+                "SELECT text, text_length FROM hunk_line_blocks WHERE block_id = ?1",
+                [block_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|error| match error {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    corruption(material, "missing hunk line dictionary block")
+                }
+                error => storage_error("reading hunk line dictionary", error),
+            })?;
+        if length != text_length {
+            return Err(corruption(
+                material,
+                "line dictionary length metadata disagrees",
+            ));
+        }
+        let bytes = decode(&compressed, length, material)?;
+        #[cfg(test)]
+        {
+            self.line_block_loads += 1;
+        }
+        let mut cursor = 0usize;
+        let mut lines = Vec::with_capacity(line_count as usize);
+        for _ in 0..line_count {
+            let length = bytes
+                .get(cursor..cursor + 4)
+                .and_then(|bytes| bytes.try_into().ok())
+                .map(u32::from_le_bytes)
+                .ok_or_else(|| corruption(material, "truncated line dictionary"))?;
+            cursor += 4;
+            let length = usize::try_from(length)
+                .map_err(|_| corruption(material, "invalid line dictionary length"))?;
+            let end = cursor
+                .checked_add(length)
+                .ok_or_else(|| corruption(material, "line dictionary overflow"))?;
+            lines.push(
+                bytes
+                    .get(cursor..end)
+                    .ok_or_else(|| corruption(material, "truncated line dictionary"))?
+                    .to_vec(),
+            );
+            cursor = end;
+        }
+        if cursor != bytes.len() {
+            return Err(corruption(material, "unexpected line dictionary bytes"));
+        }
+        let retained_bytes = line_block_retained_bytes(&lines);
+        if self.reserve_decoded_bytes(retained_bytes) {
+            self.retained_bytes += retained_bytes;
+            self.line_cache.insert(
+                block_id,
+                CachedBlock {
+                    contents: lines,
+                    retained_bytes,
+                    last_used,
+                },
+            );
+            Ok(Cow::Borrowed(&self.line_cache[&block_id].contents[offset]))
+        } else {
+            transient_blocks.insert(block_id, lines);
+            Ok(Cow::Borrowed(&transient_blocks[&block_id][offset]))
+        }
     }
+}
+
+fn cache_entry_overhead<T>() -> usize {
+    size_of::<(i64, CachedBlock<T>)>().saturating_add(2 * size_of::<usize>())
+}
+
+fn token_block_retained_bytes(block: &Vec<u8>) -> usize {
+    block
+        .capacity()
+        .saturating_add(cache_entry_overhead::<Vec<u8>>())
+}
+
+fn line_block_retained_bytes(lines: &Vec<Vec<u8>>) -> usize {
+    let line_bytes = lines
+        .iter()
+        .fold(0usize, |total, line| total.saturating_add(line.capacity()));
+    lines
+        .capacity()
+        .saturating_mul(size_of::<Vec<u8>>())
+        .saturating_add(line_bytes)
+        .saturating_add(cache_entry_overhead::<Vec<Vec<u8>>>())
 }
 
 #[cfg(test)]
 mod tests {
     use super::{decode, encode};
 
+    fn reader_fixture(texts: &[Vec<u8>]) -> (rusqlite::Connection, Vec<i64>) {
+        use super::HunkWriter;
+        use crate::git::Hunk;
+        use rusqlite::{Connection, params};
+
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(super::super::schema::SCHEMA)
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO commits(position, oid, message, message_length, commit_time)
+                 VALUES (0, ?1, ?2, 0, 0)",
+                params!["oid", Vec::<u8>::new()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO changes(change_id, commit_id, ordinal, status, old_mode, new_mode)
+                 VALUES (1, 1, 0, 'M', '100644', '100644')",
+                [],
+            )
+            .unwrap();
+
+        let transaction = connection.transaction().unwrap();
+        {
+            let mut writer = HunkWriter::new(&transaction).unwrap();
+            for (ordinal, text) in texts.iter().enumerate() {
+                writer
+                    .write(
+                        &transaction,
+                        1,
+                        &Hunk {
+                            commit_oid: "oid".to_owned(),
+                            change_ordinal: 0,
+                            ordinal: ordinal as i64,
+                            old_start: 1,
+                            old_lines: 1,
+                            new_start: 1,
+                            new_lines: 1,
+                            text: text.clone(),
+                        },
+                    )
+                    .unwrap();
+            }
+            writer.finish(&transaction).unwrap();
+        }
+        transaction.commit().unwrap();
+
+        let payload_ids = connection
+            .prepare("SELECT payload_id FROM hunks ORDER BY ordinal")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<Vec<i64>, _>>()
+            .unwrap();
+        (connection, payload_ids)
+    }
     #[test]
     fn compressed_payloads_round_trip_bytes() {
         for bytes in [
@@ -1009,5 +1236,61 @@ mod tests {
                 .unwrap();
             assert_eq!(&decoded, expected);
         }
+    }
+
+    #[test]
+    fn decoded_block_cache_evicts_within_its_budget() {
+        use super::HunkReader;
+
+        let text = b"@@ -1 +1 @@\n context\n-old\n+new\n".to_vec();
+        let (connection, payload_ids) = reader_fixture(&[text.clone(), text.clone()]);
+        let mut reader = HunkReader::new_with_budget(&connection, 250).unwrap();
+
+        for payload_id in payload_ids {
+            assert_eq!(reader.decode_payload(payload_id, "oid/hunk").unwrap(), text);
+            assert!(reader.retained_bytes <= reader.retention_budget);
+        }
+        assert_eq!(reader.decoded_block_load_counts(), (2, 2));
+
+        reader.clear_decoded_blocks();
+        assert_eq!(reader.retained_bytes, 0);
+        assert!(reader.token_cache.is_empty());
+        assert!(reader.line_cache.is_empty());
+    }
+
+    #[test]
+    fn token_block_switch_keeps_the_line_dictionary_cached() {
+        use super::{BLOCK_BYTES, HunkReader};
+
+        let text = b"@@ -1 +1 @@\n+same\n".to_vec();
+        let texts = vec![text.clone(); BLOCK_BYTES / 6 + 1];
+        let (connection, payload_ids) = reader_fixture(&texts);
+        let mut reader = HunkReader::new(&connection).unwrap();
+
+        for payload_id in [payload_ids[0], *payload_ids.last().unwrap()] {
+            assert_eq!(reader.decode_payload(payload_id, "oid/hunk").unwrap(), text);
+        }
+        assert_eq!(reader.decoded_block_load_counts(), (2, 1));
+    }
+
+    #[test]
+    fn oversized_line_block_is_decoded_once_per_payload() {
+        use super::{BLOCK_BYTES, HunkReader};
+
+        let long_line = vec![b'x'; BLOCK_BYTES + 1];
+        let mut text = b"@@ -1 +1 @@\n".to_vec();
+        for _ in 0..5 {
+            text.push(b'+');
+            text.extend_from_slice(&long_line);
+            text.push(b'\n');
+        }
+        let (connection, payload_ids) = reader_fixture(&[text.clone(), text.clone()]);
+        let mut reader = HunkReader::new_with_budget(&connection, 100).unwrap();
+
+        for payload_id in payload_ids {
+            assert_eq!(reader.decode_payload(payload_id, "oid/hunk").unwrap(), text);
+            assert!(reader.retained_bytes <= reader.retention_budget);
+        }
+        assert_eq!(reader.decoded_block_load_counts(), (2, 4));
     }
 }

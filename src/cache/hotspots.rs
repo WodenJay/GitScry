@@ -265,12 +265,19 @@ fn load_text_churn(
     connection: &rusqlite::Connection,
     change_ids: &HashSet<i64>,
 ) -> Result<HashMap<i64, TextChurn>, AppError> {
-    let mut churn = HashMap::new();
     if change_ids.is_empty() {
-        return Ok(churn);
+        return Ok(HashMap::new());
     }
-
     let mut reader = super::HunkReader::new(connection)?;
+    load_text_churn_with_reader(connection, change_ids, &mut reader)
+}
+
+fn load_text_churn_with_reader(
+    connection: &rusqlite::Connection,
+    change_ids: &HashSet<i64>,
+    reader: &mut super::HunkReader<'_>,
+) -> Result<HashMap<i64, TextChurn>, AppError> {
+    let mut churn: HashMap<i64, TextChurn> = HashMap::new();
     let change_ids = change_ids.iter().copied().collect::<Vec<_>>();
     for batch in change_ids.chunks(400) {
         let placeholders = vec!["?"; batch.len()].join(", ");
@@ -298,7 +305,6 @@ fn load_text_churn(
                     .checked_add(1)
                     .ok_or_else(|| AppError::operational("error: textual churn count overflow"))?;
             }
-            reader.clear_decoded_blocks();
         }
     }
     Ok(churn)
@@ -697,6 +703,66 @@ mod tests {
             old_mode: "100644".to_owned(),
             new_mode: "100644".to_owned(),
         }
+    }
+
+    #[test]
+    fn hotspot_churn_reuses_shared_decoded_blocks() {
+        use crate::{cache::payload::HunkWriter, git::Hunk};
+        use rusqlite::{Connection, params};
+
+        let mut connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(super::super::schema::SCHEMA)
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO commits(position, oid, message, message_length, commit_time)
+                 VALUES (0, ?1, ?2, 0, 0)",
+                params!["oid", Vec::<u8>::new()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO changes(change_id, commit_id, ordinal, status, old_mode, new_mode)
+                 VALUES (1, 1, 0, 'M', '100644', '100644')",
+                [],
+            )
+            .unwrap();
+
+        let transaction = connection.transaction().unwrap();
+        let mut writer = HunkWriter::new(&transaction).unwrap();
+        for ordinal in 0..4 {
+            writer
+                .write(
+                    &transaction,
+                    1,
+                    &Hunk {
+                        commit_oid: "oid".to_owned(),
+                        change_ordinal: 0,
+                        ordinal,
+                        old_start: 1,
+                        old_lines: 2,
+                        new_start: 1,
+                        new_lines: 2,
+                        text: b"@@ -1 +1 @@\n context\n-old\n+new\n".to_vec(),
+                    },
+                )
+                .unwrap();
+        }
+        writer.finish(&transaction).unwrap();
+        transaction.commit().unwrap();
+
+        let mut reader = super::super::HunkReader::new(&connection).unwrap();
+        let churn = load_text_churn_with_reader(
+            &connection,
+            &std::collections::HashSet::from([1]),
+            &mut reader,
+        )
+        .unwrap();
+
+        assert_eq!(churn[&1].additions, 4);
+        assert_eq!(churn[&1].deletions, 4);
+        assert_eq!(reader.decoded_block_load_counts(), (1, 1));
     }
 
     #[test]
