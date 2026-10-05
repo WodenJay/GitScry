@@ -179,6 +179,476 @@ fn related_keeps_case_distinct_paths_as_distinct_history() {
 }
 
 #[test]
+fn related_discovers_separate_commit_follow_on_by_default() {
+    let repo = TestRepo::new();
+    for cycle in 0..2 {
+        let start = if cycle == 0 {
+            "2025-01-01"
+        } else {
+            "2025-01-20"
+        };
+        let later = if cycle == 0 {
+            "2025-01-02"
+        } else {
+            "2025-01-21"
+        };
+        let value = format!("{cycle}\n");
+        let start = format!("{start}T12:00:00Z");
+        let later = format!("{later}T12:00:00Z");
+        repo.commit_files_at(&[("source.rs", value.as_bytes())], "source", &start, &start);
+        repo.commit_files_at(
+            &[("candidate.rs", value.as_bytes())],
+            "candidate",
+            &later,
+            &later,
+        );
+    }
+    for day in 1..=8 {
+        let date = format!("2025-02-{day:02}T12:00:00Z");
+        let value = format!("{day}\n");
+        repo.commit_files_at(
+            &[("noise.txt", value.as_bytes())],
+            "background",
+            &date,
+            &date,
+        );
+    }
+    repo.commit_files_at(
+        &[("noise.txt", b"end\n")],
+        "end",
+        "2025-02-20T12:00:00Z",
+        "2025-02-20T12:00:00Z",
+    );
+    repo.index();
+    let output = repo.run(["related", "source.rs", "--json"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let item = &json["materials"][0];
+    assert_eq!(item["paths"][0], "candidate.rs", "{json}");
+    assert_eq!(
+        item["detail"]["follow_on"][0]["supporting_origins"], 2,
+        "{json}"
+    );
+    assert_eq!(
+        item["detail"]["follow_on"][0]["eligible_origins"], 2,
+        "{json}"
+    );
+    assert_eq!(
+        item["detail"]["follow_on"][0]["independent_chains"], 2,
+        "{json}"
+    );
+    let reverse = repo.run(["related", "candidate.rs", "--json"]);
+    let reverse: serde_json::Value = serde_json::from_slice(&reverse.stdout).unwrap();
+    assert!(
+        reverse["materials"].as_array().unwrap().is_empty(),
+        "{reverse}"
+    );
+}
+// Keep observation windows disjoint so background support is controlled explicitly.
+fn follow_on_event(repo: &TestRepo, path: &str, value: usize, date: &str) {
+    repo.commit_files_at(
+        &[(path, format!("{path} {value}\n").as_bytes())],
+        path,
+        date,
+        date,
+    );
+}
+
+fn finish_follow_on_history(repo: &TestRepo) {
+    for day in 1..=8 {
+        follow_on_event(
+            repo,
+            "noise.txt",
+            day,
+            &format!("2025-03-{day:02}T12:00:00Z"),
+        );
+    }
+    follow_on_event(repo, "noise.txt", 99, "2025-03-20T12:00:00Z");
+    repo.index();
+}
+
+fn follow_on_json(repo: &TestRepo, args: &[&str]) -> serde_json::Value {
+    let output = repo.run(args.iter().copied());
+    assert!(output.status.success(), "{}", stderr(&output));
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+#[test]
+fn related_keeps_dual_bases_and_sources_separate() {
+    let repo = TestRepo::new();
+    follow_on_event(&repo, "a.rs", 0, "2025-01-01T12:00:00Z");
+    follow_on_event(&repo, "b.rs", 0, "2025-01-02T12:00:00Z");
+    follow_on_event(&repo, "a.rs", 1, "2025-01-20T12:00:00Z");
+    follow_on_event(&repo, "b.rs", 1, "2025-01-21T12:00:00Z");
+    // A second source has only one independent chain; it must not borrow A's.
+    follow_on_event(&repo, "other.rs", 0, "2025-02-01T12:00:00Z");
+    follow_on_event(&repo, "b.rs", 2, "2025-02-02T12:00:00Z");
+    // Candidate-touching source events belong to co-change, not its follow-on denominator.
+    repo.commit_files_at(
+        &[("a.rs", b"joint\n"), ("b.rs", b"joint\n")],
+        "joint",
+        "2025-02-20T12:00:00Z",
+        "2025-02-20T12:00:00Z",
+    );
+    finish_follow_on_history(&repo);
+    let json = follow_on_json(&repo, &["related", "a.rs", "other.rs", "--json"]);
+    let candidates = json["materials"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["paths"][0] == "b.rs")
+        .collect::<Vec<_>>();
+    assert_eq!(candidates.len(), 1, "{json}");
+    let detail = &candidates[0]["detail"];
+    assert_eq!(detail["co_change_count"], 1, "{json}");
+    assert_eq!(detail["follow_on"].as_array().unwrap().len(), 1, "{json}");
+    assert_eq!(detail["follow_on"][0]["source"], "a.rs", "{json}");
+    assert_eq!(detail["follow_on"][0]["eligible_origins"], 2, "{json}");
+    assert_eq!(detail["follow_on"][0]["supporting_origins"], 2, "{json}");
+}
+
+#[test]
+fn related_rejects_inflated_chains_and_low_occurrence_rates() {
+    for (origins, later_events) in [(2, 1), (1, 2), (5, 2)] {
+        let repo = TestRepo::new();
+        for day in 1..=origins.min(2) {
+            follow_on_event(&repo, "a.rs", day, &format!("2025-01-{day:02}T12:00:00Z"));
+        }
+        for day in 1..=later_events {
+            follow_on_event(
+                &repo,
+                "b.rs",
+                day,
+                &format!("2025-01-{:02}T12:00:00Z", day + 5),
+            );
+        }
+        for day in 3..=origins {
+            follow_on_event(&repo, "a.rs", day, &format!("2025-02-{day:02}T12:00:00Z"));
+        }
+        finish_follow_on_history(&repo);
+        let json = follow_on_json(&repo, &["related", "a.rs", "--json"]);
+        assert!(
+            json["materials"].as_array().unwrap().is_empty(),
+            "{origins}/{later_events}: {json}"
+        );
+    }
+}
+
+#[test]
+fn related_requires_ancestry_not_timestamp_adjacency() {
+    let repo = TestRepo::new();
+    follow_on_event(&repo, "root.txt", 0, "2024-12-01T12:00:00Z");
+    let base = repo.head();
+    git(repo.dir.path(), ["checkout", "-b", "sources"]);
+    follow_on_event(&repo, "a.rs", 0, "2025-01-01T12:00:00Z");
+    follow_on_event(&repo, "a.rs", 1, "2025-01-20T12:00:00Z");
+    git(
+        repo.dir.path(),
+        ["checkout", "-b", "candidates", base.as_str()],
+    );
+    follow_on_event(&repo, "b.rs", 0, "2025-01-02T12:00:00Z");
+    follow_on_event(&repo, "b.rs", 1, "2025-01-21T12:00:00Z");
+    let status = git_command(repo.dir.path())
+        .env("GIT_AUTHOR_DATE", "2025-02-01T12:00:00Z")
+        .env("GIT_COMMITTER_DATE", "2025-02-01T12:00:00Z")
+        .args(["merge", "--no-ff", "sources", "-m", "import source branch"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    finish_follow_on_history(&repo);
+    let json = follow_on_json(&repo, &["related", "a.rs", "--json"]);
+    assert!(json["materials"].as_array().unwrap().is_empty(), "{json}");
+}
+
+#[test]
+fn related_discloses_window_examples_and_bounds_material_by_scope() {
+    let repo = TestRepo::new();
+    for (cycle, start, later) in [
+        (0, "2025-01-01", "2025-01-08"),
+        (1, "2025-01-20", "2025-01-27"),
+    ] {
+        follow_on_event(&repo, "a.rs", cycle, &format!("{start}T12:00:00Z"));
+        follow_on_event(&repo, "b.rs", cycle, &format!("{later}T12:00:00Z"));
+    }
+    finish_follow_on_history(&repo);
+    let json = follow_on_json(&repo, &["related", "a.rs", "--json"]);
+    let evidence = &json["materials"][0]["detail"]["follow_on"][0];
+    assert_eq!(evidence["observation_days"], 7, "{json}");
+    assert_eq!(evidence["max_parent_distance"], 20, "{json}");
+    for chain in evidence["examples"].as_array().unwrap() {
+        assert_eq!(chain["parent_distance"], 1, "{json}");
+        assert_eq!(chain["elapsed_seconds"], 7 * 86400, "{json}");
+        assert_eq!(chain["origin_path"], "a.rs", "{json}");
+        assert_eq!(chain["later_path"], "b.rs", "{json}");
+    }
+    let scoped = follow_on_json(
+        &repo,
+        &["related", "a.rs", "--since", "2025-01-19", "--json"],
+    );
+    assert!(
+        scoped["materials"].as_array().unwrap().is_empty(),
+        "{scoped}"
+    );
+    let unobserved = follow_on_json(
+        &repo,
+        &["related", "a.rs", "--until", "2025-01-26", "--json"],
+    );
+    assert!(
+        unobserved["materials"].as_array().unwrap().is_empty(),
+        "{unobserved}"
+    );
+    let output = repo.run(["related", "a.rs"]);
+    assert!(output.status.success());
+    assert!(
+        stdout(&output).contains("a.rs -> b.rs"),
+        "{}",
+        stdout(&output)
+    );
+}
+
+#[test]
+fn related_rejects_backdated_descendants_and_events_outside_seven_days() {
+    for later_dates in [["2024-12-31", "2025-01-19"], ["2025-01-09", "2025-01-28"]] {
+        let repo = TestRepo::new();
+        for (cycle, (start, later)) in ["2025-01-01", "2025-01-20"]
+            .into_iter()
+            .zip(later_dates)
+            .enumerate()
+        {
+            follow_on_event(&repo, "a.rs", cycle, &format!("{start}T12:00:00Z"));
+            follow_on_event(&repo, "b.rs", cycle, &format!("{later}T12:00:00Z"));
+        }
+        finish_follow_on_history(&repo);
+        let json = follow_on_json(&repo, &["related", "a.rs", "--json"]);
+        assert!(json["materials"].as_array().unwrap().is_empty(), "{json}");
+    }
+}
+
+#[test]
+fn related_observes_the_shortest_twenty_edge_boundary() {
+    for distance in [20, 21] {
+        let repo = TestRepo::new();
+        for (cycle, date) in [(0, "2025-01-01T12:00:00Z"), (1, "2025-01-20T12:00:00Z")] {
+            follow_on_event(&repo, "a.rs", cycle, date);
+            for edge in 1..distance {
+                follow_on_event(&repo, "filler.txt", cycle * 100 + edge, date);
+            }
+            follow_on_event(&repo, "b.rs", cycle, date);
+        }
+        // Dilute background without introducing any additional source origin.
+        for value in 0..45 {
+            follow_on_event(&repo, "noise.txt", value, "2025-03-01T12:00:00Z");
+        }
+        follow_on_event(&repo, "noise.txt", 99, "2025-03-20T12:00:00Z");
+        repo.index();
+        let json = follow_on_json(&repo, &["related", "a.rs", "--json"]);
+        let candidate = json["materials"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["paths"][0] == "b.rs");
+        if distance == 20 {
+            let examples =
+                candidate.expect("twenty-edge candidate")["detail"]["follow_on"][0]["examples"]
+                    .as_array()
+                    .unwrap();
+            assert_eq!(examples.len(), 2, "{json}");
+            assert!(
+                examples
+                    .iter()
+                    .all(|example| example["parent_distance"] == 20),
+                "{json}"
+            );
+            assert_eq!(follow_on_json(&repo, &["related", "a.rs", "--json"]), json);
+        } else {
+            assert!(candidate.is_none(), "{json}");
+        }
+    }
+}
+
+#[test]
+fn related_rejects_ubiquitous_candidate_background() {
+    let repo = TestRepo::new();
+    for (cycle, date) in [(0, "2025-01-01T12:00:00Z"), (1, "2025-01-20T12:00:00Z")] {
+        follow_on_event(&repo, "a.rs", cycle, date);
+        for value in 0..6 {
+            follow_on_event(&repo, "other.txt", cycle * 10 + value, date);
+        }
+        follow_on_event(&repo, "b.rs", cycle, date);
+    }
+    finish_follow_on_history(&repo);
+    let json = follow_on_json(&repo, &["related", "a.rs", "--json"]);
+    assert!(
+        json["materials"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["paths"][0] != "b.rs"),
+        "{json}"
+    );
+}
+
+#[test]
+fn related_follows_detected_renames_but_not_recreated_candidates() {
+    let repo = TestRepo::new();
+    for (cycle, start, later) in [
+        (0, "2025-01-01", "2025-01-02"),
+        (1, "2025-01-20", "2025-01-21"),
+    ] {
+        follow_on_event(&repo, "a.rs", cycle, &format!("{start}T12:00:00Z"));
+        follow_on_event(&repo, "b.rs", cycle, &format!("{later}T12:00:00Z"));
+    }
+    git(repo.dir.path(), ["mv", "a.rs", "renamed-a.rs"]);
+    git(repo.dir.path(), ["mv", "b.rs", "renamed-b.rs"]);
+    let output = git_command(repo.dir.path())
+        .env("GIT_AUTHOR_DATE", "2025-02-01T12:00:00Z")
+        .env("GIT_COMMITTER_DATE", "2025-02-01T12:00:00Z")
+        .args(["commit", "-m", "rename both"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    finish_follow_on_history(&repo);
+    let json = follow_on_json(&repo, &["related", "renamed-a.rs", "--json"]);
+    let evidence = &json["materials"][0]["detail"]["follow_on"][0];
+    assert_eq!(evidence["candidate"], "renamed-b.rs", "{json}");
+    assert_eq!(evidence["supporting_origins"], 2, "{json}");
+    for example in evidence["examples"].as_array().unwrap() {
+        assert_eq!(example["origin_path"], "a.rs", "{json}");
+        assert_eq!(example["later_path"], "b.rs", "{json}");
+    }
+    git(repo.dir.path(), ["rm", "renamed-b.rs"]);
+    let output = git_command(repo.dir.path())
+        .env("GIT_AUTHOR_DATE", "2025-04-01T12:00:00Z")
+        .env("GIT_COMMITTER_DATE", "2025-04-01T12:00:00Z")
+        .args(["commit", "-m", "delete candidate"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    follow_on_event(&repo, "renamed-b.rs", 99, "2025-04-02T12:00:00Z");
+    let json = follow_on_json(&repo, &["related", "renamed-a.rs", "--json"]);
+    assert!(
+        json["materials"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["detail"]["follow_on"]
+                .as_array()
+                .is_none_or(Vec::is_empty)),
+        "{json}"
+    );
+}
+
+#[test]
+fn related_traverses_merges_without_counting_merge_replay() {
+    let repo = TestRepo::new();
+    follow_on_event(&repo, "root.txt", 0, "2024-12-01T12:00:00Z");
+    let base = repo.head();
+    git(repo.dir.path(), ["checkout", "-b", "source-branch"]);
+    follow_on_event(&repo, "a.rs", 0, "2025-01-01T12:00:00Z");
+    git(
+        repo.dir.path(),
+        ["checkout", "-b", "target-branch", base.as_str()],
+    );
+    follow_on_event(&repo, "branch.txt", 0, "2025-01-01T13:00:00Z");
+    let output = git_command(repo.dir.path())
+        .env("GIT_AUTHOR_DATE", "2025-01-01T14:00:00Z")
+        .env("GIT_COMMITTER_DATE", "2025-01-01T14:00:00Z")
+        .args(["merge", "--no-ff", "source-branch", "-m", "import A"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    follow_on_event(&repo, "b.rs", 0, "2025-01-02T12:00:00Z");
+    follow_on_event(&repo, "a.rs", 1, "2025-01-20T12:00:00Z");
+    follow_on_event(&repo, "b.rs", 1, "2025-01-21T12:00:00Z");
+    finish_follow_on_history(&repo);
+    let json = follow_on_json(&repo, &["related", "a.rs", "--json"]);
+    let evidence = &json["materials"][0]["detail"]["follow_on"][0];
+    assert_eq!(evidence["eligible_origins"], 2, "{json}");
+    assert_eq!(evidence["independent_chains"], 2, "{json}");
+}
+
+#[test]
+fn related_reports_missing_history_without_inventing_observations() {
+    let repo = TestRepo::new();
+    follow_on_event(&repo, "a.rs", 0, "2025-01-01T12:00:00Z");
+    follow_on_event(&repo, "b.rs", 0, "2025-01-02T12:00:00Z");
+    follow_on_event(&repo, "a.rs", 1, "2025-01-20T12:00:00Z");
+    let boundary = repo.head();
+    follow_on_event(&repo, "b.rs", 1, "2025-01-21T12:00:00Z");
+    fs::write(
+        repo.dir.path().join(".git/shallow"),
+        format!("{boundary}\n"),
+    )
+    .unwrap();
+    finish_follow_on_history(&repo);
+    let target = repo.head();
+    let json = follow_on_json(&repo, &["related", "a.rs", "--to-rev", &target, "--json"]);
+    assert_eq!(json["scope"]["coverage_complete"], false, "{json}");
+    assert!(json["materials"].as_array().unwrap().is_empty(), "{json}");
+}
+
+#[test]
+fn related_does_not_count_a_shallow_boundary_merge_as_an_origin() {
+    let repo = TestRepo::new();
+    follow_on_event(&repo, "root.txt", 0, "2024-12-01T12:00:00Z");
+    let base = repo.head();
+    git(repo.dir.path(), ["checkout", "-b", "source-branch"]);
+    follow_on_event(&repo, "a.rs", 0, "2025-01-01T12:00:00Z");
+    git(
+        repo.dir.path(),
+        ["checkout", "-b", "target-branch", base.as_str()],
+    );
+    follow_on_event(&repo, "branch.txt", 0, "2025-01-01T13:00:00Z");
+    let output = git_command(repo.dir.path())
+        .env("GIT_AUTHOR_DATE", "2025-01-01T14:00:00Z")
+        .env("GIT_COMMITTER_DATE", "2025-01-01T14:00:00Z")
+        .args(["merge", "--no-ff", "source-branch", "-m", "import A"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let boundary = repo.head();
+    follow_on_event(&repo, "b.rs", 0, "2025-01-02T12:00:00Z");
+    follow_on_event(&repo, "a.rs", 1, "2025-01-20T12:00:00Z");
+    follow_on_event(&repo, "b.rs", 1, "2025-01-21T12:00:00Z");
+    finish_follow_on_history(&repo);
+    fs::write(
+        repo.dir.path().join(".git/shallow"),
+        format!("{boundary}\n"),
+    )
+    .unwrap();
+    let json = follow_on_json(&repo, &["related", "a.rs", "--json"]);
+    assert_eq!(json["scope"]["coverage_complete"], false, "{json}");
+    assert!(
+        json["materials"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["paths"][0] != "b.rs"),
+        "{json}"
+    );
+}
+
+#[test]
+fn related_omits_only_independent_examples_and_exposes_json_policy() {
+    let repo = TestRepo::new();
+    for day in 1..=3 {
+        follow_on_event(&repo, "a.rs", day, &format!("2025-01-{day:02}T12:00:00Z"));
+    }
+    follow_on_event(&repo, "b.rs", 0, "2025-01-04T12:00:00Z");
+    follow_on_event(&repo, "a.rs", 4, "2025-01-20T12:00:00Z");
+    follow_on_event(&repo, "b.rs", 1, "2025-01-21T12:00:00Z");
+    finish_follow_on_history(&repo);
+    let json = follow_on_json(&repo, &["related", "a.rs", "--json"]);
+    let evidence = &json["materials"][0]["detail"]["follow_on"][0];
+    assert_eq!(evidence["supporting_origins"], 4, "{json}");
+    assert_eq!(evidence["independent_chains"], 2, "{json}");
+    assert_eq!(evidence["omitted_examples"], 0, "{json}");
+    assert_eq!(evidence["bounds_inclusive"], true, "{json}");
+    assert_eq!(evidence["proper_descendants_only"], true, "{json}");
+    assert_eq!(evidence["merge_events_counted"], false, "{json}");
+}
+
+#[test]
 fn related_does_not_treat_case_distinct_mass_change_as_exact_seed() {
     let repo = TestRepo::new();
     git(repo.dir.path(), ["config", "core.ignorecase", "false"]);

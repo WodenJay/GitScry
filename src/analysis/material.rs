@@ -118,6 +118,8 @@ pub(crate) struct Relation {
     pub(crate) co_change_count: usize,
     pub(crate) proportion: f64,
     pub(crate) supporting_count: usize,
+    pub(crate) follow_on: Vec<super::retrieval::follow_on::PathObservation>,
+    pub(crate) co_change_citations: Vec<String>,
 }
 
 /// What history records about why an approach failed. Absent text stays absent, so

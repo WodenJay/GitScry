@@ -27,4 +27,7 @@ pub(crate) use material::{
 pub(crate) use patch::{PatchExcerpt, PatchHunk, PatchStatus};
 use retrieval::Intent;
 pub(in crate::analysis) use retrieval::anchors_overlap;
+pub(crate) use retrieval::follow_on::{
+    MAX_PARENT_DISTANCE as FOLLOW_ON_MAX_PARENT_DISTANCE, PathObservation,
+};
 pub(crate) use retrieval::{message_parts, normalize_path, searchable_text};
