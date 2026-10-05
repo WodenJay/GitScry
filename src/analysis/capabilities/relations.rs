@@ -13,6 +13,24 @@ use super::super::{Citation, Confidence, Detail, Intent, Material, Relation, Rep
 
 const MASS_CHANGE_PATH_LIMIT: usize = 50;
 
+mod directory;
+
+#[derive(serde::Serialize)]
+pub(crate) struct RelationSource {
+    pub(crate) path: String,
+    pub(crate) kind: &'static str,
+    pub(crate) matched: bool,
+}
+
+pub(crate) struct ModuleCoChange {
+    pub(crate) touch_commits: usize,
+    pub(crate) support: Vec<ModuleSupport>,
+}
+
+pub(crate) struct ModuleSupport {
+    pub(crate) oid: String,
+    pub(crate) paths: Vec<Vec<u8>>,
+}
 #[cfg(unix)]
 fn current_path_is_file(root: &Path, path: &[u8]) -> bool {
     use std::os::unix::ffi::OsStrExt;
@@ -39,7 +57,42 @@ pub(crate) fn related(
     limit: usize,
     scope: Option<&SearchFilter>,
 ) -> Result<Report, AppError> {
-    run(session, intent, worktree_root, limit, false, scope)
+    let observations = session.pattern_observations(scope)?;
+    let sources = intent
+        .anchors()
+        .iter()
+        .map(|path| {
+            let directory = intent.requests_directory(path) || worktree_root.join(path).is_dir();
+            let matched = observations.iter().any(|commit| {
+                commit.paths.iter().any(|historical| {
+                    if directory {
+                        directory::contains(path, historical)
+                    } else if path.contains('/') {
+                        historical == path.as_bytes()
+                    } else {
+                        retrieval::normalize_path(historical).rsplit('/').next()
+                            == Some(path.as_str())
+                    }
+                })
+            });
+            RelationSource {
+                path: path.clone(),
+                kind: if directory { "directory" } else { "file" },
+                matched,
+            }
+        })
+        .collect::<Vec<_>>();
+    if sources.iter().any(|source| source.kind == "directory") {
+        if sources.len() != 1 {
+            return Err(AppError::input(
+                "directory queries currently require a single source path",
+            ));
+        }
+        return directory::run(session, observations, sources, limit);
+    }
+    let mut report = run(session, intent, worktree_root, limit, false, scope)?;
+    report.relation_sources = sources;
+    Ok(report)
 }
 
 pub(crate) fn tests(
@@ -153,6 +206,7 @@ fn run(
                 co_change_count: support_count,
                 proportion,
                 supporting_count: support_count,
+                module: None,
                 follow_on: Vec::new(),
                 co_change_citations: citation_oids.clone(),
             })),
@@ -197,6 +251,7 @@ fn run(
                             co_change_count: 0,
                             proportion: 0.0,
                             supporting_count: 0,
+                            module: None,
                             follow_on: Vec::new(),
                             co_change_citations: Vec::new(),
                         })),

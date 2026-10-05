@@ -24,7 +24,7 @@ pub(crate) use history::PathChange;
 pub(crate) use history::{CodeHunk, HistoryCommit, HistoryHunk, OtherFileChange, PatchHistoryHunk};
 use payload::HunkReader;
 pub(crate) use prune::{PruneReport, prune};
-pub(crate) use query::{RelationHistory, SearchCandidate, SearchMaterial};
+pub(crate) use query::{PatternObservation, RelationHistory, SearchCandidate, SearchMaterial};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 pub(crate) use semantic::{
     SemanticCandidate, SemanticPreference, SemanticResourcePolicy, maintain as maintain_semantic,

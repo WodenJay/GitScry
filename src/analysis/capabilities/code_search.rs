@@ -240,6 +240,7 @@ fn run_with_scope(
         kind: ReportKind::CodeSearch,
         materials: Vec::new(),
         code_matches: matches.into_iter().map(|ordered| ordered.matched).collect(),
+        relation_sources: Vec::new(),
         matched_count,
         truncated: matched_count > limit,
         warnings: Vec::new(),

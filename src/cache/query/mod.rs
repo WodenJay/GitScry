@@ -6,6 +6,7 @@ mod patterns;
 mod relations;
 mod search;
 
+pub(crate) use patterns::PatternObservation;
 pub(crate) use relations::RelationHistory;
 pub(crate) use search::{SearchCandidate, SearchMaterial};
 
