@@ -433,6 +433,50 @@ mod tests {
     use super::locate;
 
     #[test]
+    fn legitimate_constants_variables_and_function_values_keep_useful_ranges() {
+        for (path, source, name, expected) in [
+            (
+                "source.rs",
+                "pub const LIMIT: usize = 3;\nconst NEXT: usize = 4;",
+                "LIMIT",
+                (1, 1),
+            ),
+            (
+                "source.ts",
+                "export let count: number = 3;\nconst next = 4;",
+                "count",
+                (1, 1),
+            ),
+            (
+                "source.js",
+                "var count = 3;\nvar next = 4;",
+                "count",
+                (1, 1),
+            ),
+            (
+                "source.ts",
+                "export const parse = (value: string) => {\n    return value.trim();\n};\nconst next = 4;",
+                "parse",
+                (1, 3),
+            ),
+            (
+                "source.js",
+                "let parse = function(value) {\n    return value;\n};\nlet next = 4;",
+                "parse",
+                (1, 3),
+            ),
+            (
+                "source.js",
+                "var parse = value => value;\nvar next = 4;",
+                "parse",
+                (1, 1),
+            ),
+        ] {
+            let span = super::locate_unique(source.as_bytes(), name, path).unwrap();
+            assert_eq!((span.start, span.end), expected, "{path}: {source}");
+        }
+    }
+    #[test]
     fn unbraced_declarations_end_before_the_next_declaration() {
         let source = b"const FOO: usize = 1;\nconst BAR: usize = 2;";
         let span = locate(source, "FOO", "source.rs").unwrap();
