@@ -329,12 +329,12 @@ Examples:
             ArgGroup::new("search-mode")
                 .required(true)
                 .multiple(false)
-                .args(["query", "code", "code_regex"]),
+                .args(["query", "code", "code_regex", "code_file"]),
         ),
         group(
             ArgGroup::new("code-mode")
                 .multiple(false)
-                .args(["code", "code_regex"]),
+                .args(["code", "code_regex", "code_file"]),
         ),
         about = "Search history or changed-code lines",
         long_about = r#"Search the published cache's history reachable from the current HEAD for relevant commits or changed-code lines.
@@ -379,6 +379,9 @@ Examples:
         /// Regex matched independently against each changed line.
         #[arg(long, value_name = "PATTERN")]
         code_regex: Option<String>,
+        /// Exact whole-line fragment from a file; - reads stdin through EOF.
+        #[arg(long, value_name = "PATH")]
+        code_file: Option<std::path::PathBuf>,
         /// Restrict code matches to added or removed lines.
         #[arg(long, value_enum, requires = "code-mode", conflicts_with = "query")]
         change: Option<CodeChange>,

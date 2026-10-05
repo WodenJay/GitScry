@@ -8,6 +8,7 @@ mod conflicts;
 mod context;
 mod escape;
 mod followups;
+mod fragment_search;
 mod github_links;
 mod json;
 mod material;
@@ -31,6 +32,7 @@ fn format_report(
     github_links: Option<&crate::github::LinksReport>,
 ) -> String {
     match report {
+        QueryReport::FragmentSearch(report) => fragment_search::format_report(report, github_links),
         QueryReport::Conflicts(report) => conflicts::format_report(report),
         QueryReport::Followups(report) => followups::format_report(report),
         QueryReport::Patterns(report) => patterns::format_report(report),
@@ -80,6 +82,9 @@ fn format_json_report(
     github_links: Option<&crate::github::LinksReport>,
 ) -> Result<String, serde_json::Error> {
     match report {
+        QueryReport::FragmentSearch(report) => {
+            fragment_search::format_json_report(report, additional_warnings, github_links)
+        }
         QueryReport::Conflicts(report) => {
             conflicts::format_json_report(report, additional_warnings)
         }

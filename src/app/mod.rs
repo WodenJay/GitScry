@@ -179,6 +179,7 @@ pub(crate) fn execute(
             query,
             code,
             code_regex,
+            code_file,
             hybrid,
             change,
             path,
@@ -191,15 +192,20 @@ pub(crate) fn execute(
                 CodeChange::Added => CodeDirection::Added,
                 CodeChange::Removed => CodeDirection::Removed,
             });
-            let request = match (query, code, code_regex) {
-                (Some(words), None, None) => Request::Search { words, hybrid },
-                (None, Some(query), None) => Request::CodeSearch {
+            let request = match (query, code, code_regex, code_file) {
+                (Some(words), None, None, None) => Request::Search { words, hybrid },
+                (None, Some(query), None, None) => Request::CodeSearch {
                     query,
                     path,
                     direction,
                 },
-                (None, None, Some(pattern)) => Request::CodeRegexSearch {
+                (None, None, Some(pattern), None) => Request::CodeRegexSearch {
                     pattern,
+                    path,
+                    direction,
+                },
+                (None, None, None, Some(input)) => Request::FragmentSearch {
+                    input,
                     path,
                     direction,
                 },
@@ -418,6 +424,9 @@ pub(crate) fn execute(
         query::QueryReport::Patterns(_) => unreachable!("patterns has no GitHub link option"),
         query::QueryReport::Hotspots(_) => unreachable!("hotspots has no GitHub link option"),
         query::QueryReport::Analysis(report) => github::fetch(report, explicit_repo.as_deref()),
+        query::QueryReport::FragmentSearch(report) => {
+            github::fetch_fragments(report, explicit_repo.as_deref())
+        }
         query::QueryReport::Timeline(report) => {
             github::fetch_timeline(report, explicit_repo.as_deref())
         }

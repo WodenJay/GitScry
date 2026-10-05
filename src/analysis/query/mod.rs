@@ -18,6 +18,11 @@ pub(in crate::analysis) use context::Context;
 pub(crate) use scope::SearchScopeOptions;
 
 pub(crate) enum Request {
+    FragmentSearch {
+        input: std::path::PathBuf,
+        path: Option<String>,
+        direction: Option<CodeDirection>,
+    },
     Conflicts {
         paths: Vec<String>,
     },
@@ -101,6 +106,7 @@ pub(crate) struct Options {
 }
 
 pub(crate) enum QueryReport {
+    FragmentSearch(capabilities::fragment_search::Report),
     Conflicts(capabilities::conflicts::Report),
     Followups(capabilities::followups::Report),
     Context(super::ContextReport),
@@ -114,6 +120,7 @@ pub(crate) enum QueryReport {
 impl QueryReport {
     pub(crate) fn warnings(&self) -> &[String] {
         match self {
+            Self::FragmentSearch(_) => &[],
             Self::Conflicts(report) => &report.warnings,
             Self::Followups(report) => &report.warnings,
             Self::Patterns(_) => &[],
@@ -125,6 +132,7 @@ impl QueryReport {
 
     pub(crate) fn notices(&self) -> &[String] {
         match self {
+            Self::FragmentSearch(_) => &[],
             Self::Conflicts(_) => &[],
             Self::Followups(_) => &[],
             Self::Patterns(_) => &[],
@@ -146,6 +154,11 @@ pub(crate) fn execute(request: Request, options: Options) -> Result<Outcome, App
         return Err(AppError::input("limit must be greater than zero"));
     }
     match request {
+        Request::FragmentSearch {
+            input,
+            path,
+            direction,
+        } => capabilities::fragment_search::execute(input, path, direction, options),
         Request::Conflicts { paths } => capabilities::conflicts::execute(paths, options.limit),
         Request::Followups {
             revision,

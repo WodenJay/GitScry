@@ -10,6 +10,7 @@ pub(crate) mod context;
 mod examples;
 mod failures;
 pub(crate) mod followups;
+pub(crate) mod fragment_search;
 pub(crate) mod hotspots;
 pub(in crate::analysis) mod hybrid;
 pub(crate) mod patterns;

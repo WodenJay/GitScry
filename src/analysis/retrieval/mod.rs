@@ -4,6 +4,7 @@
 //! Capabilities share candidate retrieval, ranking, and line-history interpretation here;
 //! storage stays in `cache`, and report wording stays in `capabilities`.
 
+pub(crate) mod code_fragment;
 pub(in crate::analysis) mod follow_on;
 mod intent;
 mod lexical;

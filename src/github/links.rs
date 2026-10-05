@@ -139,6 +139,19 @@ pub(crate) fn fetch_timeline(
         .collect();
     fetch_commits(commits, explicit_repository)
 }
+pub(crate) fn fetch_fragments(
+    report: &crate::analysis::capabilities::fragment_search::Report,
+    explicit_repository: Option<&str>,
+) -> LinksReport {
+    let mut seen = HashSet::new();
+    let commits = report
+        .occurrences
+        .iter()
+        .filter(|entry| seen.insert(entry.commit_id.clone()))
+        .map(|entry| entry.commit_id.clone())
+        .collect();
+    fetch_commits(commits, explicit_repository)
+}
 
 fn fetch_commits(commits: Vec<String>, explicit_repository: Option<&str>) -> LinksReport {
     if commits.is_empty() {
