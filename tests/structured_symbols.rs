@@ -209,3 +209,151 @@ fn lightweight_results_disclose_mode_in_text_and_json_without_stripping_owners()
     );
     assert!(text.contains("lightweight symbol selection"), "{text}");
 }
+
+fn commit_py(repo: &TestRepo, source: &str, subject: &str) -> String {
+    fs::create_dir_all(repo.dir.path().join("src")).unwrap();
+    fs::write(repo.dir.path().join("src/store.py"), source).unwrap();
+    git(repo.dir.path(), ["add", "."]);
+    git(repo.dir.path(), ["commit", "-m", subject]);
+    repo.head()
+}
+
+fn query_py(repo: &TestRepo, command: &str, selector: &str, revision: &str) -> serde_json::Value {
+    let args = if command == "regression" {
+        vec![
+            command,
+            "failure",
+            "--path",
+            "src/store.py",
+            "--symbol",
+            selector,
+            "--bad",
+            revision,
+            "--json",
+        ]
+    } else {
+        vec![
+            command,
+            "src/store.py",
+            "--symbol",
+            selector,
+            "--at",
+            revision,
+            "--json",
+        ]
+    };
+    let output = repo.run(args);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+#[test]
+fn python_decorated_methods_track_history_across_commands() {
+    let repo = TestRepo::new();
+    let initial = commit_py(
+        &repo,
+        concat!(
+            "class Store:\n",
+            "    def run(self, value):\n",
+            "        return value\n",
+            "\n",
+            "    def neighbor(self):\n",
+            "        return 1\n",
+        ),
+        "Create store",
+    );
+    let decorated = commit_py(
+        &repo,
+        concat!(
+            "class Store:\n",
+            "    @staticmethod\n",
+            "    def run(self, value):\n",
+            "        return value\n",
+            "\n",
+            "    def neighbor(self):\n",
+            "        return 1\n",
+        ),
+        "Decorate run",
+    );
+    let neighbor = commit_py(
+        &repo,
+        concat!(
+            "class Store:\n",
+            "    @staticmethod\n",
+            "    def run(self, value):\n",
+            "        return value\n",
+            "\n",
+            "    def neighbor(self):\n",
+            "        return 2\n",
+        ),
+        "Change neighbor",
+    );
+    repo.index();
+    for command in ["why", "tests", "related", "regression"] {
+        let report = query_py(&repo, command, "Store.run", &neighbor);
+        let selected = &report["symbol_selection"];
+        assert_eq!(
+            selected["input_selector"], "Store.run",
+            "{command}: {report}"
+        );
+        assert_eq!(selected["qualified_name"], "Store.run");
+        assert_eq!(selected["kind"], "method");
+        assert_eq!(selected["start_line"], 2);
+        assert_eq!(selected["end_line"], 4);
+        assert_eq!(selected["identifier_line"], 3);
+        assert_eq!(selected["language"], "python");
+        assert_eq!(selected["mode"], "structured");
+        if command == "why" {
+            let introduction = &report["symbol_summary"]["introduction"]["commit_oid"];
+            assert_eq!(introduction, &initial, "{command}: {report}");
+        }
+        // Only `why` (symbol_summary) and `regression` (symbol_changes) carry
+        // symbol history material; `tests`/`related` expose selection only.
+        let rendered = report.to_string();
+        if command == "why" || command == "regression" {
+            assert!(rendered.contains("Decorate run"), "{command}: {report}");
+            assert!(!rendered.contains("Change neighbor"), "{command}: {report}");
+        }
+        let _ = decorated;
+    }
+}
+
+#[test]
+fn python_simple_and_suffix_selectors_resolve_uniquely() {
+    let repo = TestRepo::new();
+    let revision = commit_py(
+        &repo,
+        concat!(
+            "def produce():\n",
+            "    return 1\n",
+            "\n",
+            "class Store:\n",
+            "    class Part:\n",
+            "        def build(self):\n",
+            "            return 2\n",
+        ),
+        "Create store",
+    );
+    repo.index();
+    let report = query_py(&repo, "why", "build", &revision);
+    assert_eq!(
+        report["symbol_selection"]["qualified_name"],
+        "Store.Part.build"
+    );
+    let report = query_py(&repo, "why", "Part.build", &revision);
+    assert_eq!(
+        report["symbol_selection"]["qualified_name"],
+        "Store.Part.build"
+    );
+    let output = repo.run(["why", "src/store.py", "--symbol", "Store.run"]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("no supported declaration"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

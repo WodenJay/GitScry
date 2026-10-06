@@ -188,6 +188,7 @@ mod tests {
             );
         }
     }
+    #[test]
     fn independent_comments_and_neighbors_stay_outside_ranges() {
         let source = b"# leading\n\ndef f():\n    pass\n\n# trailing\ndef g():\n    pass\n";
         let f = locate(source, "f", "source.py").unwrap();
