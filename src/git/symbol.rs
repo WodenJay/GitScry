@@ -119,7 +119,7 @@ pub(super) fn declarations(content: &[u8], path: &str) -> (Vec<Location>, Option
     } else if let Some(language) = javascript_language(path) {
         let grammar = if path.ends_with(".tsx") {
             javascript::Language::Tsx
-        } else if path.ends_with(".ts") {
+        } else if path.ends_with(".ts") || path.ends_with(".mts") || path.ends_with(".cts") {
             javascript::Language::TypeScript
         } else {
             javascript::Language::JavaScript
@@ -163,7 +163,7 @@ pub(super) fn declarations(content: &[u8], path: &str) -> (Vec<Location>, Option
 
 /// The bundled JavaScript/TypeScript interpretation for a path, if any.
 fn javascript_language(path: &str) -> Option<&'static str> {
-    for extension in [".tsx", ".ts", ".jsx", ".mjs", ".cjs", ".js"] {
+    for extension in [".tsx", ".ts", ".mts", ".cts", ".jsx", ".mjs", ".cjs", ".js"] {
         if path.ends_with(extension) {
             return Some("javascript");
         }
@@ -961,6 +961,56 @@ mod javascript_tests {
         let selected = locate(tsx, "Widget", "source.tsx").unwrap();
         assert_eq!(selected.selection.mode, "structured");
         assert_eq!(selected.selection.language, "typescript");
+    }
+
+    #[test]
+    fn typescript_decorators_and_exported_decorations_stay_in_the_span() {
+        let source = b"class Device {
+  @watch
+  onClick() {
+    step();
+  }
+}
+";
+        let selected = locate(source, "Device.onClick", "source.ts").unwrap();
+        assert_eq!(
+            (selected.span.start, selected.span.end),
+            (2, 5),
+            "{source:?}"
+        );
+        let source = b"@logged
+export class Gadget {}
+";
+        let selected = locate(source, "Gadget", "source.ts").unwrap();
+        assert_eq!((selected.span.start, selected.span.end), (1, 2));
+        let source = b"@logged
+export default class Widget {}
+";
+        let selected = locate(source, "Widget", "source.ts").unwrap();
+        assert_eq!((selected.span.start, selected.span.end), (1, 2));
+    }
+
+    #[test]
+    fn static_accessors_and_typescript_only_extensions_resolve() {
+        let source = b"class Meter {
+  static get zero() {
+    return 0;
+  }
+}
+";
+        let selected = locate(source, "Meter.zero", "source.js").unwrap();
+        assert_eq!(selected.selection.kind, "getter");
+        for path in ["source.mts", "source.cts"] {
+            let selected = locate(
+                b"interface A { a: number }
+",
+                "A",
+                path,
+            )
+            .unwrap();
+            assert_eq!(selected.selection.language, "typescript", "{path}");
+            assert_eq!(selected.selection.mode, "structured");
+        }
     }
 
     #[test]

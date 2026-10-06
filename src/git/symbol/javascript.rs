@@ -83,8 +83,7 @@ fn visit(
         let name = text(identifier, source).to_owned();
         let mut qualified = owners.to_vec();
         qualified.push(name.clone());
-        // Attached decorators are repeat fields on the declaration itself.
-        let first = node.child_by_field_name("decorator").unwrap_or(node);
+        let first = attached(node);
         let start = first.start_position().row + 1;
         let end = node.end_position().row + usize::from(node.end_position().column > 0);
         let identifier_line = identifier.start_position().row + 1;
@@ -127,6 +126,24 @@ fn visit(
     }
 }
 
+// The earliest attached syntax of a declaration: its own decorator field,
+// sibling decorators before class members, or the wrapping export statement.
+fn attached(node: Node<'_>) -> Node<'_> {
+    let mut first = node.child_by_field_name("decorator").unwrap_or(node);
+    if let Some(parent) = node.parent()
+        && (parent.kind() == "class_body" || parent.kind() == "export_statement")
+        && node.child_by_field_name("decorator").is_none()
+    {
+        while let Some(previous) = first.prev_named_sibling() {
+            if previous.kind() != "decorator" {
+                break;
+            }
+            first = previous;
+        }
+    }
+    first
+}
+
 fn method_kind(node: Node<'_>, source: &[u8]) -> &'static str {
     if let Some(name) = node.child_by_field_name("name")
         && text(name, source) == "constructor"
@@ -135,13 +152,13 @@ fn method_kind(node: Node<'_>, source: &[u8]) -> &'static str {
     }
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        if !child.is_named() {
-            if child.kind() == "get" {
-                return "getter";
-            }
-            if child.kind() == "set" {
-                return "setter";
-            }
+        if child.is_named() {
+            continue;
+        }
+        match child.kind() {
+            "get" | "static get" => return "getter",
+            "set" => return "setter",
+            _ => {}
         }
     }
     "method"
