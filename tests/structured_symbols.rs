@@ -200,7 +200,7 @@ fn query_c(repo: &TestRepo, command: &str, selector: &str, revision: &str) -> se
     } else {
         vec![
             command,
-            "src/limits.c",
+            "src/util.c",
             "--symbol",
             selector,
             "--at",
@@ -1007,11 +1007,13 @@ fn legacy_constants_and_variables_stay_selectable_across_languages() {
     git(repo.dir.path(), ["add", "."]);
     git(repo.dir.path(), ["commit", "-m", "Create limits"]);
     repo.index();
-    let report = query_c(&repo, "why", "limit", &repo.head());
+    let output = repo.run(["why", "src/limits.c", "--symbol", "limit", "--json"]);
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(report["symbol_selection"]["kind"], "constant", "{report}");
     assert_eq!(report["symbol_selection"]["language"], "c");
     assert_eq!(report["symbol_selection"]["mode"], "structured");
-    let report = query_c(&repo, "why", "count", &repo.head());
+    let output = repo.run(["why", "src/limits.c", "--symbol", "count", "--json"]);
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(report["symbol_selection"]["kind"], "variable", "{report}");
     let output = repo.run(["why", "src/limits.go", "--symbol", "limit", "--json"]);
     assert!(
