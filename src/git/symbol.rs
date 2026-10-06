@@ -4,6 +4,7 @@
 mod c;
 mod go;
 mod python;
+mod javascript;
 mod rust;
 
 /// The actual source interpretation and declaration selected at a pinned revision.
@@ -21,6 +22,7 @@ pub(crate) struct Selection {
 }
 use crate::app::AppError;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Span {
     pub(super) start: usize,
     pub(super) end: usize,
@@ -58,7 +60,7 @@ pub(super) fn locate_unique(content: &[u8], name: &str, path: &str) -> Result<Lo
             qualified == name
                 || qualified
                     .strip_suffix(name)
-                    .is_some_and(|prefix| prefix.ends_with(separator))
+                    .is_some_and(|prefix|  prefix.ends_with(separator) || prefix.ends_with('.'))
         })
         .collect::<Vec<_>>();
     match matches.len() {
@@ -142,6 +144,18 @@ pub(super) fn declarations(content: &[u8], path: &str) -> (Vec<Location>, Option
             Ok(locations) => return (locations, None),
             Err(reason) => ("python", reason),
         }
+    } else if let Some(language) = javascript_language(path) {
+        let grammar = if path.ends_with(".tsx") {
+            javascript::Language::Tsx
+        } else if path.ends_with(".ts") || path.ends_with(".mts") || path.ends_with(".cts") {
+            javascript::Language::TypeScript
+        } else {
+            javascript::Language::JavaScript
+        };
+        match javascript::extract(content, grammar) {
+            Ok(locations) => return (locations, None),
+            Err(reason) => (language, reason),
+        }
     } else {
         ("unsupported", "unsupported language".to_owned())
     };
@@ -173,6 +187,16 @@ pub(super) fn declarations(content: &[u8], path: &str) -> (Vec<Location>, Option
         })
         .collect();
     (locations, Some(notice))
+}
+
+/// The bundled JavaScript/TypeScript interpretation for a path, if any.
+fn javascript_language(path: &str) -> Option<&'static str> {
+    for extension in [".tsx", ".ts", ".mts", ".cts", ".jsx", ".mjs", ".cjs", ".js"] {
+        if path.ends_with(extension) {
+            return Some("javascript");
+        }
+    }
+    None
 }
 
 fn declaration_positions(content: &[u8], rust_source: bool) -> Vec<(String, usize, usize)> {
@@ -832,5 +856,204 @@ mod tests {
                 .unwrap();
             assert_eq!(error.to_string(), message);
         }
+    }
+}
+
+#[cfg(test)]
+mod javascript_tests {
+    use super::locate_unique as locate;
+
+    #[test]
+    fn js_methods_getters_setters_and_constructors_are_structural() {
+        let source = b"class RFB {\n  constructor(a) {\n    this.a = a;\n  }\n  get state() {\n    return this._state;\n  }\n  set state(value) {\n    this._state = value;\n  }\n  async clipboardPasteFrom(text) {\n    await this.send(text);\n  }\n  static create(a) {\n    return new RFB(a);\n  }\n  #secret() {\n    return 1;\n  }\n}\n";
+        for (name, kind, span) in [
+            ("RFB", "class", (1, 20)),
+            ("RFB.constructor", "constructor", (2, 4)),
+            ("RFB.clipboardPasteFrom", "method", (11, 13)),
+            ("RFB.create", "method", (14, 16)),
+            ("RFB.#secret", "method", (17, 19)),
+        ] {
+            let selected = locate(source, name, "source.js").unwrap();
+            assert_eq!(selected.selection.kind, kind, "{name}");
+            assert_eq!(
+                (selected.span.start, selected.span.end),
+                span,
+                "{name} {kind}"
+            );
+            assert_eq!(selected.selection.mode, "structured");
+            assert_eq!(selected.selection.language, "javascript");
+        }
+        // A same-name getter/setter pair shares one qualified name and stays
+        // an explicit ambiguity even when qualified.
+        let collision = locate(source, "RFB.state", "source.js")
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(collision.contains("ambiguous"), "{collision}");
+        assert!(collision.contains("getter"));
+        assert!(collision.contains("setter"));
+        assert!(collision.contains("lines 5-7"));
+        assert!(collision.contains("lines 8-10"));
+    }
+
+    #[test]
+    fn js_exported_and_decorated_declarations_keep_attached_syntax() {
+        let source = b"// leading comment\n@logged\nclass Device extends Base {\n  @watch\n  onClick() {\n    step();\n  }\n}\nmodule.exports = { Device };\nfunction standalone() {\n  return 1;\n}\nasync function* stream() {\n  yield 1;\n}\n";
+        let selected = locate(source, "Device", "source.js").unwrap();
+        assert_eq!((selected.span.start, selected.span.end), (2, 8));
+        assert_eq!(selected.selection.kind, "class");
+        let on_click = locate(source, "Device.onClick", "source.js").unwrap();
+        assert_eq!((on_click.span.start, on_click.span.end), (4, 7));
+        assert_eq!(on_click.selection.kind, "method");
+        let standalone = locate(source, "standalone", "source.js").unwrap();
+        assert_eq!((standalone.span.start, standalone.span.end), (10, 12));
+        let stream = locate(source, "stream", "source.js").unwrap();
+        assert_eq!((stream.span.start, stream.span.end), (13, 15));
+    }
+
+    #[test]
+    fn ts_interfaces_types_enums_and_private_methods_are_structural() {
+        let source = b"interface Options {\n  size: number;\n  resize(value: number): void;\n}\ntype Alias = Options;\nenum Color {\n  Red,\n}\nabstract class Base {\n  abstract run(): void;\n  private helper() {\n    return 1;\n  }\n  get total() {\n    return 1;\n  }\n}\nexport class Impl extends Base implements Options {\n  run() {}\n}\n";
+        for (name, kind, span) in [
+            ("Options", "interface", (1, 4)),
+            ("Alias", "type", (5, 5)),
+            ("Color", "enum", (6, 8)),
+            ("Base", "class", (9, 17)),
+            ("Base.helper", "method", (11, 13)),
+            ("Base.total", "getter", (14, 16)),
+            ("Impl", "class", (18, 20)),
+            ("Impl.run", "method", (19, 19)),
+        ] {
+            let selected = locate(source, name, "source.ts").unwrap();
+            assert_eq!(selected.selection.kind, kind, "{name}");
+            assert_eq!(
+                (selected.span.start, selected.span.end),
+                span,
+                "{name} {kind}"
+            );
+            assert_eq!(selected.selection.mode, "structured");
+            assert_eq!(selected.selection.language, "typescript");
+        }
+        // Bare names match complete-segment suffixes: the bodyless signatures
+        // are not locations, so only the implementations resolve.
+        assert!(locate(source, "run", "source.ts").is_ok());
+        assert!(locate(source, "Impl.run", "source.ts").is_ok());
+    }
+
+    #[test]
+    fn js_variables_and_function_values_keep_useful_ranges() {
+        for (path, source, name, expected) in [
+            (
+                "source.js",
+                "const limit = 3;\nlet next = 4;",
+                "limit",
+                (1, 1),
+            ),
+            (
+                "source.ts",
+                "export const parse = (value: string) => {\n  return value.trim();\n};",
+                "parse",
+                (1, 3),
+            ),
+            (
+                "source.js",
+                "let handler = function(event) {\n  return event;\n};",
+                "handler",
+                (1, 3),
+            ),
+        ] {
+            let selected = locate(source.as_bytes(), name, path).unwrap();
+            assert_eq!(
+                (selected.span.start, selected.span.end),
+                expected,
+                "{path} {source}"
+            );
+            assert_eq!(selected.selection.mode, "structured");
+        }
+    }
+
+    #[test]
+    fn broken_javascript_degrades_to_lightweight_with_notice() {
+        let broken = b"function real() {}\nfunction broken(\n";
+        let selected = locate(broken, "real", "source.js").unwrap();
+        assert_eq!(selected.selection.mode, "lightweight");
+        assert!(selected.notice.unwrap().contains("parse failed"));
+        assert!(locate(broken, "RFB.real", "source.js").is_err());
+    }
+
+    #[test]
+    fn jsx_and_tsx_select_the_right_grammars() {
+        let jsx = b"function App() {\n  return <div className=\"name\">{count}</div>;\n}\n";
+        let selected = locate(jsx, "App", "source.jsx").unwrap();
+        assert_eq!(selected.selection.mode, "structured");
+        assert_eq!(selected.selection.language, "javascript");
+        let tsx = b"interface Props {\n  name: string;\n}\nfunction Widget(props: Props) {\n  return <span>{props.name}</span>;\n}\n";
+        let selected = locate(tsx, "Widget", "source.tsx").unwrap();
+        assert_eq!(selected.selection.mode, "structured");
+        assert_eq!(selected.selection.language, "typescript");
+    }
+
+    #[test]
+    fn typescript_decorators_and_exported_decorations_stay_in_the_span() {
+        let source = b"class Device {
+  @watch
+  onClick() {
+    step();
+  }
+}
+";
+        let selected = locate(source, "Device.onClick", "source.ts").unwrap();
+        assert_eq!(
+            (selected.span.start, selected.span.end),
+            (2, 5),
+            "{source:?}"
+        );
+        let source = b"@logged
+export class Gadget {}
+";
+        let selected = locate(source, "Gadget", "source.ts").unwrap();
+        assert_eq!((selected.span.start, selected.span.end), (1, 2));
+        let source = b"@logged
+export default class Widget {}
+";
+        let selected = locate(source, "Widget", "source.ts").unwrap();
+        assert_eq!((selected.span.start, selected.span.end), (1, 2));
+    }
+
+    #[test]
+    fn static_accessors_and_typescript_only_extensions_resolve() {
+        let source = b"class Meter {
+  static get zero() {
+    return 0;
+  }
+}
+";
+        let selected = locate(source, "Meter.zero", "source.js").unwrap();
+        assert_eq!(selected.selection.kind, "getter");
+        for path in ["source.mts", "source.cts"] {
+            let selected = locate(
+                b"interface A { a: number }
+",
+                "A",
+                path,
+            )
+            .unwrap();
+            assert_eq!(selected.selection.language, "typescript", "{path}");
+            assert_eq!(selected.selection.mode, "structured");
+        }
+    }
+
+    #[test]
+    fn owner_collisions_and_suffix_rules_match_rust() {
+        let source =
+            b"class Outer {\n  method() {\n    class Inner {\n      method() {}\n    }\n  }\n}\n";
+        // Complete-segment suffixes disambiguate; bare names collide.
+        assert!(locate(source, "method", "source.js").is_err());
+        let outer = locate(source, "Outer.method", "source.js").unwrap();
+        assert_eq!((outer.span.start, outer.span.end), (2, 6));
+        let inner = locate(source, "Outer.method.Inner.method", "source.js").unwrap();
+        assert_eq!((inner.span.start, inner.span.end), (4, 4));
+        // Incomplete segments never match.
+        assert!(locate(source, "ethod", "source.js").is_err());
     }
 }
