@@ -234,7 +234,7 @@ fn run(
 
     let mut report = super::super::report(ReportKind::Regression, materials, matched_count, limit);
     report.warnings.extend(target.warnings.iter().cloned());
-    report.symbol_selection = target.symbol_selection.clone();
+    report.symbol_selection = target.symbol_selection.clone().map(Box::new);
     if let Some(trace) = symbol_trace
         && let Err(reason) = &trace.introduction
     {

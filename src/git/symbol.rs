@@ -40,10 +40,11 @@ pub(super) fn locate_unique(content: &[u8], name: &str, path: &str) -> Result<Lo
         return Err(AppError::input("symbol must not be empty"));
     }
     let (locations, notice) = declarations(content, path);
-    if notice.is_some() && name.contains("::") {
+    if let Some(notice) = &notice
+        && name.contains("::")
+    {
         return Err(AppError::input(format!(
-            "qualified symbol {name} requires structured Rust parsing in {path}: {}",
-            notice.unwrap()
+            "qualified symbol {name} requires structured Rust parsing in {path}: {notice}"
         )));
     }
     let mut matches = locations

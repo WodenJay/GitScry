@@ -120,3 +120,37 @@ fn historical_parse_degradation_is_observable_across_commands() {
         );
     }
 }
+
+#[test]
+fn lightweight_results_disclose_mode_in_text_and_json_without_stripping_owners() {
+    let repo = TestRepo::new();
+    let revision = commit(&repo, "fn parse() {}\nfn broken(\n", "Malformed source");
+    repo.index();
+    for command in ["why", "tests", "related", "regression"] {
+        let report = query(&repo, command, "parse", &revision);
+        assert_eq!(report["symbol_selection"]["mode"], "lightweight");
+        assert_eq!(report["symbol_selection"]["language"], "rust");
+        let qualified = if command == "regression" {
+            repo.run(vec![
+                command,
+                "failure",
+                "--path",
+                "src/lib.rs",
+                "--symbol",
+                "net::parse",
+            ])
+        } else {
+            repo.run(vec![command, "src/lib.rs", "--symbol", "net::parse"])
+        };
+        assert_eq!(qualified.status.code(), Some(2));
+    }
+    let output = repo.run(["why", "src/lib.rs", "--symbol", "parse"]);
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        text.contains(
+            "parse -> parse (declaration, lines 1-1, identifier line 1, rust, lightweight)"
+        ),
+        "{text}"
+    );
+    assert!(text.contains("lightweight symbol selection"), "{text}");
+}

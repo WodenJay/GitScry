@@ -16,7 +16,7 @@ pub(crate) struct Report {
     pub(crate) target: Option<RelationTarget>,
     pub(crate) scope: Option<SearchScopeInfo>,
     pub(crate) symbol_summary: Option<SymbolSummary>,
-    pub(crate) symbol_selection: Option<crate::git::SymbolSelection>,
+    pub(crate) symbol_selection: Option<Box<crate::git::SymbolSelection>>,
     pub(crate) relation_sources: Vec<super::capabilities::RelationSource>,
 }
 pub(crate) enum RelationSelector {

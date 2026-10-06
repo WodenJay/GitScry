@@ -374,7 +374,7 @@ fn run(
         standalone_count.saturating_sub(target_related_modifications.len());
 
     let mut report = super::super::report(ReportKind::Why, Vec::new(), standalone_count, limit);
-    report.symbol_selection = target.symbol_selection.clone();
+    report.symbol_selection = target.symbol_selection.clone().map(Box::new);
     report.notices.extend(target.warnings.iter().cloned());
     report.notices.push(REMOTE_CONTEXT_NOTICE.to_owned());
     if missing_objects {
@@ -544,6 +544,7 @@ fn limitations(
     with_patch: bool,
 ) -> Vec<String> {
     let mut limitations = vec![REMOTE_CONTEXT_NOTICE.to_owned()];
+    limitations.extend(target.warnings.iter().cloned());
     if !target.anchor_valid {
         limitations.push(
             "The target anchor is unavailable at this revision; no modification classification was made."

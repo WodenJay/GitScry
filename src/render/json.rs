@@ -44,7 +44,7 @@ pub(crate) fn format_json_report(
         github_links,
         scope: report.scope.as_ref().map(json_scope),
         symbol_summary: report.symbol_summary.as_ref().map(json_symbol_summary),
-        symbol_selection: report.symbol_selection.as_ref(),
+        symbol_selection: report.symbol_selection.as_deref(),
         sources: &report.relation_sources,
         target: report.target.as_ref().map(|target| {
             let line = match &target.selector {
