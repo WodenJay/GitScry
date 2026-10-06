@@ -78,34 +78,6 @@ Historical test candidates (1 match):
   confidence: medium
 ```
 
-These examples are from GitScry's own repository history.
-
-## What GitScry answers
-
-Instead of manually stitching together `git log`, `blame`, old diffs, reverts, and path history, GitScry provides purpose-built queries for questions such as:
-
-- **How was a similar change implemented before?** → `examples`
-- **Why does this line or symbol exist?** → `why`
-- **Which files historically change together?** → `related`
-- **Which tests should I inspect for this change?** → `tests`
-- **Was this approach tried and abandoned before?** → `failures`
-- **Which commit may have introduced this regression?** → `regression`
-- **What change originally introduced the code removed by this fix?** → `trace-fix`
-- **Where was this remembered text deleted?** → `trace-removal`
-- **What history is relevant to this topic?** → `search`
-- **Which existing files were touched repeatedly?** → `hotspots`
-- **What direct historical material exists on each side of this merge conflict?** → `conflicts`
-
-Results stay traceable: GitScry shows the commits, paths, confidence, and evidence behind each finding.
-
-GitScry is local by design. It builds a rebuildable cache from your local repository history; Git remains the source of truth.
-
-### Cache initialization and refresh
-
-Run `gitscry index` once per repository to initialize its shared cache. Search and capabilities using shared query preparation then synchronously add missing locally available history reachable from the invocation's pinned HEAD, including merged parents, before selecting material. Previously cached branch history is retained; query filters do not limit maintenance. Covered targets remain quiet even when the published cache tip differs.
-
-Queries do not initialize, repair, upgrade, fetch, or scan all refs. Refresh and lock waits report progress on stderr, without a default timeout. Shallow and missing-object limitations remain disclosed. A failed refresh uses prior published material only when the cache is safely readable and query prerequisites hold, with explicit failure and incomplete-coverage warnings in human and JSON reports. Semantic settings remain unchanged; hybrid queries still require compatible semantic coverage. Explicit `index` remains available for maintenance and semantic preparation.
-
 ## Installation
 
 ```bash
