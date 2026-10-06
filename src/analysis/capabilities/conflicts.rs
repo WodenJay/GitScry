@@ -60,6 +60,7 @@ pub(crate) struct Limits {
     message_characters: usize,
     related_history_per_file: usize,
     historical_cases_per_file: usize,
+    historical_checks: Option<usize>,
 }
 #[derive(Serialize)]
 pub(crate) struct File {
@@ -168,6 +169,8 @@ pub(crate) struct CandidateSummary {
     pub(crate) unsupported: usize,
     pub(crate) failed: usize,
     pub(crate) unchecked: usize,
+    pub(crate) budget: Option<usize>,
+    pub(crate) limited: bool,
 }
 
 #[derive(Serialize)]
@@ -665,7 +668,11 @@ impl<'a> AssociatedMaterialCollector<'a> {
     }
 }
 
-pub(crate) fn execute(paths: Vec<String>, limit: usize) -> Result<Outcome, AppError> {
+pub(crate) fn execute(
+    paths: Vec<String>,
+    max_historical_checks: Option<usize>,
+    limit: usize,
+) -> Result<Outcome, AppError> {
     let repository = git::Repository::discover()?;
     let mut target = repository.merge_conflict()?;
     let total_unmerged_paths = target.files.len();
@@ -727,8 +734,13 @@ pub(crate) fn execute(paths: Vec<String>, limit: usize) -> Result<Outcome, AppEr
         let endpoint_paths = repository.file_paths_at(endpoint)?;
         histories.push((name, endpoint, reachable, endpoint_paths));
     }
-    let mut historical_cases =
-        super::historical_conflicts::analyze(&repository, &target, &cached, &incarnations);
+    let mut historical_cases = super::historical_conflicts::analyze(
+        &repository,
+        &target,
+        &cached,
+        &incarnations,
+        max_historical_checks,
+    );
     if files_truncated {
         historical_cases.status = "partial";
         historical_cases
@@ -958,7 +970,7 @@ pub(crate) fn execute(paths: Vec<String>, limit: usize) -> Result<Outcome, AppEr
         && !files_truncated
         && files.iter().all(|file| file.unsupported.is_none());
     let report = Report {
-        schema_version: 6,
+        schema_version: 7,
         ours: target.ours,
         theirs: target.theirs,
         merge_base: target.base,
@@ -985,6 +997,7 @@ pub(crate) fn execute(paths: Vec<String>, limit: usize) -> Result<Outcome, AppEr
             message_characters: MESSAGE_LIMIT,
             related_history_per_file: RELATED_HISTORY_LIMIT,
             historical_cases_per_file: super::historical_conflicts::CASE_LIMIT_PER_FILE,
+            historical_checks: max_historical_checks,
         },
         limitations: vec![
             "History is bounded to each side's commits after the merge base and selected by file-incarnation identity; detected renames are followed. Cross-file migration, semantic responsibility, and paths without an established incarnation are not inferred. Cached merge changes are first-parent diffs."

@@ -65,6 +65,39 @@ struct CandidateAccounting {
     failed: usize,
 }
 
+/// Tracks the optional historical-examination execution budget. The budget
+/// bounds replay checks only; candidate discovery, existing side-history
+/// leads, cache refresh, and output limits are never governed by it.
+struct Budget {
+    remaining: Option<usize>,
+    exhausted: bool,
+}
+
+impl Budget {
+    fn new(budget: Option<usize>) -> Self {
+        Self {
+            remaining: budget,
+            exhausted: false,
+        }
+    }
+
+    /// Reserve one replay check. Returns false when the budget is spent;
+    /// the caller must stop launching work without examining anything.
+    fn start_check(&mut self) -> bool {
+        match self.remaining {
+            Some(0) => {
+                self.exhausted = true;
+                false
+            }
+            Some(remaining) => {
+                self.remaining = Some(remaining - 1);
+                true
+            }
+            None => true,
+        }
+    }
+}
+
 impl CandidateAccounting {
     fn discovered(count: usize) -> Self {
         Self {
@@ -111,6 +144,7 @@ pub(crate) fn analyze(
     target: &git::MergeConflict,
     cached: &HashSet<String>,
     incarnations: &FileIncarnationHistory,
+    budget: Option<usize>,
 ) -> HistoricalCases {
     let runner = match MergeTree::new(repository) {
         Ok(runner) => runner,
@@ -123,8 +157,8 @@ pub(crate) fn analyze(
             format!("Git 2.40 or newer is required; found {version}"),
         );
     }
-    match analyze_with_runner(&runner, repository, target, cached, incarnations) {
-        Ok((mut files, accounting, discovery_complete)) => {
+    match analyze_with_runner(&runner, repository, target, cached, incarnations, budget) {
+        Ok((mut files, accounting, discovery_complete, budget_exhausted)) => {
             let files_analyzed = files.len();
             let files_with_cases = files.iter().filter(|file| file.cases_total > 0).count();
             let mut status = if files.iter().any(|file| file.status != "complete") {
@@ -151,6 +185,13 @@ pub(crate) fn analyze(
                 status = "partial";
                 reasons.push(
                     "candidate discovery did not finish; remaining candidates are unknown"
+                        .to_owned(),
+                );
+            }
+            if budget_exhausted {
+                status = "partial";
+                reasons.push(
+                    "the historical examination budget expired before all discovered candidates were examined"
                         .to_owned(),
                 );
             }
@@ -183,6 +224,8 @@ pub(crate) fn analyze(
                 unsupported: accounting.unsupported,
                 failed: accounting.failed,
                 unchecked: accounting.unchecked(),
+                budget,
+                limited: budget_exhausted,
             };
             HistoricalCases {
                 status,
@@ -213,15 +256,21 @@ fn unavailable(version: String, reason: String) -> HistoricalCases {
         files: Vec::new(),
     }
 }
+
 fn analyze_with_runner(
     runner: &MergeTree,
     repository: &git::Repository,
     target: &git::MergeConflict,
     cached: &HashSet<String>,
     incarnations: &FileIncarnationHistory,
-) -> Result<(Vec<HistoricalFile>, CandidateAccounting, bool), AppError> {
+    budget: Option<usize>,
+) -> Result<(Vec<HistoricalFile>, CandidateAccounting, bool, bool), AppError> {
+    // Discovery itself stays complete: the candidate set is computed up front
+    // from the cached graph without replay work, so an expired budget leaves
+    // the discovered total known and only bounds examination.
     let candidates = discover_candidates(repository, target, cached)?;
     let discovery_complete = true;
+    let mut budget = Budget::new(budget);
     let current = runner.replay(&target.base, &target.ours, &target.theirs)?;
     if !current.conflicted {
         return Err(AppError::operational(
@@ -267,7 +316,7 @@ fn analyze_with_runner(
             file.candidates_unsupported = candidates.len();
             file.candidates_unchecked = 0;
         }
-        return Ok((files, accounting, discovery_complete));
+        return Ok((files, accounting, discovery_complete, false));
     }
     let mut file_analysis = FileAnalysis {
         runner,
@@ -278,6 +327,7 @@ fn analyze_with_runner(
         tree_paths: HashMap::new(),
         ours: &target.ours,
         theirs: &target.theirs,
+        budget: &mut budget,
     };
     let mut total = CandidateAccounting::discovered(candidates.len() * target.files.len());
     let files = target
@@ -297,7 +347,7 @@ fn analyze_with_runner(
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
-    Ok((files, total, discovery_complete))
+    Ok((files, total, discovery_complete, budget.exhausted))
 }
 
 fn discover_candidates(
@@ -344,6 +394,7 @@ struct FileAnalysis<'a> {
     tree_paths: HashMap<String, BTreeSet<Vec<u8>>>,
     ours: &'a str,
     theirs: &'a str,
+    budget: &'a mut Budget,
 }
 
 impl FileAnalysis<'_> {
@@ -449,9 +500,21 @@ impl FileAnalysis<'_> {
                 "current replay conflict markers could not be parsed",
             );
         };
+
         let mut staged_cases = Vec::new();
 
         for candidate in candidates {
+            // Stop launching work when the budget is spent; already found
+            // cases and existing leads are retained and the report is marked
+            // partial with unchecked candidates counted.
+            if !self.budget.start_check() {
+                report.status = "partial";
+                report.reasons.push(format!(
+                    "historical examination stopped after {} candidate(s) by the budget; unexamined candidates are counted but their outcomes are unknown",
+                    accounting.examined
+                ));
+                break;
+            }
             let bases = runner.merge_bases(&candidate.parents[0], &candidate.parents[1])?;
             if bases.len() != 1 {
                 skip_candidate(

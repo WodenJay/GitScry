@@ -25,6 +25,7 @@ pub(crate) enum Request {
     },
     Conflicts {
         paths: Vec<String>,
+        max_historical_checks: Option<usize>,
     },
     Followups {
         revision: String,
@@ -180,7 +181,10 @@ pub(crate) fn execute(request: Request, options: Options) -> Result<Outcome, App
             path,
             direction,
         } => capabilities::fragment_search::execute(input, path, direction, options),
-        Request::Conflicts { paths } => capabilities::conflicts::execute(paths, options.limit),
+        Request::Conflicts {
+            paths,
+            max_historical_checks,
+        } => capabilities::conflicts::execute(paths, max_historical_checks, options.limit),
         Request::Followups {
             revision,
             paths,

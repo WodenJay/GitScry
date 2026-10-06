@@ -692,6 +692,67 @@ fn reports_a_shared_historical_conflict_even_when_its_result_matches_first_paren
 }
 
 #[test]
+fn bounds_historical_checks_with_max_historical_checks() {
+    let (repo, _, _, _, historical_merge) = historical_conflict_fixture("conflict.txt", false);
+
+    // A budget of 1 admits the single discovered candidate.
+    let report = json(
+        TestRepo::command_at(repo.dir.path(), repo.user_data_dir())
+            .args(["conflicts", "--json", "--max-historical-checks", "1"])
+            .env("GITSCRY_FULL_OUTPUT", "1")
+            .output()
+            .unwrap(),
+    );
+    let history = &report["historical_cases"];
+    assert_eq!(
+        history["status"], "complete",
+        "historical report: {history}"
+    );
+    assert_eq!(history["candidates"]["discovered"], 1);
+    assert_eq!(history["candidates"]["examined"], 1);
+    assert_eq!(history["candidates"]["unchecked"], 0);
+    assert_eq!(history["candidates"]["budget"], 1);
+    assert_eq!(history["candidates"]["limited"], false);
+    let cases = history["files"][0]["cases"].as_array().unwrap();
+    assert_eq!(cases.len(), 1, "historical report: {history}");
+    assert_eq!(cases[0]["merge_commit"], historical_merge);
+
+    // A zero budget keeps discovery complete but examines nothing.
+    let report = json(
+        TestRepo::command_at(repo.dir.path(), repo.user_data_dir())
+            .args(["conflicts", "--json", "--max-historical-checks", "0"])
+            .env("GITSCRY_FULL_OUTPUT", "1")
+            .output()
+            .unwrap(),
+    );
+    let history = &report["historical_cases"];
+    assert_eq!(history["status"], "partial", "historical report: {history}");
+    assert_eq!(history["candidates"]["discovered"], 1);
+    assert_eq!(history["candidates"]["examined"], 0);
+    assert_eq!(history["candidates"]["unchecked"], 1);
+    assert_eq!(history["candidates"]["budget"], 0);
+    assert_eq!(history["candidates"]["limited"], true);
+    assert!(
+        history["files"].as_array().unwrap().is_empty(),
+        "historical report: {history}"
+    );
+    assert!(
+        history["reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|reason| reason.as_str().unwrap().contains("budget expired")),
+        "historical report: {history}"
+    );
+    assert_eq!(history["files_analyzed"], 1);
+    assert_eq!(history["files_with_cases"], 0);
+    let human = repo.run(["conflicts", "--max-historical-checks", "0"]);
+    assert!(human.status.success());
+    let human = String::from_utf8_lossy(&human.stdout);
+    assert!(human.contains("partial"));
+}
+
+#[test]
 fn finds_a_historical_conflict_reachable_from_only_one_side() {
     let (repo, _, _, _, historical_merge) =
         historical_conflict_fixture_with("conflict.txt", false, true, false);
@@ -1507,7 +1568,7 @@ fn reports_same_commit_callers_tests_and_bounded_matching_hunks() {
     );
     let materials = report["associated_materials"].as_array().unwrap();
     assert_eq!(materials.len(), 2);
-    assert_eq!(report["schema_version"], 6);
+    assert_eq!(report["schema_version"], 7);
     assert_eq!(report["associated_materials_truncated"], false);
 
     let caller = materials
