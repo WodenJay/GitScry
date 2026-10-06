@@ -136,6 +136,8 @@ pub(in crate::analysis) fn execute_target(
         context.filter(),
         Some(history),
     )?;
+    report.symbol_selection = target.symbol_selection;
+    report.warnings.extend(target.warnings);
     report.target = Some(RelationTarget {
         path: target.path,
         selector,

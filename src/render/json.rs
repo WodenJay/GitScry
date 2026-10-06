@@ -44,6 +44,7 @@ pub(crate) fn format_json_report(
         github_links,
         scope: report.scope.as_ref().map(json_scope),
         symbol_summary: report.symbol_summary.as_ref().map(json_symbol_summary),
+        symbol_selection: report.symbol_selection.as_ref(),
         sources: &report.relation_sources,
         target: report.target.as_ref().map(|target| {
             let line = match &target.selector {
@@ -97,6 +98,8 @@ struct JsonReport<'a> {
     scope: Option<JsonSearchScope<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     symbol_summary: Option<JsonSymbolSummary<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    symbol_selection: Option<&'a crate::git::SymbolSelection>,
     #[serde(skip_serializing_if = "<[crate::analysis::capabilities::RelationSource]>::is_empty")]
     sources: &'a [crate::analysis::capabilities::RelationSource],
     #[serde(skip_serializing_if = "Option::is_none")]

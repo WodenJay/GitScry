@@ -238,6 +238,7 @@ fn run(
 
     let mut report = super::super::report(ReportKind::Regression, materials, matched_count, limit);
     report.warnings.extend(target.warnings.iter().cloned());
+    report.symbol_selection = target.symbol_selection.clone();
     if identity.is_none() {
         report.warnings.push(
             "warning: file incarnation could not be established at the pinned bad revision; regression suspects are withheld because cached history is incomplete."

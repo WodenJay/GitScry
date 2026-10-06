@@ -373,6 +373,7 @@ fn run(
         standalone_count.saturating_sub(target_related_modifications.len());
 
     let mut report = super::super::report(ReportKind::Why, Vec::new(), standalone_count, limit);
+    report.symbol_selection = target.symbol_selection.clone();
     report.notices.extend(target.warnings.iter().cloned());
     report.notices.push(REMOTE_CONTEXT_NOTICE.to_owned());
     if missing_objects {

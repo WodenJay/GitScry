@@ -35,6 +35,7 @@ pub(crate) fn normalize_git_path(path: &[u8]) -> Vec<u8> {
 pub(crate) use target::TimelineTarget;
 pub(crate) use target::{DeletedLine, RegressionTarget, TraceFixTarget, WhyAnchor, WhyTarget};
 
+pub(crate) use symbol::Selection as SymbolSelection;
 pub(crate) struct SymbolTrace {
     pub(crate) revisions: Vec<String>,
     pub(crate) modifications: Vec<SymbolChange>,

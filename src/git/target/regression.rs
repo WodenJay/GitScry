@@ -10,6 +10,7 @@ pub(crate) struct RegressionTarget {
     pub(crate) symbol: Option<String>,
     pub(crate) symbol_line: Option<usize>,
     pub(crate) symbol_end: Option<usize>,
+    pub(crate) symbol_selection: Option<symbol::Selection>,
     pub(crate) warnings: Vec<String>,
 }
 
@@ -41,16 +42,19 @@ pub(in crate::git) fn pin_regression(
         )));
     }
     let content = git.output(["cat-file", "blob", &format!("{bad_revision}:{path}")], &[])?;
-    let (symbol, symbol_line, symbol_end) = match symbol {
-        Some(name) => {
-            let span = symbol::locate_unique(&content, name, &path)?.span;
-            (Some(name.to_owned()), Some(span.start), Some(span.end))
-        }
-        None => (None, None, None),
-    };
+    let mut warnings = Vec::new();
+    let location = symbol
+        .map(|name| symbol::locate_unique(&content, name, &path))
+        .transpose()?;
+    let symbol_selection = location.as_ref().map(|location| location.selection.clone());
+    let symbol_line = location.as_ref().map(|location| location.span.start);
+    let symbol_end = location.as_ref().map(|location| location.span.end);
+    let symbol = symbol.map(str::to_owned);
+    if let Some(notice) = location.and_then(|location| location.notice) {
+        warnings.push(notice);
+    }
 
     let shallow = read_shallow_boundaries(git)?;
-    let mut warnings = Vec::new();
     if !shallow.is_empty() {
         warnings.push(
             "warning: local history is shallow; regression material may be incomplete.".to_owned(),
@@ -64,6 +68,7 @@ pub(in crate::git) fn pin_regression(
         symbol,
         symbol_line,
         symbol_end,
+        symbol_selection,
         warnings,
     })
 }
