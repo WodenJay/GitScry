@@ -227,6 +227,7 @@ fn directory_follow_on(
     let mut analysis = retrieval::follow_on::paths(
         session,
         repository,
+        None,
         &sources
             .iter()
             .filter(|source| source.kind == "file")
@@ -427,7 +428,7 @@ fn run(
             .map(|path| path.as_bytes().to_vec())
             .collect::<Vec<_>>();
         let follow_on =
-            retrieval::follow_on::paths(session, &repository, &sources, &sources, scope)?;
+            retrieval::follow_on::paths(session, &repository, None, &sources, &sources, scope)?;
         merge_follow_on(&mut ranked, follow_on.observations);
     }
 
