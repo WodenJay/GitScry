@@ -297,7 +297,7 @@ pub(in crate::analysis) fn execute(
                         commit_id: node.oid.clone(),
                         subject: session.forward_subject(&node.oid)?,
                         commit_time: node.commit_time,
-                        relationship: "replaced",
+                        relationship: "rewrite",
                         before: state.clone(),
                         after: Some(Location {
                             path: new_path.clone(),
@@ -305,14 +305,8 @@ pub(in crate::analysis) fn execute(
                         }),
                         parent_count: node.parents.len(),
                     });
-                    stop = Some((
-                        node.oid.clone(),
-                        FinalState::Deleted,
-                        StopReason {
-                            code: "replaced",
-                            explanation: "the tracked line was rewritten; the replacement is associated but not treated as the same line",
-                        },
-                    ));
+                    state.path = new_path;
+                    state.line = new_line;
                 }
                 None => {
                     events.push(Event {

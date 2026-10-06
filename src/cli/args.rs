@@ -863,15 +863,15 @@ Examples:
 then tracked forward through cached history to --to-rev (HEAD fixed at
 invocation by default). Unchanged lines follow preceding insertions and
 deletions and detected renames; unrelated edits shift coordinates without
-becoming events. A rewritten selected line is a change with a bounded
-replacement association, then tracking stops.
+becoming events. A rewritten selected line is recorded as a change with a
+bounded replacement association, and tracking continues from the replacement.
 
 Run `gitscry index` first. Queries refresh locally available HEAD history;
 index another branch before selecting an uncached --at or --to-rev revision
 from it. The starting revision must be an ancestor of the endpoint. Equal
 endpoints report the validated location without events. Unsupported moves,
-merge history, and incomplete material stop explicitly as unknown; deletion
-is reported only from an observed removal without continuation.
+merge history, and incomplete material stop explicitly as unknown; deletion is
+reported only from an observed removal with no replacement found.
 
 Traversal has no default ceiling. Positive --max-commits bounds inspected
 forward commits and reports incomplete when exhausted. --limit defaults to

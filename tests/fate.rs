@@ -337,6 +337,7 @@ fn fate_reports_unknown_on_incomplete_coverage() {
         "Side rewrite",
         "2020-01-02T00:00:00Z",
     );
+    git(repo.dir.path(), ["checkout", "main"]);
     let output = repo.run([
         "fate", "a.txt", "--line", "2", "--at", &start, "--to-rev", "side", "--json",
     ]);
