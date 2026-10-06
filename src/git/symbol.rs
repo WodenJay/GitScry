@@ -112,7 +112,11 @@ pub(super) fn declaration_lines(content: &[u8], name: &str, path: &str) -> Vec<u
 
 /// Qualification uses each language's native separator; no cross-language mixing.
 fn qualification_separator(path: &str) -> &'static str {
-    if path.ends_with(".go") || path.ends_with(".py") { "." } else { "::" }
+    if path.ends_with(".go") || path.ends_with(".py") {
+        "."
+    } else {
+        "::"
+    }
 }
 
 /// Enumerate only the interpretation selected by the extension, never try grammars.
