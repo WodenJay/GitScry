@@ -106,6 +106,14 @@ impl FileIncarnationHistory {
             .is_some_and(|identities| identities.contains(identity))
     }
 
+    pub(crate) fn aliases_for(&self, identity: &FileIncarnation) -> Vec<Vec<u8>> {
+        self.aliases
+            .iter()
+            .filter(|(_, identities)| identities.contains(identity))
+            .map(|(path, _)| path.clone())
+            .collect()
+    }
+
     pub(crate) fn aliases_in(
         &self,
         identity: &FileIncarnation,

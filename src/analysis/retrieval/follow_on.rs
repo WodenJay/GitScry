@@ -611,6 +611,7 @@ pub(crate) fn paths(
         complete_origin_windows: 0,
         incomplete_origin_windows: 0,
     };
+    let mut prepared = None;
     for source in sources {
         let history = session.timeline_history(source, &identity_cached)?;
         let changes = incarnation_changes(
@@ -637,7 +638,7 @@ pub(crate) fn paths(
             })
             .collect();
         let mut coverage = Coverage::new(None);
-        let observations = discover(
+        let observations = discover_reusing(
             session,
             repository,
             Origins {
@@ -649,6 +650,7 @@ pub(crate) fn paths(
             7,
             scope,
             &mut coverage,
+            &mut prepared,
         )?;
         results.complete_origin_windows += coverage.complete_origin_windows;
         results.incomplete_origin_windows += coverage.incomplete_origin_windows;
@@ -662,6 +664,88 @@ pub(crate) fn paths(
     Ok(results)
 }
 
+struct PreparedHistory {
+    parents: HashMap<String, Vec<String>>,
+    commit_times: HashMap<String, i64>,
+    target_time: Option<i64>,
+    children: HashMap<String, Vec<String>>,
+    topo_order: Vec<String>,
+    cached: HashSet<String>,
+    active_parents: Option<HashMap<String, Vec<String>>>,
+    identity_cached: HashSet<String>,
+    excluded: HashSet<String>,
+    eligible: HashSet<String>,
+}
+
+impl PreparedHistory {
+    fn new(
+        session: &QuerySession,
+        repository: &Repository,
+        active_revision: &str,
+        scope: Option<&SearchFilter>,
+    ) -> Result<Self, AppError> {
+        let target = scope
+            .map(|scope| scope.to_oid.as_str())
+            .unwrap_or(active_revision);
+        let parents = repository.reachable_commit_parents(target)?;
+        let commit_times = repository.reachable_commit_times(target)?;
+        let target_time = commit_times.get(target).copied();
+        let children = child_graph(&parents);
+        let topo_order = stable_topological_order(&parents);
+        let cached = session.commit_oids()?;
+        let active_parents = if active_revision == target {
+            None
+        } else {
+            Some(repository.reachable_commit_parents(active_revision)?)
+        };
+        let identity_parents = active_parents.as_ref().unwrap_or(&parents);
+        let identity_cached = identity_parents
+            .keys()
+            .filter(|oid| cached.contains(*oid))
+            .cloned()
+            .collect();
+        let excluded = match scope.and_then(|scope| scope.from_oid.as_deref()) {
+            Some(from_oid) => repository
+                .reachable_commits(from_oid)?
+                .into_iter()
+                .collect(),
+            None => HashSet::new(),
+        };
+        // Truncated boundary diffs cannot establish origins or fresh support events.
+        let boundaries = repository
+            .shallow_boundaries()?
+            .into_iter()
+            .collect::<HashSet<_>>();
+        let eligible = parents
+            .keys()
+            .filter(|oid| {
+                cached.contains(*oid)
+                    && !excluded.contains(*oid)
+                    && !boundaries.contains(*oid)
+                    && scope.is_none_or(|scope| {
+                        commit_times.get(*oid).is_some_and(|time| {
+                            scope.since.is_none_or(|since| *time >= since)
+                                && scope.until.is_none_or(|until| *time <= until)
+                        })
+                    })
+            })
+            .cloned()
+            .collect();
+        Ok(Self {
+            parents,
+            commit_times,
+            target_time,
+            children,
+            topo_order,
+            cached,
+            active_parents,
+            identity_cached,
+            excluded,
+            eligible,
+        })
+    }
+}
+
 pub(crate) fn discover(
     session: &QuerySession,
     repository: &Repository,
@@ -670,6 +754,26 @@ pub(crate) fn discover(
     scope: Option<&SearchFilter>,
     coverage: &mut Coverage,
 ) -> Result<Vec<Observation>, AppError> {
+    discover_reusing(
+        session,
+        repository,
+        origins,
+        observation_days,
+        scope,
+        coverage,
+        &mut None,
+    )
+}
+
+fn discover_reusing(
+    session: &QuerySession,
+    repository: &Repository,
+    origins: Origins<'_>,
+    observation_days: usize,
+    scope: Option<&SearchFilter>,
+    coverage: &mut Coverage,
+    prepared: &mut Option<PreparedHistory>,
+) -> Result<Vec<Observation>, AppError> {
     let window_seconds = i64::try_from(observation_days)
         .ok()
         .and_then(|days| days.checked_mul(SECONDS_PER_DAY))
@@ -677,71 +781,41 @@ pub(crate) fn discover(
         .ok_or_else(|| {
             AppError::input("historical follow-up days must be a positive timestamp window")
         })?;
-    let target = scope
-        .map(|scope| scope.to_oid.as_str())
-        .unwrap_or(origins.revision);
-
-    let parents = repository.reachable_commit_parents(target)?;
-    let commit_times = repository.reachable_commit_times(target)?;
-    let Some(&target_time) = commit_times.get(target) else {
+    if origins.events.is_empty() {
+        return Ok(Vec::new());
+    }
+    if prepared.is_none() {
+        *prepared = Some(PreparedHistory::new(
+            session,
+            repository,
+            origins.revision,
+            scope,
+        )?);
+    }
+    let PreparedHistory {
+        parents,
+        commit_times,
+        target_time,
+        children,
+        topo_order,
+        cached,
+        active_parents,
+        identity_cached,
+        excluded,
+        eligible,
+    } = prepared.as_ref().expect("prepared nonempty history");
+    let Some(target_time) = *target_time else {
         return Ok(Vec::new());
     };
-    let children = child_graph(&parents);
-    let topo_order = stable_topological_order(&parents);
-    let cached = session.commit_oids()?;
-    let reachable_cached = parents
-        .keys()
-        .filter(|oid| cached.contains(*oid))
-        .cloned()
-        .collect::<HashSet<_>>();
-    // Scope bounds evidence, but identity must follow the current HEAD file incarnation.
     let active_revision = origins.revision;
-    let active_parents = if active_revision == target {
-        None
-    } else {
-        Some(repository.reachable_commit_parents(active_revision)?)
-    };
-    let identity_parents = active_parents.as_ref().unwrap_or(&parents);
-    let identity_cached = identity_parents
-        .keys()
-        .filter(|oid| cached.contains(*oid))
-        .cloned()
-        .collect::<HashSet<_>>();
-    let excluded = match scope.and_then(|scope| scope.from_oid.as_deref()) {
-        Some(from_oid) => repository
-            .reachable_commits(from_oid)?
-            .into_iter()
-            .collect(),
-        None => HashSet::new(),
-    };
-    // Boundary parent links are truncated, so their diffs cannot establish an
-    // origin or fresh support event (a hidden merge could import existing work).
-    // Keep boundaries in the traversal graph, but out of every event pool.
-    let boundaries = repository
-        .shallow_boundaries()?
-        .into_iter()
-        .collect::<HashSet<_>>();
-    let eligible = reachable_cached
-        .iter()
-        .filter(|oid| {
-            !excluded.contains(*oid)
-                && !boundaries.contains(*oid)
-                && scope.is_none_or(|scope| {
-                    commit_times.get(*oid).is_some_and(|time| {
-                        scope.since.is_none_or(|since| *time >= since)
-                            && scope.until.is_none_or(|until| *time <= until)
-                    })
-                })
-        })
-        .cloned()
-        .collect::<HashSet<_>>();
+    let identity_parents = active_parents.as_ref().unwrap_or(parents);
 
     let incomplete_origins = incomplete_windows(
-        &parents,
-        &commit_times,
-        &cached,
-        &eligible,
-        &excluded,
+        parents,
+        commit_times,
+        cached,
+        eligible,
+        excluded,
         scope,
         window_seconds,
     );
@@ -779,7 +853,7 @@ pub(crate) fn discover(
     }
 
     let mut complete_baseline_origins = Vec::new();
-    for oid in &topo_order {
+    for oid in topo_order {
         if !eligible.contains(oid) || parents.get(oid).is_none_or(|parents| parents.len() > 1) {
             continue;
         }
@@ -794,10 +868,10 @@ pub(crate) fn discover(
     }
 
     let relationships = RelationshipGraph {
-        children: &children,
-        commit_times: &commit_times,
-        eligible: &eligible,
-        parents: &parents,
+        children,
+        commit_times,
+        eligible,
+        parents,
         window_seconds,
     };
     let mut relationship_windows = HashMap::<String, BTreeSet<String>>::new();
@@ -835,7 +909,7 @@ pub(crate) fn discover(
     let selected_paths = origins.selected_paths;
     let mut candidate_paths = BTreeSet::new();
     for seed in candidate_seeds {
-        for commit in session.timeline_history(&seed, &identity_cached)? {
+        for commit in session.timeline_history(&seed, identity_cached)? {
             for path in commit.paths {
                 if tracked_paths.contains(&path)
                     && !selected_paths.contains(&path)
@@ -851,13 +925,13 @@ pub(crate) fn discover(
     let mut results = Vec::new();
 
     for path in candidate_paths {
-        let history = session.timeline_history(&path, &identity_cached)?;
+        let history = session.timeline_history(&path, identity_cached)?;
         let incarnation_changes = incarnation_changes(
             &history,
             &path,
             active_revision,
             identity_parents,
-            &identity_cached,
+            identity_cached,
         );
         if incarnation_changes.is_empty() {
             continue;
@@ -979,7 +1053,7 @@ pub(crate) fn discover(
                         })
                         .and_then(|change| change.new_path.clone())
                         .unwrap_or_else(|| path.clone()),
-                    parent_distance: ancestor_distances(later_oid, &parents)[origin_oid],
+                    parent_distance: ancestor_distances(later_oid, parents)[origin_oid],
                     elapsed_seconds: commit_times[later_oid] - commit_times[origin_oid],
                 }
             })

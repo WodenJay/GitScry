@@ -318,6 +318,20 @@ fn analyze_with_runner(
         }
         return Ok((files, accounting, discovery_complete, false));
     }
+    let requested_paths = target
+        .files
+        .iter()
+        .flat_map(|file| {
+            let mut paths = vec![file.path.clone()];
+            for revision in [&target.ours, &target.theirs] {
+                if let Some(identity) = incarnations.identity_at(revision, &file.path) {
+                    paths.extend(incarnations.aliases_for(identity));
+                }
+            }
+            paths
+        })
+        .filter_map(|path| String::from_utf8(path).ok())
+        .collect::<BTreeSet<_>>();
     let mut file_analysis = FileAnalysis {
         runner,
         repository,
@@ -325,6 +339,8 @@ fn analyze_with_runner(
         candidates: &candidates,
         incarnations,
         tree_paths: HashMap::new(),
+        requested_paths,
+        metadata: HashMap::new(),
         ours: &target.ours,
         theirs: &target.theirs,
         budget: &mut budget,
@@ -392,6 +408,8 @@ struct FileAnalysis<'a> {
     candidates: &'a [Candidate],
     incarnations: &'a FileIncarnationHistory,
     tree_paths: HashMap<String, BTreeSet<Vec<u8>>>,
+    requested_paths: BTreeSet<String>,
+    metadata: HashMap<String, Vec<git::TreeEntry>>,
     ours: &'a str,
     theirs: &'a str,
     budget: &'a mut Budget,
@@ -418,6 +436,8 @@ impl FileAnalysis<'_> {
         let candidates = self.candidates;
         let incarnations = self.incarnations;
         let tree_paths = &mut self.tree_paths;
+        let metadata = &mut self.metadata;
+        let requested_paths = &self.requested_paths;
         let ours = self.ours;
         let theirs = self.theirs;
         let path = String::from_utf8_lossy(&file.path).into_owned();
@@ -473,7 +493,9 @@ impl FileAnalysis<'_> {
                 .push("current replay contains a non-regular file stage".to_owned());
             return Ok(report);
         }
-        let Some(current_entry) = runner.tree_entry(&current.tree, &path)? else {
+        let Some(current_entry) =
+            cached_tree_entry(runner, metadata, requested_paths, &current.tree, &path)?
+        else {
             return partial_file(
                 report,
                 "isolated current replay has no merged blob for this path",
@@ -585,16 +607,30 @@ impl FileAnalysis<'_> {
                 PathMatch::Missing => String::new(),
                 PathMatch::Ambiguous => continue,
             };
-            let Some(base_entry) = runner.tree_entry(base, &base_path)? else {
-                accounting.examine(CandidateOutcome::Irrelevant);
-                continue;
-            };
-            let Some(parent1_entry) = runner.tree_entry(&candidate.parents[0], &parent1_path)?
+            let Some(base_entry) =
+                cached_tree_entry(runner, metadata, requested_paths, base, &base_path)?
             else {
                 accounting.examine(CandidateOutcome::Irrelevant);
                 continue;
             };
-            let Some(parent2_entry) = runner.tree_entry(&candidate.parents[1], &parent2_path)?
+            let Some(parent1_entry) = cached_tree_entry(
+                runner,
+                metadata,
+                requested_paths,
+                &candidate.parents[0],
+                &parent1_path,
+            )?
+            else {
+                accounting.examine(CandidateOutcome::Irrelevant);
+                continue;
+            };
+            let Some(parent2_entry) = cached_tree_entry(
+                runner,
+                metadata,
+                requested_paths,
+                &candidate.parents[1],
+                &parent2_path,
+            )?
             else {
                 accounting.examine(CandidateOutcome::Irrelevant);
                 continue;
@@ -602,7 +638,13 @@ impl FileAnalysis<'_> {
             // The merge commit may have deleted or renamed the file; a missing
             // result entry keeps the case with the absence disclosed instead
             // of dropping the lead (see #229/#231 intent).
-            let result_entry = runner.tree_entry(&candidate.oid, &result_path)?;
+            let result_entry = cached_tree_entry(
+                runner,
+                metadata,
+                requested_paths,
+                &candidate.oid,
+                &result_path,
+            )?;
             report.candidates_examined += 1;
             let replay = runner.replay(base, &candidate.parents[0], &candidate.parents[1])?;
             if !replay.conflicted {
@@ -697,7 +739,14 @@ impl FileAnalysis<'_> {
                 );
                 continue;
             }
-            let Some(conflict_entry) = runner.tree_entry(&replay.tree, &conflict_path)? else {
+            let Some(conflict_entry) = cached_tree_entry(
+                runner,
+                metadata,
+                requested_paths,
+                &replay.tree,
+                &conflict_path,
+            )?
+            else {
                 skip_candidate(
                     &mut report,
                     accounting,
@@ -957,6 +1006,29 @@ fn skip_candidate(
     file.status = "partial";
     accounting.examine(outcome);
     file.reasons.push(reason);
+}
+
+// Query-local immutable metadata, targeted to the selected incarnations' aliases.
+fn cached_tree_entry(
+    runner: &MergeTree,
+    metadata: &mut HashMap<String, Vec<git::TreeEntry>>,
+    requested_paths: &BTreeSet<String>,
+    revision: &str,
+    path: &str,
+) -> Result<Option<git::TreeEntry>, AppError> {
+    if path.is_empty() {
+        return Ok(None);
+    }
+    if !metadata.contains_key(revision) {
+        metadata.insert(
+            revision.to_owned(),
+            runner.tree_entries_for_paths(revision, requested_paths)?,
+        );
+    }
+    Ok(metadata[revision]
+        .iter()
+        .find(|entry| entry.path == path.as_bytes())
+        .cloned())
 }
 
 fn incarnation_path_at(

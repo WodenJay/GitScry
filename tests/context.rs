@@ -732,12 +732,15 @@ fn content_budget_stops_per_path_git_probes() {
         .output()
         .unwrap();
     let trace = fs::read_to_string(trace_path).unwrap();
-    assert!(trace.contains("ls-tree -z HEAD -- f127.rs"));
+    let metadata = trace
+        .lines()
+        .filter(|line| line.contains("ls-tree") || line.contains("ls-files --stage"))
+        .collect::<Vec<_>>();
+    assert!(metadata.iter().any(|line| line.contains("f127.rs")));
     assert!(
-        !trace.contains("ls-tree -z HEAD -- f128.rs"),
+        metadata.iter().all(|line| !line.contains("f128.rs")),
         "content budget must stop mode probes"
     );
-    assert!(!trace.contains("ls-files --stage -z -- f128.rs"));
     let report = json(output);
     assert!(
         report["content_omissions"]
