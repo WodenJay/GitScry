@@ -29,7 +29,7 @@ https://github.com/user-attachments/assets/cfbff097-3226-444a-aa37-4859b9586aae
 
 ### Find precedent before making a change
 
-```text
+```console
 $ gitscry examples "cache update" --path src/cache/mod.rs --limit 3
 
 Historical examples (52 matches):
@@ -53,7 +53,7 @@ Historical examples (52 matches):
 
 ### Trace a fix back to the change that introduced it
 
-```text
+```console
 $ gitscry trace-fix 278e915d9e08 --path src/cache/mod.rs --limit 3
 
 Fix lineage (1 match):
@@ -67,7 +67,7 @@ Fix lineage (1 match):
 
 ### Find tests that historically move with the code you changed
 
-```text
+```console
 $ gitscry tests src/app/update.rs --limit 3
 
 Historical test candidates (1 match):
@@ -116,7 +116,7 @@ gitscry why src/lib.rs --line 42
 gitscry tests src/lib.rs
 ```
 
-`gitscry index` builds the local cache from the repository's default-branch history. Run it again whenever you want to refresh the cache.
+`gitscry index` builds the local cache. It will auto refresh after your first manually index.
 
 ## Coding agent integration
 
