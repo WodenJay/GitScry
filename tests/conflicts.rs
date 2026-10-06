@@ -645,6 +645,13 @@ fn reports_a_shared_historical_conflict_even_when_its_result_matches_first_paren
     assert_eq!(case["parents"][0]["commit"], historical_ours);
     assert_eq!(case["parents"][1]["commit"], historical_theirs);
     assert_eq!(case["related_sides"], serde_json::json!(["ours", "theirs"]));
+    assert_eq!(history["candidates"]["discovered"], 1);
+    assert_eq!(history["candidates"]["examined"], 1);
+    assert_eq!(history["candidates"]["nonconflicting"], 0);
+    assert_eq!(history["candidates"]["irrelevant"], 1);
+    assert_eq!(history["candidates"]["unchecked"], 0);
+    assert_eq!(history["files"][0]["candidates_examined"], 1);
+    assert_eq!(history["files"][0]["candidates_unchecked"], 0);
     assert_eq!(
         case["result"]["excerpt"],
         "setting=ours-old\nunique-context=anchor\n"
@@ -1500,7 +1507,7 @@ fn reports_same_commit_callers_tests_and_bounded_matching_hunks() {
     );
     let materials = report["associated_materials"].as_array().unwrap();
     assert_eq!(materials.len(), 2);
-    assert_eq!(report["schema_version"], 5);
+    assert_eq!(report["schema_version"], 6);
     assert_eq!(report["associated_materials_truncated"], false);
 
     let caller = materials
@@ -1625,7 +1632,13 @@ fn reports_output_bounds_and_absent_reasons() {
     );
     git(repo.dir.path(), ["checkout", "main"]);
     merge(&repo, "other");
-    let report = json(repo.run(["conflicts", "--limit", "1", "--json"]));
+    let report = json(
+        TestRepo::command_at(repo.dir.path(), repo.user_data_dir())
+            .args(["conflicts", "--limit", "1", "--json"])
+            .env("GITSCRY_FULL_OUTPUT", "1")
+            .output()
+            .unwrap(),
+    );
     let side = &report["files"][0]["sides"][1];
     assert_eq!(side["total_leads"], 2);
     assert_eq!(side["truncated"], true);

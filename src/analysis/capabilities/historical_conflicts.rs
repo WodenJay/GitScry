@@ -260,7 +260,10 @@ fn analyze_with_runner(
             .collect::<Vec<_>>();
         let mut accounting = CandidateAccounting::discovered(candidates.len() * files.len());
         for file in &mut files {
-            accounting.examine(CandidateOutcome::Unsupported);
+            for _ in 0..candidates.len() {
+                accounting.examine(CandidateOutcome::Unsupported);
+            }
+            file.candidates_examined = candidates.len();
             file.candidates_unsupported = candidates.len();
             file.candidates_unchecked = 0;
         }
@@ -276,7 +279,7 @@ fn analyze_with_runner(
         ours: &target.ours,
         theirs: &target.theirs,
     };
-    let mut total = CandidateAccounting::discovered(candidates.len());
+    let mut total = CandidateAccounting::discovered(candidates.len() * target.files.len());
     let files = target
         .files
         .iter()
@@ -803,6 +806,7 @@ impl FileAnalysis<'_> {
             if !case_limitation.is_empty() {
                 limitations.push(case_limitation);
             }
+            accounting.examine(CandidateOutcome::Irrelevant);
             staged_cases.push(StagedCase {
                 region_strength,
                 commit_time: candidate.commit_time,

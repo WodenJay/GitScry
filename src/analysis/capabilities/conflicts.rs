@@ -958,7 +958,7 @@ pub(crate) fn execute(paths: Vec<String>, limit: usize) -> Result<Outcome, AppEr
         && !files_truncated
         && files.iter().all(|file| file.unsupported.is_none());
     let report = Report {
-        schema_version: 5,
+        schema_version: 6,
         ours: target.ours,
         theirs: target.theirs,
         merge_base: target.base,
