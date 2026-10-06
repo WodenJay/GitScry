@@ -4,8 +4,8 @@
 mod c;
 mod cpp;
 mod go;
-mod python;
 mod javascript;
+mod python;
 mod rust;
 
 /// The actual source interpretation and declaration selected at a pinned revision.
@@ -61,7 +61,7 @@ pub(super) fn locate_unique(content: &[u8], name: &str, path: &str) -> Result<Lo
             qualified == name
                 || qualified
                     .strip_suffix(name)
-                    .is_some_and(|prefix|  prefix.ends_with(separator) || prefix.ends_with('.'))
+                    .is_some_and(|prefix| prefix.ends_with(separator) || prefix.ends_with('.'))
         })
         .collect::<Vec<_>>();
     match matches.len() {
