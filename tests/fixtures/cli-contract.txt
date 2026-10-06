@@ -8,7 +8,7 @@ stdout=Scope: commits reachable from 4ca5b496b63464a21d3c49b7575782477c90709d; c
 stderr=
 [failures]
 status=Some(0)
-stdout=Scope: commits reachable from 4ca5b496b63464a21d3c49b7575782477c90709d; cache tip 4ca5b496b63464a21d3c49b7575782477c90709d; coverage complete\nFailed approaches (4 matches):\n- f803e6ea117d Retire legacy provider safely\n  reason: Reason: provider normalization caused a regression in legacy callers\n  retry: restore normalization after callers migrate\n  path: src/lib.rs\n  path: tests/provider.rs\n  confidence: high\n  basis: subject match (1), term coverage 1/1, exact repository term (1), exact path match, recorded revert, corrective follow-up\n  commit: 3642a5c1bf39 Revert \"Retire legacy provider safely\" (reverts this change)\n  commit: 4ca5b496b634 Fix provider regression after revert (follow-up)\n
+stdout=Scope: commits reachable from 4ca5b496b63464a21d3c49b7575782477c90709d; cache tip 4ca5b496b63464a21d3c49b7575782477c90709d; coverage complete\nFailed approaches (1 match):\n- f803e6ea117d Retire legacy provider safely\n  reason: Reason: provider normalization caused a regression in legacy callers\n  retry: restore normalization after callers migrate\n  path: src/lib.rs\n  path: tests/provider.rs\n  confidence: high\n  basis: subject match (1), term coverage 1/1, exact repository term (1), exact path match, recorded revert, corrective follow-up\n  commit: 3642a5c1bf39 Revert \"Retire legacy provider safely\" (reverts this change)\n  commit: 4ca5b496b634 Fix provider regression after revert (follow-up)\n
 stderr=
 [related]
 status=Some(0)

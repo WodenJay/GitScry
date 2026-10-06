@@ -128,6 +128,8 @@ pub(crate) fn run(
     }
     retrieval::sort(&mut ranked);
 
+    let matched_count = ranked.len();
+
     let mut materials = ranked
         .into_iter()
         .take(limit)
@@ -153,7 +155,7 @@ pub(crate) fn run(
     Ok(super::super::report(
         ReportKind::Failures,
         materials,
-        pool.matched_count,
+        matched_count,
         limit,
     ))
 }
