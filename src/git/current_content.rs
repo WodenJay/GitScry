@@ -4,7 +4,7 @@ use super::{
     process::Git,
 };
 use crate::app::AppError;
-use std::{ffi::OsString, io::Read, path::Path};
+use std::{collections::HashSet, ffi::OsString, io::Read, path::Path};
 
 const FILE_LIMIT: usize = 128;
 const BYTE_LIMIT: usize = 256 * 1024;
@@ -20,6 +20,7 @@ pub(super) fn read(
     let mut hunks = Vec::new();
     let mut omissions = Vec::new();
     let mut total = 0;
+    let unsafe_paths = unsafe_modes(git, changes, has_head)?;
     for (ordinal, change) in changes.iter().enumerate() {
         let path = change
             .new_path
@@ -35,42 +36,13 @@ pub(super) fn read(
         }
         let mut reason = None;
         // Inspect repository-visible modes, never symlink targets or gitlink contents.
-        for side in change.old_path.iter().chain(&change.new_path) {
-            let arg = worktree_path(Path::new(""), side).into_os_string();
-            let index = git.output(
-                [
-                    OsString::from("--literal-pathspecs"),
-                    "ls-files".into(),
-                    "--stage".into(),
-                    "-z".into(),
-                    "--".into(),
-                    arg.clone(),
-                ],
-                &[],
-            )?;
-            let head = if has_head {
-                git.output(
-                    [
-                        OsString::from("--literal-pathspecs"),
-                        "ls-tree".into(),
-                        "-z".into(),
-                        "HEAD".into(),
-                        "--".into(),
-                        arg,
-                    ],
-                    &[],
-                )?
-            } else {
-                Vec::new()
-            };
-            for entries in [&index, &head] {
-                if entries
-                    .split(|b| *b == 0)
-                    .any(|entry| entry.starts_with(b"120000 ") || entry.starts_with(b"160000 "))
-                {
-                    reason = Some("symlink_or_submodule");
-                }
-            }
+        if change
+            .old_path
+            .iter()
+            .chain(&change.new_path)
+            .any(|side| unsafe_paths.contains(side))
+        {
+            reason = Some("symlink_or_submodule");
         }
         if !staged && let Some(new) = &change.new_path {
             let full = worktree_path(root, new);
@@ -165,6 +137,53 @@ pub(super) fn read(
         }
     }
     Ok((hunks, omissions))
+}
+
+// Limit metadata to the same file prefix as content acquisition, with literal raw paths.
+fn unsafe_modes(
+    git: &Git,
+    changes: &[CurrentPath],
+    has_head: bool,
+) -> Result<HashSet<Vec<u8>>, AppError> {
+    let paths = changes
+        .iter()
+        .take(FILE_LIMIT)
+        .flat_map(|change| change.old_path.iter().chain(&change.new_path))
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut unsafe_paths = HashSet::new();
+    let paths = paths.into_iter().collect::<Vec<_>>();
+    // Keep targeted commands small enough for Windows command-line limits too.
+    for chunk in paths.chunks(16) {
+        for prefix in [
+            Some(vec![
+                "--literal-pathspecs",
+                "ls-files",
+                "--stage",
+                "-z",
+                "--",
+            ]),
+            has_head.then(|| vec!["--literal-pathspecs", "ls-tree", "-z", "HEAD", "--"]),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let mut args = prefix.into_iter().map(OsString::from).collect::<Vec<_>>();
+            args.extend(
+                chunk
+                    .iter()
+                    .map(|path| worktree_path(Path::new(""), path).into_os_string()),
+            );
+            let entries = git.output(args, &[])?;
+            for entry in entries.split(|byte| *byte == 0) {
+                if (entry.starts_with(b"120000 ") || entry.starts_with(b"160000 "))
+                    && let Some(tab) = entry.iter().position(|byte| *byte == b'\t')
+                {
+                    unsafe_paths.insert(entry[tab + 1..].to_vec());
+                }
+            }
+        }
+    }
+    Ok(unsafe_paths)
 }
 
 fn parse_patch(
