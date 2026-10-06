@@ -312,6 +312,15 @@ pub(super) fn format_report(report: &Report) -> String {
             )
             .unwrap();
             writeln!(output, "      Association: {}", case.association).unwrap();
+            writeln!(
+                output,
+                "      Region trace: current lines {}-{}, historical lines {}-{}",
+                case.region_trace.current_start_line,
+                case.region_trace.current_start_line + case.region_trace.current_lines - 1,
+                case.region_trace.historical_start_line,
+                case.region_trace.historical_start_line + case.region_trace.historical_lines - 1,
+            )
+            .unwrap();
             write_historical_object(
                 &mut output,
                 "Reconstructed conflict",

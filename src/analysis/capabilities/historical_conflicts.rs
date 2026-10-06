@@ -6,7 +6,9 @@ use crate::{
     git::{self, MergeTree, Replay, StageEntry},
 };
 
-use super::conflicts::{HistoricalCase, HistoricalCases, HistoricalFile, HistoricalObject};
+use super::conflicts::{
+    HistoricalCase, HistoricalCases, HistoricalFile, HistoricalObject, RegionTrace,
+};
 
 pub(crate) const CASE_LIMIT_PER_FILE: usize = 5;
 const EXCERPT_CHAR_LIMIT: usize = 4096;
@@ -22,10 +24,18 @@ struct Candidate {
 struct ConflictRegion {
     before: Vec<String>,
     after: Vec<String>,
+    ours_lines: Vec<String>,
+    theirs_lines: Vec<String>,
+    start_line: usize,
+    line_count: usize,
 }
 
 enum RegionMatch {
-    Unique,
+    Unique {
+        current: usize,
+        historical: usize,
+        basis: &'static str,
+    },
     None,
     Ambiguous,
 }
@@ -491,6 +501,16 @@ impl FileAnalysis<'_> {
                 );
                 continue;
             };
+            let (Some(parent1_text), Some(parent2_text)) = (
+                std::str::from_utf8(&parent1_blob).ok(),
+                std::str::from_utf8(&parent2_blob).ok(),
+            ) else {
+                skip_candidate(
+                    &mut report,
+                    format!("{} parent blobs are not valid UTF-8 text", candidate.oid),
+                );
+                continue;
+            };
             let conflict_text =
                 std::str::from_utf8(&conflict_blob).expect("blob reader validated UTF-8");
             let Some(historical_regions) = conflict_regions(conflict_text) else {
@@ -500,25 +520,44 @@ impl FileAnalysis<'_> {
                 );
                 continue;
             };
-            match match_regions(
+            let parent1_lines = parent1_text.lines().collect::<Vec<_>>();
+            let parent2_lines = parent2_text.lines().collect::<Vec<_>>();
+            if !regions_match_parents(&historical_regions, &parent1_lines, &parent2_lines) {
+                skip_candidate(
+                    &mut report,
+                    format!(
+                        "{} conflict regions could not be validated against the historical parents",
+                        candidate.oid
+                    ),
+                );
+                continue;
+            }
+            let matched = match_regions(
                 current_text,
                 &current_regions,
                 conflict_text,
                 &historical_regions,
-            ) {
-                RegionMatch::None => continue,
+            );
+            let (current_region, historical_region, basis) = match matched {
+                RegionMatch::Unique {
+                    current,
+                    historical,
+                    basis,
+                } => (current, historical, basis),
                 RegionMatch::Ambiguous => {
                     skip_candidate(
                         &mut report,
                         format!(
-                            "{} conflict has no unique current-region correspondence",
+                            "{} current-region correspondence is ambiguous",
                             candidate.oid
                         ),
                     );
                     continue;
                 }
-                RegionMatch::Unique => {}
-            }
+                RegionMatch::None => continue,
+            };
+            let current_matched = &current_regions[current_region];
+            let historical_matched = &historical_regions[historical_region];
             report.cases.push(HistoricalCase {
                 merge_commit: candidate.oid.clone(),
                 merge_base: historical_object(
@@ -554,7 +593,13 @@ impl FileAnalysis<'_> {
                     &result_entry.oid,
                     &result_blob,
                 ),
-                association: "same file incarnation and unique surrounding context",
+                association: basis,
+                region_trace: RegionTrace {
+                    current_start_line: current_matched.start_line,
+                    current_lines: current_matched.line_count,
+                    historical_start_line: historical_matched.start_line,
+                    historical_lines: historical_matched.line_count,
+                },
             });
         }
         report.cases_total = report.cases.len();
@@ -687,7 +732,23 @@ fn conflict_regions(text: &str) -> Option<Vec<ConflictRegion>> {
             }
             after.push((*line).to_owned());
         }
-        regions.push(ConflictRegion { before, after });
+
+        let ours_lines = lines[cursor + 1..separator]
+            .iter()
+            .map(|line| (*line).to_owned())
+            .collect();
+        let theirs_lines = lines[separator + 1..end]
+            .iter()
+            .map(|line| (*line).to_owned())
+            .collect();
+        regions.push(ConflictRegion {
+            before,
+            after,
+            ours_lines,
+            theirs_lines,
+            start_line: cursor + 1,
+            line_count: end - cursor + 1,
+        });
         cursor = end + 1;
     }
     (!regions.is_empty()).then_some(regions)
@@ -700,6 +761,9 @@ fn marker_line(line: &str) -> bool {
         || line.starts_with("|||||||")
 }
 
+const CONTEXT_BASIS: &str = "same file incarnation and identical unique surrounding context";
+const CONTENT_BASIS: &str = "same file incarnation and unique conflict-region content correspondence across historical edits";
+
 fn match_regions(
     current_text: &str,
     current: &[ConflictRegion],
@@ -710,9 +774,9 @@ fn match_regions(
     let historical_lines = historical_text.lines().collect::<Vec<_>>();
     let mut matches = BTreeSet::new();
     let mut ambiguous = false;
-    let mut common_context = false;
     for (current_index, current_region) in current.iter().enumerate() {
         for (historical_index, historical_region) in historical.iter().enumerate() {
+            let mut matched = false;
             for (current_context, historical_context) in [
                 (&current_region.before, &historical_region.before),
                 (&current_region.after, &historical_region.after),
@@ -720,24 +784,106 @@ fn match_regions(
                 if current_context.is_empty() || current_context != historical_context {
                     continue;
                 }
-                common_context = true;
                 if count_context(&current_lines, current_context) == 1
                     && count_context(&historical_lines, historical_context) == 1
                 {
-                    matches.insert((current_index, historical_index));
+                    matches.insert((current_index, historical_index, CONTEXT_BASIS));
+                    matched = true;
                 } else {
                     ambiguous = true;
                 }
             }
+            if matched {
+                continue;
+            }
+            if region_content(current_region).is_empty()
+                || region_content(historical_region).is_empty()
+            {
+                continue;
+            }
+            if region_content(current_region) == region_content(historical_region)
+                && count_region_content(&current_lines, current_region) == 1
+                && count_region_content(&historical_lines, historical_region) == 1
+            {
+                matches.insert((current_index, historical_index, CONTENT_BASIS));
+            }
         }
     }
-    if matches.len() == 1 && !ambiguous {
-        RegionMatch::Unique
-    } else if !matches.is_empty() || ambiguous || !common_context {
-        RegionMatch::Ambiguous
-    } else {
-        RegionMatch::None
+    let mut unique: Option<(usize, usize, &'static str)> = None;
+    for found in &matches {
+        if unique.is_some() {
+            return RegionMatch::Ambiguous;
+        }
+        unique = Some(*found);
     }
+    match unique {
+        Some((current, historical, basis)) if !ambiguous => RegionMatch::Unique {
+            current,
+            historical,
+            basis,
+        },
+        Some(_) => RegionMatch::Ambiguous,
+        None if ambiguous => RegionMatch::Ambiguous,
+        None => RegionMatch::None,
+    }
+}
+
+fn region_content(region: &ConflictRegion) -> Vec<&str> {
+    region
+        .ours_lines
+        .iter()
+        .chain(region.theirs_lines.iter())
+        .map(String::as_str)
+        .collect()
+}
+/// Count occurrences of a region's decisive content block: the ours lines,
+/// the conflict separator marker, and the theirs lines, contiguous in the
+/// conflict text. Used for uniqueness, never as a positional identity test.
+fn count_region_content(lines: &[&str], region: &ConflictRegion) -> usize {
+    let ours = &region.ours_lines;
+    let theirs = &region.theirs_lines;
+    let span = ours.len() + theirs.len() + 1;
+    if span > lines.len() {
+        return 0;
+    }
+    lines
+        .windows(span)
+        .filter(|window| {
+            let (head, rest) = window.split_at(ours.len());
+            let (marker, tail) = rest.split_at(1);
+            lines_equal(head, ours) && marker[0].starts_with("=======") && lines_equal(tail, theirs)
+        })
+        .count()
+}
+
+fn lines_equal(window: &[&str], expected: &[String]) -> bool {
+    window
+        .iter()
+        .zip(expected)
+        .all(|(line, expected)| *line == expected)
+}
+
+/// Verify parsed conflict regions against the historical parent blobs: the
+/// ours side of each region must have its non-empty lines present in parent 1
+/// and the theirs side in parent 2, so marker scanning alone cannot invent a
+/// region whose sides appear in neither parent. (This is per-line containment,
+/// not a contiguous-block match.)
+fn regions_match_parents(
+    regions: &[ConflictRegion],
+    parent1_lines: &[&str],
+    parent2_lines: &[&str],
+) -> bool {
+    regions.iter().all(|region| {
+        let ours_ok = region
+            .ours_lines
+            .iter()
+            .all(|line| line.is_empty() || parent1_lines.contains(&line.as_str()));
+        let theirs_ok = region
+            .theirs_lines
+            .iter()
+            .all(|line| line.is_empty() || parent2_lines.contains(&line.as_str()));
+        ours_ok && theirs_ok
+    })
 }
 
 fn count_context(lines: &[&str], context: &[String]) -> usize {
