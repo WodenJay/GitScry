@@ -1,6 +1,21 @@
 //! Source-only symbol location, shared by why and regression targets.
 //! Git objects and target anchors stay outside this module.
 
+mod rust;
+
+/// The actual source interpretation and declaration selected at a pinned revision.
+#[derive(Clone, Debug, serde::Serialize)]
+pub(crate) struct Selection {
+    pub(crate) input_selector: String,
+    pub(crate) qualified_name: String,
+    pub(crate) kind: String,
+    pub(crate) start_line: usize,
+    pub(crate) end_line: usize,
+    pub(crate) identifier_line: usize,
+    pub(crate) identifier_column: usize,
+    pub(crate) language: String,
+    pub(crate) mode: String,
+}
 use crate::app::AppError;
 
 pub(super) struct Span {
@@ -11,65 +26,124 @@ pub(super) struct Span {
 /// A local declaration, with its identifier kept separate from its source range.
 pub(super) struct Location {
     pub(super) name: String,
+    pub(super) selection: Selection,
+    pub(super) notice: Option<String>,
     /// One-based line and zero-based byte column in the original source.
     pub(super) identifier_line: usize,
     pub(super) identifier_column: usize,
     pub(super) span: Span,
 }
 
-/// Require exactly one supported declaration; never fall back to a text mention.
-/// This lightweight locator does not claim compiler-level symbol resolution.
+/// Require a unique declaration; a clean structured parse is authoritative.
 pub(super) fn locate_unique(content: &[u8], name: &str, path: &str) -> Result<Location, AppError> {
     if name.trim().is_empty() {
         return Err(AppError::input("symbol must not be empty"));
     }
-    let mut matches = declaration_positions(content, path.ends_with(".rs"))
+    let (locations, notice) = declarations(content, path);
+    if notice.is_some() && name.contains("::") {
+        return Err(AppError::input(format!(
+            "qualified symbol {name} requires structured Rust parsing in {path}: {}",
+            notice.unwrap()
+        )));
+    }
+    let mut matches = locations
         .into_iter()
-        .filter(|(declared, _, _)| declared == name)
+        .filter(|location| {
+            let qualified = &location.selection.qualified_name;
+            qualified == name
+                || qualified
+                    .strip_suffix(name)
+                    .is_some_and(|prefix| prefix.ends_with("::"))
+        })
         .collect::<Vec<_>>();
     match matches.len() {
         0 => Err(AppError::input(format!(
-            "symbol {name} has no supported declaration in {path} at the target revision"
+            "symbol {name} has no supported declaration in {path} at the target revision{}",
+            notice
+                .map(|notice| format!("; {notice}"))
+                .unwrap_or_default()
         ))),
         1 => {
-            let (name, line, column) = matches.pop().unwrap();
-            Ok(location(content, name, line, column, path))
+            let mut location = matches.pop().unwrap();
+            location.selection.input_selector = name.to_owned();
+            Ok(location)
         }
         _ => Err(AppError::input(format!(
-            "symbol {name} is ambiguous in {path} at the target revision; declarations found at lines {}",
+            "symbol {name} is ambiguous in {path} at the target revision; declarations: {}{}",
             matches
                 .iter()
-                .map(|(_, line, _)| line.to_string())
+                .map(|location| format!(
+                    "{} ({}, lines {}-{}, identifier {}:{}): {}",
+                    location.selection.qualified_name,
+                    location.selection.kind,
+                    location.span.start,
+                    location.span.end,
+                    location.identifier_line,
+                    location.identifier_column,
+                    content
+                        .split(|byte| *byte == b'\n')
+                        .nth(location.identifier_line - 1)
+                        .map(|line| String::from_utf8_lossy(line).trim().to_owned())
+                        .unwrap_or_default()
+                ))
                 .collect::<Vec<_>>()
-                .join(", ")
+                .join("; "),
+            notice
+                .map(|notice| format!("; {notice}"))
+                .unwrap_or_default()
         ))),
     }
 }
 
-pub(super) fn declaration_lines(content: &[u8], name: &str) -> Vec<usize> {
-    declaration_positions(content, true)
+pub(super) fn declaration_lines(content: &[u8], name: &str, path: &str) -> Vec<usize> {
+    declarations(content, path)
+        .0
         .into_iter()
-        .filter_map(|(declared, line, _)| (declared == name).then_some(line))
+        .filter_map(|location| {
+            (location.selection.qualified_name == name || location.name == name)
+                .then_some(location.identifier_line)
+        })
         .collect()
 }
 
-/// Enumerate supported declarations for conservative same-change correspondence.
-pub(super) fn declarations(content: &[u8], path: &str) -> Vec<Location> {
-    declaration_positions(content, path.ends_with(".rs"))
+/// Enumerate only the interpretation selected by the extension, never try grammars.
+pub(super) fn declarations(content: &[u8], path: &str) -> (Vec<Location>, Option<String>) {
+    let (language, reason) = if path.ends_with(".rs") {
+        match rust::extract(content) {
+            Ok(locations) => return (locations, None),
+            Err(reason) => ("rust", reason),
+        }
+    } else {
+        ("unsupported", "unsupported language".to_owned())
+    };
+    let notice = format!(
+        "lightweight symbol selection in {path}: {reason}; structural ownership and ranges are unverified"
+    );
+    let locations = declaration_positions(content, path.ends_with(".rs"))
         .into_iter()
-        .map(|(name, line, column)| location(content, name, line, column, path))
-        .collect()
-}
-fn location(content: &[u8], name: String, line: usize, column: usize, path: &str) -> Location {
-    Location {
-        name,
-        identifier_line: line,
-        identifier_column: column,
-        span: Span {
-            start: line,
-            end: symbol_span_end(content, line, path.ends_with(".rs")),
-        },
-    }
+        .map(|(name, line, column)| {
+            let end = symbol_span_end(content, line, path.ends_with(".rs"));
+            Location {
+                selection: Selection {
+                    input_selector: name.clone(),
+                    qualified_name: name.clone(),
+                    kind: "declaration".to_owned(),
+                    start_line: line,
+                    end_line: end,
+                    identifier_line: line,
+                    identifier_column: column,
+                    language: language.to_owned(),
+                    mode: "lightweight".to_owned(),
+                },
+                name,
+                identifier_line: line,
+                identifier_column: column,
+                span: Span { start: line, end },
+                notice: Some(notice.clone()),
+            }
+        })
+        .collect();
+    (locations, Some(notice))
 }
 
 fn declaration_positions(content: &[u8], rust_source: bool) -> Vec<(String, usize, usize)> {
@@ -444,6 +518,97 @@ mod tests {
     use super::locate_unique as locate;
 
     #[test]
+    fn qualified_rust_selection_tracks_attributes_and_identifier_separately() {
+        let source = b"// outside\nmod net {\n    /// outside\n    #[inline]\n    pub fn parse<T>(\n        value: T,\n    ) -> T {\n        value\n    }\n    fn neighbor() {}\n}\n";
+        let selected = locate(source, "net::parse", "source.rs").unwrap();
+        assert_eq!((selected.span.start, selected.span.end), (4, 9));
+        assert_eq!(
+            (selected.identifier_line, selected.identifier_column),
+            (5, 11)
+        );
+    }
+
+    #[test]
+    fn rust_owners_suffixes_and_impl_collisions_are_structural() {
+        let source = b"mod outer { mod inner { struct Item<T>(T); impl<T> Item<T> { pub fn read(&self) {} } trait Access { fn required(); fn defaulted() {} } impl Access for Item<u8> { fn read(&self) {} } } }";
+        let collision = locate(source, "inner::Item::read", "source.rs")
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(collision.contains("ambiguous"));
+        assert!(collision.contains("outer::inner::Item::read"));
+        assert!(collision.contains("method"));
+        assert!(collision.contains("impl<T>"));
+        for selector in ["Access", "inner::Access", "outer::inner::Access"] {
+            assert_eq!(
+                locate(source, selector, "source.rs")
+                    .unwrap()
+                    .selection
+                    .kind,
+                "trait"
+            );
+        }
+        assert!(locate(source, "required", "source.rs").is_err());
+        assert!(locate(source, "nner::Access", "source.rs").is_err());
+        assert!(locate(source, "access", "source.rs").is_err());
+        assert!(locate(source, "Item<T>::read", "source.rs").is_err());
+        assert_eq!(
+            locate(source, "Access::defaulted", "source.rs")
+                .unwrap()
+                .selection
+                .kind,
+            "method"
+        );
+    }
+
+    #[test]
+    fn clean_parses_are_authoritative_and_degradation_is_explicit() {
+        let clean = b"trait Trait { fn signature(); } fn real() {}";
+        assert!(locate(clean, "signature", "source.rs").is_err());
+        assert!(locate(clean, "missing", "source.rs").is_err());
+        for broken in [
+            b"fn real() {}\nfn broken(\n".as_slice(),
+            b"fn real() {}\nfn broken() {\n".as_slice(),
+        ] {
+            let selected = locate(broken, "real", "source.rs").unwrap();
+            assert_eq!(selected.selection.mode, "lightweight");
+            assert!(selected.notice.unwrap().contains("parse failed"));
+            assert!(locate(broken, "owner::real", "source.rs").is_err());
+        }
+        let unknown = locate(b"fn real() {}", "real", "source.custom").unwrap();
+        assert_eq!(unknown.selection.language, "unsupported");
+        assert_eq!(unknown.selection.mode, "lightweight");
+        assert!(unknown.notice.unwrap().contains("unsupported language"));
+        assert!(
+            locate(
+                b"mod owner { fn real() {} }",
+                "owner::real",
+                "source.custom"
+            )
+            .is_err()
+        );
+        assert!(locate(b"fn real() {} fn real() {}", "real", "source.rs").is_err());
+        assert!(locate(b"fn real() {}\nfn real() {}\n@", "real", "source.rs").is_err());
+        assert!(locate(b"// fn mention() {}\nfn other() {}", "mention", "source.rs").is_err());
+    }
+
+    #[test]
+    fn rust_named_types_and_explicit_variables_use_complete_syntax_ranges() {
+        let source = b"#[doc = \"syntactic docs\"]\npub struct Data<T> {\n value: T,\n}\nmod empty;\ntype Alias = Data<u8>;\nstatic FLAG: bool = true;\nfn holder() {\n let value: usize = {\n  2\n };\n}\n";
+        for (name, kind, span) in [
+            ("Data", "struct", (1, 4)),
+            ("empty", "module", (5, 5)),
+            ("Alias", "type", (6, 6)),
+            ("FLAG", "static", (7, 7)),
+            ("holder::value", "variable", (9, 11)),
+        ] {
+            let selected = locate(source, name, "source.rs").unwrap();
+            assert_eq!(selected.selection.kind, kind);
+            assert_eq!((selected.span.start, selected.span.end), span);
+            assert_eq!(selected.selection.mode, "structured");
+        }
+    }
+    #[test]
     fn legitimate_constants_variables_and_function_values_keep_useful_ranges() {
         for (path, source, name, expected) in [
             (
@@ -513,7 +678,10 @@ mod tests {
             super::identity(source, &original),
             super::identity(renamed, &renamed_span),
         );
-        assert_eq!(super::declaration_lines(source, "parse"), vec![1]);
+        assert_eq!(
+            super::declaration_lines(source, "parse", "source.rs"),
+            vec![1]
+        );
     }
 
     #[test]
@@ -593,7 +761,7 @@ mod tests {
             .is_err()
         );
         assert_eq!(
-            declaration_lines(b"fn target() {} fn target() {}\n", "target"),
+            declaration_lines(b"fn target() {} fn target() {}\n", "target", "source.rs"),
             vec![1, 1]
         );
     }

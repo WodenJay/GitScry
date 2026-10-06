@@ -142,7 +142,7 @@ fn walk(git: &Git, target: &WhyTarget, trace: &mut SymbolTrace) -> Result<String
                             continue;
                         };
                         let after = target::read_blob_at(git, oid, old_path)?;
-                        for old_span in symbol::declarations(&source, old_path) {
+                        for old_span in symbol::declarations(&source, old_path).0 {
                             let old_name = &old_span.name;
                             if old_path == path && old_name == &name {
                                 continue;
@@ -150,7 +150,7 @@ fn walk(git: &Git, target: &WhyTarget, trace: &mut SymbolTrace) -> Result<String
                             if symbol::identity(&source, &old_span)
                                 == symbol::identity(&current, &current_span)
                                 && after.as_ref().is_none_or(|after| {
-                                    symbol::declaration_lines(after, old_name).is_empty()
+                                    symbol::declaration_lines(after, old_name, old_path).is_empty()
                                 })
                             {
                                 return Err(unknown(
@@ -194,11 +194,11 @@ fn walk(git: &Git, target: &WhyTarget, trace: &mut SymbolTrace) -> Result<String
                 } else {
                     None
                 };
-                for old_span in symbol::declarations(&source, source_path) {
+                for old_span in symbol::declarations(&source, source_path).0 {
                     let old_name = &old_span.name;
                     let survives = !changed
                         || after.as_ref().is_some_and(|after| {
-                            !symbol::declaration_lines(after, old_name).is_empty()
+                            !symbol::declaration_lines(after, old_name, source_path).is_empty()
                         });
                     if changed
                         && !survives
