@@ -788,16 +788,88 @@ fn follow_on_event(repo: &TestRepo, path: &str, value: usize, date: &str) {
     );
 }
 
-fn finish_follow_on_history(repo: &TestRepo) {
+#[test]
+fn filler_history_preserves_non_main_branch_and_exact_commits() {
+    let original = TestRepo::new();
+    let imported = TestRepo::new();
+    for repo in [&original, &imported] {
+        follow_on_event(repo, "base.txt", 0, "2025-01-01T12:00:00Z");
+        git(repo.dir.path(), ["checkout", "-b", "observations"]);
+    }
     for day in 1..=8 {
         follow_on_event(
-            repo,
+            &original,
             "noise.txt",
             day,
             &format!("2025-03-{day:02}T12:00:00Z"),
         );
     }
-    follow_on_event(repo, "noise.txt", 99, "2025-03-20T12:00:00Z");
+    follow_on_event(&original, "noise.txt", 99, "2025-03-20T12:00:00Z");
+    finish_follow_on_history(&imported);
+    // Matching object IDs checks contents, parents, messages and both identities/dates.
+    assert_eq!(original.head(), imported.head());
+    assert_eq!(
+        git_stdout(imported.dir.path(), ["symbolic-ref", "HEAD"]),
+        "refs/heads/observations"
+    );
+    assert_eq!(
+        git_stdout(original.dir.path(), ["rev-parse", "main"]),
+        git_stdout(imported.dir.path(), ["rev-parse", "main"])
+    );
+    assert!(git_stdout(imported.dir.path(), ["status", "--porcelain"]).is_empty());
+    assert_eq!(
+        fs::read(imported.dir.path().join("noise.txt")).unwrap(),
+        b"noise.txt 99\n"
+    );
+    assert_eq!(
+        fs::read(imported.dir.path().join("base.txt")).unwrap(),
+        b"base.txt 0\n"
+    );
+}
+
+fn finish_follow_on_history(repo: &TestRepo) {
+    use std::{io::Write, process::Stdio};
+
+    let cwd = repo.dir.path();
+    let branch = git_stdout(cwd, ["symbolic-ref", "HEAD"]);
+    let parent = repo.head();
+    let mut stream = String::new();
+    for (offset, value) in (0..8).map(|day| (day, day + 1)).chain([(19, 99)]) {
+        let contents = format!("noise.txt {value}\n");
+        // 2025-03-01T12:00:00Z, retaining the original nine observation fillers.
+        let timestamp = 1_740_830_400 + offset * 86_400;
+        stream.push_str(&format!(
+            "commit {branch}\nauthor GitScry Test <gitscry@example.invalid> {timestamp} +0000\ncommitter GitScry Test <gitscry@example.invalid> {timestamp} +0000\ndata 10\nnoise.txt\n"
+        ));
+        if offset == 0 {
+            stream.push_str(&format!("from {parent}\n"));
+        }
+        stream.push_str(&format!(
+            "M 100644 inline noise.txt\ndata {}\n{contents}\n",
+            contents.len()
+        ));
+    }
+    stream.push_str("done\n");
+    let mut import = git_command(cwd)
+        .args(["fast-import", "--quiet"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start filler import");
+    import
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stream.as_bytes())
+        .expect("write filler history");
+    let output = import.wait_with_output().expect("finish filler import");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    git(cwd, ["reset", "--hard", "HEAD"]);
     repo.index();
 }
 

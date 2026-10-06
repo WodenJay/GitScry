@@ -17,11 +17,15 @@ impl TestRepo {
     pub(crate) fn new() -> Self {
         let dir = tempfile::tempdir().expect("create temporary repository");
         git(dir.path(), ["init", "--initial-branch=main"]);
-        git(dir.path(), ["config", "user.name", "GitScry Test"]);
-        git(
-            dir.path(),
-            ["config", "user.email", "gitscry@example.invalid"],
-        );
+        // Keep Git's generated repository configuration, appending only fixture identity.
+        std::io::Write::write_all(
+            &mut std::fs::OpenOptions::new()
+                .append(true)
+                .open(dir.path().join(".git/config"))
+                .expect("open repository config"),
+            b"\n[user]\n\tname = GitScry Test\n\temail = gitscry@example.invalid\n",
+        )
+        .expect("configure fixture identity");
         let user_data = tempfile::tempdir().expect("create temporary user data directory");
         Self { dir, user_data }
     }
