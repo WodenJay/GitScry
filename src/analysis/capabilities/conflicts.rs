@@ -38,6 +38,7 @@ pub(crate) struct Report {
     pub(crate) files_truncated: bool,
     pub(crate) associated_materials: Vec<AssociatedMaterial>,
     pub(crate) associated_materials_truncated: bool,
+    pub(crate) historical_cases: HistoricalCases,
     pub(crate) coverage_complete: bool,
     pub(crate) limits: Limits,
     pub(crate) limitations: Vec<String>,
@@ -58,6 +59,7 @@ pub(crate) struct Limits {
     associated_line_characters: usize,
     message_characters: usize,
     related_history_per_file: usize,
+    historical_cases_per_file: usize,
 }
 #[derive(Serialize)]
 pub(crate) struct File {
@@ -141,6 +143,50 @@ pub(crate) struct Region {
     pub(crate) old_lines: i64,
     pub(crate) new_start: i64,
     pub(crate) new_lines: i64,
+}
+
+#[derive(Serialize)]
+pub(crate) struct HistoricalCases {
+    pub(crate) status: &'static str,
+    pub(crate) git_version: String,
+    pub(crate) reconstruction_rules: &'static str,
+    pub(crate) reasons: Vec<String>,
+    pub(crate) files_analyzed: usize,
+    pub(crate) files_with_cases: usize,
+    pub(crate) files: Vec<HistoricalFile>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct HistoricalFile {
+    pub(crate) path: String,
+    pub(crate) status: &'static str,
+    pub(crate) candidate_merges: usize,
+    pub(crate) candidates_examined: usize,
+    pub(crate) candidates_skipped: usize,
+    pub(crate) reasons: Vec<String>,
+    pub(crate) cases: Vec<HistoricalCase>,
+    pub(crate) cases_total: usize,
+    pub(crate) cases_truncated: bool,
+}
+
+#[derive(Serialize)]
+pub(crate) struct HistoricalCase {
+    pub(crate) merge_commit: String,
+    pub(crate) merge_base: HistoricalObject,
+    pub(crate) parents: [HistoricalObject; 2],
+    pub(crate) related_sides: Vec<&'static str>,
+    pub(crate) reconstructed_conflict: HistoricalObject,
+    pub(crate) result: HistoricalObject,
+    pub(crate) association: &'static str,
+}
+
+#[derive(Serialize)]
+pub(crate) struct HistoricalObject {
+    pub(crate) commit: Option<String>,
+    pub(crate) path: String,
+    pub(crate) blob: String,
+    pub(crate) excerpt: String,
+    pub(crate) excerpt_truncated: bool,
 }
 
 #[derive(Serialize)]
@@ -630,15 +676,31 @@ pub(crate) fn execute(paths: Vec<String>, limit: usize) -> Result<Outcome, AppEr
     let incarnations = session.file_incarnations(&target_revisions, &current_paths)?;
     let base_paths = repository.file_paths_at(&target.base)?;
     let mut histories = Vec::new();
+    let mut history_incomplete = false;
     for (name, endpoint) in [("ours", &target.ours), ("theirs", &target.theirs)] {
         let mut reachable = session.ancestors(endpoint)?;
         let missing = reachable.difference(&cached).count();
         if missing > 0 {
+            history_incomplete = true;
             warnings.push(format!("{name} endpoint {endpoint}: incomplete history coverage; {missing} known ancestor(s) unavailable in the prepared cache (for example, beyond a shallow boundary)"));
         }
         reachable.retain(|oid| cached.contains(oid) && !excluded.contains(oid));
         let endpoint_paths = repository.file_paths_at(endpoint)?;
         histories.push((name, endpoint, reachable, endpoint_paths));
+    }
+    let mut historical_cases =
+        super::historical_conflicts::analyze(&repository, &target, &cached, &incarnations);
+    if files_truncated {
+        historical_cases.status = "partial";
+        historical_cases
+            .reasons
+            .push("the selected conflict files exceed the 100-file query limit".to_owned());
+    }
+    if history_incomplete {
+        historical_cases.status = "partial";
+        historical_cases
+            .reasons
+            .push("one or both side histories are incomplete in the prepared cache".to_owned());
     }
     let mut associated_materials = AssociatedMaterialCollector::new(&session, &unmerged_paths);
     let shared_reachable = excluded
@@ -857,7 +919,7 @@ pub(crate) fn execute(paths: Vec<String>, limit: usize) -> Result<Outcome, AppEr
         && !files_truncated
         && files.iter().all(|file| file.unsupported.is_none());
     let report = Report {
-        schema_version: 4,
+        schema_version: 5,
         ours: target.ours,
         theirs: target.theirs,
         merge_base: target.base,
@@ -867,6 +929,7 @@ pub(crate) fn execute(paths: Vec<String>, limit: usize) -> Result<Outcome, AppEr
         files_truncated,
         associated_materials: associated_materials.materials,
         associated_materials_truncated: associated_materials.truncated,
+        historical_cases,
         coverage_complete,
         limits: Limits {
             files: FILE_LIMIT,
@@ -882,6 +945,7 @@ pub(crate) fn execute(paths: Vec<String>, limit: usize) -> Result<Outcome, AppEr
             associated_line_characters: ASSOCIATED_LINE_CHAR_LIMIT,
             message_characters: MESSAGE_LIMIT,
             related_history_per_file: RELATED_HISTORY_LIMIT,
+            historical_cases_per_file: super::historical_conflicts::CASE_LIMIT_PER_FILE,
         },
         limitations: vec![
             "History is bounded to each side's commits after the merge base and selected by file-incarnation identity; detected renames are followed. Cross-file migration, semantic responsibility, and paths without an established incarnation are not inferred. Cached merge changes are first-parent diffs."
