@@ -127,13 +127,13 @@ struct TrackedRegion {
 
 /// Typed per-commit diagnostic recorded at generation time; rendering derives
 /// category summaries or the full warning string from it without parsing text.
-#[derive(Clone)]
 pub(crate) struct Diagnostic {
     pub(crate) category: DiagnosticCategory,
     pub(crate) commit_id: String,
     /// False when the diagnostic arose during out-of-window lineage traversal.
     pub(crate) eligible: bool,
-    pub(crate) warning: String,
+    /// Index into `Report::warnings` where this diagnostic was pushed.
+    pub(crate) warning_index: usize,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -157,17 +157,20 @@ impl Report {
     }
 
     fn aggregated_warnings(&self) -> Vec<String> {
-        // Diagnostics enter `warnings` in push order, so the recorded order
-        // identifies exactly which strings to replace with summaries.
-        let mut warnings = Vec::new();
-        let mut cursor = 0;
-        for warning in &self.warnings {
-            if cursor < self.diagnostics.len() && *warning == self.diagnostics[cursor].warning {
-                cursor += 1;
-                continue;
-            }
-            warnings.push(warning.clone());
-        }
+        // Diagnostics record their exact `warnings` index at push time, so
+        // stripping never depends on warning text.
+        let diagnostic_indices: HashSet<usize> = self
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.warning_index)
+            .collect();
+        let mut warnings: Vec<String> = self
+            .warnings
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !diagnostic_indices.contains(index))
+            .map(|(_, warning)| warning.clone())
+            .collect();
         let mut summaries = Vec::new();
         for category in [
             DiagnosticCategory::FirstParentFileCorrespondence,
@@ -216,34 +219,48 @@ impl DiagnosticCategory {
             summaries.push(self.summary_line(
                 counts.inspected_instances,
                 counts.inspected_commits.len(),
-                "inspected commits",
+                "inspected commit",
             ));
         }
         if counts.lineage_instances > 0 {
             summaries.push(self.summary_line(
                 counts.lineage_instances,
                 counts.lineage_commits.len(),
-                "out-of-window lineage commits",
+                "out-of-window lineage commit",
             ));
         }
         summaries
     }
 
     fn summary_line(self, instances: usize, commits: usize, commits_label: &str) -> String {
+        let commits_label = plural(commits, commits_label);
+        let instances_label = plural(instances, "file-tracking instance");
+        let have = if commits == 1 { "has" } else { "have" };
+        let lacks = if commits == 1 { "lacks" } else { "lack" };
         match self {
             Self::FirstParentFileCorrespondence => format!(
-                "{commits} {commits_label} lack first-parent file correspondence to the seed; no same-file identity is assumed."
+                "{commits} {commits_label} {lacks} first-parent file correspondence to the seed; no same-file identity is assumed."
             ),
             Self::AmbiguousMergeFileCorrespondence => format!(
-                "{instances} file-tracking instances across {commits} {commits_label} have ambiguous merge file correspondence; affected file tracking stopped."
+                "{instances} {instances_label} across {commits} {commits_label} {have} ambiguous merge file correspondence; affected file tracking stopped."
             ),
             Self::AmbiguousMergeRegionCorrespondence => format!(
-                "{instances} file-tracking instances across {commits} {commits_label} have ambiguous merge region correspondence; changed-region tracking downgraded."
+                "{instances} {instances_label} across {commits} {commits_label} {have} ambiguous merge region correspondence; changed-region tracking downgraded."
             ),
             Self::TimestampInversion => {
                 format!("{commits} {commits_label} have commit times earlier than the seed time.")
             }
         }
+    }
+}
+
+/// Pluralizes a singular noun phrase by appending `s` (e.g. "commit" ->
+/// "commits", "file-tracking instance" -> "file-tracking instances").
+fn plural(count: usize, singular: &str) -> String {
+    if count == 1 {
+        singular.to_owned()
+    } else {
+        format!("{singular}s")
     }
 }
 
@@ -773,7 +790,7 @@ fn push_diagnostic(
         category,
         commit_id: commit_id.to_owned(),
         eligible,
-        warning: warning.clone(),
+        warning_index: report.warnings.len(),
     });
     report.warnings.push(warning);
 }

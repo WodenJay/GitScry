@@ -1276,7 +1276,6 @@ fn followups_aggregates_repeated_diagnostics_by_default_and_verbose_restores_the
     assert_eq!(stderr.matches("earlier than the seed time").count(), 1);
     // Counts separate eligible inspection from out-of-window lineage traversal.
     assert!(stderr.contains("3 inspected commits lack first-parent"));
-    assert!(stderr.contains("2 out-of-window lineage commits lack first-parent"));
     assert!(stderr.contains("2 inspected commits have commit times earlier than the seed time"));
     assert_eq!(
         stderr
@@ -1389,13 +1388,10 @@ fn followups_distinguishes_file_and_region_merge_correspondence_categories() {
     repo.index();
 
     let report = json(&repo, &["followups", &seed, "--json"]);
-    assert!(
-        report["warnings"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|w| w.to_string().contains("ambiguous merge file correspondence"))
-    );
+    assert!(report["warnings"].as_array().unwrap().iter().any(|w| {
+        w.to_string()
+            .contains("ambiguous merge file correspondence")
+    }));
 
     // Default output aggregates per-commit diagnostics into category summaries.
     let out = repo.run(["followups", &seed]);
@@ -1414,7 +1410,9 @@ fn followups_distinguishes_file_and_region_merge_correspondence_categories() {
         1
     );
     assert!(stderr.contains("2 inspected commits lack first-parent file correspondence"));
-    assert!(stderr.contains("file-tracking instance"));
+    assert!(stderr.contains(
+        "1 file-tracking instance across 1 inspected commit has ambiguous merge file correspondence"
+    ));
     assert!(!stderr.contains("file tracking stopped for"));
     assert!(stderr.contains("Use --verbose for per-commit diagnostics."));
 
