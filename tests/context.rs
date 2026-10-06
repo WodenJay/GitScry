@@ -1316,3 +1316,132 @@ fn clean_unborn_and_untracked_inputs_do_not_initialize_cache() {
     let staged = json(repo.run(["context", "--staged", "--json"]));
     assert_eq!(staged["input"]["changes"], serde_json::json!([]));
 }
+
+#[test]
+fn matched_change_tests_precede_broad_co_change_tests() {
+    let repo = TestRepo::new();
+    commit(
+        &repo,
+        &[
+            ("clipboard.rs", "fn clipboard() {}\n"),
+            ("tests/clipboard.rs", "test\n"),
+            ("tests/broad_a.rs", "test\n"),
+            ("tests/broad_b.rs", "test\n"),
+            ("tests/broad_c.rs", "test\n"),
+        ],
+        "base",
+    );
+    // Broad co-change tests accumulate many supporting commits.
+    for round in 0..4 {
+        let mut files: Vec<(String, String)> = vec![];
+        for name in [
+            "clipboard.rs",
+            "tests/broad_a.rs",
+            "tests/broad_b.rs",
+            "tests/broad_c.rs",
+        ] {
+            files.push((
+                name.to_owned(),
+                if name == "clipboard.rs" {
+                    "fn clipboard() {}\n".to_owned()
+                } else {
+                    format!("test round {round}\n")
+                },
+            ));
+        }
+        let refs = files
+            .iter()
+            .map(|(path, content)| (path.as_str(), content.as_str()))
+            .collect::<Vec<_>>();
+        commit(&repo, &refs, "broad update");
+    }
+    // Verified matched commit co-modifies its test once (below every gate).
+    commit(
+        &repo,
+        &[
+            (
+                "clipboard.rs",
+                "fn clipboard() { refreshSessionCache(\"session-expired\"); }\n",
+            ),
+            ("tests/clipboard.rs", "test changed\n"),
+        ],
+        "clipboard update",
+    );
+    let matched_oid = repo.head();
+    repo.index();
+    fs::write(repo.dir.path().join("clipboard.rs"), "fn clipboard() {}\n").unwrap();
+    let report = json(repo.run(["context", "--json", "--limit", "12"]));
+    let entries = report["suggestions"].as_array().unwrap();
+    let tests = entries
+        .iter()
+        .filter(|entry| entry["category"] == "test")
+        .collect::<Vec<_>>();
+    assert!(!tests.is_empty());
+    assert_eq!(tests[0]["path"], "tests/clipboard.rs");
+    assert!(
+        tests[0]["selection_routes"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("matched_change_test"))
+    );
+    assert!(
+        tests[0]["associated_current_paths"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("clipboard.rs"))
+    );
+    assert_eq!(tests[0]["citations"][0]["oid"], matched_oid);
+    for basis in tests[0]["basis"].as_array().unwrap() {
+        if basis
+            .as_str()
+            .unwrap()
+            .contains("matched historical change")
+        {
+            return;
+        }
+    }
+    panic!("matched-change basis missing: {:?}", tests[0]["basis"]);
+}
+
+#[test]
+fn merge_commits_and_mass_changes_do_not_promote_tests() {
+    let repo = TestRepo::new();
+    commit(
+        &repo,
+        &[
+            ("feature.rs", "fn feature() {}\n"),
+            ("tests/feature.rs", "test\n"),
+            ("other.rs", "other\n"),
+        ],
+        "base",
+    );
+    let base = repo.head();
+    commit(
+        &repo,
+        &[("feature.rs", "fn feature() { other(); }\n")],
+        "side branch",
+    );
+    git(repo.dir.path(), ["checkout", "-q", &base]);
+    fs::write(repo.dir.path().join("other.rs"), "other side\n").unwrap();
+    git(repo.dir.path(), ["add", "--all"]);
+    git(repo.dir.path(), ["commit", "-m", "other side"]);
+    git(repo.dir.path(), ["merge", "-q", "--no-edit", "main"]);
+    repo.index();
+    fs::write(
+        repo.dir.path().join("feature.rs"),
+        "fn feature() { other(); }\n",
+    )
+    .unwrap();
+    let report = json(repo.run(["context", "--json"]));
+    assert!(
+        report["suggestions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry["selection_routes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|route| route != "matched_change_test"))
+    );
+}

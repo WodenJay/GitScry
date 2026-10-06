@@ -8,6 +8,7 @@ use crate::analysis::query::{Context, Options, Outcome, QueryReport, scope};
 use crate::analysis::{Citation, SearchScopeInfo, retrieval};
 use crate::{
     app::AppError,
+    cache::QuerySession,
     git::{CurrentChange, Repository, current_regular_file},
 };
 use std::{
@@ -260,6 +261,18 @@ struct RankedSuggestion {
     suggestion: Suggestion,
     supporting: Vec<String>,
     co_change_supporting: Vec<String>,
+    matched_supporting: Vec<String>,
+}
+
+struct MatchedCommit {
+    oid: String,
+    commit_time: i64,
+    current_paths: Vec<Vec<u8>>,
+}
+
+struct MatchedAssociation {
+    path: Vec<u8>,
+    commits: Vec<MatchedCommit>,
 }
 
 fn run(
@@ -369,12 +382,15 @@ fn run(
             },
             supporting,
             co_change_supporting: Vec::new(),
+            matched_supporting: Vec::new(),
         });
     }
     if omitted_tests {
         report.warnings.push("warning: historical test paths absent as safe regular files in the current worktree were omitted; renames are not resolved".to_owned());
     }
     let changes = content::discover(session, &mut report, scope, hybrid)?;
+    let matched_tests =
+        apply_matched_change_tests(session, &mut ranked, &changes, &excluded, root, &mut report)?;
     if historical_followup.enabled {
         for (strength, time, suggestion) in historical_followup::discover(
             session,
@@ -391,6 +407,7 @@ fn run(
                 suggestion,
                 supporting: Vec::new(),
                 co_change_supporting: Vec::new(),
+                matched_supporting: Vec::new(),
             });
         }
     }
@@ -410,11 +427,13 @@ fn run(
             suggestion,
             supporting: Vec::new(),
             co_change_supporting: Vec::new(),
+            matched_supporting: Vec::new(),
         });
     }
     merge_cochange_followups(&mut ranked);
     merge_path_follow_on(context, repository, selected_paths, &excluded, &mut ranked)?;
     ranked.sort_by(compare_ranked_suggestions);
+    let ranked = refill_test_positions(ranked, matched_tests);
     report.matched_count = ranked.len();
     let mut category_counts = [0; 6];
     for mut ranked_suggestion in ranked {
@@ -524,6 +543,7 @@ fn merge_path_follow_on(
                 },
                 supporting: Vec::new(),
                 co_change_supporting: Vec::new(),
+                matched_supporting: Vec::new(),
             });
             ranked.last_mut().unwrap()
         };
@@ -550,6 +570,221 @@ fn merge_path_follow_on(
     Ok(())
 }
 
+/// Same-commit test promotion from verified changed-code matches (issue #238).
+/// Returns the ordered matched tests for the later test-position refill.
+fn apply_matched_change_tests(
+    session: &QuerySession,
+    ranked: &mut [RankedSuggestion],
+    changes: &[(usize, i64, Suggestion)],
+    excluded: &HashSet<Vec<u8>>,
+    root: &Path,
+    report: &mut Report,
+) -> Result<Vec<RankedSuggestion>, AppError> {
+    if changes.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Only verified commits promote tests; each is a suggestion with its own
+    // associated current paths. Citations[0] carries the commit oid.
+    let mut matched = Vec::new();
+    for (_, time, suggestion) in changes {
+        let Some(verified) = suggestion
+            .citations
+            .first()
+            .map(|citation| citation.oid.clone())
+        else {
+            continue;
+        };
+        matched.push(MatchedCommit {
+            oid: verified,
+            commit_time: *time,
+            current_paths: suggestion.associated_current_paths.clone(),
+        });
+    }
+    if matched.is_empty() {
+        return Ok(Vec::new());
+    }
+    let oids = matched
+        .iter()
+        .map(|commit| commit.oid.clone())
+        .collect::<Vec<_>>();
+    let promoted = session.promotion_commit_paths(&oids, 50)?;
+    let matched_by_oid = matched
+        .iter()
+        .map(|commit| (commit.oid.as_str(), commit))
+        .collect::<HashMap<_, _>>();
+    // Group eligible test paths by exact raw identity.
+    let mut associations: HashMap<Vec<u8>, MatchedAssociation> = HashMap::new();
+    let mut omitted_tests = false;
+    for entry in promoted {
+        let Some(commit) = matched_by_oid.get(entry.oid.as_str()) else {
+            continue;
+        };
+        for path in entry.paths {
+            if !is_test_path(&path) || excluded.contains(&path) {
+                continue;
+            }
+            if !current_regular_file(root, &path) {
+                omitted_tests = true;
+                continue;
+            }
+            let association =
+                associations
+                    .entry(path.clone())
+                    .or_insert_with(|| MatchedAssociation {
+                        path: path.clone(),
+                        commits: Vec::new(),
+                    });
+            if !association.commits.iter().any(|c| c.oid == commit.oid) {
+                association.commits.push(MatchedCommit {
+                    oid: commit.oid.clone(),
+                    commit_time: commit.commit_time,
+                    current_paths: commit.current_paths.clone(),
+                });
+            }
+        }
+    }
+    if omitted_tests {
+        report.warnings.push("warning: historical test paths absent as safe regular files in the current worktree were omitted; renames are not resolved".to_owned());
+    }
+    let mut ordered = Vec::new();
+    for association in associations.into_values() {
+        let mut commits = association.commits;
+        commits.sort_by(|a, b| {
+            b.commit_time
+                .cmp(&a.commit_time)
+                .then_with(|| a.oid.cmp(&b.oid))
+        });
+        let latest_time = commits[0].commit_time;
+        let mut current_paths = commits
+            .iter()
+            .flat_map(|commit| commit.current_paths.iter().cloned())
+            .collect::<Vec<_>>();
+        current_paths.sort();
+        current_paths.dedup();
+        // Augment an existing candidate sharing the exact test path; otherwise
+        // admit a new one without the ordinary frequency/proportion gate.
+        if let Some(item) = ranked.iter_mut().find(|item| {
+            item.suggestion.path == association.path
+                && matches!(
+                    item.suggestion.category,
+                    Category::Test | Category::CoChangingFile
+                )
+        }) {
+            let suggestion = &mut item.suggestion;
+            if !suggestion.selection_routes.contains(&"matched_change_test") {
+                suggestion.selection_routes.push("matched_change_test");
+            }
+            suggestion.basis.push(format!(
+                "co-changed with matched historical change in {} commits",
+                commits.len()
+            ));
+            for path in &current_paths {
+                if !suggestion.associated_current_paths.contains(path) {
+                    suggestion.associated_current_paths.push(path.clone());
+                }
+            }
+            suggestion.associated_current_paths.sort();
+            // Matched supporting commits lead citations; keep ordinary counts
+            // explicit rather than relabeling them as matched support.
+            let ordinary = std::mem::take(&mut item.supporting);
+            let mut supporting = commits
+                .iter()
+                .map(|commit| commit.oid.clone())
+                .collect::<Vec<_>>();
+            for oid in ordinary {
+                if !supporting.contains(&oid) {
+                    supporting.push(oid);
+                }
+            }
+            item.supporting = supporting;
+            item.time = item.time.max(latest_time);
+            let distinct_supporting = item.supporting.len();
+            item.suggestion.citations_truncated = distinct_supporting > CITATION_LIMIT;
+            item.matched_supporting = commits
+                .iter()
+                .map(|commit| commit.oid.clone())
+                .collect::<Vec<_>>();
+        } else {
+            let suggestion = Suggestion {
+                category: Category::Test,
+                path: association.path.clone(),
+                associated_current_paths: current_paths,
+                basis: vec![
+                    format!(
+                        "co-changed with matched historical change in {} commits",
+                        commits.len()
+                    ),
+                    "test-shaped path exists as a regular file in the current worktree".to_owned(),
+                ],
+                selection_routes: vec!["matched_change_test", "test_path"],
+                citations: Vec::new(),
+                supporting_count: commits.len(),
+                citations_truncated: commits.len() > CITATION_LIMIT,
+                content_matches: Vec::new(),
+                content_matches_truncated: false,
+                abandonment: None,
+                historical_followup: None,
+                follow_on: Vec::new(),
+                co_change: None,
+            };
+            let strength = suggestion.associated_current_paths.len();
+            ordered.push(RankedSuggestion {
+                strength,
+                time: latest_time,
+                suggestion,
+                supporting: commits.iter().map(|commit| commit.oid.clone()).collect(),
+                co_change_supporting: Vec::new(),
+                matched_supporting: commits.iter().map(|commit| commit.oid.clone()).collect(),
+            });
+        }
+    }
+    Ok(ordered)
+}
+/// Refill test-category positions with matched tests first, then ordinary
+/// tests in their existing relative order. Operates on the already globally
+/// sorted list so non-test ordering and transitivity are untouched. Matched
+/// tests beyond the original test positions (when no ordinary tests exist)
+/// keep their appended order.
+fn refill_test_positions(
+    ranked: Vec<RankedSuggestion>,
+    mut matched: Vec<RankedSuggestion>,
+) -> Vec<RankedSuggestion> {
+    if matched.is_empty() {
+        return ranked;
+    }
+    matched.sort_by(|a, b| {
+        b.suggestion
+            .associated_current_paths
+            .len()
+            .cmp(&a.suggestion.associated_current_paths.len())
+            .then_with(|| {
+                b.suggestion
+                    .supporting_count
+                    .cmp(&a.suggestion.supporting_count)
+            })
+            .then_with(|| b.time.cmp(&a.time))
+            .then_with(|| a.suggestion.path.cmp(&b.suggestion.path))
+    });
+    let mut slots: Vec<Option<RankedSuggestion>> = ranked.into_iter().map(Some).collect();
+    let mut ordinary = Vec::new();
+    for slot in slots.iter_mut() {
+        if slot
+            .as_ref()
+            .is_some_and(|item| item.suggestion.category == Category::Test)
+        {
+            ordinary.push(slot.take().unwrap());
+        }
+    }
+    matched.extend(ordinary);
+    let mut refill = matched.into_iter();
+    for slot in slots.iter_mut() {
+        if slot.is_none() {
+            *slot = refill.next();
+        }
+    }
+    slots.extend(refill.map(Some));
+    slots.into_iter().flatten().collect()
+}
 fn merge_cochange_followups(ranked: &mut Vec<RankedSuggestion>) {
     let cochanges = ranked
         .iter()
@@ -704,6 +939,7 @@ mod tests {
             },
             supporting: Vec::new(),
             co_change_supporting: Vec::new(),
+            matched_supporting: Vec::new(),
         }
     }
     fn followup(

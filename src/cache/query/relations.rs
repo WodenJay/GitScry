@@ -94,6 +94,85 @@ impl QuerySession {
             false,
         )
     }
+
+    /// Changed paths of eligible (non-merge, within the path limit) commits.
+    /// Used for same-commit test promotion; commit identity comes from
+    /// verified changed-code discovery, so no extra scope filtering applies.
+    pub(crate) fn promotion_commit_paths(
+        &self,
+        oids: &[String],
+        path_limit: usize,
+    ) -> Result<Vec<PromotionCommitPaths>, AppError> {
+        promotion_commit_paths(&self.connection, oids, path_limit)
+    }
+}
+
+/// One commit's deduplicated changed paths, in cache order.
+pub(crate) struct PromotionCommitPaths {
+    pub(crate) oid: String,
+    pub(crate) paths: Vec<Vec<u8>>,
+}
+
+fn promotion_commit_paths(
+    connection: &Connection,
+    oids: &[String],
+    path_limit: usize,
+) -> Result<Vec<PromotionCommitPaths>, AppError> {
+    let limit = i64::try_from(path_limit).map_err(|_| {
+        search_error(
+            "reading promotion commit paths",
+            "path limit exceeded platform limits",
+        )
+    })?;
+    let mut found: Vec<PromotionCommitPaths> = Vec::new();
+    for chunk in oids.chunks(SQL_PARAMETER_LIMIT) {
+        let placeholders = numbered_placeholders(1, chunk.len());
+        let query = format!(
+            "SELECT c.oid, cp.raw_path\n\
+             FROM commits AS c\n\
+             JOIN commit_paths AS cp ON cp.commit_id = c.commit_id\n\
+             WHERE c.oid IN ({placeholders})\n\
+               AND EXISTS (\n\
+                   SELECT 1 FROM commit_path_counts AS pc\n\
+                   WHERE pc.commit_id = c.commit_id AND pc.path_count <= ?{}\n\
+               )\n\
+               AND NOT EXISTS (\n\
+                   SELECT 1 FROM commit_parents AS parents\n\
+                   WHERE parents.commit_id = c.commit_id AND parents.position > 0\n\
+               )\n\
+             ORDER BY c.position, cp.path_order",
+            chunk.len() + 1
+        );
+        let mut values = chunk
+            .iter()
+            .map(|oid| Value::Text(oid.clone()))
+            .collect::<Vec<_>>();
+        values.push(Value::Integer(limit));
+        let mut statement = connection
+            .prepare(&query)
+            .map_err(|error| search_error("preparing promotion commit paths", error))?;
+        let rows = statement
+            .query_map(params_from_iter(values), |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
+            })
+            .map_err(|error| search_error("reading promotion commit paths", error))?;
+        for row in rows {
+            let (oid, raw_path) =
+                row.map_err(|error| search_error("reading promotion commit paths", error))?;
+            match found.last_mut() {
+                Some(entry) if entry.oid == oid => {
+                    if !entry.paths.contains(&raw_path) {
+                        entry.paths.push(raw_path);
+                    }
+                }
+                _ => found.push(PromotionCommitPaths {
+                    oid,
+                    paths: vec![raw_path],
+                }),
+            }
+        }
+    }
+    Ok(found)
 }
 /// One cached commit's deduplicated changed paths, in cache order.
 pub(crate) struct RelationSupport {
