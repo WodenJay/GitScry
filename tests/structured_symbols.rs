@@ -1,7 +1,7 @@
 mod support;
 
 use std::fs;
-use support::{TestRepo, git};
+use support::{TestRepo, git, git_command};
 
 fn commit(repo: &TestRepo, source: &str, subject: &str) -> String {
     fs::create_dir_all(repo.dir.path().join("src")).unwrap();
@@ -732,4 +732,317 @@ fn header_prototypes_fail_closed_with_closed_language_errors() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("no supported declaration"), "{stderr}");
     assert!(!stderr.contains("lightweight symbol selection"), "{stderr}");
+}
+
+fn commit_go(repo: &TestRepo, source: &str, subject: &str) -> String {
+    fs::create_dir_all(repo.dir.path().join("src")).unwrap();
+    fs::write(repo.dir.path().join("src/store.go"), source).unwrap();
+    git(repo.dir.path(), ["add", "."]);
+    git(repo.dir.path(), ["commit", "-m", subject]);
+    repo.head()
+}
+
+fn query_go(repo: &TestRepo, command: &str, selector: &str, revision: &str) -> serde_json::Value {
+    let args: Vec<&str> = if command == "regression" {
+        vec![
+            command,
+            "failure",
+            "--path",
+            "src/store.go",
+            "--symbol",
+            selector,
+            "--bad",
+            revision,
+            "--json",
+        ]
+    } else {
+        vec![
+            command,
+            "src/store.go",
+            "--symbol",
+            selector,
+            "--at",
+            revision,
+            "--json",
+        ]
+    };
+    let output = repo.run(args);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+#[test]
+fn go_commands_return_structured_history_and_exclude_neighbors() {
+    let repo = TestRepo::new();
+    let initial = commit_go(
+        &repo,
+        concat!(
+            "package store\n",
+            "\n",
+            "type Client struct {\n",
+            "\tlimit int\n",
+            "}\n",
+            "\n",
+            "func (c *Client) Fetch(path string) (int, error) {\n",
+            "\treturn 1, nil\n",
+            "}\n",
+            "\n",
+            "func neighbor() int {\n",
+            "\treturn 0\n",
+            "}\n",
+        ),
+        "Create fetch",
+    );
+    let changed = commit_go(
+        &repo,
+        concat!(
+            "package store\n",
+            "\n",
+            "type Client struct {\n",
+            "\tlimit int\n",
+            "}\n",
+            "\n",
+            "func (c *Client) Fetch(path string) (int, error) {\n",
+            "\treturn 2, nil\n",
+            "}\n",
+            "\n",
+            "func neighbor() int {\n",
+            "\treturn 0\n",
+            "}\n",
+        ),
+        "Change fetch",
+    );
+    let neighbor = commit_go(
+        &repo,
+        concat!(
+            "package store\n",
+            "\n",
+            "type Client struct {\n",
+            "\tlimit int\n",
+            "}\n",
+            "\n",
+            "func (c *Client) Fetch(path string) (int, error) {\n",
+            "\treturn 2, nil\n",
+            "}\n",
+            "\n",
+            "func neighbor() int {\n",
+            "\treturn 1\n",
+            "}\n",
+        ),
+        "Change neighbor",
+    );
+    repo.index();
+    for command in ["why", "tests", "related", "regression"] {
+        let report = query_go(&repo, command, "Client.Fetch", &neighbor);
+        let selected = &report["symbol_selection"];
+        assert_eq!(
+            selected["input_selector"], "Client.Fetch",
+            "{command}: {report}"
+        );
+        assert_eq!(selected["qualified_name"], "Client.Fetch");
+        assert_eq!(selected["kind"], "method");
+        assert_eq!(selected["start_line"], 7);
+        assert_eq!(selected["end_line"], 9);
+        assert_eq!(selected["identifier_line"], 7);
+        assert_eq!(selected["language"], "go");
+        assert_eq!(selected["mode"], "structured");
+        if command == "why" {
+            assert_eq!(
+                report["symbol_summary"]["introduction"]["commit_oid"], initial,
+                "{command}: {report}"
+            );
+        }
+        let rendered = report.to_string();
+        if command == "why" || command == "regression" {
+            assert!(rendered.contains("Change fetch"), "{command}: {report}");
+            assert!(!rendered.contains("Change neighbor"), "{command}: {report}");
+        }
+    }
+    let _ = changed;
+}
+
+#[test]
+fn go_value_receiver_simple_and_suffix_selectors_resolve_uniquely() {
+    let repo = TestRepo::new();
+    let revision = commit_go(
+        &repo,
+        concat!(
+            "package store\n",
+            "\n",
+            "func fetch() {}\n",
+            "\n",
+            "type Cache struct {\n",
+            "\titems int\n",
+            "}\n",
+            "\n",
+            "type L1 struct {\n",
+            "\tCache\n",
+            "}\n",
+            "\n",
+            "func (c Cache) Load() int {\n",
+            "\treturn c.items\n",
+            "}\n",
+        ),
+        "Create cache",
+    );
+    repo.index();
+    let report = query_go(&repo, "why", "Load", &revision);
+    assert_eq!(report["symbol_selection"]["qualified_name"], "Cache.Load");
+    let report = query_go(&repo, "why", "Cache.Load", &revision);
+    assert_eq!(report["symbol_selection"]["qualified_name"], "Cache.Load");
+    let report = query_go(&repo, "why", "fetch", &revision);
+    assert_eq!(report["symbol_selection"]["kind"], "function");
+}
+
+#[test]
+fn go_bodyless_signatures_and_receiver_collisions_fail_explicitly() {
+    let repo = TestRepo::new();
+    let signature = commit_go(
+        &repo,
+        concat!(
+            "package store\n",
+            "\n",
+            "type Handler interface {\n",
+            "\tServe(path string) error\n",
+            "}\n",
+        ),
+        "Interface signature only",
+    );
+    commit_go(
+        &repo,
+        concat!(
+            "package store\n",
+            "\n",
+            "func (a Inner) m() {}\n",
+            "\n",
+            "func (b Outer) m() {}\n",
+        ),
+        "Receiver collision",
+    );
+    repo.index();
+    let output = repo.run([
+        "why",
+        "src/store.go",
+        "--symbol",
+        "Serve",
+        "--at",
+        &signature,
+    ]);
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("no supported declaration"), "{stderr}");
+    let output = repo.run(["why", "src/store.go", "--symbol", "m"]);
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("ambiguous"), "{stderr}");
+    assert!(stderr.contains("Inner.m"), "{stderr}");
+    assert!(stderr.contains("Outer.m"), "{stderr}");
+}
+
+#[test]
+fn go_shallow_history_keeps_its_uncertainty_disclosure() {
+    let source = TestRepo::new();
+    commit_go(
+        &source,
+        "package store\n\nfunc fetch() {}\n",
+        "Create fetch",
+    );
+    commit_go(
+        &source,
+        "package store\n\nfunc fetch() int { return 1 }\n",
+        "Change fetch",
+    );
+    let parent = tempfile::tempdir().expect("create clone parent");
+    let clone = parent.path().join("clone");
+    let cloned = git_command(parent.path())
+        .args(["clone", "--depth", "1", "--no-local"])
+        .arg(source.dir.path())
+        .arg(&clone)
+        .output()
+        .expect("clone shallow repository");
+    assert!(
+        cloned.status.success(),
+        "{}",
+        String::from_utf8_lossy(&cloned.stderr)
+    );
+    let indexed = TestRepo::run_at(&clone, ["index"]);
+    assert!(
+        indexed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&indexed.stderr)
+    );
+    let output = TestRepo::run_at(
+        &clone,
+        ["why", "src/store.go", "--symbol", "fetch", "--json"],
+    );
+    assert_eq!(output.status.code(), Some(0));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        report["symbol_summary"]["introduction"]["status"], "unknown",
+        "{report}"
+    );
+    assert!(
+        report["symbol_summary"]["introduction"]["reason"]
+            .as_str()
+            .is_some(),
+        "{report}"
+    );
+}
+
+#[test]
+fn legacy_constants_and_variables_stay_selectable_across_languages() {
+    let repo = TestRepo::new();
+    fs::create_dir_all(repo.dir.path().join("src")).unwrap();
+    fs::write(
+        repo.dir.path().join("src/limits.c"),
+        "const int limit = 3;\nint count = 4;\nint compute(void) { return limit + count; }\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.dir.path().join("src/limits.go"),
+        "package store\n\nconst limit = 3\n\nvar count = 4\n",
+    )
+    .unwrap();
+    git(repo.dir.path(), ["add", "."]);
+    git(repo.dir.path(), ["commit", "-m", "Create limits"]);
+    repo.index();
+    let output = repo.run(["why", "src/limits.c", "--symbol", "limit", "--json"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["symbol_selection"]["kind"], "constant", "{report}");
+    assert_eq!(report["symbol_selection"]["language"], "c");
+    assert_eq!(report["symbol_selection"]["mode"], "structured");
+    let output = repo.run(["why", "src/limits.c", "--symbol", "count", "--json"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["symbol_selection"]["kind"], "variable", "{report}");
+    let output = repo.run(["why", "src/limits.go", "--symbol", "limit", "--json"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["symbol_selection"]["kind"], "constant", "{report}");
+    assert_eq!(report["symbol_selection"]["language"], "go");
+    let output = repo.run(["why", "src/limits.go", "--symbol", "count", "--json"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["symbol_selection"]["kind"], "variable", "{report}");
 }
