@@ -327,9 +327,15 @@ Examples:
     },
     #[command(
         about = "Build or refresh the repository history cache",
-        after_help = r#"Adds locally available history reachable from HEAD. Previously cached commits
-remain available across branch switches; fetch remote history with Git first.
-The cache is shared by linked worktrees under the Git common directory's gitscry/.
+        after_help = r#"Adds locally available history reachable from HEAD, or from explicit
+revisions with --ref (repeatable). Each --ref value must resolve to one commit:
+branches, remote-tracking branches, tags, commit IDs, and ancestry expressions
+like HEAD~3 are accepted; ranges are rejected; nothing is fetched. Previously
+cached commits remain available across branch switches; fetch remote history
+with Git first. Each --ref selection applies to this run only; run it again to
+refresh that revision later. Reconstruction of a missing or incompatible cache
+covers only the revisions selected in that run. The cache is shared by linked
+worktrees under the Git common directory's gitscry/.
 
 Semantic indexing is off by default. Enabling it saves the choice for later index
 runs and may download about 90 MB of shared model resources. Offline use requires
@@ -338,10 +344,15 @@ leave the ordinary history cache usable. Queries use local resources only.
 
 Examples:
   gitscry index
+  gitscry index --ref origin/feature
+  gitscry index --ref origin/a --ref v1.2 --ref HEAD~3
   gitscry index --semantic
   gitscry index --no-semantic"#
     )]
     Index {
+        /// Cache history reachable from these revisions instead of HEAD; repeatable.
+        #[arg(long = "ref", value_name = "REVISION")]
+        refs: Vec<String>,
         /// Generate and maintain the local semantic index.
         #[arg(long, conflicts_with = "no_semantic")]
         semantic: bool,
@@ -885,6 +896,17 @@ impl Command {
             | Self::Stats { json, .. } => *json,
             Self::Clear { .. } | Self::Prune { .. } => false,
             Self::Update | Self::Index { .. } => false,
+        }
+    }
+
+    /// Progress context for `gitscry index`; empty when indexing current HEAD.
+    pub(crate) fn index_scope(&self) -> String {
+        match self {
+            Self::Index { refs, .. } if !refs.is_empty() => {
+                let list = refs.join(", ");
+                format!("Indexing history reachable from the selected revisions: {list}...")
+            }
+            _ => String::new(),
         }
     }
 

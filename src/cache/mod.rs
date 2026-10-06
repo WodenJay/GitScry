@@ -108,7 +108,7 @@ impl QuerySession {
             .map_err(|error| query_error(format!("checking requested revision: {error}")))?;
         if present == 0 {
             return Err(query_error(format!(
-                "revision {revision} is outside the published cache generation; run `gitscry index` first"
+                "revision {revision} is outside the published cache generation; run `gitscry index --ref {revision}` to cache its locally available history"
             )));
         }
         Ok(())

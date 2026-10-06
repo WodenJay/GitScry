@@ -40,9 +40,12 @@ pub(crate) enum Progress {
     Update(UpdateStage),
 }
 
-#[derive(Clone, Copy)]
 pub(crate) struct IndexReport {
-    pub(crate) current_head_commit_count: usize,
+    /// Requested revision paired with its resolved, deduplicated commit ID;
+    /// aliases of one commit repeat the commit ID. Empty when indexing HEAD.
+    pub(crate) selected: Vec<(String, String)>,
+    /// Unique commits reachable from the selected histories.
+    pub(crate) selected_commit_count: usize,
     pub(crate) semantic_disabled: bool,
 }
 
@@ -154,10 +157,11 @@ pub(crate) fn execute(
             SearchScopeOptions::default(),
         ),
         Command::Index {
+            refs,
             semantic,
             no_semantic,
         } => {
-            return index::run(semantic, no_semantic, &mut |stage| {
+            return index::run(refs, semantic, no_semantic, &mut |stage| {
                 report(Progress::Index(stage))
             });
         }

@@ -1630,14 +1630,16 @@ fn indexing_only_current_head_and_reuses_cached_ancestors_across_branches() {
         String::from_utf8_lossy(&detached_index.stderr)
     );
     let cache = Connection::open(&cache_path).unwrap();
-    let completed_tip: String = cache
+    // Fully covered history is not rewritten just to move the latest-publisher
+    // marker; the base commit itself must already be cached.
+    let base_cached: i64 = cache
         .query_row(
-            "SELECT value FROM metadata WHERE key = 'completed_tip'",
-            [],
+            "SELECT COUNT(*) FROM commits WHERE oid = ?1",
+            [&base],
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(completed_tip, base);
+    assert_eq!(base_cached, 1);
     assert_eq!(
         cache
             .query_row("SELECT COUNT(*) FROM commits", [], |row| row
@@ -2470,4 +2472,234 @@ fn linked_worktrees_share_the_repository_cache_and_lock() {
     );
     assert!(!repo.dir.path().join(".gitscry").exists());
     assert!(!linked.join(".gitscry").exists());
+}
+
+#[test]
+fn explicit_ref_caches_remote_branch_without_changing_checkout() {
+    let repo = TestRepo::new();
+    repo.commit("base.txt", b"base\n", "Shared base commit");
+    git(repo.dir.path(), ["switch", "-c", "feature"]);
+    repo.commit("feature.txt", b"feature\n", "Feature only marker");
+    let feature_tip = repo.head();
+    git(
+        repo.dir.path(),
+        ["update-ref", "refs/remotes/origin/feature", &feature_tip],
+    );
+    git(repo.dir.path(), ["switch", "main"]);
+    repo.commit("main.txt", b"main\n", "Main only marker");
+
+    let before_head = repo.head();
+    fs::write(repo.dir.path().join("staged.txt"), b"staged\n").unwrap();
+    git(repo.dir.path(), ["add", "staged.txt"]);
+    fs::write(repo.dir.path().join("dirty.txt"), b"dirty\n").unwrap();
+
+    let output = repo.run(["index", "--ref", "origin/feature"]);
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("origin/feature") && stdout.contains(&feature_tip[..12]),
+        "success output must identify the selected revision and pinned commit: {stdout}"
+    );
+    assert!(!stdout.contains("current HEAD"));
+
+    // HEAD, index and worktree must be preserved.
+    assert_eq!(repo.head(), before_head);
+    let status = git_stdout(repo.dir.path(), ["status", "--porcelain"]);
+    assert!(status.contains("A  staged.txt"), "{status}");
+    assert!(status.contains("?? dirty.txt"), "{status}");
+
+    // Explicit selection excludes unrelated HEAD history.
+    let cache = Connection::open(repo.cache_dir().join("cache.sqlite")).unwrap();
+    assert_eq!(
+        cache
+            .query_row("SELECT COUNT(*) FROM commits", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        2,
+        "explicit selection must not include unrelated HEAD history"
+    );
+    drop(cache);
+
+    let timeline = repo.run(["timeline", "feature.txt", "--at", "origin/feature"]);
+    assert_eq!(
+        timeline.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&timeline.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&timeline.stdout).contains("Feature only marker"),
+        "{}",
+        String::from_utf8_lossy(&timeline.stdout)
+    );
+}
+
+#[test]
+fn explicit_refs_deduplicate_aliases_and_reject_invalid_input_before_publication() {
+    let repo = TestRepo::new();
+    repo.commit("base.txt", b"base\n", "Shared base commit");
+    let base = repo.head();
+    repo.commit("next.txt", b"next\n", "Second commit");
+    let second = repo.head();
+
+    // Aliases of one commit resolve to one starting point.
+    let output = repo.run(["index", "--ref", "HEAD", "--ref", &second]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let cache = Connection::open(repo.cache_dir().join("cache.sqlite")).unwrap();
+    assert_eq!(
+        cache
+            .query_row("SELECT COUNT(*) FROM commits", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        2,
+        "aliases of one commit must not duplicate cached material"
+    );
+    drop(cache);
+
+    // All inputs are validated before publication: an unknown ref must not
+    // partially fulfill the request or damage the published generation.
+    let output = repo.run(["index", "--ref", &base, "--ref", "no-such-ref"]);
+    assert_eq!(output.status.code(), Some(2));
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        error.contains("no-such-ref") || error.contains("invalid revision"),
+        "{error}"
+    );
+    let cache = Connection::open(repo.cache_dir().join("cache.sqlite")).unwrap();
+    assert_eq!(
+        cache
+            .query_row("SELECT COUNT(*) FROM commits", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        2,
+        "failed validation must leave the published generation intact"
+    );
+}
+
+#[test]
+fn explicit_refs_accept_ancestry_and_tag_forms() {
+    let repo = TestRepo::new();
+    repo.commit("one.txt", b"one\n", "First commit");
+    let first = repo.head();
+    repo.commit("two.txt", b"two\n", "Second commit");
+    git(repo.dir.path(), ["tag", "v1"]);
+    repo.commit("three.txt", b"three\n", "Third commit");
+
+    let output = repo.run(["index", "--ref", "HEAD~2", "--ref", "v1"]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let cache = Connection::open(repo.cache_dir().join("cache.sqlite")).unwrap();
+    assert_eq!(
+        cache
+            .query_row(
+                "SELECT COUNT(*) FROM commits WHERE oid = ?1",
+                [&first],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        cache
+            .query_row("SELECT COUNT(*) FROM commits", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        2,
+        "the ancestry expression and the tag resolve to distinct single commits"
+    );
+}
+
+#[test]
+fn explicit_refs_union_independent_histories_and_retain_existing_coverage() {
+    let repo = TestRepo::new();
+    repo.commit("base.txt", b"base\n", "Initial commit");
+    let initial = repo.head();
+    git(repo.dir.path(), ["checkout", "--orphan", "isolated"]);
+    git(repo.dir.path(), ["rm", "-rf", "--quiet", "."]);
+    fs::write(repo.dir.path().join("island.txt"), b"island\n").unwrap();
+    git(repo.dir.path(), ["add", "island.txt"]);
+    git(repo.dir.path(), ["commit", "-m", "Independent root commit"]);
+    let island = repo.head();
+
+    let output = repo.run(["index", "--ref", &initial, "--ref", &island]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(&initial[..12]) && stdout.contains(&island[..12]),
+        "each selected revision must be reported: {stdout}"
+    );
+
+    let cache = Connection::open(repo.cache_dir().join("cache.sqlite")).unwrap();
+    assert_eq!(
+        cache
+            .query_row("SELECT COUNT(*) FROM commits", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        2,
+        "independent roots are cached as one union without an ancestry requirement"
+    );
+}
+
+#[test]
+fn explicit_ref_rejects_ranges() {
+    let repo = TestRepo::new();
+    repo.commit("one.txt", b"one\n", "First commit");
+    repo.commit("two.txt", b"two\n", "Second commit");
+
+    let output = repo.run(["index", "--ref", "HEAD~1..HEAD"]);
+    assert_eq!(output.status.code(), Some(2));
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        error.contains("invalid revision") || error.contains("HEAD~1..HEAD"),
+        "{error}"
+    );
+}
+
+#[test]
+fn query_error_for_uncached_revision_recommends_explicit_indexing() {
+    let repo = TestRepo::new();
+    repo.commit(
+        "base.txt",
+        b"base
+",
+        "Initial commit",
+    );
+    git(repo.dir.path(), ["switch", "-c", "feature"]);
+    repo.commit(
+        "feature.txt",
+        b"feature
+",
+        "Feature only commit",
+    );
+    let feature = repo.head();
+    git(repo.dir.path(), ["switch", "main"]);
+
+    repo.index();
+    let output = repo.run(["timeline", "feature.txt", "--at", &feature]);
+    assert_eq!(output.status.code(), Some(1));
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        error.contains("outside the published cache generation") && error.contains("index --ref"),
+        "coverage error must recommend explicit revision indexing: {error}"
+    );
 }

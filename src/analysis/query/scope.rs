@@ -286,7 +286,7 @@ fn require_cached_revision(
         Ok(())
     } else {
         Err(AppError::input(format!(
-            "revision {requested} is outside the published cache generation; run `gitscry index` first"
+            "revision {requested} is outside the published cache generation; run `gitscry index --ref {requested}` to cache its locally available history"
         )))
     }
 }
