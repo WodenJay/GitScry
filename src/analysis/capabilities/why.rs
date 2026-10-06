@@ -431,14 +431,18 @@ fn summarize_symbol(
             reason: "shallow, merge, or path-move history makes symbol lineage uncertain"
                 .to_owned(),
         },
-        Err(SymbolHistoryLimitation::IntroductionAbsent) => SymbolFact::Unknown {
-            reason: "symbol introduction is not present in cached path history".to_owned(),
-        },
-        Ok(commit) if !eligible_revisions.is_none_or(|eligible| eligible.contains(&commit.oid)) => {
+        Ok(_) | Err(SymbolHistoryLimitation::IntroductionAbsent)
+            if trace.introduction.as_ref().is_ok_and(|oid| {
+                !eligible_revisions.is_none_or(|eligible| eligible.contains(oid))
+            }) =>
+        {
             SymbolFact::Unknown {
                 reason: "symbol introduction is outside the current query scope".to_owned(),
             }
         }
+        Err(SymbolHistoryLimitation::IntroductionAbsent) => SymbolFact::Unknown {
+            reason: "symbol introduction is not present in cached path history".to_owned(),
+        },
         Ok(commit) => SymbolFact::Known {
             commit_oid: commit.oid.clone(),
             subject: commit.subject.clone(),
