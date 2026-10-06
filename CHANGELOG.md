@@ -1,3 +1,59 @@
+## [0.13.0] - 2026-10-06
+
+### 🚀 Features
+
+- *(conflicts)* Add safe historical cases
+- *(symbol)* Resolve structured Rust selectors
+- *(symbol)* Expose pinned selection metadata
+- *(symbol)* Share traced history and notices
+- *(symbol)* Merge Rust structured history
+- *(symbol)* Resolve structured Python selectors
+- *(symbol)* Resolve structured Go selectors
+- *(conflicts)* Report association basis and region trace for historical cases
+- *(conflicts)* Rank and expose inspectable cases
+- *(conflicts)* Disclose historical case coverage
+- *(symbol)* Add structured JS/TS symbol extraction
+- *(conflicts)* Bound historical checks explicitly
+- *(symbols)* Structured C++ symbol extraction
+- Dual-grammar interpretation for C/C++ header symbols
+
+### 🐛 Bug Fixes
+
+- *(regression)* Require unique symbol targets
+- *(symbol)* Scan every declaration candidate
+- *(context)* Preserve follow-up ranking
+- *(context)* Separate identity from scope
+- *(context)* Merge identity scope fix
+- *(failures)* Count eligible results
+- *(symbol)* Disclose degradation in text
+- *(symbol)* Guard historical ownership and copies
+- *(conflicts)* Correct candidate coverage accounting and bump schema to 6
+- *(symbol)* Keep TS method decorators and export decorations in spans
+- *(tests)* Pin the noVNC fixture to LF line endings
+- *(test)* Point c query helper at util.c
+- Preserve symbol scope disclosure precedence
+
+### ⚡ Performance
+
+- *(cache)* Retain decoded hunk blocks
+- *(context)* Batch current path modes
+- *(history)* Share query graph preparation
+- *(test)* Batch fixture identity and fillers
+- *(conflicts)* Reuse targeted tree metadata
+- Merge test runtime improvements
+
+### 🚜 Refactor
+
+- *(symbol)* Retain declaration identity
+- *(history)* Remove redundant borrows
+- Share symbol history confirmation
+- Centralize conflict candidate counters
+
+### 📚 Documentation
+
+- Record hotspot dogfooding timeout
+- Change block type from bash to console in README
+- Define patch relationship boundaries
 ## [0.12.0] - 2026-10-05
 
 ### 🚀 Features
