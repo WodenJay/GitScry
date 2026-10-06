@@ -1,6 +1,7 @@
 //! Source-only symbol location, shared by why and regression targets.
 //! Git objects and target anchors stay outside this module.
 
+mod go;
 mod rust;
 
 /// The actual source interpretation and declaration selected at a pinned revision.
@@ -40,11 +41,12 @@ pub(super) fn locate_unique(content: &[u8], name: &str, path: &str) -> Result<Lo
         return Err(AppError::input("symbol must not be empty"));
     }
     let (locations, notice) = declarations(content, path);
+    let separator = qualification_separator(path);
     if let Some(notice) = &notice
-        && name.contains("::")
+        && name.contains(separator)
     {
         return Err(AppError::input(format!(
-            "qualified symbol {name} requires structured Rust parsing in {path}: {notice}"
+            "qualified symbol {name} requires structured parsing in {path}: {notice}"
         )));
     }
     let mut matches = locations
@@ -54,7 +56,7 @@ pub(super) fn locate_unique(content: &[u8], name: &str, path: &str) -> Result<Lo
             qualified == name
                 || qualified
                     .strip_suffix(name)
-                    .is_some_and(|prefix| prefix.ends_with("::"))
+                    .is_some_and(|prefix| prefix.ends_with(separator))
         })
         .collect::<Vec<_>>();
     match matches.len() {
@@ -107,12 +109,22 @@ pub(super) fn declaration_lines(content: &[u8], name: &str, path: &str) -> Vec<u
         .collect()
 }
 
+/// Qualification uses each language's native separator; no cross-language mixing.
+fn qualification_separator(path: &str) -> &'static str {
+    if path.ends_with(".go") { "." } else { "::" }
+}
+
 /// Enumerate only the interpretation selected by the extension, never try grammars.
 pub(super) fn declarations(content: &[u8], path: &str) -> (Vec<Location>, Option<String>) {
     let (language, reason) = if path.ends_with(".rs") {
         match rust::extract(content) {
             Ok(locations) => return (locations, None),
             Err(reason) => ("rust", reason),
+        }
+    } else if path.ends_with(".go") {
+        match go::extract(content) {
+            Ok(locations) => return (locations, None),
+            Err(reason) => ("go", reason),
         }
     } else {
         ("unsupported", "unsupported language".to_owned())
