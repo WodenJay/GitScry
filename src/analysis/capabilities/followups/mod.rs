@@ -2,6 +2,7 @@
 mod regions;
 
 use crate::analysis::provenance::explicit_revert_declarations;
+use crate::analysis::retrieval::single_revert_target;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::analysis::query::{Context, Options, Outcome, QueryReport, scope};
@@ -621,15 +622,13 @@ fn explicitly_references_seed(
     all_cached_oids: &HashSet<String>,
 ) -> bool {
     let text = String::from_utf8_lossy(message);
-    let resolved = explicit_revert_declarations(&text)
-        .into_iter()
-        .map(|hex| crate::analysis::retrieval::resolve_oid_prefix(all_cached_oids, &hex))
-        .collect::<Option<HashSet<_>>>();
     // A declaration naming several different commits identifies nothing, so the seed is
     // referenced only when the message resolves to the seed alone.
-    resolved.is_some_and(|targets| targets.len() == 1 && targets.contains(seed))
+    single_revert_target(explicit_revert_declarations(&text), |hex| {
+        crate::analysis::retrieval::resolve_oid_prefix(all_cached_oids, hex)
+    })
+    .is_some_and(|target| target == seed)
 }
-
 fn validate_path(path: &str) -> Result<(), AppError> {
     if path.is_empty()
         || path.contains('\0')

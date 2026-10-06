@@ -27,7 +27,9 @@ pub(in crate::analysis) use lexical::Signals;
 pub(in crate::analysis) use lexical::anchors_overlap;
 pub(in crate::analysis) use line_history::{hunk_overlaps_symbol, trace_line};
 pub(in crate::analysis) use rank::{Ranked, assign_citations, sort};
-pub(in crate::analysis) use reverts::{Revert, RevertIndex, index as reverts, resolve_oid_prefix};
+pub(in crate::analysis) use reverts::{
+    Revert, RevertIndex, index as reverts, resolve_oid_prefix, single_revert_target,
+};
 pub(in crate::analysis) use text::{distinctive_signals, tokenize};
 pub(crate) use text::{normalize_path, searchable_text};
 /// How deep the lexical pool reaches relative to the caller's `--limit`.

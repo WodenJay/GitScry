@@ -1,13 +1,11 @@
 use std::collections::{HashMap, HashSet};
 
+use super::super::provenance::{explicit_revert_declarations, is_revert_subject};
+use super::message_parts;
 use crate::{
     app::AppError,
     cache::{QuerySession, SearchFilter},
 };
-
-use super::super::provenance::{explicit_revert_declarations, is_revert_subject};
-use super::message_parts;
-
 /// A cached commit whose message explicitly declares what it reverts, or whose subject
 /// reads like a revert. The declaration is authoritative; a subject alone never names a
 /// target, so revert-like commits without a declaration carry no revert relationship.
@@ -73,16 +71,10 @@ pub(in crate::analysis) fn index(
     let mut reverts = Vec::new();
     for commit in commits {
         let (subject, body) = message_parts(&commit.message);
-        let single_target = explicit_revert_declarations(&format!("{subject}\n{body}"))
-            .into_iter()
-            .map(|hex| resolve_in_scope(&all_cached, &eligible, &hex))
-            .collect::<Option<Vec<_>>>()
-            .and_then(|targets| {
-                let unique = targets.into_iter().collect::<HashSet<_>>();
-                (unique.len() == 1)
-                    .then(|| unique.into_iter().next())
-                    .flatten()
-            });
+        let single_target = single_revert_target(
+            explicit_revert_declarations(&format!("{subject}\n{body}")),
+            |hex| resolve_in_scope(&all_cached, &eligible, hex),
+        );
         if !is_revert_subject(&subject) && single_target.is_none() {
             continue;
         }
@@ -100,6 +92,25 @@ pub(in crate::analysis) fn index(
         }
     }
     Ok(RevertIndex { reverts, by_target })
+}
+
+/// The one target a message's declarations share, when they share exactly one.
+///
+/// Declarations that resolve to nothing are dropped; only resolved declarations naming
+/// distinct targets conflict. A message naming one target (repeatedly or not) binds to it.
+pub(in crate::analysis) fn single_revert_target(
+    declarations: impl IntoIterator<Item = String>,
+    resolve: impl Fn(&str) -> Option<String>,
+) -> Option<String> {
+    let mut targets = HashSet::new();
+    for hex in declarations {
+        if let Some(target) = resolve(&hex) {
+            targets.insert(target);
+        }
+    }
+    (targets.len() == 1)
+        .then(|| targets.into_iter().next())
+        .flatten()
 }
 
 /// Resolve an abbreviated object ID, but only when it is unambiguous.

@@ -14,11 +14,6 @@ const CAUSE_MARKERS: &[&str] = &[
     "since ",
     "due to",
     "reason:",
-    "cannot ",
-    "can't ",
-    "reverted ",
-    "reverts the changes from ",
-    "this is a revert of",
     "why:",
     "root cause",
     "caused by",
@@ -114,20 +109,29 @@ fn starts_with_any(subject: &str, prefixes: &[&str]) -> bool {
 pub(in crate::analysis) fn explicit_revert_declarations(text: &str) -> Vec<String> {
     let mut declarations = Vec::new();
     for sentence in sentences(text) {
-        let lowered = sentence.to_ascii_lowercase();
+        let lowered = sentence.trim_start().to_ascii_lowercase();
         for marker in DECLARATION_MARKERS {
-            let mut cursor = 0;
-            while let Some(found) = lowered[cursor..].find(marker) {
-                let start = cursor + found + marker.len();
-                let hex = lowered[start..]
-                    .chars()
-                    .take_while(char::is_ascii_hexdigit)
-                    .collect::<String>();
-                if hex.len() >= 7 {
-                    declarations.push(hex);
-                }
-                cursor = start;
+            let Some(rest) = lowered.strip_prefix(marker) else {
+                continue;
+            };
+            let hex = rest
+                .chars()
+                .take_while(char::is_ascii_hexdigit)
+                .collect::<String>();
+            if hex.len() < 7 {
+                continue;
             }
+            // "Reverted <oid> because <explanation>" records the rationale; a bare
+            // "Reverted <oid>." states no reason and is not the declaration form.
+            if *marker == "reverted " {
+                let after = rest[hex.len()..].trim_start();
+                if !after.strip_prefix("because ").is_some_and(|reason| {
+                    !reason.trim_end_matches(['.', '!', '?']).trim().is_empty()
+                }) {
+                    continue;
+                }
+            }
+            declarations.push(hex);
         }
     }
     declarations
@@ -309,5 +313,111 @@ fn clean(text: &str) -> String {
         bounded
     } else {
         cleaned
+    }
+}
+
+#[cfg(test)]
+mod declaration_tests {
+    use super::explicit_revert_declarations;
+    use std::collections::HashSet;
+
+    const TARGET: &str = "2a21bee42cfac7044cca9603e59f258605228f3a";
+
+    fn single(text: &str) -> Option<String> {
+        let unique = explicit_revert_declarations(text)
+            .into_iter()
+            .collect::<HashSet<_>>();
+        (unique.len() == 1)
+            .then(|| unique.into_iter().next())
+            .flatten()
+    }
+
+    #[test]
+    fn recognizes_every_supported_family() {
+        for body in [
+            format!("This reverts commit {TARGET}."),
+            format!("This is a revert of commit {TARGET}."),
+            format!("This is a revert of the code changes in commit {TARGET}."),
+            format!("Reverts the changes from commit {TARGET}."),
+            format!("Reverted {TARGET} because it broke the scheduled writer."),
+        ] {
+            assert_eq!(single(&body).as_deref(), Some(TARGET), "{body}");
+        }
+    }
+
+    #[test]
+    fn matches_case_and_paragraph_local_line_wrapping() {
+        let wrapped = "this is a revert of the code changes in\ncommit\n\
+                       2a21bee42cfac704 as it served no\nfunctional purpose.";
+        assert_eq!(single(wrapped).as_deref(), Some(&TARGET[..16]));
+    }
+
+    #[test]
+    fn accepts_repeated_declarations_of_one_target() {
+        let body =
+            "This reverts commit ".to_owned() + TARGET + ".\n\nThis reverts commit " + TARGET + ".";
+        assert_eq!(single(&body).as_deref(), Some(TARGET));
+    }
+
+    #[test]
+    fn rejects_negated_planned_and_conditional_statements() {
+        for body in [
+            format!("This does not revert commit {TARGET}."),
+            format!("Do not revert {TARGET} yet."),
+            format!("We will revert {TARGET} tomorrow."),
+            format!("Consider reverting {TARGET} because it is noisy."),
+            format!("Going to revert {TARGET} soon."),
+            format!("If this fails, revert {TARGET}."),
+        ] {
+            assert!(
+                explicit_revert_declarations(&body).is_empty(),
+                "false positive: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_quoted_examples_and_mid_sentence_mentions() {
+        for body in [
+            format!("The docs say: \"This reverts commit {TARGET}\"."),
+            format!("The earlier message read: This reverts commit {TARGET}."),
+            format!("See whether a revert of {TARGET} helps."),
+            format!("We discussed reverting {TARGET} because it was noisy."),
+        ] {
+            assert!(
+                explicit_revert_declarations(&body).is_empty(),
+                "false positive: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_bare_reverted_without_a_reason() {
+        assert!(explicit_revert_declarations(&format!("Reverted {TARGET}.")).is_empty());
+        assert!(explicit_revert_declarations(&format!("Reverted {TARGET}")).is_empty());
+        assert!(explicit_revert_declarations(&format!("Reverted {TARGET} because.")).is_empty());
+        assert!(explicit_revert_declarations(&format!("Reverted {TARGET} because ")).is_empty());
+    }
+
+    #[test]
+    fn rejects_malformed_and_short_references() {
+        for body in [
+            "This reverts commit nothexhere.".to_owned(),
+            "This reverts commit 123456.".to_owned(),
+            "This reverts commit.".to_owned(),
+            format!("This reverts commit zz{TARGET}."),
+        ] {
+            assert!(
+                explicit_revert_declarations(&body).is_empty(),
+                "false positive: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn does_not_join_unrelated_paragraphs() {
+        let body = "This is a revert of the code changes in\n\n\
+                    2a21bee42cfac7044cca9603e59f258605228f3a.";
+        assert!(explicit_revert_declarations(body).is_empty());
     }
 }

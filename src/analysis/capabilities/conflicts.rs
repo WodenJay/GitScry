@@ -6,7 +6,7 @@ use crate::analysis::{
 };
 use crate::{
     app::AppError,
-    cache::{self, QuerySession, SearchFilter},
+    cache::{self, QuerySession},
     git,
 };
 use serde::Serialize;
@@ -945,7 +945,6 @@ pub(crate) fn execute(
                     &session,
                     &file.path,
                     &shared_reachable,
-                    &shared_scope,
                     &reverts,
                     RELATED_HISTORY_LIMIT,
                 )?
@@ -1022,7 +1021,6 @@ fn related_history(
     session: &QuerySession,
     path: &[u8],
     reachable: &HashSet<String>,
-    _scope: &SearchFilter,
     reverts: &retrieval::RevertIndex,
     limit: usize,
 ) -> Result<(Vec<RelatedLead>, usize, bool), AppError> {

@@ -1280,9 +1280,10 @@ fn failures_subject_only_revert_never_links_without_a_declaration() {
 #[test]
 fn failures_do_not_link_explicit_revert_of_another_commit_through_shared_paths() {
     // A changes only Cargo.lock; B changes the same file; a later revert explicitly
-    // names B. The shared file must not attribute the revert to A.
+    // names B. The shared file must not attribute the revert to A — including when an
+    // unrelated A update intervenes with no touch between A and the revert.
     let repo = TestRepo::new();
-    let a = repo.commit_files_at(
+    let _first_a = repo.commit_files_at(
         &[("Cargo.lock", b"package a\n")],
         "Bump dependency for the parser",
         "2020-01-01T00:00:00+0000",
@@ -1292,7 +1293,14 @@ fn failures_do_not_link_explicit_revert_of_another_commit_through_shared_paths()
         "Pin the regression suite lockfile",
         "2020-02-01T00:00:00+0000",
     );
-    repo.commit_files_at(
+    // Intervening unrelated A update; the revert of B follows with no intervening
+    // touch of A's original change, so the old path fallback would have bound here.
+    let a = repo.commit_files_at(
+        &[("Cargo.lock", b"package a\npackage b\npackage a2\n")],
+        "Bump the unrelated lockfile entry",
+        "2020-02-15T00:00:00+0000",
+    );
+    let revert = repo.commit_files_at(
         &[("Cargo.lock", b"package a\n")],
         &format!(
             "Restore the lockfile\n\nThis reverts commit {}.\n",
@@ -1307,7 +1315,7 @@ fn failures_do_not_link_explicit_revert_of_another_commit_through_shared_paths()
     // Only B is reported, as the revert's resolved target; A stays out entirely.
     let b_entry = block(&text, &b[..12]);
     assert!(
-        b_entry.contains("recorded revert"),
+        b_entry.contains(&revert[..12]) && b_entry.contains("(reverts this change)"),
         "the explicit revert of B was not reported against B:\n{b_entry}"
     );
     assert!(
@@ -1344,7 +1352,7 @@ fn failures_recognize_noncanonical_explicit_revert_declarations() {
     let text = stdout(&output);
     let entry = block(&text, &abandoned[..12]);
     assert!(
-        entry.contains(&revert[..12]) && entry.contains("recorded revert"),
+        entry.contains(&revert[..12]) && entry.contains("(reverts this change)"),
         "a wrapped non-canonical declaration was not recognized:\n{entry}"
     );
 }
