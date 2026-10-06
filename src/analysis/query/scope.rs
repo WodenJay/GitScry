@@ -3,7 +3,7 @@ use std::collections::{BTreeSet, HashSet};
 use crate::{
     analysis::SearchScopeInfo,
     app::AppError,
-    cache::{QuerySession, SearchFilter},
+    cache::{QuerySession, SQL_PARAMETER_LIMIT, SearchFilter},
     git::Repository,
 };
 
@@ -503,8 +503,19 @@ fn compare_fraction(left: &str, right: &str) -> std::cmp::Ordering {
 ///
 /// Paths stay repository-relative and case-sensitive: `.` selects the whole
 /// repository; leading `./`, trailing separators, and `\` are normalized; empty,
-/// absolute, and parent-traversal paths are rejected.
+/// absolute, and parent-traversal paths are rejected; the count stays within the
+/// SQL parameter budget shared by cache readers.
 pub(super) fn query_paths(requested: &[String]) -> Result<Vec<String>, AppError> {
+    // Cache readers bind two SQL parameters per restricted path (exact value and
+    // `path/` prefix) on top of five fixed bindings in the tightest query, which
+    // caps at SQL_PARAMETER_LIMIT. The tightest consumer (scoped search) reserves
+    // six fixed slots, so at most (SQL_PARAMETER_LIMIT - 6) / 2 paths fit.
+    const MAX_QUERY_PATHS: usize = (SQL_PARAMETER_LIMIT - 6) / 2;
+    if requested.len() > MAX_QUERY_PATHS {
+        return Err(AppError::input(format!(
+            "error: at most {MAX_QUERY_PATHS} --path values are supported per query"
+        )));
+    }
     let mut normalized = Vec::new();
     for path in requested {
         if path.trim().is_empty() {
@@ -512,10 +523,13 @@ pub(super) fn query_paths(requested: &[String]) -> Result<Vec<String>, AppError>
                 "error: --path must not be empty or whitespace",
             ));
         }
-        let bytes = path.as_bytes();
+        // Normalize separators first so `..`, drive letters, and rooted
+        // paths are validated against the repository-relative form.
+        let forward = path.replace('\\', "/");
+        let bytes = forward.as_bytes();
         let has_windows_drive =
             bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
-        let candidate = std::path::Path::new(path);
+        let candidate = std::path::Path::new(&forward);
         if candidate.is_absolute()
             || candidate.has_root()
             || has_windows_drive
@@ -527,7 +541,7 @@ pub(super) fn query_paths(requested: &[String]) -> Result<Vec<String>, AppError>
                 "error: --path must be relative to the repository root without `..` segments: {path}"
             )));
         }
-        let mut normalized_path = path.replace('\\', "/");
+        let mut normalized_path = forward;
         while let Some(stripped) = normalized_path.strip_prefix("./") {
             normalized_path = stripped.to_owned();
         }
@@ -540,4 +554,38 @@ pub(super) fn query_paths(requested: &[String]) -> Result<Vec<String>, AppError>
         }
     }
     Ok(normalized)
+}
+
+#[cfg(test)]
+mod query_path_tests {
+    use super::query_paths;
+
+    fn rejected(path: &str) -> bool {
+        query_paths(&[path.to_owned()]).is_err()
+    }
+
+    #[test]
+    fn query_paths_normalizes_and_validates() {
+        assert_eq!(
+            query_paths(&["./packages/a/".to_owned()]).unwrap(),
+            ["packages/a"]
+        );
+        assert_eq!(query_paths(&[".".to_owned()]).unwrap(), ["."]);
+        assert_eq!(
+            query_paths(&[r"weird\sub\".to_owned()]).unwrap(),
+            ["weird/sub"]
+        );
+        assert!(rejected(""));
+        assert!(rejected("   "));
+        assert!(rejected("/etc/passwd"));
+        assert!(rejected(r"\etc\passwd"));
+        assert!(rejected(r"C:\temp"));
+        assert!(rejected("../outside"));
+        assert!(rejected("src/../../outside"));
+        assert!(rejected(r"src\..\..\outside"));
+        assert_eq!(
+            query_paths(&["a/b".to_owned(), "./a/b/".to_owned()]).unwrap(),
+            ["a/b"]
+        );
+    }
 }

@@ -12,7 +12,7 @@ _Avoid_: index, database, repository memory
 The selected uncommitted additions, modifications, removals, and detected renames for which an Agent seeks historical material. It is distinct from the historical query scope.
 
 **historical query scope**:
-The subset of cache-reachable commits eligible to contribute material to a historical query. It may be narrowed by revision reachability and commit time without changing the query's target revision or implying coverage beyond the cache.
+The subset of cache-reachable commits eligible to contribute material to a historical query. It may be narrowed by revision reachability, commit time, or historical changed paths without changing the query's target revision or implying coverage beyond the cache.
 
 **historical detail**:
 The contents of a cache-reachable commit or file version opened to inspect the context around returned material. It is not additional query-selected material and does not expand the historical query scope.

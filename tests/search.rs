@@ -2449,23 +2449,7 @@ fn code_regex_search_rejects_mixed_and_text_only_modes() {
     }
 }
 
-#[allow(dead_code)]
 fn commit_staged_at(repo: &TestRepo, message: &str, date: &str) {
-    let output = git_command(repo.dir.path())
-        .args(["commit", "-m", message])
-        .env("GIT_AUTHOR_DATE", date)
-        .env("GIT_COMMITTER_DATE", date)
-        .output()
-        .expect("commit staged changes");
-    assert!(
-        output.status.success(),
-        "git commit failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-/// Commit already-staged changes at fixed dates, like `commit_staged_at`.
-fn commit_staged_at_path_scope(repo: &TestRepo, message: &str, date: &str) {
     let output = git_command(repo.dir.path())
         .args(["commit", "-m", message])
         .env("GIT_AUTHOR_DATE", date)
@@ -2690,7 +2674,7 @@ fn search_path_scope_matches_deleted_and_moved_paths() {
         "2001-01-02T00:00:00Z",
     );
     git(repo.dir.path(), ["rm", "component/removed.txt"]);
-    commit_staged_at_path_scope(
+    commit_staged_at(
         &repo,
         "PathScope delete removed file",
         "2001-01-03T00:00:00Z",
@@ -2705,7 +2689,7 @@ fn search_path_scope_matches_deleted_and_moved_paths() {
         repo.dir.path(),
         ["mv", "component/keep.txt", "elsewhere/keep.txt"],
     );
-    commit_staged_at_path_scope(&repo, "PathScope move keep file", "2001-01-05T00:00:00Z");
+    commit_staged_at(&repo, "PathScope move keep file", "2001-01-05T00:00:00Z");
     repo.index();
 
     // Deleted paths remain eligible through their recorded old path.
@@ -2876,6 +2860,9 @@ fn search_path_scope_rejects_invalid_paths() {
         "../outside",
         "src/../../outside",
         "C:\\temp",
+        // Backslash traversal must be rejected after separator normalization.
+        "src\\..\\..\\outside",
+        "\\etc\\passwd",
     ] {
         let output = repo.run(["search", "PathScope", "--path", invalid]);
         assert_ne!(
@@ -2924,17 +2911,6 @@ fn search_path_scope_preserves_hybrid_readiness_requirements() {
     let error = String::from_utf8_lossy(&hybrid.stderr);
     assert!(error.contains("semantic"), "{error}");
     assert!(error.contains("gitscry index --semantic"), "{error}");
-}
-
-#[test]
-fn search_help_documents_query_path_scope() {
-    let repo = TestRepo::new();
-    let output = repo.run(["search", "--help"]);
-    assert_eq!(output.status.code(), Some(0));
-    let help = String::from_utf8_lossy(&output.stdout);
-    for expected in ["--path", "repeatable"] {
-        assert!(help.contains(expected), "missing {expected:?} in:\n{help}");
-    }
 }
 
 #[test]

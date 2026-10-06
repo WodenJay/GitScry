@@ -61,6 +61,14 @@ pub(in crate::cache) fn semantic_top_k(
     let sql = match scope {
         Some(scope) => {
             let eligibility = changed_path_predicate(scope, scope_values(scope).len() + 1);
+            // `changed_path_predicate` emits `AND EXISTS (...)` for restricted
+            // scopes and an empty string for unrestricted ones, so the WHERE
+            // clause is assembled from the predicate itself.
+            let eligibility_clause = if eligibility.is_empty() {
+                String::new()
+            } else {
+                format!("WHERE {}", eligibility.trim_start_matches("AND "))
+            };
             format!(
                 "{SEARCH_SCOPE_CTE}
                  SELECT c.commit_id, c.oid, c.commit_time, v.commit_oid, v.embedding,
@@ -68,7 +76,7 @@ pub(in crate::cache) fn semantic_top_k(
                  FROM eligible
                  JOIN commits AS c ON c.commit_id = eligible.commit_id
                  JOIN semantic_vectors AS v ON v.commit_id = c.commit_id
-                 WHERE 1 = 1 {eligibility}
+                 {eligibility_clause}
 "
             )
         }
