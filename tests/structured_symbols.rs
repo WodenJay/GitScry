@@ -613,3 +613,123 @@ fn cpp_prototypes_are_not_targets_and_conditional_collisions_stay_ambiguous() {
     assert!(stderr.contains("no supported declaration"), "{stderr}");
     assert!(!stderr.contains("lightweight symbol selection"), "{stderr}");
 }
+
+fn commit_h(repo: &TestRepo, source: &str, subject: &str) -> String {
+    fs::create_dir_all(repo.dir.path().join("src")).unwrap();
+    fs::write(repo.dir.path().join("src/util.h"), source).unwrap();
+    git(repo.dir.path(), ["add", "."]);
+    git(repo.dir.path(), ["commit", "-m", subject]);
+    repo.head()
+}
+
+fn query_h(repo: &TestRepo, command: &str, selector: &str, revision: &str) -> serde_json::Value {
+    let args: Vec<&str> = if command == "regression" {
+        vec![
+            command,
+            "failure",
+            "--path",
+            "src/util.h",
+            "--symbol",
+            selector,
+            "--bad",
+            revision,
+            "--json",
+        ]
+    } else {
+        vec![
+            command,
+            "src/util.h",
+            "--symbol",
+            selector,
+            "--at",
+            revision,
+            "--json",
+        ]
+    };
+    let output = repo.run(args);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+#[test]
+fn header_commands_return_structured_history_and_exclude_neighbors() {
+    let repo = TestRepo::new();
+    let initial = commit_h(
+        &repo,
+        "int compute(int a) {\n    return a + 1;\n}\n\nint neighbor(void) {\n    return 0;\n}\n",
+        "Create compute",
+    );
+    let changed = commit_h(
+        &repo,
+        "int compute(int a) {\n    return a + 2;\n}\n\nint neighbor(void) {\n    return 0;\n}\n",
+        "Change compute",
+    );
+    let neighbor = commit_h(
+        &repo,
+        "int compute(int a) {\n    return a + 2;\n}\n\nint neighbor(void) {\n    return 1;\n}\n",
+        "Change neighbor",
+    );
+    repo.index();
+    let why = query_h(&repo, "why", "compute", &neighbor);
+    let selected = &why["symbol_selection"];
+    assert_eq!(selected["input_selector"], "compute", "{why}");
+    assert_eq!(selected["qualified_name"], "compute");
+    assert_eq!(selected["kind"], "function");
+    assert_eq!(selected["start_line"], 1);
+    assert_eq!(selected["end_line"], 3);
+    assert_eq!(selected["identifier_line"], 1);
+    assert_eq!(selected["language"], "c/c++");
+    assert_eq!(selected["mode"], "structured");
+    assert_eq!(why["symbol_summary"]["introduction"]["commit_oid"], initial);
+    let rendered = why["target_related_modifications"].to_string();
+    assert!(rendered.contains(&changed), "{why}");
+    assert!(!rendered.contains(&neighbor), "{why}");
+    let regression = query_h(&repo, "regression", "compute", &neighbor);
+    let rendered = regression.to_string();
+    assert!(rendered.contains(&changed), "{regression}");
+    assert!(!rendered.contains(&neighbor), "{regression}");
+}
+
+#[test]
+fn header_cpp_only_constructs_resolve_with_cpp_language() {
+    let repo = TestRepo::new();
+    let revision = commit_h(
+        &repo,
+        concat!(
+            "class Widget {\n",
+            "public:\n",
+            "    int size() const;\n",
+            "};\n",
+            "int Widget::size() const {\n",
+            "    return 0;\n",
+            "}\n",
+        ),
+        "Create widget",
+    );
+    repo.index();
+    let report = query_h(&repo, "why", "Widget::size", &revision);
+    let selected = &report["symbol_selection"];
+    assert_eq!(selected["input_selector"], "Widget::size", "{report}");
+    assert_eq!(selected["qualified_name"], "Widget::size");
+    assert_eq!(selected["kind"], "function");
+    assert_eq!(selected["start_line"], 5);
+    assert_eq!(selected["end_line"], 7);
+    assert_eq!(selected["language"], "cpp");
+    assert_eq!(selected["mode"], "structured");
+}
+
+#[test]
+fn header_prototypes_fail_closed_with_closed_language_errors() {
+    let repo = TestRepo::new();
+    commit_h(&repo, "int compute(int a);\n", "Prototype only");
+    repo.index();
+    let output = repo.run(["why", "src/util.h", "--symbol", "compute"]);
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("no supported declaration"), "{stderr}");
+    assert!(!stderr.contains("lightweight symbol selection"), "{stderr}");
+}
