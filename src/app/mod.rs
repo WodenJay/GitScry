@@ -253,8 +253,16 @@ pub(crate) fn execute(
             false,
             scope.into(),
         ),
-        Command::Conflicts { paths, limit, .. } => (
-            Request::Conflicts { paths },
+        Command::Conflicts {
+            paths,
+            limit,
+            max_historical_checks,
+            ..
+        } => (
+            Request::Conflicts {
+                paths,
+                max_historical_checks,
+            },
             limit,
             false,
             Default::default(),

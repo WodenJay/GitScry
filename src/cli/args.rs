@@ -106,6 +106,9 @@ Examples:
         /// Maximum historical leads per file and side.
         #[arg(long, default_value_t = 5, value_parser = parse_limit)]
         limit: usize,
+        /// Maximum for historical merge-case replay checks; zero disables them.
+        #[arg(long, value_name = "CHECKS", value_parser = parse_zeroable_limit)]
+        max_historical_checks: Option<usize>,
         /// Output JSON instead of text.
         #[arg(long)]
         json: bool,
@@ -940,6 +943,14 @@ fn parse_limit(value: &str) -> Result<usize, String> {
     (limit > 0)
         .then_some(limit)
         .ok_or_else(|| "limit must be greater than zero".to_owned())
+}
+
+/// Like `parse_limit` but admits zero, for budgets that fully disable a
+/// bounded phase while keeping its reporting.
+fn parse_zeroable_limit(value: &str) -> Result<usize, String> {
+    value
+        .parse::<usize>()
+        .map_err(|_| "limit must be a non-negative integer".to_owned())
 }
 
 fn parse_followup_days(value: &str) -> Result<usize, String> {
