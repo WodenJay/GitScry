@@ -178,6 +178,15 @@ pub(crate) struct HistoricalCase {
     pub(crate) reconstructed_conflict: HistoricalObject,
     pub(crate) result: HistoricalObject,
     pub(crate) association: &'static str,
+    pub(crate) region_trace: RegionTrace,
+}
+
+#[derive(Serialize)]
+pub(crate) struct RegionTrace {
+    pub(crate) current_start_line: usize,
+    pub(crate) current_lines: usize,
+    pub(crate) historical_start_line: usize,
+    pub(crate) historical_lines: usize,
 }
 
 #[derive(Serialize)]

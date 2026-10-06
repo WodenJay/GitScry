@@ -767,6 +767,189 @@ fn maps_a_historical_conflict_through_a_later_file_rename() {
 }
 
 #[test]
+fn reports_association_basis_and_region_trace_for_historical_cases() {
+    let (repo, _, _, _, historical_merge) = historical_conflict_fixture("conflict.txt", false);
+    let before = state_with_paths(&repo, &["conflict.txt"]);
+    let history = json(repo.run(["conflicts", "--json"]))["historical_cases"].clone();
+    assert_eq!(
+        history["status"], "complete",
+        "historical report: {history}"
+    );
+    let case = &history["files"][0]["cases"][0];
+    assert_eq!(case["merge_commit"], historical_merge);
+    assert_eq!(
+        case["association"],
+        "same file incarnation and identical unique surrounding context"
+    );
+    let trace = &case["region_trace"];
+    assert_eq!(trace["current_start_line"], 1);
+    assert_eq!(trace["current_lines"], 5);
+    assert_eq!(trace["historical_start_line"], 1);
+    assert_eq!(trace["historical_lines"], 5);
+    let human = repo.run(["conflicts"]);
+    assert!(human.status.success());
+    let human = String::from_utf8_lossy(&human.stdout);
+    assert!(
+        human.contains(
+            "Association: same file incarnation and identical unique surrounding context"
+        )
+    );
+    assert!(human.contains("Region trace: current lines 1-5, historical lines 1-5"));
+    assert_eq!(state_with_paths(&repo, &["conflict.txt"]), before);
+}
+
+#[test]
+fn falls_back_to_content_correspondence_without_unique_context() {
+    let repo = TestRepo::new();
+    // Historical merge: both sides replace the same line, no shared context
+    // lines beyond the conflicting one, and no unique surrounding context in
+    // the current file either -- only the conflicting line content itself is
+    // unique on both sides.
+    commit(&repo, "conflict.txt", "a\nb\nc\nshared=1\n", "base");
+    git(repo.dir.path(), ["branch", "theirs"]);
+    commit(&repo, "conflict.txt", "a\nb\nc\nours=1\n", "ours");
+    git(repo.dir.path(), ["checkout", "theirs"]);
+    commit(&repo, "conflict.txt", "a\nb\nc\ntheirs=1\n", "theirs");
+    git(repo.dir.path(), ["checkout", "main"]);
+    merge(&repo, "theirs");
+    let historical_merge = commit(&repo, "conflict.txt", "a\nb\nc\nours=1\n", "resolve ours");
+    repo.index();
+
+    // Current conflict: surrounding context differs from the historical file,
+    // so context matching cannot be unique; content matching must be used.
+    git(repo.dir.path(), ["branch", "current-theirs"]);
+    commit(&repo, "conflict.txt", "x\ny\nz\nours=1\n", "current ours");
+    git(repo.dir.path(), ["checkout", "current-theirs"]);
+    commit(
+        &repo,
+        "conflict.txt",
+        "x\ny\nz\ntheirs=1\n",
+        "current theirs",
+    );
+    git(repo.dir.path(), ["checkout", "main"]);
+    merge(&repo, "current-theirs");
+    repo.index();
+
+    let before = state_with_paths(&repo, &["conflict.txt"]);
+    let history = json(repo.run(["conflicts", "--json"]))["historical_cases"].clone();
+    assert_eq!(
+        history["status"], "complete",
+        "historical report: {history}"
+    );
+    let case = &history["files"][0]["cases"][0];
+    assert_eq!(case["merge_commit"], historical_merge);
+    assert_eq!(
+        case["association"],
+        "same file incarnation and unique conflict-region content correspondence across historical edits"
+    );
+    let trace = &case["region_trace"];
+    assert_eq!(trace["current_start_line"], 4);
+    assert_eq!(trace["current_lines"], 5);
+    assert_eq!(trace["historical_start_line"], 4);
+    assert_eq!(trace["historical_lines"], 5);
+    assert_eq!(state_with_paths(&repo, &["conflict.txt"]), before);
+}
+
+#[test]
+fn skips_ambiguous_region_correspondence_with_recorded_reason() {
+    let repo = TestRepo::new();
+    // Two historical merge candidates for the same current conflict:
+    //
+    // 1. A merge whose replay leaves two conflict regions separated by a
+    //    5-line gap (git needs at least 3 unchanged lines between changed
+    //    stretches to keep hunks separate; a wide gap keeps both sides
+    //    separate here). The current conflict recreates the same two-region
+    //    shape with a matching but repeated surrounding context, so no region
+    //    pair can be pinned down by a unique context or unique content window
+    //    and the candidate must be skipped as ambiguous.
+    // 2. A merge with a single-region conflict whose `ours` side is unique in
+    //    the current file, which resolves to a case; without it the file
+    //    would be reported only in the top-level reasons instead of as a
+    //    file entry with candidates_skipped.
+    commit(&repo, "conflict.txt", "a\nb\nc\nd\ne\nf\ng\n", "base");
+
+    // First historical merge: two-region conflict, resolved to ours.
+    git(repo.dir.path(), ["branch", "two-region-theirs"]);
+    commit(&repo, "conflict.txt", "x1\nb\nc\nd\ne\nf\nx2\n", "ours");
+    git(repo.dir.path(), ["checkout", "two-region-theirs"]);
+    commit(&repo, "conflict.txt", "y1\nb\nc\nd\ne\nf\ny2\n", "theirs");
+    git(repo.dir.path(), ["checkout", "main"]);
+    merge(&repo, "two-region-theirs");
+    commit(
+        &repo,
+        "conflict.txt",
+        "x1\nb\nc\nd\ne\nf\nx2\n",
+        "resolve ours",
+    );
+
+    // Second historical merge: single-region conflict, resolved to ours.
+    git(repo.dir.path(), ["branch", "single-region-theirs"]);
+    commit(
+        &repo,
+        "conflict.txt",
+        "x1\nb\nc\nd\ne\nf\nh-ours\n",
+        "single ours",
+    );
+    git(repo.dir.path(), ["checkout", "single-region-theirs"]);
+    commit(
+        &repo,
+        "conflict.txt",
+        "x1\nb\nc\nd\ne\nf\nh-theirs\n",
+        "single theirs",
+    );
+    git(repo.dir.path(), ["checkout", "main"]);
+    merge(&repo, "single-region-theirs");
+    let single_region_merge = commit(
+        &repo,
+        "conflict.txt",
+        "x1\nb\nc\nd\ne\nf\nh-ours\n",
+        "single resolve ours",
+    );
+    repo.index();
+
+    // Current conflict: two regions with repeated context on both sides.
+    git(repo.dir.path(), ["branch", "current-theirs"]);
+    commit(
+        &repo,
+        "conflict.txt",
+        "now-ours=1\nb\nc\nd\ne\nf\nnow-ours=2\ng\n",
+        "current ours",
+    );
+    git(repo.dir.path(), ["checkout", "current-theirs"]);
+    commit(
+        &repo,
+        "conflict.txt",
+        "now-theirs=1\nb\nc\nd\ne\nf\nnow-theirs=2\ng\n",
+        "current theirs",
+    );
+    git(repo.dir.path(), ["checkout", "main"]);
+    merge(&repo, "current-theirs");
+    repo.index();
+
+    let before = state_with_paths(&repo, &["conflict.txt"]);
+    let file = json(repo.run(["conflicts", "--json"]))["historical_cases"]["files"][0].clone();
+    assert_eq!(file["status"], "partial", "file report: {file}");
+    assert_eq!(file["cases"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        file["cases"][0]["merge_commit"], single_region_merge,
+        "file report: {file}"
+    );
+    assert_eq!(file["candidates_skipped"], 1, "file report: {file}");
+    assert!(
+        file["reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|reason| reason
+                .as_str()
+                .unwrap()
+                .contains("current-region correspondence is ambiguous")),
+        "file report: {file}"
+    );
+    assert_eq!(state_with_paths(&repo, &["conflict.txt"]), before);
+}
+
+#[test]
 fn ignores_user_global_merge_attributes_during_historical_replay() {
     let (repo, _, _, _, historical_merge) = historical_conflict_fixture("conflict.txt", false);
     let xdg_config = repo.user_data_dir().join("xdg-config");
