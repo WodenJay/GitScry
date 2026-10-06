@@ -8,9 +8,8 @@ pub(crate) struct RegressionTarget {
     pub(crate) good_revision: Option<String>,
     pub(crate) path: Vec<u8>,
     pub(crate) symbol: Option<String>,
-    pub(crate) symbol_line: Option<usize>,
-    pub(crate) symbol_end: Option<usize>,
     pub(crate) symbol_selection: Option<symbol::Selection>,
+    pub(crate) symbol_trace: Option<crate::git::SymbolTrace>,
     pub(crate) warnings: Vec<String>,
 }
 
@@ -47,8 +46,6 @@ pub(in crate::git) fn pin_regression(
         .map(|name| symbol::locate_unique(&content, name, &path))
         .transpose()?;
     let symbol_selection = location.as_ref().map(|location| location.selection.clone());
-    let symbol_line = location.as_ref().map(|location| location.span.start);
-    let symbol_end = location.as_ref().map(|location| location.span.end);
     let symbol = symbol.map(str::to_owned);
     if let Some(notice) = location.and_then(|location| location.notice) {
         warnings.push(notice);
@@ -66,9 +63,8 @@ pub(in crate::git) fn pin_regression(
         good_revision,
         path: path.as_bytes().to_vec(),
         symbol,
-        symbol_line,
-        symbol_end,
         symbol_selection,
+        symbol_trace: None,
         warnings,
     })
 }

@@ -71,3 +71,52 @@ fn four_commands_expose_the_pinned_structured_selection() {
         assert_eq!(selected["mode"], "structured");
     }
 }
+
+#[test]
+fn qualified_history_relocates_ranges_and_excludes_neighbor_edits() {
+    let repo = TestRepo::new();
+    let initial = commit(
+        &repo,
+        "mod net {\n pub fn parse() -> i32 {\n  1\n }\n fn neighbor() -> i32 { 1 }\n}\n",
+        "Create parser",
+    );
+    let changed = commit(
+        &repo,
+        "mod net {\n #[inline]\n pub fn parse() -> i32 {\n  2\n }\n fn neighbor() -> i32 { 1 }\n}\n",
+        "Change parser",
+    );
+    let neighbor = commit(
+        &repo,
+        "mod net {\n #[inline]\n pub fn parse() -> i32 {\n  2\n }\n fn neighbor() -> i32 { 2 }\n}\n",
+        "Change neighbor",
+    );
+    repo.index();
+    let why = query(&repo, "why", "net::parse", &neighbor);
+    assert_eq!(why["symbol_summary"]["introduction"]["commit_oid"], initial);
+    let rendered = why["target_related_modifications"].to_string();
+    assert!(rendered.contains(&changed), "{why}");
+    assert!(!rendered.contains(&neighbor), "{why}");
+    let regression = query(&repo, "regression", "net::parse", &neighbor);
+    let rendered = regression.to_string();
+    assert!(rendered.contains(&changed), "{regression}");
+    assert!(!rendered.contains("Change neighbor"), "{regression}");
+}
+
+#[test]
+fn historical_parse_degradation_is_observable_across_commands() {
+    let repo = TestRepo::new();
+    commit(
+        &repo,
+        "fn parse() {\n let value = 1;\n}\nfn broken(\n",
+        "Broken historical source",
+    );
+    let revision = commit(&repo, "fn parse() {\n let value = 2;\n}\n", "Repair source");
+    repo.index();
+    for command in ["why", "tests", "related", "regression"] {
+        let report = query(&repo, command, "parse", &revision);
+        assert!(
+            report.to_string().contains("lightweight symbol selection"),
+            "{command}: {report}"
+        );
+    }
+}

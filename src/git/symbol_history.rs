@@ -12,9 +12,18 @@ pub(super) fn trace(git: &Git, target: &WhyTarget) -> SymbolTrace {
         modifications: Vec::new(),
         paths: Vec::new(),
         introduction: Err("Git returned no history for the symbol range".to_owned()),
+        warnings: Vec::new(),
     };
     trace.introduction = walk(git, target, &mut trace).map_err(introduction_error);
     trace
+}
+
+fn record_notice(trace: &mut SymbolTrace, notice: Option<String>) {
+    if let Some(notice) = notice
+        && !trace.warnings.contains(&notice)
+    {
+        trace.warnings.push(notice);
+    }
 }
 
 fn unknown(reason: &str) -> AppError {
@@ -80,11 +89,13 @@ fn walk(git: &Git, target: &WhyTarget, trace: &mut SymbolTrace) -> Result<String
             let current = target::read_blob_at(git, oid, &path)?
                 .ok_or_else(|| unknown("historical symbol source is unavailable"))?;
             let current_span = symbol::locate_unique(&current, &name, &path)?;
+            record_notice(trace, current_span.notice.clone());
             if commit.parents.len() > 1 {
                 let first_parent = &commit.parents[0];
                 if let Some(source) = target::read_blob_at(git, first_parent, &path)?
                     && let Ok(previous_span) = symbol::locate_unique(&source, &name, &path)
                 {
+                    record_notice(trace, previous_span.notice.clone());
                     if symbol::identity(&current, &current_span)
                         != symbol::identity(&source, &previous_span)
                     {
@@ -124,6 +135,7 @@ fn walk(git: &Git, target: &WhyTarget, trace: &mut SymbolTrace) -> Result<String
             if let Some(source) = &previous
                 && let Ok(previous_span) = symbol::locate_unique(source, &name, &path)
             {
+                record_notice(trace, previous_span.notice.clone());
                 if native.contains(oid)
                     && symbol::identity(&current, &current_span)
                         != symbol::identity(source, &previous_span)
@@ -142,8 +154,10 @@ fn walk(git: &Git, target: &WhyTarget, trace: &mut SymbolTrace) -> Result<String
                             continue;
                         };
                         let after = target::read_blob_at(git, oid, old_path)?;
-                        for old_span in symbol::declarations(&source, old_path).0 {
-                            let old_name = &old_span.name;
+                        let (declarations, notice) = symbol::declarations(&source, old_path);
+                        record_notice(trace, notice);
+                        for old_span in declarations {
+                            let old_name = &old_span.selection.qualified_name;
                             if old_path == path && old_name == &name {
                                 continue;
                             }
@@ -194,8 +208,10 @@ fn walk(git: &Git, target: &WhyTarget, trace: &mut SymbolTrace) -> Result<String
                 } else {
                     None
                 };
-                for old_span in symbol::declarations(&source, source_path).0 {
-                    let old_name = &old_span.name;
+                let (declarations, notice) = symbol::declarations(&source, source_path);
+                record_notice(trace, notice);
+                for old_span in declarations {
+                    let old_name = &old_span.selection.qualified_name;
                     let survives = !changed
                         || after.as_ref().is_some_and(|after| {
                             !symbol::declaration_lines(after, old_name, source_path).is_empty()

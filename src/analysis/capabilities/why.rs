@@ -129,6 +129,7 @@ fn run(
         modifications: Vec::new(),
         paths: Vec::new(),
         introduction: Err("Git symbol-range history is unavailable".to_owned()),
+        warnings: Vec::new(),
     };
     let symbol_trace = anchor_info
         .is_symbol()

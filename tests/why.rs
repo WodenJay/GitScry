@@ -999,7 +999,9 @@ fn why_symbol_rejects_ambiguous_or_unlocated_declarations() {
     let ambiguous = repo.run(["why", "src/lib.rs", "--symbol", "duplicate"]);
     assert_eq!(ambiguous.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&ambiguous.stderr).contains("ambiguous"));
-    assert!(String::from_utf8_lossy(&ambiguous.stderr).contains("1, 2"));
+    let diagnostic = String::from_utf8_lossy(&ambiguous.stderr);
+    assert!(diagnostic.contains("duplicate (function, lines 1-1"));
+    assert!(diagnostic.contains("duplicate (function, lines 2-2"));
 
     repo.commit(
         "src/lib.rs",

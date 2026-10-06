@@ -41,6 +41,7 @@ pub(crate) struct SymbolTrace {
     pub(crate) modifications: Vec<SymbolChange>,
     pub(crate) paths: Vec<Vec<u8>>,
     pub(crate) introduction: Result<String, String>,
+    pub(crate) warnings: Vec<String>,
 }
 
 pub(crate) struct SymbolChange {
@@ -117,7 +118,9 @@ impl Repository {
     ) -> Result<WhyTarget, AppError> {
         let mut target = target::pin(&self.git, Some(revision), path, anchor)?;
         if matches!(&target.anchor, WhyAnchor::Symbol { .. }) {
-            target.symbol_trace = Some(self.trace_why_symbol(&target));
+            let trace = self.trace_why_symbol(&target);
+            target.warnings.extend(trace.warnings.iter().cloned());
+            target.symbol_trace = Some(trace);
         }
         Ok(target)
     }
@@ -162,7 +165,21 @@ impl Repository {
         path: &str,
         symbol: Option<&str>,
     ) -> Result<RegressionTarget, AppError> {
-        target::pin_regression(&self.git, bad_revision, good_revision, path, symbol)
+        let mut target =
+            target::pin_regression(&self.git, bad_revision, good_revision, path, symbol)?;
+        if let Some(name) = symbol {
+            let why = self.pin_why_target(
+                &target.bad_revision,
+                path,
+                WhyAnchor::Symbol {
+                    name: name.to_owned(),
+                    number: 0,
+                },
+            )?;
+            target.warnings.extend(why.warnings);
+            target.symbol_trace = why.symbol_trace;
+        }
+        Ok(target)
     }
 
     pub(crate) fn pin_trace_fix(
