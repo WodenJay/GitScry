@@ -6,11 +6,14 @@ use super::{normalize_git_path, process::Git};
 use crate::app::AppError;
 
 mod blame;
+mod fate;
 mod regression;
 mod timeline;
 mod trace_fix;
 mod why;
 
+pub(crate) use fate::FateTarget;
+pub(super) use fate::pin as pin_fate;
 pub(crate) use regression::RegressionTarget;
 pub(super) use regression::pin_regression;
 pub(crate) use timeline::TimelineTarget;

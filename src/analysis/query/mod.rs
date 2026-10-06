@@ -112,6 +112,13 @@ pub(crate) enum Request {
         offset: usize,
         last: bool,
     },
+    Fate {
+        path: String,
+        line: usize,
+        at: String,
+        to_rev: Option<String>,
+        max_commits: Option<usize>,
+    },
 }
 
 pub(crate) struct Options {
@@ -131,6 +138,7 @@ pub(crate) enum QueryReport {
     TraceRemoval(super::TraceRemovalReport),
     TraceRemovalFragment(super::TraceRemovalFragmentReport),
     Hotspots(super::HotspotsReport),
+    Fate(capabilities::fate::Report),
 }
 
 impl QueryReport {
@@ -145,7 +153,8 @@ impl QueryReport {
             Self::Timeline(_)
             | Self::Hotspots(_)
             | Self::TraceRemoval(_)
-            | Self::TraceRemovalFragment(_) => &[],
+            | Self::TraceRemovalFragment(_)
+            | Self::Fate(_) => &[],
         }
     }
 
@@ -160,7 +169,8 @@ impl QueryReport {
             Self::Timeline(_)
             | Self::Hotspots(_)
             | Self::TraceRemoval(_)
-            | Self::TraceRemovalFragment(_) => &[],
+            | Self::TraceRemovalFragment(_)
+            | Self::Fate(_) => &[],
         }
     }
 }
@@ -268,6 +278,13 @@ pub(crate) fn execute(request: Request, options: Options) -> Result<Outcome, App
             offset,
             last,
         } => capabilities::timeline::execute(path, at, offset, last, options),
+        Request::Fate {
+            path,
+            line,
+            at,
+            to_rev,
+            max_commits,
+        } => capabilities::fate::execute(path, line, at, to_rev, max_commits, options),
     }
 }
 

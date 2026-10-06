@@ -9,6 +9,7 @@ pub(crate) mod conflicts;
 pub(crate) mod context;
 mod examples;
 mod failures;
+pub(crate) mod fate;
 pub(crate) mod followups;
 pub(crate) mod fragment_search;
 pub(crate) mod historical_conflicts;
