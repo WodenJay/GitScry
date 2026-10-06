@@ -389,8 +389,7 @@ fn run(
         report.warnings.push("warning: historical test paths absent as safe regular files in the current worktree were omitted; renames are not resolved".to_owned());
     }
     let changes = content::discover(session, &mut report, scope, hybrid)?;
-    let matched_tests =
-        apply_matched_change_tests(session, &mut ranked, &changes, &excluded, root, &mut report)?;
+    apply_matched_change_tests(session, &mut ranked, &changes, &excluded, root, &mut report)?;
     if historical_followup.enabled {
         for (strength, time, suggestion) in historical_followup::discover(
             session,
@@ -433,7 +432,7 @@ fn run(
     merge_cochange_followups(&mut ranked);
     merge_path_follow_on(context, repository, selected_paths, &excluded, &mut ranked)?;
     ranked.sort_by(compare_ranked_suggestions);
-    let ranked = refill_test_positions(ranked, matched_tests);
+    let ranked = refill_test_positions(ranked);
     report.matched_count = ranked.len();
     let mut category_counts = [0; 6];
     for mut ranked_suggestion in ranked {
@@ -571,17 +570,18 @@ fn merge_path_follow_on(
 }
 
 /// Same-commit test promotion from verified changed-code matches (issue #238).
-/// Returns the ordered matched tests for the later test-position refill.
+/// Augments existing candidates and appends newly admitted ones; refill
+/// later reorders test positions via the matched_supporting marker.
 fn apply_matched_change_tests(
     session: &QuerySession,
-    ranked: &mut [RankedSuggestion],
+    ranked: &mut Vec<RankedSuggestion>,
     changes: &[(usize, i64, Suggestion)],
     excluded: &HashSet<Vec<u8>>,
     root: &Path,
     report: &mut Report,
-) -> Result<Vec<RankedSuggestion>, AppError> {
+) -> Result<(), AppError> {
     if changes.is_empty() {
-        return Ok(Vec::new());
+        return Ok(());
     }
     // Only verified commits promote tests; each is a suggestion with its own
     // associated current paths. Citations[0] carries the commit oid.
@@ -601,7 +601,7 @@ fn apply_matched_change_tests(
         });
     }
     if matched.is_empty() {
-        return Ok(Vec::new());
+        return Ok(());
     }
     let oids = matched
         .iter()
@@ -644,9 +644,11 @@ fn apply_matched_change_tests(
         }
     }
     if omitted_tests {
-        report.warnings.push("warning: historical test paths absent as safe regular files in the current worktree were omitted; renames are not resolved".to_owned());
+        let warning = "warning: historical test paths absent as safe regular files in the current worktree were omitted; renames are not resolved";
+        if !report.warnings.iter().any(|entry| entry == warning) {
+            report.warnings.push(warning.to_owned());
+        }
     }
-    let mut ordered = Vec::new();
     for association in associations.into_values() {
         let mut commits = association.commits;
         commits.sort_by(|a, b| {
@@ -728,7 +730,7 @@ fn apply_matched_change_tests(
                 co_change: None,
             };
             let strength = suggestion.associated_current_paths.len();
-            ordered.push(RankedSuggestion {
+            ranked.push(RankedSuggestion {
                 strength,
                 time: latest_time,
                 suggestion,
@@ -738,19 +740,37 @@ fn apply_matched_change_tests(
             });
         }
     }
-    Ok(ordered)
+    Ok(())
 }
 /// Refill test-category positions with matched tests first, then ordinary
 /// tests in their existing relative order. Operates on the already globally
 /// sorted list so non-test ordering and transitivity are untouched. Matched
 /// tests beyond the original test positions (when no ordinary tests exist)
 /// keep their appended order.
-fn refill_test_positions(
-    ranked: Vec<RankedSuggestion>,
-    mut matched: Vec<RankedSuggestion>,
-) -> Vec<RankedSuggestion> {
+fn refill_test_positions(ranked: Vec<RankedSuggestion>) -> Vec<RankedSuggestion> {
+    let mut matched = Vec::new();
+    let mut ordinary = Vec::new();
+    let mut slots: Vec<Option<RankedSuggestion>> = Vec::new();
+    for item in ranked {
+        if item.suggestion.category == Category::Test {
+            if item.matched_supporting.is_empty() {
+                ordinary.push(item);
+            } else {
+                matched.push(item);
+            }
+            slots.push(None);
+        } else {
+            slots.push(Some(item));
+        }
+    }
     if matched.is_empty() {
-        return ranked;
+        let mut restore = ordinary.into_iter();
+        for slot in slots.iter_mut() {
+            if slot.is_none() {
+                *slot = restore.next();
+            }
+        }
+        return slots.into_iter().flatten().collect();
     }
     matched.sort_by(|a, b| {
         b.suggestion
@@ -765,16 +785,6 @@ fn refill_test_positions(
             .then_with(|| b.time.cmp(&a.time))
             .then_with(|| a.suggestion.path.cmp(&b.suggestion.path))
     });
-    let mut slots: Vec<Option<RankedSuggestion>> = ranked.into_iter().map(Some).collect();
-    let mut ordinary = Vec::new();
-    for slot in slots.iter_mut() {
-        if slot
-            .as_ref()
-            .is_some_and(|item| item.suggestion.category == Category::Test)
-        {
-            ordinary.push(slot.take().unwrap());
-        }
-    }
     matched.extend(ordinary);
     let mut refill = matched.into_iter();
     for slot in slots.iter_mut() {

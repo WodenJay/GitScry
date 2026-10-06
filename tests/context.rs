@@ -1404,6 +1404,72 @@ fn matched_change_tests_precede_broad_co_change_tests() {
 }
 
 #[test]
+fn single_matched_support_admits_new_test_without_ordinary_gate() {
+    let repo = TestRepo::new();
+    commit(
+        &repo,
+        &[
+            ("router.rs", "fn router() {}\n"),
+            ("tests/broad_a.rs", "test\n"),
+            ("tests/broad_b.rs", "test\n"),
+        ],
+        "base",
+    );
+    // Broad tests gain ordinary co-change support; tests/router.rs is never
+    // touched outside the matched commit, so no ordinary candidate exists.
+    for round in 0..3 {
+        let files = [
+            ("router.rs", "fn router() {}\n"),
+            ("tests/broad_a.rs", "test a\n"),
+            ("tests/broad_b.rs", "test b\n"),
+        ];
+        let mut owned = files
+            .iter()
+            .map(|(path, content)| (path.to_string(), content.to_string()))
+            .collect::<Vec<_>>();
+        owned[1].1 = format!("test a round {round}");
+        owned[2].1 = format!("test b round {round}");
+        let refs = owned
+            .iter()
+            .map(|(path, content)| (path.as_str(), content.as_str()))
+            .collect::<Vec<_>>();
+        commit(&repo, &refs, "broad update");
+    }
+    commit(
+        &repo,
+        &[
+            (
+                "router.rs",
+                "fn router() { refreshSessionCache(\"session-expired\"); }\n",
+            ),
+            ("tests/router.rs", "router test changed\n"),
+        ],
+        "router update",
+    );
+    let matched_oid = repo.head();
+    repo.index();
+    fs::write(
+        repo.dir.path().join("router.rs"),
+        "fn router() { refreshSessionCache(\"session-expired\"); purgeRouteCache(\"stale\"); }\n",
+    )
+    .unwrap();
+    let report = json(repo.run(["context", "--json", "--limit", "12"]));
+    let entries = report["suggestions"].as_array().unwrap();
+    let router = entries
+        .iter()
+        .find(|entry| entry["path"] == "tests/router.rs")
+        .unwrap_or_else(|| panic!("tests/router.rs missing: {:?}", entries));
+    assert_eq!(router["category"], "test");
+    assert!(
+        router["selection_routes"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("matched_change_test"))
+    );
+    assert_eq!(router["citations"][0]["oid"], matched_oid);
+}
+
+#[test]
 fn merge_commits_and_mass_changes_do_not_promote_tests() {
     let repo = TestRepo::new();
     commit(
@@ -1432,6 +1498,33 @@ fn merge_commits_and_mass_changes_do_not_promote_tests() {
         "fn feature() { other(); }\n",
     )
     .unwrap();
+    let report = json(repo.run(["context", "--json"]));
+    assert!(
+        report["suggestions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry["selection_routes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|route| route != "matched_change_test"))
+    );
+    // A mass-change commit (over 50 paths) also cannot promote its tests.
+    let mut mass: Vec<(String, String)> = Vec::new();
+    for index in 0..51 {
+        mass.push((
+            format!("bulk{index}.rs"),
+            format!("fn feature() {{ other(); }} // bulk {index}\n"),
+        ));
+    }
+    mass.push(("tests/mass.rs".to_owned(), "test\n".to_owned()));
+    let refs = mass
+        .iter()
+        .map(|(path, content)| (path.as_str(), content.as_str()))
+        .collect::<Vec<_>>();
+    commit(&repo, &refs, "mass change");
+    repo.index();
     let report = json(repo.run(["context", "--json"]));
     assert!(
         report["suggestions"]
