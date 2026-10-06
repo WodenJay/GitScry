@@ -3255,6 +3255,21 @@ fn symbol_related_reports_partial_lineage_without_using_other_symbols() {
             .is_some_and(|limitations| !limitations.is_empty()),
         "{report}"
     );
+    let why = repo.run(["why", "src/seed.rs", "--symbol", "target", "--json"]);
+    assert!(why.status.success(), "{}", stderr(&why));
+    let why: serde_json::Value = serde_json::from_slice(&why.stdout).unwrap();
+    assert_eq!(why["symbol_summary"]["introduction"]["status"], "unknown");
+    let modifications = why["target_related_modifications"].as_array().unwrap();
+    assert!(
+        modifications
+            .iter()
+            .any(|change| change["subject"] == "change target")
+    );
+    assert!(
+        modifications
+            .iter()
+            .all(|change| change["subject"] != "change other")
+    );
 }
 
 #[test]

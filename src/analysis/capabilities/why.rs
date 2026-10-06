@@ -408,50 +408,40 @@ fn summarize_symbol(
     missing_objects: bool,
     trace: &SymbolTrace,
 ) -> SymbolSummary {
-    let commits_by_oid = commits
-        .iter()
-        .map(|commit| (commit.oid.as_str(), commit))
-        .collect::<HashMap<_, _>>();
-    let cache_gap = trace
-        .revisions
-        .iter()
-        .any(|oid| !reachable.contains(oid) || !commits_by_oid.contains_key(oid.as_str()));
-    let uncertain_lineage = trace
-        .revisions
-        .iter()
-        .filter_map(|oid| commits_by_oid.get(oid.as_str()))
-        .any(|commit| commit.parent_count > 1 || commit.shallow_boundary);
-    let shallow_history = target
-        .warnings
-        .iter()
-        .any(|warning| warning.contains("local history is shallow"));
-    let introduction = match &trace.introduction {
-        Err(reason) => SymbolFact::Unknown {
-            reason: reason.clone(),
+    use retrieval::target_history::SymbolHistoryLimitation;
+
+    let introduction = match retrieval::target_history::confirm_symbol_introduction(
+        trace,
+        commits,
+        reachable,
+        target.shallow,
+        missing_objects,
+        trace.revisions.iter(),
+    ) {
+        Err(SymbolHistoryLimitation::Trace(reason)) => SymbolFact::Unknown {
+            reason: reason.to_owned(),
         },
-        Ok(_) if cache_gap => SymbolFact::Unknown {
+        Err(SymbolHistoryLimitation::CacheGap) => SymbolFact::Unknown {
             reason: "symbol history extends beyond published cache coverage".to_owned(),
         },
-        Ok(_) if missing_objects => SymbolFact::Unknown {
+        Err(SymbolHistoryLimitation::MissingObjects) => SymbolFact::Unknown {
             reason: "local Git objects needed to confirm the introduction are missing".to_owned(),
         },
-        Ok(_) if shallow_history || uncertain_lineage => SymbolFact::Unknown {
+        Err(SymbolHistoryLimitation::UncertainLineage) => SymbolFact::Unknown {
             reason: "shallow, merge, or path-move history makes symbol lineage uncertain"
                 .to_owned(),
         },
-        Ok(oid) if !eligible_revisions.is_none_or(|eligible| eligible.contains(oid)) => {
+        Err(SymbolHistoryLimitation::IntroductionAbsent) => SymbolFact::Unknown {
+            reason: "symbol introduction is not present in cached path history".to_owned(),
+        },
+        Ok(commit) if !eligible_revisions.is_none_or(|eligible| eligible.contains(&commit.oid)) => {
             SymbolFact::Unknown {
                 reason: "symbol introduction is outside the current query scope".to_owned(),
             }
         }
-        Ok(oid) => match commits_by_oid.get(oid.as_str()) {
-            Some(commit) => SymbolFact::Known {
-                commit_oid: oid.clone(),
-                subject: commit.subject.clone(),
-            },
-            None => SymbolFact::Unknown {
-                reason: "symbol introduction is not present in cached path history".to_owned(),
-            },
+        Ok(commit) => SymbolFact::Known {
+            commit_oid: commit.oid.clone(),
+            subject: commit.subject.clone(),
         },
     };
     let anchor_line_attribution = match &target.blame {

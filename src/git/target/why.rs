@@ -20,6 +20,7 @@ pub(crate) struct WhyTarget {
     pub(crate) warnings: Vec<String>,
     pub(crate) anchor_valid: bool,
     pub(crate) symbol_trace: Option<SymbolTrace>,
+    pub(crate) shallow: bool,
 }
 
 pub(in crate::git) fn pin(
@@ -57,6 +58,7 @@ pub(in crate::git) fn pin(
             anchor_valid: false,
             symbol_trace: None,
             warnings,
+            shallow,
         });
     }
     if entry.kind != "blob" {
@@ -112,6 +114,7 @@ pub(in crate::git) fn pin(
         anchor_valid: true,
         symbol_trace: None,
         warnings,
+        shallow,
     })
 }
 

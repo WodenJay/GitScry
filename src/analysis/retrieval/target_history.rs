@@ -112,6 +112,54 @@ fn select_line(
     Ok(selection)
 }
 
+/// Shared confirmation facts; command scope and path-move policy stay with callers.
+pub(in crate::analysis) enum SymbolHistoryLimitation<'a> {
+    Trace(&'a str),
+    CacheGap,
+    MissingObjects,
+    UncertainLineage,
+    IntroductionAbsent,
+}
+
+pub(in crate::analysis) fn confirm_symbol_introduction<'a>(
+    trace: &'a crate::git::SymbolTrace,
+    commits: &'a [crate::cache::HistoryCommit],
+    reachable: &HashSet<String>,
+    shallow: bool,
+    missing_objects: bool,
+    mut required_revisions: impl Iterator<Item = &'a String>,
+) -> Result<&'a crate::cache::HistoryCommit, SymbolHistoryLimitation<'a>> {
+    let oid = trace
+        .introduction
+        .as_ref()
+        .map_err(|reason| SymbolHistoryLimitation::Trace(reason))?;
+    let history = commits
+        .iter()
+        .map(|commit| (commit.oid.as_str(), commit))
+        .collect::<HashMap<_, _>>();
+    if required_revisions.any(|oid| !reachable.contains(oid) || !history.contains_key(oid.as_str()))
+        || !reachable.contains(oid)
+    {
+        return Err(SymbolHistoryLimitation::CacheGap);
+    }
+    if missing_objects {
+        return Err(SymbolHistoryLimitation::MissingObjects);
+    }
+    if shallow
+        || trace.revisions.iter().any(|oid| {
+            history
+                .get(oid.as_str())
+                .is_some_and(|commit| commit.parent_count > 1 || commit.shallow_boundary)
+        })
+    {
+        return Err(SymbolHistoryLimitation::UncertainLineage);
+    }
+    history
+        .get(oid.as_str())
+        .copied()
+        .ok_or(SymbolHistoryLimitation::IntroductionAbsent)
+}
+
 fn select_symbol(
     session: &QuerySession,
     target: &WhyTarget,
@@ -137,29 +185,21 @@ fn select_symbol(
         }
     }
     let commits = commits_by_oid.into_values().collect::<Vec<_>>();
-    let history_by_oid = commits
-        .iter()
-        .map(|commit| (commit.oid.as_str(), commit))
-        .collect::<HashMap<_, _>>();
-    let cache_gap = trace
-        .revisions
-        .iter()
-        .chain(trace.modifications.iter().map(|change| &change.oid))
-        .any(|oid| !reachable.contains(oid) || !history_by_oid.contains_key(oid.as_str()));
-    let missing_objects = session.has_missing_objects(&commits)?;
-    let uncertain_lineage = trace.revisions.iter().any(|oid| {
-        history_by_oid
-            .get(oid.as_str())
-            .is_some_and(|commit| commit.parent_count > 1 || commit.shallow_boundary)
-    });
-    let shallow_history = target
-        .warnings
-        .iter()
-        .any(|warning| warning.contains("local history is shallow"))
-        || trace
+    let confirmation = confirm_symbol_introduction(
+        trace,
+        &commits,
+        &reachable,
+        target.shallow
+            || trace
+                .revisions
+                .iter()
+                .any(|oid| shallow_boundaries.contains(oid)),
+        session.has_missing_objects(&commits)?,
+        trace
             .revisions
             .iter()
-            .any(|oid| shallow_boundaries.contains(oid));
+            .chain(trace.modifications.iter().map(|change| &change.oid)),
+    );
     let mut selection = Selection {
         touches: trace
             .modifications
@@ -180,31 +220,27 @@ fn select_symbol(
                 .to_owned(),
         );
     }
-    match &trace.introduction {
-        Err(reason) => selection.limitations.push(format!(
+    match confirmation {
+        Err(SymbolHistoryLimitation::Trace(reason)) => selection.limitations.push(format!(
             "Symbol introduction could not be confirmed: {reason}."
         )),
-        Ok(_) if cache_gap => selection.limitations.push(
+        Err(SymbolHistoryLimitation::CacheGap) => selection.limitations.push(
             "Symbol history extends beyond published cache coverage; earlier target touches are indeterminate."
                 .to_owned(),
         ),
-        Ok(_) if missing_objects => selection.limitations.push(
+        Err(SymbolHistoryLimitation::MissingObjects) => selection.limitations.push(
             "Local Git objects needed to confirm the symbol introduction are missing."
                 .to_owned(),
         ),
-        Ok(_) if shallow_history || uncertain_lineage => selection.limitations.push(
+        Err(SymbolHistoryLimitation::UncertainLineage) => selection.limitations.push(
             "Shallow or merge history makes symbol lineage uncertain."
                 .to_owned(),
         ),
-        Ok(oid) if !reachable.contains(oid) => selection.limitations.push(
-            "Symbol history extends beyond published cache coverage; earlier target touches are indeterminate."
-                .to_owned(),
-        ),
-        Ok(oid) if !history_by_oid.contains_key(oid.as_str()) => selection.limitations.push(
+        Err(SymbolHistoryLimitation::IntroductionAbsent) => selection.limitations.push(
             "Symbol introduction is not present in cached path history.".to_owned(),
         ),
-        Ok(oid) => {
-            selection.touches.insert(oid.clone());
+        Ok(commit) => {
+            selection.touches.insert(commit.oid.clone());
             selection.complete = !path_moved;
         }
     }
