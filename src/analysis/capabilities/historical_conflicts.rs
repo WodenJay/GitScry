@@ -121,6 +121,17 @@ impl CandidateAccounting {
         self.discovered.saturating_sub(self.examined)
     }
 
+    fn project(&self, report: &mut HistoricalFile) {
+        report.candidate_merges = self.discovered;
+        report.candidates_examined = self.examined;
+        report.candidates_nonconflicting = self.nonconflicting;
+        report.candidates_irrelevant = self.irrelevant;
+        report.candidates_ambiguous = self.ambiguous;
+        report.candidates_unsupported = self.unsupported;
+        report.candidates_failed = self.failed;
+        report.candidates_unchecked = self.unchecked();
+    }
+
     fn merge(&mut self, other: &CandidateAccounting) {
         self.examined += other.examined;
         self.nonconflicting += other.nonconflicting;
@@ -309,12 +320,12 @@ fn analyze_with_runner(
             .collect::<Vec<_>>();
         let mut accounting = CandidateAccounting::discovered(candidates.len() * files.len());
         for file in &mut files {
+            let mut per_file = CandidateAccounting::discovered(candidates.len());
             for _ in 0..candidates.len() {
-                accounting.examine(CandidateOutcome::Unsupported);
+                per_file.examine(CandidateOutcome::Unsupported);
             }
-            file.candidates_examined = candidates.len();
-            file.candidates_unsupported = candidates.len();
-            file.candidates_unchecked = 0;
+            per_file.project(file);
+            accounting.merge(&per_file);
         }
         return Ok((files, accounting, discovery_complete, false));
     }
@@ -352,13 +363,7 @@ fn analyze_with_runner(
         .map(|file| {
             file_analysis.analyze(file).map(|(mut report, accounting)| {
                 total.merge(&accounting);
-                report.candidates_examined = accounting.examined;
-                report.candidates_nonconflicting = accounting.nonconflicting;
-                report.candidates_irrelevant = accounting.irrelevant;
-                report.candidates_ambiguous = accounting.ambiguous;
-                report.candidates_unsupported = accounting.unsupported;
-                report.candidates_failed = accounting.failed;
-                report.candidates_unchecked = candidates.len().saturating_sub(accounting.examined);
+                accounting.project(&mut report);
                 report
             })
         })
@@ -420,7 +425,7 @@ impl FileAnalysis<'_> {
         &mut self,
         file: &git::ConflictFile,
     ) -> Result<(HistoricalFile, CandidateAccounting), AppError> {
-        let mut accounting = CandidateAccounting::default();
+        let mut accounting = CandidateAccounting::discovered(self.candidates.len());
         let report = self.analyze_inner(file, &mut accounting)?;
         Ok((report, accounting))
     }
@@ -645,7 +650,6 @@ impl FileAnalysis<'_> {
                 &candidate.oid,
                 &result_path,
             )?;
-            report.candidates_examined += 1;
             let replay = runner.replay(base, &candidate.parents[0], &candidate.parents[1])?;
             if !replay.conflicted {
                 accounting.examine(CandidateOutcome::NonConflicting);

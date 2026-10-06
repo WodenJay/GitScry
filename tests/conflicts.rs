@@ -666,11 +666,19 @@ fn historical_metadata_preserves_multiple_paths_and_candidates() {
     let history = &report["historical_cases"];
     assert_eq!(history["status"], "complete", "{history}");
     let files = history["files"].as_array().unwrap();
+    assert_eq!(history["candidates"]["discovered"], 6);
+    assert_eq!(history["candidates"]["examined"], 6);
+    assert_eq!(history["candidates"]["irrelevant"], 6);
+    assert_eq!(history["candidates"]["unchecked"], 0);
     assert_eq!(files.len(), 3, "{history}");
     let mut ordering = None;
     for file in files {
         let path = file["path"].as_str().unwrap();
         assert!(paths.contains(&path), "{file}");
+        assert_eq!(file["candidate_merges"], 2);
+        assert_eq!(file["candidates_examined"], 2);
+        assert_eq!(file["candidates_irrelevant"], 2);
+        assert_eq!(file["candidates_unchecked"], 0);
         let cases = file["cases"].as_array().unwrap();
         assert_eq!(cases.len(), 2, "{file}");
         let ids = cases
@@ -694,6 +702,30 @@ fn historical_metadata_preserves_multiple_paths_and_candidates() {
         } else {
             ordering = Some(ids);
         }
+    }
+    let bounded = json(
+        TestRepo::command_at(repo.dir.path(), repo.user_data_dir())
+            .args(["conflicts", "--json", "--max-historical-checks", "4"])
+            .env("GITSCRY_FULL_OUTPUT", "1")
+            .output()
+            .unwrap(),
+    );
+    let history = &bounded["historical_cases"];
+    assert_eq!(history["status"], "partial", "{history}");
+    assert_eq!(history["candidates"]["discovered"], 6);
+    assert_eq!(history["candidates"]["examined"], 4);
+    assert_eq!(history["candidates"]["irrelevant"], 4);
+    assert_eq!(history["candidates"]["unchecked"], 2);
+    assert_eq!(history["candidates"]["limited"], true);
+    assert_eq!(history["files_analyzed"], 3);
+    assert_eq!(history["files_with_cases"], 2);
+    let files = history["files"].as_array().unwrap();
+    assert_eq!(files.len(), 2, "empty file stays hidden: {history}");
+    for file in files {
+        assert_eq!(file["candidate_merges"], 2);
+        assert_eq!(file["candidates_examined"], 2);
+        assert_eq!(file["candidates_irrelevant"], 2);
+        assert_eq!(file["candidates_unchecked"], 0);
     }
     assert_eq!(state_with_paths(&repo, &paths), before);
 }
