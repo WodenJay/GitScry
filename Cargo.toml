@@ -35,6 +35,8 @@ tokenizers = { version = "=0.22.1", default-features = false, features = ["fancy
 zip = { version = "2.4", default-features = false, features = ["deflate"] }
 tree-sitter = "=0.25.10"
 tree-sitter-rust = "=0.24.2"
+tree-sitter-javascript = "=0.23.1"
+tree-sitter-typescript = "=0.23.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Security_Authorization", "Win32_Storage_FileSystem"] }
