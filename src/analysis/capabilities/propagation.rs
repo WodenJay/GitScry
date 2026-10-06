@@ -7,6 +7,8 @@ use crate::{app::AppError, cache, git};
 const REASON_PATCH_CHECK_PENDING: &str = "patch equivalence has not been checked for this target";
 const REASON_HISTORY_INCOMPLETE: &str =
     "target history is incomplete in the prepared cache; reachability was not fully inspected";
+const REASON_SOURCE_UNCACHED: &str =
+    "source commit is not cached; containment could not be inspected";
 
 #[derive(Serialize)]
 pub(crate) struct Report {
@@ -63,26 +65,36 @@ pub(crate) fn execute(source: &str, targets: &[String]) -> Result<Outcome, AppEr
     let session = cache::refresh_query_targets(&repository, &unique_tips)?;
     let progress = session.progress().to_vec();
     let mut warnings = session.warnings().to_vec();
-    session.require_revision(&source_oid)?;
+    let cached = session.commit_oids()?;
+    let source_cached = cached.contains(&source_oid);
     for (_, oid) in &resolved {
         session.require_revision(oid)?;
     }
-
+    if !source_cached {
+        warnings.push(format!(
+            "warning: source commit {source_oid} is outside the prepared cache; containment could not be inspected"
+        ));
+    }
     let mut results = Vec::with_capacity(resolved.len());
     let mut coverage_complete = true;
     for (target_ref, target_oid) in &resolved {
         let ancestors = session.ancestors(target_oid)?;
-        let cached = session.commit_oids()?;
         let missing = ancestors.difference(&cached).count();
-        let reason = (missing > 0).then(|| REASON_HISTORY_INCOMPLETE.to_owned());
-        if reason.is_some() {
+        let mut reasons: Vec<&'static str> = Vec::new();
+        if !source_cached {
+            reasons.push(REASON_SOURCE_UNCACHED);
+        }
+        if missing > 0 {
+            reasons.push(REASON_HISTORY_INCOMPLETE);
+        }
+        if !source_cached || missing > 0 {
             coverage_complete = false;
         }
         if ancestors.contains(&source_oid) {
-            let contained_by = (missing == 0)
-                .then(|| source_oid.clone())
-                .into_iter()
-                .collect();
+            // An exact positive result survives incomplete coverage: the source
+            // OID itself was resolved and observed reachable from this target.
+            let contained_by = vec![source_oid.clone()];
+            let reason = reasons.first().map(|reason| reason.to_string());
             results.push(TargetResult {
                 target_ref: target_ref.clone(),
                 target_oid: target_oid.clone(),
@@ -92,13 +104,17 @@ pub(crate) fn execute(source: &str, targets: &[String]) -> Result<Outcome, AppEr
                 reason,
             });
         } else {
+            // Exact non-reachability is not a completed negative search until
+            // patch equivalence is checked.
+            reasons.push(REASON_PATCH_CHECK_PENDING);
+            let reason = reasons.join("; ");
             results.push(TargetResult {
                 target_ref: target_ref.clone(),
                 target_oid: target_oid.clone(),
                 source_oid: source_oid.clone(),
                 status: Status::Indeterminate,
                 contained_by: Vec::new(),
-                reason: Some(reason.unwrap_or_else(|| REASON_PATCH_CHECK_PENDING.to_owned())),
+                reason: Some(reason),
             });
         }
     }
