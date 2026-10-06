@@ -404,6 +404,15 @@ Examples:
 Code modes search added/removed lines only, not unchanged context. --change and
 --path apply to code modes; --hybrid and --patch apply to QUERY mode only.
 
+--path on QUERY mode restricts eligible commits to those whose recorded changed
+paths (old or new, including removals) match the given repository-relative file
+or subtree, case-sensitively with `/`-separated segment boundaries; repeat
+--path to take the union, intersected with revision and time bounds before
+ranking. Eligibility is commit-level: a matching commit's complete touched
+paths, message, and excerpts are still shown. `.` selects the whole repository.
+--path on code modes keeps its exact historical-path meaning and accepts it
+only once.
+
 Regex uses Rust regex syntax, one changed line at a time. Matching is Unicode-aware
 and case-sensitive; (?i) ignores case. Look-around and backreferences are unsupported.
 Patterns must be nonempty, single-line, and at most 16,384 UTF-8 bytes.
@@ -419,6 +428,8 @@ UTC offset. Missing history is reported. --limit bounds output, not scan work.
 
 Examples:
   gitscry search retry backoff --from-rev v1.0 --to-rev release
+  gitscry search timeout --path packages/adapter-utils --limit 5
+  gitscry search timeout --hybrid --path packages/a --path packages/b --limit 5
   gitscry search --code 'unwrap()?' --since 2025-01-01 --limit 5
   gitscry search --code-regex 'Old[A-Z][A-Za-z0-9_]*' --change removed --path src/lib.rs
   gitscry search --code-file change.txt --github-links --json"#
@@ -442,14 +453,15 @@ Examples:
         /// Restrict code matches to added or removed lines.
         #[arg(long, value_enum, requires = "code-mode", conflicts_with = "query")]
         change: Option<CodeChange>,
-        /// Exact historical path; additions use the new path, removals the old path.
+        /// QUERY mode: repository-relative historical changed path or subtree; repeatable.
+        /// Code modes: exact historical path; additions use the new path, removals the old path.
         #[arg(
             long = "path",
             value_name = "PATH",
-            requires = "code-mode",
-            conflicts_with = "query"
+            action = clap::ArgAction::Append,
+            requires = "search-mode"
         )]
-        path: Option<String>,
+        paths: Vec<String>,
         #[command(flatten)]
         scope: HistoricalScopeArgs,
         /// Maximum number of matching commits, changed lines, or fragment occurrences to return.

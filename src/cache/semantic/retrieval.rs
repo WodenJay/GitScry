@@ -1,7 +1,9 @@
 //! Scoped, deterministic top-k retrieval of compatible semantic vectors.
 use super::super::{
     cache_error as search_error,
-    scope::{SEARCH_SCOPE_CTE, SearchFilter, scope_values},
+    scope::{
+        SEARCH_SCOPE_CTE, SearchFilter, changed_path_predicate, changed_path_values, scope_values,
+    },
 };
 use super::vectors::{self, normalized_vector, valid_fingerprint};
 use crate::app::AppError;
@@ -57,15 +59,19 @@ pub(in crate::cache) fn semantic_top_k(
     }
     let encoder_fingerprint = crate::semantic::encoder_fingerprint();
     let sql = match scope {
-        Some(_) => format!(
-            "{SEARCH_SCOPE_CTE}
-             SELECT c.commit_id, c.oid, c.commit_time, v.commit_oid, v.embedding,
-                    v.source_fingerprint, v.input_fingerprint, v.encoder_fingerprint
-             FROM eligible
-             JOIN commits AS c ON c.commit_id = eligible.commit_id
-             JOIN semantic_vectors AS v ON v.commit_id = c.commit_id
+        Some(scope) => {
+            let eligibility = changed_path_predicate(scope, scope_values(scope).len() + 1);
+            format!(
+                "{SEARCH_SCOPE_CTE}
+                 SELECT c.commit_id, c.oid, c.commit_time, v.commit_oid, v.embedding,
+                        v.source_fingerprint, v.input_fingerprint, v.encoder_fingerprint
+                 FROM eligible
+                 JOIN commits AS c ON c.commit_id = eligible.commit_id
+                 JOIN semantic_vectors AS v ON v.commit_id = c.commit_id
+                 WHERE 1 = 1 {eligibility}
 "
-        ),
+            )
+        }
         None => "SELECT c.commit_id, c.oid, c.commit_time, v.commit_oid, v.embedding,
                        v.source_fingerprint, v.input_fingerprint, v.encoder_fingerprint
                 FROM semantic_vectors AS v
@@ -77,9 +83,13 @@ pub(in crate::cache) fn semantic_top_k(
         .prepare(&sql)
         .map_err(|error| search_error("preparing semantic retrieval", error))?;
     let mut rows = match scope {
-        Some(scope) => statement
-            .query(params_from_iter(scope_values(scope)))
-            .map_err(|error| search_error("running scoped semantic retrieval", error))?,
+        Some(scope) => {
+            let mut values = scope_values(scope).to_vec();
+            values.extend(changed_path_values(scope));
+            statement
+                .query(params_from_iter(values))
+                .map_err(|error| search_error("running scoped semantic retrieval", error))?
+        }
         None => statement
             .query([])
             .map_err(|error| search_error("running semantic retrieval", error))?,
@@ -308,6 +318,7 @@ mod semantic_tests {
             to_oid: "target".to_owned(),
             since: None,
             until: None,
+            paths: Vec::new(),
         };
 
         let results =
@@ -315,6 +326,55 @@ mod semantic_tests {
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].oid, "target");
         assert_eq!(results[0].cosine, 0.0);
+    }
+
+    #[test]
+    fn semantic_top_k_applies_changed_path_scope_before_ranking() {
+        let connection = database();
+        connection
+            .execute_batch(
+                "CREATE TABLE commit_paths (
+                    commit_id INTEGER NOT NULL,
+                    path_search_key TEXT NOT NULL,
+                    path_basename TEXT NOT NULL,
+                    raw_path BLOB NOT NULL,
+                    path_order INTEGER NOT NULL,
+                    PRIMARY KEY (commit_id, raw_path)
+                );",
+            )
+            .unwrap();
+        crate::cache::scope::set_scope_revisions(
+            &connection,
+            &["in-scope".to_owned(), "out-of-scope".to_owned()],
+            &[],
+            &["in-scope".to_owned(), "out-of-scope".to_owned()],
+        )
+        .unwrap();
+        let query = unit_vector(0);
+        insert_vector(&connection, 1, "in-scope", &query);
+        insert_vector(&connection, 2, "out-of-scope", &query);
+        for (commit_id, path) in [(1, "packages/a/engine.txt"), (2, "packages/b/core.txt")] {
+            connection
+                .execute(
+                    "INSERT INTO commit_paths (commit_id, path_search_key, path_basename, raw_path, path_order)
+                     VALUES (?1, ?2, ?3, ?4, 0)",
+                    params![commit_id, path, path.rsplit('/').next().unwrap(), path],
+                )
+                .unwrap();
+        }
+        let scope = SearchFilter {
+            from_oid: None,
+            to_oid: "out-of-scope".to_owned(),
+            since: None,
+            until: None,
+            paths: vec!["packages/a".to_owned()],
+        };
+
+        // Both commits carry identical vectors; path eligibility decides alone.
+        let results =
+            semantic_top_k(&connection, std::slice::from_ref(&query), 2, Some(&scope)).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].oid, "in-scope");
     }
 
     #[test]

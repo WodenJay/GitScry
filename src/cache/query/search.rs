@@ -5,7 +5,9 @@ use std::collections::HashMap;
 
 use super::{SQL_PARAMETER_LIMIT, numbered_placeholders, search_error};
 use crate::app::AppError;
-use crate::cache::scope::{SEARCH_SCOPE_CTE, SearchFilter, scope_values};
+use crate::cache::scope::{
+    SEARCH_SCOPE_CTE, SearchFilter, changed_path_predicate, changed_path_values, scope_values,
+};
 use crate::cache::semantic::{SemanticCandidate, semantic_top_k};
 use crate::cache::{QuerySession, decode_message_row, message_parts};
 
@@ -122,17 +124,19 @@ fn match_count_scoped(
     explicit_paths: &[String],
 ) -> Result<usize, AppError> {
     let path_filter = explicit_path_filter(explicit_paths, 6);
+    let eligibility = changed_path_predicate(scope, 6 + explicit_paths.len());
     let query = format!(
         "{SEARCH_SCOPE_CTE}
          SELECT COUNT(*)
          FROM search_fts
          JOIN commits AS c ON c.commit_id = search_fts.rowid
          WHERE search_fts MATCH ?5
-           AND c.commit_id IN (SELECT commit_id FROM eligible) {path_filter}"
+           AND c.commit_id IN (SELECT commit_id FROM eligible) {path_filter} {eligibility}"
     );
     let mut values = scope_values(scope).to_vec();
     values.push(Value::Text(match_query.to_owned()));
     values.extend(explicit_paths.iter().cloned().map(Value::Text));
+    values.extend(changed_path_values(scope));
     let count = connection
         .query_row(&query, params_from_iter(values), |row| row.get::<_, i64>(0))
         .map_err(|error| search_error("counting scoped search matches", error))?;
@@ -153,6 +157,7 @@ fn candidates_scoped(
     // FTS5 BM25 uses corpus-wide statistics, including out-of-scope commits. Search reranks
     // every scoped match with candidate-local signals before applying the result limit.
     let path_filter = explicit_path_filter(explicit_paths, 6);
+    let eligibility = changed_path_predicate(scope, 6 + explicit_paths.len());
     let query = format!(
         "{SEARCH_SCOPE_CTE}
          SELECT c.commit_id, c.oid, c.commit_time, c.message, c.message_length,
@@ -160,12 +165,13 @@ fn candidates_scoped(
          FROM search_fts
          JOIN commits AS c ON c.commit_id = search_fts.rowid
          WHERE search_fts MATCH ?5
-           AND c.commit_id IN (SELECT commit_id FROM eligible) {path_filter}
+           AND c.commit_id IN (SELECT commit_id FROM eligible) {path_filter} {eligibility}
          ORDER BY c.commit_time DESC, c.oid ASC"
     );
     let mut values = scope_values(scope).to_vec();
     values.push(Value::Text(match_query.to_owned()));
     values.extend(explicit_paths.iter().cloned().map(Value::Text));
+    values.extend(changed_path_values(scope));
     let mut statement = connection
         .prepare(&query)
         .map_err(|error| search_error("preparing scoped search", error))?;

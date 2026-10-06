@@ -13,6 +13,9 @@ pub(crate) struct SearchScopeOptions {
     pub(crate) to_rev: Option<String>,
     pub(crate) since: Option<String>,
     pub(crate) until: Option<String>,
+    /// QUERY-mode historical changed-path eligibility; validated and normalized
+    /// during scope resolution.
+    pub(crate) paths: Vec<String>,
 }
 
 impl SearchScopeOptions {
@@ -21,6 +24,7 @@ impl SearchScopeOptions {
             && self.to_rev.is_none()
             && self.since.is_none()
             && self.until.is_none()
+            && self.paths.is_empty()
     }
 }
 
@@ -45,6 +49,7 @@ pub(in crate::analysis) fn install_shared_history_scope(
         to_oid: merge_base.to_owned(),
         since: None,
         until: None,
+        paths: Vec::new(),
     })
 }
 
@@ -264,6 +269,7 @@ fn resolve_with_target(
         to_oid: to_rev.clone(),
         since: since.as_ref().map(|bound| bound.filter_second),
         until: until.as_ref().map(|bound| bound.filter_second),
+        paths: query_paths(&options.paths)?,
     };
     let report = SearchScopeInfo {
         from_rev,
@@ -271,6 +277,7 @@ fn resolve_with_target(
         target_rev: target_revision.map(str::to_owned),
         since: since.map(|bound| bound.normalized),
         until: until.map(|bound| bound.normalized),
+        paths: filter.paths.clone(),
         cache_tip,
         coverage_complete,
     };
@@ -490,4 +497,47 @@ fn compare_fraction(left: &str, right: &str) -> std::cmp::Ordering {
         })
         .find(|order| !order.is_eq())
         .unwrap_or(std::cmp::Ordering::Equal)
+}
+
+/// Validate and normalize QUERY-mode historical changed-path scope.
+///
+/// Paths stay repository-relative and case-sensitive: `.` selects the whole
+/// repository; leading `./`, trailing separators, and `\` are normalized; empty,
+/// absolute, and parent-traversal paths are rejected.
+pub(super) fn query_paths(requested: &[String]) -> Result<Vec<String>, AppError> {
+    let mut normalized = Vec::new();
+    for path in requested {
+        if path.trim().is_empty() {
+            return Err(AppError::input(
+                "error: --path must not be empty or whitespace",
+            ));
+        }
+        let bytes = path.as_bytes();
+        let has_windows_drive =
+            bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
+        let candidate = std::path::Path::new(path);
+        if candidate.is_absolute()
+            || candidate.has_root()
+            || has_windows_drive
+            || candidate
+                .components()
+                .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
+            return Err(AppError::input(format!(
+                "error: --path must be relative to the repository root without `..` segments: {path}"
+            )));
+        }
+        let mut normalized_path = path.replace('\\', "/");
+        while let Some(stripped) = normalized_path.strip_prefix("./") {
+            normalized_path = stripped.to_owned();
+        }
+        let mut normalized_path = normalized_path.trim_matches('/').to_owned();
+        if normalized_path.is_empty() {
+            normalized_path.push('.');
+        }
+        if !normalized.contains(&normalized_path) {
+            normalized.push(normalized_path);
+        }
+    }
+    Ok(normalized)
 }

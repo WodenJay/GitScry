@@ -2194,10 +2194,6 @@ fn code_search_rejects_missing_empty_multiline_and_mixed_modes() {
             repo.run(["search", "ordinary", "--change", "removed"]),
             "--change",
         ),
-        (
-            repo.run(["search", "ordinary", "--path", "src/lib.rs"]),
-            "--path",
-        ),
     ] {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert_eq!(output.status.code(), Some(2), "{stderr}");
@@ -2453,6 +2449,7 @@ fn code_regex_search_rejects_mixed_and_text_only_modes() {
     }
 }
 
+#[allow(dead_code)]
 fn commit_staged_at(repo: &TestRepo, message: &str, date: &str) {
     let output = git_command(repo.dir.path())
         .args(["commit", "-m", message])
@@ -2465,4 +2462,491 @@ fn commit_staged_at(repo: &TestRepo, message: &str, date: &str) {
         "git commit failed: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+/// Commit already-staged changes at fixed dates, like `commit_staged_at`.
+fn commit_staged_at_path_scope(repo: &TestRepo, message: &str, date: &str) {
+    let output = git_command(repo.dir.path())
+        .args(["commit", "-m", message])
+        .env("GIT_AUTHOR_DATE", date)
+        .env("GIT_COMMITTER_DATE", date)
+        .output()
+        .expect("commit staged changes");
+    assert!(
+        output.status.success(),
+        "git commit failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn path_scope_repo() -> (TestRepo, Vec<String>) {
+    let repo = TestRepo::new();
+    repo.commit_at(
+        "packages/a/engine.txt",
+        b"packages a root commit\n",
+        "PathScope alpha root",
+        "2001-01-01T00:00:00Z",
+    );
+    repo.commit_at(
+        "packages/b/core.txt",
+        b"packages b root commit\n",
+        "PathScope beta root",
+        "2001-01-02T00:00:00Z",
+    );
+    repo.commit_at(
+        "packages/abc/other.txt",
+        b"packages abc root commit\n",
+        "PathScope adjacent prefix",
+        "2001-01-03T00:00:00Z",
+    );
+    repo.commit_at(
+        "docs/guide.txt",
+        b"docs root commit\n",
+        "PathScope docs root",
+        "2001-01-04T00:00:00Z",
+    );
+    let mut oids = vec![repo.head()];
+    repo.commit_at(
+        "packages/a/engine.txt",
+        b"packages a engine update\n",
+        "PathScope alpha update",
+        "2001-01-05T00:00:00Z",
+    );
+    oids.push(repo.head());
+    repo.commit_at(
+        "packages/b/core.txt",
+        b"packages b core update\n",
+        "PathScope beta update",
+        "2001-01-06T00:00:00Z",
+    );
+    oids.push(repo.head());
+    (repo, oids)
+}
+
+fn path_scope_subjects(value: &serde_json::Value) -> Vec<String> {
+    value["materials"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|material| material["subject"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+fn run_path_scope_json(repo: &TestRepo, args: &[&str]) -> serde_json::Value {
+    let output = repo.run(
+        std::iter::once("search")
+            .chain(args.iter().copied())
+            .chain(["--json"])
+            .collect::<Vec<_>>(),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+#[test]
+fn search_path_scope_restricts_query_matches_to_subtree_history() {
+    let (repo, _) = path_scope_repo();
+    repo.index();
+    let value = run_path_scope_json(
+        &repo,
+        &["PathScope", "--path", "packages/a", "--limit", "5"],
+    );
+    let subjects = path_scope_subjects(&value);
+    assert!(
+        subjects.contains(&"PathScope alpha root".to_owned()),
+        "{subjects:?}"
+    );
+    assert!(
+        subjects.contains(&"PathScope alpha update".to_owned()),
+        "{subjects:?}"
+    );
+    assert!(
+        !subjects.iter().any(|subject| subject.contains("beta")),
+        "{subjects:?}"
+    );
+    assert!(
+        !subjects
+            .iter()
+            .any(|subject| subject.contains("adjacent prefix")),
+        "{subjects:?}"
+    );
+    assert_eq!(value["scope"]["paths"], serde_json::json!(["packages/a"]));
+    // The unscoped query still sees everything.
+    let unscoped = run_path_scope_json(&repo, &["PathScope", "--limit", "10"]);
+    assert!(unscoped["materials"].as_array().unwrap().len() >= 6);
+}
+
+#[test]
+fn search_path_scope_matches_exact_files_and_keeps_segment_boundaries() {
+    let (repo, _) = path_scope_repo();
+    repo.index();
+    let file = run_path_scope_json(&repo, &["PathScope", "--path", "packages/a/engine.txt"]);
+    let subjects = path_scope_subjects(&file);
+    assert!(
+        subjects.contains(&"PathScope alpha update".to_owned()),
+        "{subjects:?}"
+    );
+    // Adjacent prefix must not match: packages/abc is not inside packages/a.
+    let adjacent = run_path_scope_json(&repo, &["PathScope", "--path", "packages/a/"]);
+    let subjects = path_scope_subjects(&adjacent);
+    assert!(
+        !subjects
+            .iter()
+            .any(|subject| subject.contains("adjacent prefix")),
+        "{subjects:?}"
+    );
+    assert!(
+        !subjects.iter().any(|subject| subject.contains("beta")),
+        "{subjects:?}"
+    );
+}
+
+#[test]
+fn search_path_scope_unions_repeated_paths_without_duplicates() {
+    let (repo, _) = path_scope_repo();
+    repo.index();
+    let value = run_path_scope_json(
+        &repo,
+        &[
+            "PathScope",
+            "--path",
+            "packages/a",
+            "--path",
+            "packages/b",
+            "--limit",
+            "10",
+        ],
+    );
+    let subjects = path_scope_subjects(&value);
+    assert!(
+        subjects.contains(&"PathScope alpha update".to_owned()),
+        "{subjects:?}"
+    );
+    assert!(
+        subjects.contains(&"PathScope beta update".to_owned()),
+        "{subjects:?}"
+    );
+    let unique: std::collections::HashSet<&String> = subjects.iter().collect();
+    assert_eq!(unique.len(), subjects.len());
+    assert_eq!(
+        value["scope"]["paths"],
+        serde_json::json!(["packages/a", "packages/b"])
+    );
+}
+
+#[test]
+fn search_path_scope_intersects_with_revision_bounds() {
+    let (repo, oids) = path_scope_repo();
+    repo.index();
+    // Upper revision before the alpha update excludes it even though the path matches.
+    let value = run_path_scope_json(
+        &repo,
+        &["PathScope", "--path", "packages/a", "--to-rev", &oids[0]],
+    );
+    let subjects = path_scope_subjects(&value);
+    assert!(
+        subjects.contains(&"PathScope alpha root".to_owned()),
+        "{subjects:?}"
+    );
+    assert!(
+        !subjects.contains(&"PathScope alpha update".to_owned()),
+        "{subjects:?}"
+    );
+}
+
+#[test]
+fn search_path_scope_survives_truncation_that_would_exclude_eligible_results() {
+    let (repo, _) = path_scope_repo();
+    repo.index();
+    // Six PathScope commits exist; only two touch packages/a. A small limit must
+    // still return the in-scope commits, not the globally strongest two.
+    let value = run_path_scope_json(
+        &repo,
+        &["PathScope", "--path", "packages/a", "--limit", "2"],
+    );
+    let subjects = path_scope_subjects(&value);
+    assert_eq!(subjects.len(), 2, "{subjects:?}");
+    assert!(subjects.iter().all(|subject| subject.contains("alpha")));
+}
+
+#[test]
+fn search_path_scope_matches_deleted_and_moved_paths() {
+    let repo = TestRepo::new();
+    repo.commit_at(
+        "component/keep.txt",
+        b"component history\n",
+        "PathScope component history",
+        "2001-01-01T00:00:00Z",
+    );
+    repo.commit_at(
+        "component/removed.txt",
+        b"remove me\n",
+        "PathScope add removed file",
+        "2001-01-02T00:00:00Z",
+    );
+    git(repo.dir.path(), ["rm", "component/removed.txt"]);
+    commit_staged_at_path_scope(
+        &repo,
+        "PathScope delete removed file",
+        "2001-01-03T00:00:00Z",
+    );
+    repo.commit_at(
+        "elsewhere/moved.txt",
+        b"moved\n",
+        "PathScope unrelated",
+        "2001-01-04T00:00:00Z",
+    );
+    git(
+        repo.dir.path(),
+        ["mv", "component/keep.txt", "elsewhere/keep.txt"],
+    );
+    commit_staged_at_path_scope(&repo, "PathScope move keep file", "2001-01-05T00:00:00Z");
+    repo.index();
+
+    // Deleted paths remain eligible through their recorded old path.
+    let deleted = run_path_scope_json(&repo, &["PathScope", "--path", "component/removed.txt"]);
+    let subjects = path_scope_subjects(&deleted);
+    assert!(
+        subjects.contains(&"PathScope add removed file".to_owned()),
+        "{subjects:?}"
+    );
+    assert!(
+        subjects.contains(&"PathScope delete removed file".to_owned()),
+        "{subjects:?}"
+    );
+
+    // A move commit is eligible through either side of the move.
+    for side in ["component/keep.txt", "elsewhere/keep.txt"] {
+        let moved = run_path_scope_json(&repo, &["PathScope", "--path", side]);
+        let subjects = path_scope_subjects(&moved);
+        assert!(
+            subjects.contains(&"PathScope move keep file".to_owned()),
+            "{subjects:?}"
+        );
+    }
+    // The pre-move history stays reachable through its recorded old path.
+    let old_side = run_path_scope_json(&repo, &["PathScope", "--path", "component/keep.txt"]);
+    let subjects = path_scope_subjects(&old_side);
+    assert!(
+        subjects.contains(&"PathScope component history".to_owned()),
+        "{subjects:?}"
+    );
+
+    // No rename-chain following: post-move unrelated commits elsewhere are not
+    // pulled into the component boundary.
+    let component = run_path_scope_json(&repo, &["PathScope", "--path", "component"]);
+    let subjects = path_scope_subjects(&component);
+    assert!(
+        !subjects.contains(&"PathScope unrelated".to_owned()),
+        "{subjects:?}"
+    );
+}
+
+#[test]
+fn search_path_scope_keeps_cross_component_commit_complete_paths() {
+    let repo = TestRepo::new();
+    repo.commit_at(
+        "a/one.txt",
+        b"a history\n",
+        "PathScope a history",
+        "2001-01-01T00:00:00Z",
+    );
+    repo.commit_at(
+        "b/two.txt",
+        b"b history\n",
+        "PathScope cross component commit",
+        "2001-01-02T00:00:00Z",
+    );
+    repo.index();
+    // The commit is eligible for the b boundary; touched paths stay complete.
+    let value = run_path_scope_json(&repo, &["cross component", "--path", "b"]);
+    let materials = value["materials"].as_array().unwrap();
+    assert_eq!(materials.len(), 1);
+    let paths = materials[0]["paths"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|path| path.as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert!(paths.contains(&"b/two.txt"), "{paths:?}");
+}
+
+#[test]
+fn search_path_scope_normalizes_and_accepts_root_selection() {
+    let (repo, _) = path_scope_repo();
+    repo.index();
+    let normalized = run_path_scope_json(
+        &repo,
+        &["PathScope", "--path", "./packages/a/", "--limit", "5"],
+    );
+    assert_eq!(
+        normalized["scope"]["paths"],
+        serde_json::json!(["packages/a"])
+    );
+    let subjects = path_scope_subjects(&normalized);
+    assert!(
+        subjects.contains(&"PathScope alpha update".to_owned()),
+        "{subjects:?}"
+    );
+
+    let root = run_path_scope_json(&repo, &["PathScope", "--path", ".", "--limit", "10"]);
+    assert_eq!(root["scope"]["paths"], serde_json::json!(["."]));
+    assert!(root["materials"].as_array().unwrap().len() >= 6);
+}
+
+#[test]
+fn search_path_scope_is_case_sensitive_and_never_falls_back_to_basename() {
+    let (repo, _) = path_scope_repo();
+    repo.index();
+    // No basename fallback: querying engine.txt must not match packages/a/engine.txt.
+    let basename = run_path_scope_json(&repo, &["PathScope", "--path", "engine.txt"]);
+    assert!(basename["materials"].as_array().unwrap().is_empty());
+    // Case-sensitive: Packages/A does not match packages/a.
+    let mismatched = run_path_scope_json(&repo, &["PathScope", "--path", "Packages/A"]);
+    assert!(mismatched["materials"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn search_path_scope_treats_pattern_characters_literally() {
+    let repo = TestRepo::new();
+    repo.commit_at(
+        "weird/a%b_c.txt",
+        b"weird name history\n",
+        "PathScope weird name history",
+        "2001-01-01T00:00:00Z",
+    );
+    repo.commit_at(
+        "weird/aXbYc.txt",
+        b"wildcard-like name history\n",
+        "PathScope wildcard-like name history",
+        "2001-01-02T00:00:00Z",
+    );
+    repo.index();
+    // `%` and `_` are literal: `weird/a%b_c.txt` must not match `weird/aXbYc.txt`.
+    let value = run_path_scope_json(&repo, &["PathScope", "--path", "weird/a%b_c.txt"]);
+    let subjects = path_scope_subjects(&value);
+    assert!(
+        subjects.contains(&"PathScope weird name history".to_owned()),
+        "{subjects:?}"
+    );
+    assert!(!subjects.contains(&"PathScope wildcard-like name history".to_owned()));
+}
+
+#[test]
+fn search_path_scope_works_from_repository_subdirectory() {
+    let (repo, _) = path_scope_repo();
+    repo.index();
+    let output = TestRepo::run_at(
+        &repo.dir.path().join("packages/a"),
+        ["search", "PathScope", "--path", "packages/a", "--json"],
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let subjects = path_scope_subjects(&value);
+    assert!(
+        subjects.contains(&"PathScope alpha update".to_owned()),
+        "{subjects:?}"
+    );
+    assert!(!subjects.iter().any(|subject| subject.contains("beta")));
+}
+
+#[test]
+fn search_path_scope_rejects_invalid_paths() {
+    let repo = TestRepo::new();
+    repo.commit_at(
+        "src/lib.txt",
+        b"history\n",
+        "PathScope history",
+        "2001-01-01T00:00:00Z",
+    );
+    repo.index();
+    for invalid in [
+        "",
+        "/etc/passwd",
+        "../outside",
+        "src/../../outside",
+        "C:\\temp",
+    ] {
+        let output = repo.run(["search", "PathScope", "--path", invalid]);
+        assert_ne!(
+            output.status.code(),
+            Some(0),
+            "path {invalid:?} was accepted"
+        );
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(!error.is_empty(), "path {invalid:?} failed silently");
+    }
+}
+
+#[test]
+fn search_path_scope_empty_result_has_no_fallback() {
+    let (repo, _) = path_scope_repo();
+    repo.index();
+    let value = run_path_scope_json(&repo, &["PathScope", "--path", "nonexistent/component"]);
+    assert!(value["materials"].as_array().unwrap().is_empty());
+    // The scope still reports the requested boundary; no whole-repo fallback.
+    assert_eq!(
+        value["scope"]["paths"],
+        serde_json::json!(["nonexistent/component"])
+    );
+}
+
+#[test]
+fn search_path_scope_preserves_hybrid_readiness_requirements() {
+    let repo = TestRepo::new();
+    repo.commit_at(
+        "packages/a/engine.txt",
+        b"packages a history\n",
+        "PathScope hybrid alpha",
+        "2001-01-01T00:00:00Z",
+    );
+    repo.commit_at(
+        "packages/b/core.txt",
+        b"packages b history\n",
+        "PathScope hybrid beta",
+        "2001-01-02T00:00:00Z",
+    );
+    repo.index();
+    // Without a semantic index, hybrid keeps failing explicitly: path scope must
+    // not silently substitute lexical retrieval.
+    let hybrid = repo.run(["search", "PathScope", "--hybrid", "--path", "packages/a"]);
+    assert_ne!(hybrid.status.code(), Some(0));
+    let error = String::from_utf8_lossy(&hybrid.stderr);
+    assert!(error.contains("semantic"), "{error}");
+    assert!(error.contains("gitscry index --semantic"), "{error}");
+}
+
+#[test]
+fn search_help_documents_query_path_scope() {
+    let repo = TestRepo::new();
+    let output = repo.run(["search", "--help"]);
+    assert_eq!(output.status.code(), Some(0));
+    let help = String::from_utf8_lossy(&output.stdout);
+    for expected in ["--path", "repeatable"] {
+        assert!(help.contains(expected), "missing {expected:?} in:\n{help}");
+    }
+}
+
+#[test]
+fn code_search_rejects_repeated_paths() {
+    let repo = TestRepo::new();
+    repo.commit_at(
+        "src/lib.txt",
+        b"marker\n",
+        "PathScope code history",
+        "2001-01-01T00:00:00Z",
+    );
+    repo.index();
+    let output = repo.run(["search", "--code", "marker", "--path", "a", "--path", "b"]);
+    assert_ne!(output.status.code(), Some(0));
 }
