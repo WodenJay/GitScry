@@ -465,3 +465,151 @@ fn python_simple_and_suffix_selectors_resolve_uniquely() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+fn commit_cpp(repo: &TestRepo, source: &str, subject: &str) -> String {
+    fs::create_dir_all(repo.dir.path().join("src")).unwrap();
+    fs::write(repo.dir.path().join("src/util.cpp"), source).unwrap();
+    git(repo.dir.path(), ["add", "."]);
+    git(repo.dir.path(), ["commit", "-m", subject]);
+    repo.head()
+}
+
+fn query_cpp(repo: &TestRepo, command: &str, selector: &str, revision: &str) -> serde_json::Value {
+    let args: Vec<&str> = if command == "regression" {
+        vec![
+            command,
+            "failure",
+            "--path",
+            "src/util.cpp",
+            "--symbol",
+            selector,
+            "--bad",
+            revision,
+            "--json",
+        ]
+    } else {
+        vec![
+            command,
+            "src/util.cpp",
+            "--symbol",
+            selector,
+            "--at",
+            revision,
+            "--json",
+        ]
+    };
+    let output = repo.run(args);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+#[test]
+fn cpp_commands_return_structured_history_and_exclude_neighbors() {
+    let repo = TestRepo::new();
+    let initial = commit_cpp(
+        &repo,
+        "int compute(int a) {\n    return a + 1;\n}\n\nint neighbor(void) {\n    return 0;\n}\n",
+        "Create compute",
+    );
+    let changed = commit_cpp(
+        &repo,
+        "int compute(int a) {\n    return a + 2;\n}\n\nint neighbor(void) {\n    return 0;\n}\n",
+        "Change compute",
+    );
+    let neighbor = commit_cpp(
+        &repo,
+        "int compute(int a) {\n    return a + 2;\n}\n\nint neighbor(void) {\n    return 1;\n}\n",
+        "Change neighbor",
+    );
+    repo.index();
+    let why = query_cpp(&repo, "why", "compute", &neighbor);
+    let selected = &why["symbol_selection"];
+    assert_eq!(selected["input_selector"], "compute", "{why}");
+    assert_eq!(selected["qualified_name"], "compute");
+    assert_eq!(selected["kind"], "function");
+    assert_eq!(selected["start_line"], 1);
+    assert_eq!(selected["end_line"], 3);
+    assert_eq!(selected["identifier_line"], 1);
+    assert_eq!(selected["language"], "cpp");
+    assert_eq!(selected["mode"], "structured");
+    assert_eq!(why["symbol_summary"]["introduction"]["commit_oid"], initial);
+    let rendered = why["target_related_modifications"].to_string();
+    assert!(rendered.contains(&changed), "{why}");
+    assert!(!rendered.contains(&neighbor), "{why}");
+    let regression = query_cpp(&repo, "regression", "compute", &neighbor);
+    let rendered = regression.to_string();
+    assert!(rendered.contains(&changed), "{regression}");
+    assert!(!rendered.contains(&neighbor), "{regression}");
+}
+
+#[test]
+fn cpp_qualified_selectors_resolve_namespaced_and_out_of_class_definitions() {
+    let repo = TestRepo::new();
+    let revision = commit_cpp(
+        &repo,
+        concat!(
+            "namespace net {\n",
+            "int compute(int a) {\n",
+            "    return a;\n",
+            "}\n",
+            "class Widget {\n",
+            "public:\n",
+            "    int size() const;\n",
+            "};\n",
+            "}\n",
+            "int net::Widget::size() const {\n",
+            "    return 0;\n",
+            "}\n",
+        ),
+        "Create compute",
+    );
+    repo.index();
+    for (selector, qualified, kind, start, end) in [
+        ("net::compute", "net::compute", "function", 2, 4),
+        ("net::Widget::size", "net::Widget::size", "function", 10, 12),
+        ("Widget::size", "net::Widget::size", "function", 10, 12),
+    ] {
+        let report = query_cpp(&repo, "why", selector, &revision);
+        let selected = &report["symbol_selection"];
+        assert_eq!(selected["input_selector"], selector, "{report}");
+        assert_eq!(selected["qualified_name"], qualified, "{report}");
+        assert_eq!(selected["kind"], kind, "{report}");
+        assert_eq!(selected["start_line"], start, "{report}");
+        assert_eq!(selected["end_line"], end, "{report}");
+        assert_eq!(selected["language"], "cpp", "{report}");
+        assert_eq!(selected["mode"], "structured", "{report}");
+    }
+}
+
+#[test]
+fn cpp_prototypes_are_not_targets_and_conditional_collisions_stay_ambiguous() {
+    let repo = TestRepo::new();
+    let prototype = commit_cpp(&repo, "int compute(int a);\n", "Prototype only");
+    commit_cpp(
+        &repo,
+        "#ifdef FAST\nint compute(int a) {\n    return a;\n}\n#else\nint compute(int a) {\n    return -a;\n}\n#endif\n",
+        "Conditional collision",
+    );
+    repo.index();
+    let output = repo.run(["why", "src/util.cpp", "--symbol", "compute"]);
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("ambiguous"), "{stderr}");
+    assert!(!stderr.contains("lightweight symbol selection"), "{stderr}");
+    let output = repo.run([
+        "why",
+        "src/util.cpp",
+        "--symbol",
+        "compute",
+        "--at",
+        &prototype,
+    ]);
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("no supported declaration"), "{stderr}");
+    assert!(!stderr.contains("lightweight symbol selection"), "{stderr}");
+}

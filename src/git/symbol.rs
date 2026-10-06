@@ -2,6 +2,7 @@
 //! Git objects and target anchors stay outside this module.
 
 mod c;
+mod cpp;
 mod go;
 mod python;
 mod javascript;
@@ -133,6 +134,16 @@ pub(super) fn declarations(content: &[u8], path: &str) -> (Vec<Location>, Option
         match c::extract(content) {
             Ok(locations) => return (locations, None),
             Err(reason) => ("c", reason),
+        }
+    } else if path.ends_with(".cpp")
+        || path.ends_with(".cc")
+        || path.ends_with(".cxx")
+        || path.ends_with(".hpp")
+        || path.ends_with(".hh")
+    {
+        match cpp::extract(content) {
+            Ok(locations) => return (locations, None),
+            Err(reason) => ("cpp", reason),
         }
     } else if path.ends_with(".go") {
         match go::extract(content) {
