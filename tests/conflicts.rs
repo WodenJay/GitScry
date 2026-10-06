@@ -619,6 +619,86 @@ fn historical_conflict_fixture_with(
 }
 
 #[test]
+fn historical_metadata_preserves_multiple_paths_and_candidates() {
+    let repo = TestRepo::new();
+    let paths = ["a.txt", "literal[1].txt", "c.txt"];
+    let write = |text: &str, message: &str| {
+        commit_files(
+            &repo,
+            &paths.iter().map(|path| (*path, text)).collect::<Vec<_>>(),
+            message,
+        )
+    };
+    write("setting=base\nunique-context=anchor\n", "base");
+    let mut merges = Vec::new();
+    for cycle in 0..2 {
+        let side = format!("historical-{cycle}");
+        git(repo.dir.path(), ["branch", &side]);
+        let ours = format!("setting=ours-{cycle}\nunique-context=anchor\n");
+        write(&ours, "historical ours");
+        git(repo.dir.path(), ["checkout", &side]);
+        write(
+            &format!("setting=theirs-{cycle}\nunique-context=anchor\n"),
+            "historical theirs",
+        );
+        git(repo.dir.path(), ["checkout", "main"]);
+        merge(&repo, &side);
+        merges.push(write(&ours, "historical resolution"));
+    }
+    repo.index();
+    git(repo.dir.path(), ["branch", "current-theirs"]);
+    write("setting=ours-now\nunique-context=anchor\n", "current ours");
+    git(repo.dir.path(), ["checkout", "current-theirs"]);
+    write(
+        "setting=theirs-now\nunique-context=anchor\n",
+        "current theirs",
+    );
+    git(repo.dir.path(), ["checkout", "main"]);
+    merge(&repo, "current-theirs");
+    let before = state_with_paths(&repo, &paths);
+    let report = json(
+        TestRepo::command_at(repo.dir.path(), repo.user_data_dir())
+            .args(["conflicts", "--json"])
+            .env("GITSCRY_FULL_OUTPUT", "1")
+            .output()
+            .unwrap(),
+    );
+    let history = &report["historical_cases"];
+    assert_eq!(history["status"], "complete", "{history}");
+    let files = history["files"].as_array().unwrap();
+    assert_eq!(files.len(), 3, "{history}");
+    let mut ordering = None;
+    for file in files {
+        let path = file["path"].as_str().unwrap();
+        assert!(paths.contains(&path), "{file}");
+        let cases = file["cases"].as_array().unwrap();
+        assert_eq!(cases.len(), 2, "{file}");
+        let ids = cases
+            .iter()
+            .map(|case| case["merge_commit"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>();
+        for (cycle, oid) in merges.iter().enumerate() {
+            let case = cases
+                .iter()
+                .find(|case| case["merge_commit"] == *oid)
+                .unwrap();
+            assert_eq!(case["result"]["path"], path);
+            assert_eq!(
+                case["result"]["excerpt"],
+                format!("setting=ours-{cycle}\nunique-context=anchor\n")
+            );
+            assert_eq!(case["related_sides"], serde_json::json!(["ours", "theirs"]));
+        }
+        if let Some(expected) = &ordering {
+            assert_eq!(&ids, expected);
+        } else {
+            ordering = Some(ids);
+        }
+    }
+    assert_eq!(state_with_paths(&repo, &paths), before);
+}
+
+#[test]
 fn reports_a_shared_historical_conflict_even_when_its_result_matches_first_parent() {
     let (repo, base, historical_ours, historical_theirs, historical_merge) =
         historical_conflict_fixture("conflict.txt", false);

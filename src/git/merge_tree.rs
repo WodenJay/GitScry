@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     ffi::OsStr,
     fs,
     io::Write,
@@ -34,6 +35,7 @@ pub(crate) struct StageEntry {
     pub(crate) stage: u8,
 }
 
+#[derive(Clone)]
 pub(crate) struct TreeEntry {
     pub(crate) path: Vec<u8>,
     pub(crate) mode: Vec<u8>,
@@ -202,35 +204,30 @@ impl MergeTree {
             .map(parse_tree_entry)
             .collect()
     }
-    pub(crate) fn tree_entry(
+    pub(crate) fn tree_entries_for_paths(
         &self,
         revision: &str,
-        path: &str,
-    ) -> Result<Option<TreeEntry>, AppError> {
-        let pathspec = format!(":(literal){path}");
-        let output = self.run(
-            [
-                "ls-tree".to_owned(),
-                "-r".to_owned(),
-                "-z".to_owned(),
-                revision.to_owned(),
-                "--".to_owned(),
-                pathspec,
-            ],
-            &[],
-        )?;
-        ensure_success(output.status, &output.stderr, "reading a Git tree path")?;
-        output
-            .stdout
-            .split(|byte| *byte == 0)
-            .filter(|record| !record.is_empty())
-            .map(parse_tree_entry)
-            .collect::<Result<Vec<_>, _>>()
-            .map(|entries| {
-                entries
-                    .into_iter()
-                    .find(|entry| entry.path == path.as_bytes())
-            })
+        paths: &BTreeSet<String>,
+    ) -> Result<Vec<TreeEntry>, AppError> {
+        let paths = paths.iter().collect::<Vec<_>>();
+        let mut entries = Vec::new();
+        for chunk in paths.chunks(64) {
+            let args = ["ls-tree", "-r", "-z", revision, "--"]
+                .into_iter()
+                .map(str::to_owned)
+                .chain(chunk.iter().map(|path| format!(":(literal){path}")));
+            let output = self.run(args, &[])?;
+            ensure_success(output.status, &output.stderr, "reading Git tree paths")?;
+            entries.extend(
+                output
+                    .stdout
+                    .split(|byte| *byte == 0)
+                    .filter(|record| !record.is_empty())
+                    .map(parse_tree_entry)
+                    .collect::<Result<Vec<_>, _>>()?,
+            );
+        }
+        Ok(entries)
     }
 
     pub(crate) fn blob(&self, oid: &str) -> Result<Option<Vec<u8>>, AppError> {
