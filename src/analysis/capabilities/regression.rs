@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::{app::AppError, cache::QuerySession, git::RegressionTarget};
 
@@ -95,6 +95,11 @@ fn run(
     history.truncate(last_candidate.map_or(0, |index| index + 1));
     let missing_objects = session.has_missing_objects(&history)?;
     let symbol_trace = target.symbol_trace.as_ref();
+    let symbol_changes = symbol_trace
+        .into_iter()
+        .flat_map(|trace| &trace.modifications)
+        .map(|change| (change.oid.as_str(), change))
+        .collect::<HashMap<_, _>>();
     let mut priorities = HunkPriorities::new();
 
     let rename_boundary = history
@@ -105,12 +110,7 @@ fn run(
     for commit in history {
         let eligible = eligible_revisions.contains(&commit.oid);
         let hunks = session.history_hunks(&commit.oid)?;
-        let symbol_change = symbol_trace.and_then(|trace| {
-            trace
-                .modifications
-                .iter()
-                .find(|change| change.oid == commit.oid)
-        });
+        let symbol_change = symbol_changes.get(commit.oid.as_str());
         let mut symptom_hunk = false;
         for hunk in hunks
             .iter()

@@ -115,14 +115,13 @@ fn visit(node: Node<'_>, source: &[u8], owners: &[String], locations: &mut Vec<L
             }
         }
         "impl_item" => {
-            let Some(name) = node
+            if let Some(name) = node
                 .child_by_field_name("type")
                 .and_then(|node| owner(node, source))
-            else {
-                // Do not invent a qualification for unnamed/composite self types.
-                return;
-            };
-            nested.push(name);
+            {
+                nested.push(name);
+            }
+            // Composite self types still contribute methods and simple-name collisions.
         }
         _ => {}
     }

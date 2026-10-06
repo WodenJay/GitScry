@@ -122,6 +122,61 @@ fn historical_parse_degradation_is_observable_across_commands() {
 }
 
 #[test]
+fn partial_qualification_does_not_follow_a_surviving_copy_source() {
+    let repo = TestRepo::new();
+    commit(
+        &repo,
+        "mod old {\n mod net {\n  fn parse() {}\n }\n}\n",
+        "Original source",
+    );
+    let revision = commit(
+        &repo,
+        "mod old {\n mod moved {\n  fn parse() {}\n }\n}\nmod new {\n mod net {\n  fn parse() {}\n }\n}\n",
+        "Move and copy",
+    );
+    repo.index();
+    let report = query(&repo, "why", "net::parse", &revision);
+    assert_eq!(
+        report["symbol_summary"]["introduction"]["status"], "unknown",
+        "{report}"
+    );
+}
+
+#[test]
+fn composite_impl_methods_are_not_silently_omitted() {
+    let repo = TestRepo::new();
+    commit(
+        &repo,
+        "trait T { fn m(&self) {} }\nimpl T for (u8, u8) { fn m(&self) {} }\n",
+        "Tuple implementation",
+    );
+    repo.index();
+    let output = repo.run(["why", "src/lib.rs", "--symbol", "m"]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("ambiguous"));
+}
+
+#[test]
+fn regression_degradation_notices_are_unique() {
+    let repo = TestRepo::new();
+    let revision = commit(&repo, "fn parse() {}\nfn broken(\n", "Malformed source");
+    repo.index();
+    let report = query(&repo, "regression", "parse", &revision);
+    let notices = report["warnings"].as_array().unwrap();
+    assert_eq!(
+        notices
+            .iter()
+            .filter(|notice| notice
+                .as_str()
+                .unwrap()
+                .contains("lightweight symbol selection"))
+            .count(),
+        1,
+        "{report}"
+    );
+}
+
+#[test]
 fn lightweight_results_disclose_mode_in_text_and_json_without_stripping_owners() {
     let repo = TestRepo::new();
     let revision = commit(&repo, "fn parse() {}\nfn broken(\n", "Malformed source");

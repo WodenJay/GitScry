@@ -117,16 +117,31 @@ impl Repository {
         anchor: WhyAnchor,
     ) -> Result<WhyTarget, AppError> {
         let mut target = target::pin(&self.git, Some(revision), path, anchor)?;
-        if matches!(&target.anchor, WhyAnchor::Symbol { .. }) {
-            let trace = self.trace_why_symbol(&target);
-            target.warnings.extend(trace.warnings.iter().cloned());
-            target.symbol_trace = Some(trace);
+        if let Some(selection) = &target.symbol_selection {
+            target.symbol_trace = Some(self.prepare_symbol_trace(
+                &target.revision,
+                &target.path,
+                selection,
+                &mut target.warnings,
+            ));
         }
         Ok(target)
     }
 
-    pub(crate) fn trace_why_symbol(&self, target: &WhyTarget) -> SymbolTrace {
-        symbol_history::trace(&self.git, target)
+    fn prepare_symbol_trace(
+        &self,
+        revision: &str,
+        path: &[u8],
+        selection: &SymbolSelection,
+        warnings: &mut Vec<String>,
+    ) -> SymbolTrace {
+        let trace = symbol_history::trace(&self.git, revision, path, selection);
+        for warning in &trace.warnings {
+            if !warnings.contains(warning) {
+                warnings.push(warning.clone());
+            }
+        }
+        trace
     }
 
     pub(crate) fn pin_timeline_target(
@@ -167,17 +182,13 @@ impl Repository {
     ) -> Result<RegressionTarget, AppError> {
         let mut target =
             target::pin_regression(&self.git, bad_revision, good_revision, path, symbol)?;
-        if let Some(name) = symbol {
-            let why = self.pin_why_target(
+        if let Some(selection) = &target.symbol_selection {
+            target.symbol_trace = Some(self.prepare_symbol_trace(
                 &target.bad_revision,
-                path,
-                WhyAnchor::Symbol {
-                    name: name.to_owned(),
-                    number: 0,
-                },
-            )?;
-            target.warnings.extend(why.warnings);
-            target.symbol_trace = why.symbol_trace;
+                &target.path,
+                selection,
+                &mut target.warnings,
+            ));
         }
         Ok(target)
     }
