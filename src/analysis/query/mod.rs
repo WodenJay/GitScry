@@ -33,6 +33,7 @@ pub(crate) enum Request {
         to_rev: Option<String>,
         days: usize,
         max_commits: usize,
+        verbose: bool,
     },
     Hotspots {
         path_prefix: Option<String>,
@@ -134,6 +135,15 @@ pub(crate) enum QueryReport {
 }
 
 impl QueryReport {
+    /// Warnings for human-readable stderr. Mirrors `warnings` for every report
+    /// except those that present dynamic diagnostics differently by default.
+    pub(crate) fn human_warnings(&self) -> std::borrow::Cow<'_, [String]> {
+        match self {
+            Self::Followups(report) => report.human_warnings(),
+            _ => std::borrow::Cow::Borrowed(self.warnings()),
+        }
+    }
+
     pub(crate) fn warnings(&self) -> &[String] {
         match self {
             Self::FragmentSearch(_) => &[],
@@ -191,7 +201,16 @@ pub(crate) fn execute(request: Request, options: Options) -> Result<Outcome, App
             to_rev,
             days,
             max_commits,
-        } => capabilities::followups::run(revision, paths, to_rev, days, max_commits, options),
+            verbose,
+        } => capabilities::followups::run(
+            revision,
+            paths,
+            to_rev,
+            days,
+            max_commits,
+            verbose,
+            options,
+        ),
         Request::Context {
             staged,
             hybrid,

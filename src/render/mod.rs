@@ -301,7 +301,7 @@ fn write_outcome(outcome: Outcome, json_output: bool) -> io::Result<()> {
             writeln!(stderr, "{warning}")?;
         }
         if let Some(report) = &outcome.report {
-            for warning in report.warnings() {
+            for warning in report.human_warnings().iter() {
                 writeln!(stderr, "{warning}")?;
             }
         }
