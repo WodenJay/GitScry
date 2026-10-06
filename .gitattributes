@@ -1,1 +1,2 @@
 tests/fixtures/cli-contract.txt text eol=lf
+*.rs merge=mergiraf
