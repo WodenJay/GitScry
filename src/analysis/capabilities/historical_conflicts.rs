@@ -7,8 +7,8 @@ use crate::{
 };
 
 use super::conflicts::{
-    HistoricalCase, HistoricalCases, HistoricalFile, HistoricalObject, HistoricalRegion,
-    RegionTrace,
+    CandidateSummary, HistoricalCase, HistoricalCases, HistoricalFile, HistoricalObject,
+    HistoricalRegion, RegionTrace,
 };
 
 pub(crate) const CASE_LIMIT_PER_FILE: usize = 5;
@@ -54,6 +54,58 @@ enum PathMatch {
     Ambiguous,
 }
 
+#[derive(Default)]
+struct CandidateAccounting {
+    discovered: usize,
+    examined: usize,
+    nonconflicting: usize,
+    irrelevant: usize,
+    ambiguous: usize,
+    unsupported: usize,
+    failed: usize,
+}
+
+impl CandidateAccounting {
+    fn discovered(count: usize) -> Self {
+        Self {
+            discovered: count,
+            ..Self::default()
+        }
+    }
+
+    fn examine(&mut self, outcome: CandidateOutcome) {
+        self.examined += 1;
+        match outcome {
+            CandidateOutcome::NonConflicting => self.nonconflicting += 1,
+            CandidateOutcome::Irrelevant => self.irrelevant += 1,
+            CandidateOutcome::Ambiguous => self.ambiguous += 1,
+            CandidateOutcome::Unsupported => self.unsupported += 1,
+            CandidateOutcome::Failed => self.failed += 1,
+        }
+    }
+
+    fn unchecked(&self) -> usize {
+        self.discovered.saturating_sub(self.examined)
+    }
+
+    fn merge(&mut self, other: &CandidateAccounting) {
+        self.examined += other.examined;
+        self.nonconflicting += other.nonconflicting;
+        self.irrelevant += other.irrelevant;
+        self.ambiguous += other.ambiguous;
+        self.unsupported += other.unsupported;
+        self.failed += other.failed;
+    }
+}
+
+enum CandidateOutcome {
+    NonConflicting,
+    Irrelevant,
+    Ambiguous,
+    Unsupported,
+    Failed,
+}
+
 pub(crate) fn analyze(
     repository: &git::Repository,
     target: &git::MergeConflict,
@@ -72,14 +124,36 @@ pub(crate) fn analyze(
         );
     }
     match analyze_with_runner(&runner, repository, target, cached, incarnations) {
-        Ok(mut files) => {
+        Ok((mut files, accounting, discovery_complete)) => {
             let files_analyzed = files.len();
             let files_with_cases = files.iter().filter(|file| file.cases_total > 0).count();
-            let status = if files.iter().any(|file| file.status != "complete") {
+            let mut status = if files.iter().any(|file| file.status != "complete") {
                 "partial"
             } else {
                 "complete"
             };
+            let mut reasons = Vec::new();
+            if accounting.failed > 0 {
+                status = "partial";
+                reasons.push(format!(
+                    "{} historical candidate(s) could not be reconstructed",
+                    accounting.failed
+                ));
+            }
+            if accounting.unchecked() > 0 {
+                status = "partial";
+                reasons.push(format!(
+                    "{} historical candidate(s) were not examined",
+                    accounting.unchecked()
+                ));
+            }
+            if !discovery_complete {
+                status = "partial";
+                reasons.push(
+                    "candidate discovery did not finish; remaining candidates are unknown"
+                        .to_owned(),
+                );
+            }
             let mut skipped_reasons = BTreeMap::<String, Vec<&str>>::new();
             for file in files
                 .iter()
@@ -92,23 +166,31 @@ pub(crate) fn analyze(
                         .push(&file.path);
                 }
             }
-            let reasons = skipped_reasons
-                .into_iter()
-                .map(|(reason, paths)| {
-                    if paths.len() == 1 {
-                        format!("{}: {reason}", paths[0])
-                    } else {
-                        format!("{} files: {reason}", paths.len())
-                    }
-                })
-                .collect();
+            for (reason, paths) in skipped_reasons {
+                if paths.len() == 1 {
+                    reasons.push(format!("{}: {reason}", paths[0]));
+                } else {
+                    reasons.push(format!("{} files: {reason}", paths.len()));
+                }
+            }
             files.retain(|file| file.cases_total > 0);
+            let candidates = CandidateSummary {
+                discovered: accounting.discovered,
+                examined: accounting.examined,
+                nonconflicting: accounting.nonconflicting,
+                irrelevant: accounting.irrelevant,
+                ambiguous: accounting.ambiguous,
+                unsupported: accounting.unsupported,
+                failed: accounting.failed,
+                unchecked: accounting.unchecked(),
+            };
             HistoricalCases {
                 status,
                 git_version: version,
                 reconstruction_rules: RECONSTRUCTION_RULES,
                 ranking: RANKING_RULES,
                 reasons,
+                candidates,
                 files_analyzed,
                 files_with_cases,
                 files,
@@ -125,20 +207,21 @@ fn unavailable(version: String, reason: String) -> HistoricalCases {
         reconstruction_rules: RECONSTRUCTION_RULES,
         ranking: RANKING_RULES,
         reasons: vec![reason],
+        candidates: CandidateSummary::default(),
         files_analyzed: 0,
         files_with_cases: 0,
         files: Vec::new(),
     }
 }
-
 fn analyze_with_runner(
     runner: &MergeTree,
     repository: &git::Repository,
     target: &git::MergeConflict,
     cached: &HashSet<String>,
     incarnations: &FileIncarnationHistory,
-) -> Result<Vec<HistoricalFile>, AppError> {
+) -> Result<(Vec<HistoricalFile>, CandidateAccounting, bool), AppError> {
     let candidates = discover_candidates(repository, target, cached)?;
+    let discovery_complete = true;
     let current = runner.replay(&target.base, &target.ours, &target.theirs)?;
     if !current.conflicted {
         return Err(AppError::operational(
@@ -152,7 +235,7 @@ fn analyze_with_runner(
         &current.tree,
     ])?;
     if current_attributes_unsupported {
-        return Ok(target
+        let mut files = target
             .files
             .iter()
             .map(|file| HistoricalFile {
@@ -160,7 +243,12 @@ fn analyze_with_runner(
                 status: "partial",
                 candidate_merges: candidates.len(),
                 candidates_examined: 0,
-                candidates_skipped: 0,
+                candidates_nonconflicting: 0,
+                candidates_irrelevant: 0,
+                candidates_ambiguous: 0,
+                candidates_unsupported: 0,
+                candidates_failed: 0,
+                candidates_unchecked: candidates.len(),
                 reasons: vec![
                     "custom merge attributes occur in the current replay trees; external drivers are disabled".to_owned(),
                 ],
@@ -169,9 +257,15 @@ fn analyze_with_runner(
                 cases_omitted: 0,
                 cases_truncated: false,
             })
-            .collect());
+            .collect::<Vec<_>>();
+        let mut accounting = CandidateAccounting::discovered(candidates.len() * files.len());
+        for file in &mut files {
+            accounting.examine(CandidateOutcome::Unsupported);
+            file.candidates_unsupported = candidates.len();
+            file.candidates_unchecked = 0;
+        }
+        return Ok((files, accounting, discovery_complete));
     }
-
     let mut file_analysis = FileAnalysis {
         runner,
         repository,
@@ -182,11 +276,25 @@ fn analyze_with_runner(
         ours: &target.ours,
         theirs: &target.theirs,
     };
-    target
+    let mut total = CandidateAccounting::discovered(candidates.len());
+    let files = target
         .files
         .iter()
-        .map(|file| file_analysis.analyze(file))
-        .collect()
+        .map(|file| {
+            file_analysis.analyze(file).map(|(mut report, accounting)| {
+                total.merge(&accounting);
+                report.candidates_examined = accounting.examined;
+                report.candidates_nonconflicting = accounting.nonconflicting;
+                report.candidates_irrelevant = accounting.irrelevant;
+                report.candidates_ambiguous = accounting.ambiguous;
+                report.candidates_unsupported = accounting.unsupported;
+                report.candidates_failed = accounting.failed;
+                report.candidates_unchecked = candidates.len().saturating_sub(accounting.examined);
+                report
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((files, total, discovery_complete))
 }
 
 fn discover_candidates(
@@ -236,7 +344,20 @@ struct FileAnalysis<'a> {
 }
 
 impl FileAnalysis<'_> {
-    fn analyze(&mut self, file: &git::ConflictFile) -> Result<HistoricalFile, AppError> {
+    fn analyze(
+        &mut self,
+        file: &git::ConflictFile,
+    ) -> Result<(HistoricalFile, CandidateAccounting), AppError> {
+        let mut accounting = CandidateAccounting::default();
+        let report = self.analyze_inner(file, &mut accounting)?;
+        Ok((report, accounting))
+    }
+
+    fn analyze_inner(
+        &mut self,
+        file: &git::ConflictFile,
+        accounting: &mut CandidateAccounting,
+    ) -> Result<HistoricalFile, AppError> {
         let runner = self.runner;
         let repository = self.repository;
         let current = self.current;
@@ -251,7 +372,12 @@ impl FileAnalysis<'_> {
             status: "complete",
             candidate_merges: candidates.len(),
             candidates_examined: 0,
-            candidates_skipped: 0,
+            candidates_nonconflicting: 0,
+            candidates_irrelevant: 0,
+            candidates_ambiguous: 0,
+            candidates_unsupported: 0,
+            candidates_failed: 0,
+            candidates_unchecked: 0,
             reasons: Vec::new(),
             cases: Vec::new(),
             cases_total: 0,
@@ -327,6 +453,8 @@ impl FileAnalysis<'_> {
             if bases.len() != 1 {
                 skip_candidate(
                     &mut report,
+                    accounting,
+                    CandidateOutcome::Ambiguous,
                     format!(
                         "{} has {} best merge bases; exactly one is required",
                         candidate.oid,
@@ -366,6 +494,8 @@ impl FileAnalysis<'_> {
             {
                 skip_candidate(
                     &mut report,
+                    accounting,
+                    CandidateOutcome::Ambiguous,
                     format!(
                         "{} has ambiguous paths for the current file incarnation",
                         candidate.oid
@@ -379,6 +509,7 @@ impl FileAnalysis<'_> {
                 PathMatch::Unique(parent2_path),
             ) = (paths.0, paths.1, paths.2)
             else {
+                accounting.examine(CandidateOutcome::Irrelevant);
                 continue;
             };
             let result_path = match paths.3 {
@@ -389,20 +520,27 @@ impl FileAnalysis<'_> {
                 PathMatch::Ambiguous => continue,
             };
             let Some(base_entry) = runner.tree_entry(base, &base_path)? else {
+                accounting.examine(CandidateOutcome::Irrelevant);
                 continue;
             };
             let Some(parent1_entry) = runner.tree_entry(&candidate.parents[0], &parent1_path)?
             else {
+                accounting.examine(CandidateOutcome::Irrelevant);
                 continue;
             };
             let Some(parent2_entry) = runner.tree_entry(&candidate.parents[1], &parent2_path)?
             else {
+                accounting.examine(CandidateOutcome::Irrelevant);
                 continue;
             };
+            // The merge commit may have deleted or renamed the file; a missing
+            // result entry keeps the case with the absence disclosed instead
+            // of dropping the lead (see #229/#231 intent).
             let result_entry = runner.tree_entry(&candidate.oid, &result_path)?;
             report.candidates_examined += 1;
             let replay = runner.replay(base, &candidate.parents[0], &candidate.parents[1])?;
             if !replay.conflicted {
+                accounting.examine(CandidateOutcome::NonConflicting);
                 continue;
             }
             if runner.has_unsupported_attributes(&[
@@ -414,6 +552,8 @@ impl FileAnalysis<'_> {
             ])? {
                 skip_candidate(
                     &mut report,
+                    accounting,
+                    CandidateOutcome::Unsupported,
                     format!(
                         "{} uses an unsupported custom merge attribute; external drivers are disabled",
                         candidate.oid
@@ -436,11 +576,14 @@ impl FileAnalysis<'_> {
                 })
                 .collect::<Vec<_>>();
             if matching_stages.is_empty() {
+                accounting.examine(CandidateOutcome::Irrelevant);
                 continue;
             }
             if matching_stages.len() > 1 {
                 skip_candidate(
                     &mut report,
+                    accounting,
+                    CandidateOutcome::Ambiguous,
                     format!(
                         "{} has multiple conflicts for the current file incarnation",
                         candidate.oid
@@ -455,6 +598,8 @@ impl FileAnalysis<'_> {
             let Ok(conflict_path) = String::from_utf8(stage_path) else {
                 skip_candidate(
                     &mut report,
+                    accounting,
+                    CandidateOutcome::Failed,
                     format!("{} conflict path is not UTF-8", candidate.oid),
                 );
                 continue;
@@ -462,6 +607,8 @@ impl FileAnalysis<'_> {
             if !stages.iter().all(|stage| regular_mode(&stage.mode)) {
                 skip_candidate(
                     &mut report,
+                    accounting,
+                    CandidateOutcome::Failed,
                     format!("{} has non-regular conflict stages", candidate.oid),
                 );
                 continue;
@@ -475,6 +622,8 @@ impl FileAnalysis<'_> {
             {
                 skip_candidate(
                     &mut report,
+                    accounting,
+                    CandidateOutcome::Failed,
                     format!(
                         "{} tree entries do not match its regular text conflict stages",
                         candidate.oid
@@ -485,6 +634,8 @@ impl FileAnalysis<'_> {
             let Some(conflict_entry) = runner.tree_entry(&replay.tree, &conflict_path)? else {
                 skip_candidate(
                     &mut report,
+                    accounting,
+                    CandidateOutcome::Failed,
                     format!("{} replay produced no conflict blob", candidate.oid),
                 );
                 continue;
@@ -492,6 +643,8 @@ impl FileAnalysis<'_> {
             if !regular_mode(&conflict_entry.mode) {
                 skip_candidate(
                     &mut report,
+                    accounting,
+                    CandidateOutcome::Failed,
                     format!("{} replay conflict is not a regular file", candidate.oid),
                 );
                 continue;
@@ -504,6 +657,8 @@ impl FileAnalysis<'_> {
             ) else {
                 skip_candidate(
                     &mut report,
+                    accounting,
+                    CandidateOutcome::Failed,
                     format!("{} contains a non-text or oversized blob", candidate.oid),
                 );
                 continue;
@@ -514,6 +669,8 @@ impl FileAnalysis<'_> {
             ) else {
                 skip_candidate(
                     &mut report,
+                    accounting,
+                    CandidateOutcome::Failed,
                     format!("{} parent blobs are not valid UTF-8 text", candidate.oid),
                 );
                 continue;
@@ -567,6 +724,8 @@ impl FileAnalysis<'_> {
             let Some(historical_regions) = conflict_regions(conflict_text) else {
                 skip_candidate(
                     &mut report,
+                    accounting,
+                    CandidateOutcome::Failed,
                     format!("{} conflict markers could not be parsed", candidate.oid),
                 );
                 continue;
@@ -576,6 +735,8 @@ impl FileAnalysis<'_> {
             if !regions_match_parents(&historical_regions, &parent1_lines, &parent2_lines) {
                 skip_candidate(
                     &mut report,
+                    accounting,
+                    CandidateOutcome::Failed,
                     format!(
                         "{} conflict regions could not be validated against the historical parents",
                         candidate.oid
@@ -720,9 +881,14 @@ fn partial_file(mut file: HistoricalFile, reason: &str) -> Result<HistoricalFile
     Ok(file)
 }
 
-fn skip_candidate(file: &mut HistoricalFile, reason: String) {
+fn skip_candidate(
+    file: &mut HistoricalFile,
+    accounting: &mut CandidateAccounting,
+    outcome: CandidateOutcome,
+    reason: String,
+) {
     file.status = "partial";
-    file.candidates_skipped += 1;
+    accounting.examine(outcome);
     file.reasons.push(reason);
 }
 

@@ -154,7 +154,11 @@ fn conflicts_reports_local_semantic_refresh_failure_but_keeps_history() {
         .unwrap();
     drop(cache);
 
-    let output = repo.run(["conflicts", "--json"]);
+    let output = TestRepo::command_at(repo.dir.path(), repo.user_data_dir())
+        .args(["conflicts", "--json"])
+        .env("GITSCRY_FULL_OUTPUT", "1")
+        .output()
+        .unwrap();
     let report = json(output);
     let warnings = report["warnings"].to_string();
     assert!(
@@ -220,7 +224,13 @@ fn conflicts_falls_back_to_cached_history_after_refresh_failure() {
 
     git(repo.dir.path(), ["checkout", "main"]);
     merge(&repo, "other");
-    let report = json(repo.run(["conflicts", "--json"]));
+    let report = json(
+        TestRepo::command_at(repo.dir.path(), repo.user_data_dir())
+            .args(["conflicts", "--json"])
+            .env("GITSCRY_FULL_OUTPUT", "1")
+            .output()
+            .unwrap(),
+    );
     let warnings = report["warnings"].to_string();
     assert!(
         warnings.contains("automatic history refresh failed"),
@@ -382,7 +392,13 @@ fn shared_history_fixture() -> (TestRepo, String, String, String, String, String
 fn reports_reverted_shared_history_once_with_source_and_conflict_associations() {
     let (repo, fix, revert, ours, theirs, unrelated) = shared_history_fixture();
     let before = state(&repo);
-    let report = json(repo.run(["conflicts", "--json"]));
+    let report = json(
+        TestRepo::command_at(repo.dir.path(), repo.user_data_dir())
+            .args(["conflicts", "--json"])
+            .env("GITSCRY_FULL_OUTPUT", "1")
+            .output()
+            .unwrap(),
+    );
     let file = &report["files"][0];
     let related = file["related_history"].as_array().unwrap();
     assert_eq!(related[0]["commit"], fix);
@@ -451,7 +467,13 @@ fn bounds_shared_history_per_conflicted_file() {
     git(repo.dir.path(), ["checkout", "main"]);
     merge(&repo, "other");
 
-    let report = json(repo.run(["conflicts", "--json"]));
+    let report = json(
+        TestRepo::command_at(repo.dir.path(), repo.user_data_dir())
+            .args(["conflicts", "--json"])
+            .env("GITSCRY_FULL_OUTPUT", "1")
+            .output()
+            .unwrap(),
+    );
     let file = &report["files"][0];
     assert_eq!(file["related_history"].as_array().unwrap().len(), 3);
     assert_eq!(file["related_history_total"], 6);
@@ -602,7 +624,13 @@ fn reports_a_shared_historical_conflict_even_when_its_result_matches_first_paren
         historical_conflict_fixture("conflict.txt", false);
     let before = state_with_paths(&repo, &["conflict.txt"]);
 
-    let report = json(repo.run(["conflicts", "--json"]));
+    let report = json(
+        TestRepo::command_at(repo.dir.path(), repo.user_data_dir())
+            .args(["conflicts", "--json"])
+            .env("GITSCRY_FULL_OUTPUT", "1")
+            .output()
+            .unwrap(),
+    );
     let history = &report["historical_cases"];
     assert_eq!(
         history["status"], "complete",
@@ -660,7 +688,14 @@ fn reports_a_shared_historical_conflict_even_when_its_result_matches_first_paren
 fn finds_a_historical_conflict_reachable_from_only_one_side() {
     let (repo, _, _, _, historical_merge) =
         historical_conflict_fixture_with("conflict.txt", false, true, false);
-    let history = json(repo.run(["conflicts", "--json"]))["historical_cases"].clone();
+    let history = json(
+        TestRepo::command_at(repo.dir.path(), repo.user_data_dir())
+            .args(["conflicts", "--json"])
+            .env("GITSCRY_FULL_OUTPUT", "1")
+            .output()
+            .unwrap(),
+    )["historical_cases"]
+        .clone();
     assert_eq!(
         history["status"], "complete",
         "historical report: {history}"
@@ -675,14 +710,12 @@ fn finds_a_historical_conflict_reachable_from_only_one_side() {
 fn non_regular_conflict_stages_do_not_hide_text_historical_cases() {
     let (repo, _, _, _, historical_merge) =
         historical_conflict_fixture_with("conflict.txt", false, false, true);
-    let history = json(
-        TestRepo::command_at(repo.dir.path(), repo.user_data_dir())
-            .args(["conflicts", "--json"])
-            .env("GITSCRY_FULL_OUTPUT", "1")
-            .output()
-            .unwrap(),
-    )["historical_cases"]
-        .clone();
+    let output = TestRepo::command_at(repo.dir.path(), repo.user_data_dir())
+        .args(["conflicts", "--json"])
+        .env("GITSCRY_FULL_OUTPUT", "1")
+        .output()
+        .unwrap();
+    let history = json(output)["historical_cases"].clone();
     assert_eq!(history["status"], "partial", "historical report: {history}");
     let text_file = history["files"]
         .as_array()
@@ -727,7 +760,14 @@ fn skips_a_clean_historical_merge_candidate() {
     merge(&repo, "current-theirs");
     repo.index();
 
-    let history = json(repo.run(["conflicts", "--json"]))["historical_cases"].clone();
+    let history = json(
+        TestRepo::command_at(repo.dir.path(), repo.user_data_dir())
+            .args(["conflicts", "--json"])
+            .env("GITSCRY_FULL_OUTPUT", "1")
+            .output()
+            .unwrap(),
+    )["historical_cases"]
+        .clone();
     assert_eq!(
         history["status"], "complete",
         "historical report: {history}"
@@ -752,7 +792,13 @@ fn skips_a_clean_historical_merge_candidate() {
 fn maps_a_historical_conflict_through_a_later_file_rename() {
     let (repo, _, _, _, historical_merge) = historical_conflict_fixture("legacy.txt", false);
     let before = state_with_paths(&repo, &["conflict.txt", "legacy.txt"]);
-    let report = json(repo.run(["conflicts", "--json"]));
+    let report = json(
+        TestRepo::command_at(repo.dir.path(), repo.user_data_dir())
+            .args(["conflicts", "--json"])
+            .env("GITSCRY_FULL_OUTPUT", "1")
+            .output()
+            .unwrap(),
+    );
     let history = &report["historical_cases"];
     assert_eq!(
         history["status"], "complete",
@@ -1086,7 +1132,13 @@ fn skips_custom_attributes_without_running_an_external_driver() {
             "merge.external-sentinel.driver",
         ],
     );
-    let report = json(repo.run(["conflicts", "--json"]));
+    let report = json(
+        TestRepo::command_at(repo.dir.path(), repo.user_data_dir())
+            .args(["conflicts", "--json"])
+            .env("GITSCRY_FULL_OUTPUT", "1")
+            .output()
+            .unwrap(),
+    );
     let history = &report["historical_cases"];
     assert_eq!(history["status"], "partial", "historical report: {history}");
     assert_eq!(history["files_analyzed"], 1);
@@ -1160,7 +1212,13 @@ fn state_with_paths(repo: &TestRepo, paths: &[&str]) -> Vec<Vec<u8>> {
 fn retrieves_both_sides_prepares_uncached_branch_and_reuses_history_without_git_changes() {
     let (repo, _base, ours, theirs, unrelated) = fixture();
     let before = state(&repo);
-    let report = json(repo.run(["conflicts", "--json"]));
+    let report = json(
+        TestRepo::command_at(repo.dir.path(), repo.user_data_dir())
+            .args(["conflicts", "--json"])
+            .env("GITSCRY_FULL_OUTPUT", "1")
+            .output()
+            .unwrap(),
+    );
     assert_eq!(report["ours"], repo.head());
     assert_eq!(
         report["theirs"],
@@ -1193,7 +1251,13 @@ fn retrieves_both_sides_prepares_uncached_branch_and_reuses_history_without_git_
             .iter()
             .all(|lead| lead["commit"] != unrelated)
     }));
-    let again = json(repo.run(["conflicts", "--json"]));
+    let again = json(
+        TestRepo::command_at(repo.dir.path(), repo.user_data_dir())
+            .args(["conflicts", "--json"])
+            .env("GITSCRY_FULL_OUTPUT", "1")
+            .output()
+            .unwrap(),
+    );
     assert_eq!(report, again);
     let text = repo.run(["conflicts"]);
     assert!(text.status.success());
@@ -1255,7 +1319,13 @@ fn exposes_earlier_behavior_and_refactor_across_a_detected_rename() {
     );
     merge(&repo, "other");
 
-    let report = json(repo.run(["conflicts", "--json"]));
+    let report = json(
+        TestRepo::command_at(repo.dir.path(), repo.user_data_dir())
+            .args(["conflicts", "--json"])
+            .env("GITSCRY_FULL_OUTPUT", "1")
+            .output()
+            .unwrap(),
+    );
     let file = &report["files"][0];
     assert_eq!(file["path"], "score.rs");
     let sides = file["sides"].as_array().unwrap();
@@ -1324,7 +1394,13 @@ fn does_not_join_a_reintroduced_path_to_an_older_incarnation() {
     );
     merge(&repo, "other");
 
-    let report = json(repo.run(["conflicts", "--json"]));
+    let report = json(
+        TestRepo::command_at(repo.dir.path(), repo.user_data_dir())
+            .args(["conflicts", "--json"])
+            .env("GITSCRY_FULL_OUTPUT", "1")
+            .output()
+            .unwrap(),
+    );
     assert_eq!(report["coverage_complete"], true);
     let theirs = report["files"][0]["sides"]
         .as_array()
@@ -1379,7 +1455,13 @@ fn rename_does_not_claim_same_commit_reintroduction() {
     );
     merge(&repo, "other");
 
-    let report = json(repo.run(["conflicts", "--json"]));
+    let report = json(
+        TestRepo::command_at(repo.dir.path(), repo.user_data_dir())
+            .args(["conflicts", "--json"])
+            .env("GITSCRY_FULL_OUTPUT", "1")
+            .output()
+            .unwrap(),
+    );
     assert_eq!(report["coverage_complete"], true);
     let file = report["files"]
         .as_array()
@@ -1604,7 +1686,13 @@ fn explicitly_reports_file_level_and_binary_conflicts() {
     commit(&repo, "binary", "theirs\0\n", "binary theirs");
     git(repo.dir.path(), ["checkout", "main"]);
     merge(&repo, "other");
-    let report = json(repo.run(["conflicts", "--json"]));
+    let report = json(
+        TestRepo::command_at(repo.dir.path(), repo.user_data_dir())
+            .args(["conflicts", "--json"])
+            .env("GITSCRY_FULL_OUTPUT", "1")
+            .output()
+            .unwrap(),
+    );
     assert_eq!(report["coverage_complete"], false);
     let file = &report["files"][0];
     assert_eq!(file["file_level"], true);
@@ -1672,7 +1760,13 @@ fn traces_rename_delete_conflicts_alongside_text_conflicts_without_git_changes()
 
     let paths = ["src/old.rs", "src/new.rs", "notes.txt"];
     let before = state_with_paths(&repo, &paths);
-    let report = json(repo.run(["conflicts", "--json"]));
+    let report = json(
+        TestRepo::command_at(repo.dir.path(), repo.user_data_dir())
+            .args(["conflicts", "--json"])
+            .env("GITSCRY_FULL_OUTPUT", "1")
+            .output()
+            .unwrap(),
+    );
     assert_eq!(report["coverage_complete"], true);
     assert_eq!(report["files"].as_array().unwrap().len(), 2);
 
@@ -1756,12 +1850,22 @@ fn shallow_history_after_initialization_reports_incomplete_coverage() {
     let (repo, _, ours, theirs, _) = fixture();
     let base = git_stdout(repo.dir.path(), ["merge-base", "main", "other"]);
     fs::write(repo.common_dir().join("shallow"), format!("{base}\n")).unwrap();
-    let report = json(repo.run(["conflicts", "--json"]));
+    let report = json(
+        TestRepo::command_at(repo.dir.path(), repo.user_data_dir())
+            .args(["conflicts", "--json"])
+            .env("GITSCRY_FULL_OUTPUT", "1")
+            .output()
+            .unwrap(),
+    );
     assert_eq!(report["coverage_complete"], false);
     assert!(!report["warnings"].as_array().unwrap().is_empty());
     assert_eq!(report["files"][0]["sides"][0]["leads"][0]["commit"], ours);
     assert_eq!(report["files"][0]["sides"][1]["leads"][0]["commit"], theirs);
-    let again = repo.run(["conflicts", "--json"]);
+    let again = TestRepo::command_at(repo.dir.path(), repo.user_data_dir())
+        .args(["conflicts", "--json"])
+        .env("GITSCRY_FULL_OUTPUT", "1")
+        .output()
+        .unwrap();
     assert!(again.status.success());
     assert!(
         again.stderr.is_empty(),
