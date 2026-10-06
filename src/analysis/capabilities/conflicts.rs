@@ -150,6 +150,7 @@ pub(crate) struct HistoricalCases {
     pub(crate) status: &'static str,
     pub(crate) git_version: String,
     pub(crate) reconstruction_rules: &'static str,
+    pub(crate) ranking: &'static str,
     pub(crate) reasons: Vec<String>,
     pub(crate) files_analyzed: usize,
     pub(crate) files_with_cases: usize,
@@ -166,6 +167,7 @@ pub(crate) struct HistoricalFile {
     pub(crate) reasons: Vec<String>,
     pub(crate) cases: Vec<HistoricalCase>,
     pub(crate) cases_total: usize,
+    pub(crate) cases_omitted: usize,
     pub(crate) cases_truncated: bool,
 }
 
@@ -176,8 +178,19 @@ pub(crate) struct HistoricalCase {
     pub(crate) parents: [HistoricalObject; 2],
     pub(crate) related_sides: Vec<&'static str>,
     pub(crate) reconstructed_conflict: HistoricalObject,
-    pub(crate) result: HistoricalObject,
+    pub(crate) region: Option<HistoricalRegion>,
+    pub(crate) result: Option<HistoricalObject>,
+    pub(crate) result_status: &'static str,
+    pub(crate) limitations: Vec<String>,
     pub(crate) association: &'static str,
+}
+
+#[derive(Serialize)]
+pub(crate) struct HistoricalRegion {
+    pub(crate) before: Vec<String>,
+    pub(crate) after: Vec<String>,
+    pub(crate) context: &'static str,
+    pub(crate) result_anchored: bool,
 }
 
 #[derive(Serialize)]

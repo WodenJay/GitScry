@@ -279,6 +279,12 @@ pub(super) fn format_report(report: &Report) -> String {
         display(report.historical_cases.reconstruction_rules)
     )
     .unwrap();
+    writeln!(
+        output,
+        "  Ranking: {}",
+        display(report.historical_cases.ranking)
+    )
+    .unwrap();
     for reason in &report.historical_cases.reasons {
         writeln!(output, "  Coverage: {}", display(reason)).unwrap();
     }
@@ -317,7 +323,32 @@ pub(super) fn format_report(report: &Report) -> String {
                 "Reconstructed conflict",
                 &case.reconstructed_conflict,
             );
-            write_historical_object(&mut output, "Recorded result", &case.result);
+            match &case.region {
+                Some(region) => {
+                    writeln!(output, "      Region: {} context", region.context).unwrap();
+                    for line in &region.before {
+                        writeln!(output, "        before | {}", display(line)).unwrap();
+                    }
+                    for line in &region.after {
+                        writeln!(output, "        after | {}", display(line)).unwrap();
+                    }
+                }
+                None => writeln!(output, "      Region: not mapped").unwrap(),
+            }
+            match &case.result {
+                Some(result) => write_historical_object(&mut output, "Recorded result", result),
+                None => {
+                    writeln!(
+                        output,
+                        "      Recorded result: not available ({}); inspect the merge commit tree directly",
+                        case.result_status
+                    )
+                    .unwrap();
+                }
+            }
+            for limitation in &case.limitations {
+                writeln!(output, "      Limitation: {}", display(limitation)).unwrap();
+            }
         }
     }
     if !report.associated_materials.is_empty() {

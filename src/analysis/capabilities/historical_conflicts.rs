@@ -6,11 +6,14 @@ use crate::{
     git::{self, MergeTree, Replay, StageEntry},
 };
 
-use super::conflicts::{HistoricalCase, HistoricalCases, HistoricalFile, HistoricalObject};
+use super::conflicts::{
+    HistoricalCase, HistoricalCases, HistoricalFile, HistoricalObject, HistoricalRegion,
+};
 
 pub(crate) const CASE_LIMIT_PER_FILE: usize = 5;
 const EXCERPT_CHAR_LIMIT: usize = 4096;
 const RECONSTRUCTION_RULES: &str = "Git merge-tree --write-tree with an explicit unique base, ort strategy and find-renames; replay uses an isolated Git directory and object store, committed .gitattributes only, merge.default=text, and built-in merge drivers only. External custom drivers and global, system, and info attributes are never used.";
+const RANKING_RULES: &str = "Cases are ranked by region-association strength (a unique correspondence of both surrounding contexts outranks one, which outranks none), then by merge commit recency, with the merge commit object ID as the deterministic tie-breaker. All eligible candidates are examined; the per-file case limit only bounds returned cases.";
 
 struct Candidate {
     oid: String,
@@ -25,8 +28,14 @@ struct ConflictRegion {
 }
 
 enum RegionMatch {
-    Unique,
+    /// The historical region's surrounding context maps uniquely into the
+    /// current conflict; carries the matched historical region indices.
+    Unique(Vec<usize>),
+    /// The historical conflict exists but no surrounding context matches the
+    /// current conflict; the case is retained without region mapping.
     None,
+    /// Context lines match but appear more than once, so no precise mapping
+    /// exists; the case is retained without region mapping.
     Ambiguous,
 }
 
@@ -89,6 +98,7 @@ pub(crate) fn analyze(
                 status,
                 git_version: version,
                 reconstruction_rules: RECONSTRUCTION_RULES,
+                ranking: RANKING_RULES,
                 reasons,
                 files_analyzed,
                 files_with_cases,
@@ -104,6 +114,7 @@ fn unavailable(version: String, reason: String) -> HistoricalCases {
         status: "unavailable",
         git_version: version,
         reconstruction_rules: RECONSTRUCTION_RULES,
+        ranking: RANKING_RULES,
         reasons: vec![reason],
         files_analyzed: 0,
         files_with_cases: 0,
@@ -146,6 +157,7 @@ fn analyze_with_runner(
                 ],
                 cases: Vec::new(),
                 cases_total: 0,
+                cases_omitted: 0,
                 cases_truncated: false,
             })
             .collect());
@@ -234,6 +246,7 @@ impl FileAnalysis<'_> {
             reasons: Vec::new(),
             cases: Vec::new(),
             cases_total: 0,
+            cases_omitted: 0,
             cases_truncated: false,
         };
         if file.file_level || file.unsupported.is_some() || std::str::from_utf8(&file.path).is_err()
@@ -298,6 +311,7 @@ impl FileAnalysis<'_> {
                 "current replay conflict markers could not be parsed",
             );
         };
+        let mut staged_cases = Vec::new();
 
         for candidate in candidates {
             let bases = runner.merge_bases(&candidate.parents[0], &candidate.parents[1])?;
@@ -354,10 +368,16 @@ impl FileAnalysis<'_> {
                 PathMatch::Unique(base_path),
                 PathMatch::Unique(parent1_path),
                 PathMatch::Unique(parent2_path),
-                PathMatch::Unique(result_path),
-            ) = paths
+            ) = (paths.0, paths.1, paths.2)
             else {
                 continue;
+            };
+            let result_path = match paths.3 {
+                PathMatch::Unique(result_path) => result_path,
+                // The merge commit deleted or renamed the file; keep the case
+                // with the absence disclosed instead of dropping the lead.
+                PathMatch::Missing => String::new(),
+                PathMatch::Ambiguous => continue,
             };
             let Some(base_entry) = runner.tree_entry(base, &base_path)? else {
                 continue;
@@ -370,10 +390,7 @@ impl FileAnalysis<'_> {
             else {
                 continue;
             };
-            let Some(result_entry) = runner.tree_entry(&candidate.oid, &result_path)? else {
-                continue;
-            };
-
+            let result_entry = runner.tree_entry(&candidate.oid, &result_path)?;
             report.candidates_examined += 1;
             let replay = runner.replay(base, &candidate.parents[0], &candidate.parents[1])?;
             if !replay.conflicted {
@@ -443,7 +460,6 @@ impl FileAnalysis<'_> {
             if !regular_mode(&base_entry.mode)
                 || !regular_mode(&parent1_entry.mode)
                 || !regular_mode(&parent2_entry.mode)
-                || !regular_mode(&result_entry.mode)
                 || base_entry.oid != stages[0].oid
                 || parent1_entry.oid != stages[1].oid
                 || parent2_entry.oid != stages[2].oid
@@ -471,25 +487,61 @@ impl FileAnalysis<'_> {
                 );
                 continue;
             }
-            let (
-                Some(base_blob),
-                Some(parent1_blob),
-                Some(parent2_blob),
-                Some(conflict_blob),
-                Some(result_blob),
-            ) = (
+            let (Some(base_blob), Some(parent1_blob), Some(parent2_blob), Some(conflict_blob)) = (
                 runner.blob(&base_entry.oid)?,
                 runner.blob(&parent1_entry.oid)?,
                 runner.blob(&parent2_entry.oid)?,
                 runner.blob(&conflict_entry.oid)?,
-                runner.blob(&result_entry.oid)?,
-            )
-            else {
+            ) else {
                 skip_candidate(
                     &mut report,
                     format!("{} contains a non-text or oversized blob", candidate.oid),
                 );
                 continue;
+            };
+            let (result, result_status, case_limitation) = match result_entry {
+                Some(entry) if regular_mode(&entry.mode) => match runner.blob(&entry.oid)? {
+                    Some(blob) => (
+                        Some(historical_object(
+                            Some(candidate.oid.clone()),
+                            &result_path,
+                            &entry.oid,
+                            &blob,
+                        )),
+                        "present",
+                        String::new(),
+                    ),
+                    None => (
+                        None,
+                        "unreadable",
+                        format!(
+                            "{} committed result is not bounded UTF-8 text; inspect the result blob {} directly",
+                            candidate.oid, entry.oid
+                        ),
+                    ),
+                },
+                Some(entry) => (
+                    Some(HistoricalObject {
+                        commit: Some(candidate.oid.clone()),
+                        path: result_path.clone(),
+                        blob: entry.oid.clone(),
+                        excerpt: String::new(),
+                        excerpt_truncated: false,
+                    }),
+                    "non_regular",
+                    format!(
+                        "{} committed result is not a regular file; inspect the result blob {} directly",
+                        candidate.oid, entry.oid
+                    ),
+                ),
+                None => (
+                    None,
+                    "absent",
+                    format!(
+                        "{} committed result does not contain the file (deleted or absent); no result excerpt exists",
+                        candidate.oid
+                    ),
+                ),
             };
             let conflict_text =
                 std::str::from_utf8(&conflict_blob).expect("blob reader validated UTF-8");
@@ -500,68 +552,118 @@ impl FileAnalysis<'_> {
                 );
                 continue;
             };
-            match match_regions(
+            let (region, region_strength, region_limitation) = match match_regions(
                 current_text,
                 &current_regions,
                 conflict_text,
                 &historical_regions,
             ) {
-                RegionMatch::None => continue,
-                RegionMatch::Ambiguous => {
-                    skip_candidate(
-                        &mut report,
-                        format!(
-                            "{} conflict has no unique current-region correspondence",
-                            candidate.oid
-                        ),
-                    );
-                    continue;
+                RegionMatch::Unique(indices) => {
+                    let historical_region = &historical_regions[indices[0]];
+                    (
+                        Some(HistoricalRegion {
+                            before: historical_region.before.clone(),
+                            after: historical_region.after.clone(),
+                            context: "surrounding",
+                            result_anchored: false,
+                        }),
+                        2u8,
+                        String::new(),
+                    )
                 }
-                RegionMatch::Unique => {}
-            }
-            report.cases.push(HistoricalCase {
-                merge_commit: candidate.oid.clone(),
-                merge_base: historical_object(
-                    Some(base.clone()),
-                    &base_path,
-                    &base_entry.oid,
-                    &base_blob,
-                ),
-                parents: [
-                    historical_object(
-                        Some(candidate.parents[0].clone()),
-                        &parent1_path,
-                        &parent1_entry.oid,
-                        &parent1_blob,
-                    ),
-                    historical_object(
-                        Some(candidate.parents[1].clone()),
-                        &parent2_path,
-                        &parent2_entry.oid,
-                        &parent2_blob,
-                    ),
-                ],
-                related_sides: candidate.related_sides.iter().copied().collect(),
-                reconstructed_conflict: historical_object(
+                RegionMatch::Ambiguous => (
                     None,
-                    &conflict_path,
-                    &conflict_entry.oid,
-                    &conflict_blob,
+                    1,
+                    format!(
+                        "{} conflict context appears more than once in the current or historical conflict; no precise region mapping",
+                        candidate.oid
+                    ),
                 ),
-                result: historical_object(
-                    Some(candidate.oid.clone()),
-                    &result_path,
-                    &result_entry.oid,
-                    &result_blob,
+                RegionMatch::None => (
+                    None,
+                    0,
+                    format!(
+                        "{} conflict shares no surrounding context with the current conflict; no region mapping",
+                        candidate.oid
+                    ),
                 ),
-                association: "same file incarnation and unique surrounding context",
+            };
+            let mut limitations = Vec::new();
+            if !region_limitation.is_empty() {
+                limitations.push(region_limitation);
+            }
+            if !case_limitation.is_empty() {
+                limitations.push(case_limitation);
+            }
+            staged_cases.push(StagedCase {
+                region_strength,
+                commit_time: candidate.commit_time,
+                case: HistoricalCase {
+                    merge_commit: candidate.oid.clone(),
+                    merge_base: historical_object(
+                        Some(base.clone()),
+                        &base_path,
+                        &base_entry.oid,
+                        &base_blob,
+                    ),
+                    parents: [
+                        historical_object(
+                            Some(candidate.parents[0].clone()),
+                            &parent1_path,
+                            &parent1_entry.oid,
+                            &parent1_blob,
+                        ),
+                        historical_object(
+                            Some(candidate.parents[1].clone()),
+                            &parent2_path,
+                            &parent2_entry.oid,
+                            &parent2_blob,
+                        ),
+                    ],
+                    related_sides: candidate.related_sides.iter().copied().collect(),
+                    reconstructed_conflict: historical_object(
+                        None,
+                        &conflict_path,
+                        &conflict_entry.oid,
+                        &conflict_blob,
+                    ),
+                    region,
+                    result,
+                    result_status,
+                    limitations,
+                    association: "same file incarnation",
+                },
             });
         }
-        report.cases_total = report.cases.len();
+        staged_cases.sort_by(|left, right| {
+            right
+                .region_strength
+                .cmp(&left.region_strength)
+                .then_with(|| right.commit_time.cmp(&left.commit_time))
+                .then_with(|| left.case.merge_commit.cmp(&right.case.merge_commit))
+        });
+        report.cases_total = staged_cases.len();
         report.cases_truncated = report.cases_total > CASE_LIMIT_PER_FILE;
-        report.cases.truncate(CASE_LIMIT_PER_FILE);
+        report.cases_omitted = report.cases_total.saturating_sub(CASE_LIMIT_PER_FILE);
+        if report.cases_truncated {
+            report.reasons.push(format!(
+                "{} additional ranked cases omitted by the {}-case-per-file limit",
+                report.cases_omitted, CASE_LIMIT_PER_FILE
+            ));
+        }
+        report.cases = staged_cases
+            .into_iter()
+            .take(CASE_LIMIT_PER_FILE)
+            .map(|staged| staged.case)
+            .collect();
         Ok(report)
     }
+}
+
+struct StagedCase {
+    region_strength: u8,
+    commit_time: i64,
+    case: HistoricalCase,
 }
 
 fn partial_file(mut file: HistoricalFile, reason: &str) -> Result<HistoricalFile, AppError> {
@@ -732,7 +834,12 @@ fn match_regions(
         }
     }
     if matches.len() == 1 && !ambiguous {
-        RegionMatch::Unique
+        RegionMatch::Unique(
+            matches
+                .into_iter()
+                .map(|(_, historical_index)| historical_index)
+                .collect(),
+        )
     } else if !matches.is_empty() || ambiguous || !common_context {
         RegionMatch::Ambiguous
     } else {
