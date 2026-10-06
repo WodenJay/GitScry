@@ -174,7 +174,7 @@ This is enough! GitScry intentionally uses a single lightweight instruction inst
 
 ## Commands
 
-```bash
+```console
 $ gitscry --help
 
 Usage: gitscry <COMMAND>
