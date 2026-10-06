@@ -675,7 +675,14 @@ fn finds_a_historical_conflict_reachable_from_only_one_side() {
 fn non_regular_conflict_stages_do_not_hide_text_historical_cases() {
     let (repo, _, _, _, historical_merge) =
         historical_conflict_fixture_with("conflict.txt", false, false, true);
-    let history = json(repo.run(["conflicts", "--json"]))["historical_cases"].clone();
+    let history = json(
+        TestRepo::command_at(repo.dir.path(), repo.user_data_dir())
+            .args(["conflicts", "--json"])
+            .env("GITSCRY_FULL_OUTPUT", "1")
+            .output()
+            .unwrap(),
+    )["historical_cases"]
+        .clone();
     assert_eq!(history["status"], "partial", "historical report: {history}");
     let text_file = history["files"]
         .as_array()
@@ -875,7 +882,7 @@ fn skips_ambiguous_region_correspondence_with_recorded_reason() {
     commit(&repo, "conflict.txt", "y1\nb\nc\nd\ne\nf\ny2\n", "theirs");
     git(repo.dir.path(), ["checkout", "main"]);
     merge(&repo, "two-region-theirs");
-    commit(
+    let two_region_merge = commit(
         &repo,
         "conflict.txt",
         "x1\nb\nc\nd\ne\nf\nx2\n",
@@ -927,23 +934,37 @@ fn skips_ambiguous_region_correspondence_with_recorded_reason() {
     repo.index();
 
     let before = state_with_paths(&repo, &["conflict.txt"]);
-    let file = json(repo.run(["conflicts", "--json"]))["historical_cases"]["files"][0].clone();
-    assert_eq!(file["status"], "partial", "file report: {file}");
-    assert_eq!(file["cases"].as_array().unwrap().len(), 1);
+    let file = json(
+        TestRepo::command_at(repo.dir.path(), repo.user_data_dir())
+            .args(["conflicts", "--json"])
+            .env("GITSCRY_FULL_OUTPUT", "1")
+            .output()
+            .unwrap(),
+    )["historical_cases"]["files"][0]
+        .clone();
+    // The ambiguous two-region candidate is retained (ranked below the unique
+    // correspondence) with its limitation recorded on the case itself.
+    assert_eq!(file["status"], "complete", "file report: {file}");
+    assert_eq!(file["cases"].as_array().unwrap().len(), 2);
     assert_eq!(
         file["cases"][0]["merge_commit"], single_region_merge,
         "file report: {file}"
     );
-    assert_eq!(file["candidates_skipped"], 1, "file report: {file}");
+    assert_eq!(file["cases"][1]["merge_commit"], two_region_merge);
+    assert_eq!(
+        file["cases"][1]["association"],
+        "same file incarnation; no unique region correspondence"
+    );
+    assert!(file["cases"][1]["region"].is_null());
     assert!(
-        file["reasons"]
+        file["cases"][1]["limitations"]
             .as_array()
             .unwrap()
             .iter()
             .any(|reason| reason
                 .as_str()
                 .unwrap()
-                .contains("current-region correspondence is ambiguous")),
+                .contains("no precise region mapping")),
         "file report: {file}"
     );
     assert_eq!(state_with_paths(&repo, &["conflict.txt"]), before);
@@ -1788,4 +1809,240 @@ fn discloses_non_utf8_commit_message_decoding() {
             .iter()
             .any(|value| value.as_str().unwrap().contains("UTF-8"))
     );
+}
+
+#[test]
+fn keeps_a_historical_case_whose_committed_result_is_not_inspectable_text() {
+    let repo = TestRepo::new();
+    let base = commit(
+        &repo,
+        "conflict.txt",
+        "setting=base
+unique-context=anchor
+",
+        "base",
+    );
+    git(repo.dir.path(), ["branch", "historical-theirs"]);
+    let historical_ours = commit(
+        &repo,
+        "conflict.txt",
+        "setting=ours-old
+unique-context=anchor
+",
+        "historical ours",
+    );
+    git(repo.dir.path(), ["checkout", "historical-theirs"]);
+    let historical_theirs = commit(
+        &repo,
+        "conflict.txt",
+        "setting=theirs-old
+unique-context=anchor
+",
+        "historical theirs",
+    );
+    git(repo.dir.path(), ["checkout", "main"]);
+    merge(&repo, "historical-theirs");
+    // Resolve the historical conflict by committing binary content: the case
+    // stays reportable, but its committed result has no text excerpt.
+    fs::write(
+        repo.dir.path().join("conflict.txt"),
+        [0u8, 0xff, 0x80, b'b', b'i', b'n', b'a', b'r', b'y'],
+    )
+    .unwrap();
+    git(repo.dir.path(), ["add", "conflict.txt"]);
+    git(
+        repo.dir.path(),
+        ["commit", "-m", "historical resolution is binary"],
+    );
+    let historical_merge = repo.head();
+
+    git(repo.dir.path(), ["branch", "current-theirs", &base]);
+    git(repo.dir.path(), ["checkout", "current-theirs"]);
+    commit(
+        &repo,
+        "conflict.txt",
+        "setting=theirs-now
+unique-context=anchor
+",
+        "current theirs",
+    );
+    git(repo.dir.path(), ["checkout", "main"]);
+    commit(
+        &repo,
+        "conflict.txt",
+        "setting=ours-now
+unique-context=anchor
+",
+        "current ours",
+    );
+    merge(&repo, "current-theirs");
+    repo.index();
+
+    let report = json(
+        TestRepo::command_at(repo.dir.path(), repo.user_data_dir())
+            .args(["conflicts", "--json"])
+            .env("GITSCRY_FULL_OUTPUT", "1")
+            .output()
+            .unwrap(),
+    );
+    let history = &report["historical_cases"];
+    assert_eq!(
+        history["status"], "complete",
+        "historical report: {history}"
+    );
+    let case = &history["files"][0]["cases"][0];
+    assert_eq!(case["merge_commit"], historical_merge);
+    assert!(case["result"].is_null(), "historical report: {case}");
+    assert_eq!(case["result_status"], "unreadable");
+    let limitations = case["limitations"].as_array().unwrap();
+    assert!(
+        limitations
+            .iter()
+            .any(|value| value.as_str().unwrap().contains("not bounded UTF-8 text")),
+        "historical report: {history}"
+    );
+    assert_eq!(case["parents"][0]["commit"], historical_ours);
+    assert_eq!(case["parents"][1]["commit"], historical_theirs);
+    assert!(case["merge_base"]["excerpt"].is_string());
+
+    let human = repo.run(["conflicts"]);
+    assert!(human.status.success());
+    let human = String::from_utf8_lossy(&human.stdout);
+    assert!(human.contains("not available (unreadable)"), "{human}");
+}
+
+#[test]
+fn ranks_historical_cases_by_region_strength_then_recency() {
+    let repo = TestRepo::new();
+    let base = commit(
+        &repo,
+        "conflict.txt",
+        "setting=base
+shared-anchor=1
+",
+        "base",
+    );
+    git(repo.dir.path(), ["branch", "side-a"]);
+    let _weak_ours = commit(
+        &repo,
+        "conflict.txt",
+        "setting=weak-ours
+shared-anchor=1
+",
+        "weak historical ours",
+    );
+    git(repo.dir.path(), ["checkout", "side-a"]);
+    let _weak_theirs = commit(
+        &repo,
+        "conflict.txt",
+        "setting=weak-theirs
+shared-anchor=1
+",
+        "weak historical theirs",
+    );
+    git(repo.dir.path(), ["checkout", "main"]);
+    merge(&repo, "side-a");
+    commit(
+        &repo,
+        "conflict.txt",
+        "setting=weak-ours
+shared-anchor=1
+",
+        "weak historical resolution",
+    );
+    let weak_merge = repo.head();
+
+    // A later merge whose conflict region shares no surrounding context with
+    // the current conflict, and whose merge commit is more recent.
+    commit(
+        &repo,
+        "unrelated.txt",
+        "a
+",
+        "advance main clock",
+    );
+    git(repo.dir.path(), ["branch", "side-b"]);
+    commit(
+        &repo,
+        "conflict.txt",
+        "setting=strong-ours
+shared-anchor=2
+",
+        "strong historical ours",
+    );
+    git(repo.dir.path(), ["checkout", "side-b"]);
+    commit(
+        &repo,
+        "conflict.txt",
+        "setting=strong-theirs
+shared-anchor=2
+",
+        "strong historical theirs",
+    );
+    git(repo.dir.path(), ["checkout", "main"]);
+    merge(&repo, "side-b");
+    commit(
+        &repo,
+        "conflict.txt",
+        "setting=strong-ours
+shared-anchor=2
+",
+        "strong historical resolution",
+    );
+    let strong_merge = repo.head();
+
+    // Current conflict: both sides share the historical strong anchor as
+    // unique surrounding context; the weak anchor appears twice in the file.
+    git(repo.dir.path(), ["branch", "current-theirs", &base]);
+    git(repo.dir.path(), ["checkout", "current-theirs"]);
+    commit(
+        &repo,
+        "conflict.txt",
+        "setting=theirs-now
+shared-anchor=2
+",
+        "current theirs",
+    );
+    git(repo.dir.path(), ["checkout", "main"]);
+    commit(
+        &repo,
+        "conflict.txt",
+        "setting=ours-now
+shared-anchor=2
+",
+        "current ours",
+    );
+    merge(&repo, "current-theirs");
+    repo.index();
+
+    let report = json(
+        TestRepo::command_at(repo.dir.path(), repo.user_data_dir())
+            .args(["conflicts", "--json"])
+            .env("GITSCRY_FULL_OUTPUT", "1")
+            .output()
+            .unwrap(),
+    );
+    let history = &report["historical_cases"];
+    assert_eq!(
+        history["status"], "complete",
+        "historical report: {history}"
+    );
+    let cases = history["files"][0]["cases"].as_array().unwrap();
+    assert_eq!(cases.len(), 2, "historical report: {history}");
+    assert_eq!(cases[0]["merge_commit"], strong_merge);
+    assert_eq!(cases[1]["merge_commit"], weak_merge);
+    assert_eq!(
+        cases[0]["region"]["after"],
+        serde_json::json!(["shared-anchor=2"])
+    );
+    assert!(cases[1]["region"].is_null());
+    assert!(!cases[1]["limitations"].as_array().unwrap().is_empty());
+    // Human output parity: the ranked order and limitation prose match.
+    let human = repo.run(["conflicts"]);
+    assert!(human.status.success());
+    let human = String::from_utf8_lossy(&human.stdout);
+    let strong_pos = human.find(&strong_merge).unwrap();
+    let weak_pos = human.find(&weak_merge).unwrap();
+    assert!(strong_pos < weak_pos);
+    assert!(human.contains("Limitation:"));
 }
