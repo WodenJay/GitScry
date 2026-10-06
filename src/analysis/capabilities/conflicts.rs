@@ -152,9 +152,22 @@ pub(crate) struct HistoricalCases {
     pub(crate) reconstruction_rules: &'static str,
     pub(crate) ranking: &'static str,
     pub(crate) reasons: Vec<String>,
+    pub(crate) candidates: CandidateSummary,
     pub(crate) files_analyzed: usize,
     pub(crate) files_with_cases: usize,
     pub(crate) files: Vec<HistoricalFile>,
+}
+
+#[derive(Serialize, Default)]
+pub(crate) struct CandidateSummary {
+    pub(crate) discovered: usize,
+    pub(crate) examined: usize,
+    pub(crate) nonconflicting: usize,
+    pub(crate) irrelevant: usize,
+    pub(crate) ambiguous: usize,
+    pub(crate) unsupported: usize,
+    pub(crate) failed: usize,
+    pub(crate) unchecked: usize,
 }
 
 #[derive(Serialize)]
@@ -163,7 +176,12 @@ pub(crate) struct HistoricalFile {
     pub(crate) status: &'static str,
     pub(crate) candidate_merges: usize,
     pub(crate) candidates_examined: usize,
-    pub(crate) candidates_skipped: usize,
+    pub(crate) candidates_nonconflicting: usize,
+    pub(crate) candidates_irrelevant: usize,
+    pub(crate) candidates_ambiguous: usize,
+    pub(crate) candidates_unsupported: usize,
+    pub(crate) candidates_failed: usize,
+    pub(crate) candidates_unchecked: usize,
     pub(crate) reasons: Vec<String>,
     pub(crate) cases: Vec<HistoricalCase>,
     pub(crate) cases_total: usize,
@@ -940,7 +958,7 @@ pub(crate) fn execute(paths: Vec<String>, limit: usize) -> Result<Outcome, AppEr
         && !files_truncated
         && files.iter().all(|file| file.unsupported.is_none());
     let report = Report {
-        schema_version: 5,
+        schema_version: 6,
         ours: target.ours,
         theirs: target.theirs,
         merge_base: target.base,
