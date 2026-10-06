@@ -125,7 +125,147 @@ struct TrackedRegion {
     protected_boundaries: Vec<i64>,
 }
 
+/// Typed per-commit diagnostic recorded at generation time; rendering derives
+/// category summaries or the full warning string from it without parsing text.
+pub(crate) struct Diagnostic {
+    pub(crate) category: DiagnosticCategory,
+    pub(crate) commit_id: String,
+    /// False when the diagnostic arose during out-of-window lineage traversal.
+    pub(crate) eligible: bool,
+    /// Index into `Report::warnings` where this diagnostic was pushed.
+    pub(crate) warning_index: usize,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(crate) enum DiagnosticCategory {
+    FirstParentFileCorrespondence,
+    AmbiguousMergeFileCorrespondence,
+    AmbiguousMergeRegionCorrespondence,
+    TimestampInversion,
+}
+
+impl Report {
+    /// Human-readable warnings. Verbose keeps every per-commit diagnostic in
+    /// generation order; the default replaces dynamic diagnostics with
+    /// fixed-order category summaries and one discovery hint. JSON keeps the
+    /// full `warnings` array regardless of this choice.
+    pub(crate) fn human_warnings(&self) -> std::borrow::Cow<'_, [String]> {
+        if self.verbose {
+            return std::borrow::Cow::Borrowed(&self.warnings);
+        }
+        std::borrow::Cow::Owned(self.aggregated_warnings())
+    }
+
+    fn aggregated_warnings(&self) -> Vec<String> {
+        // Diagnostics record their exact `warnings` index at push time, so
+        // stripping never depends on warning text.
+        let diagnostic_indices: HashSet<usize> = self
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.warning_index)
+            .collect();
+        let mut warnings: Vec<String> = self
+            .warnings
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !diagnostic_indices.contains(index))
+            .map(|(_, warning)| warning.clone())
+            .collect();
+        let mut summaries = Vec::new();
+        for category in [
+            DiagnosticCategory::FirstParentFileCorrespondence,
+            DiagnosticCategory::AmbiguousMergeFileCorrespondence,
+            DiagnosticCategory::AmbiguousMergeRegionCorrespondence,
+            DiagnosticCategory::TimestampInversion,
+        ] {
+            summaries.extend(category.summaries(&self.diagnostics));
+        }
+        if !summaries.is_empty() {
+            summaries.push("Use --verbose for per-commit diagnostics.".into());
+        }
+        warnings.extend(summaries);
+        warnings
+    }
+}
+
+/// Counts for one category over one inspection window. Commit-level categories
+/// count distinct commits; file and region categories count file-tracking
+/// instances (an affected seed file identity at one traversed commit) plus
+/// distinct commits. Categories are never summed together.
+#[derive(Default)]
+struct CategoryCounts {
+    inspected_instances: usize,
+    inspected_commits: BTreeSet<String>,
+    lineage_instances: usize,
+    lineage_commits: BTreeSet<String>,
+}
+
+impl DiagnosticCategory {
+    fn summaries(self, diagnostics: &[Diagnostic]) -> Vec<String> {
+        let mut counts = CategoryCounts::default();
+        for diagnostic in diagnostics.iter().filter(|d| d.category == self) {
+            if diagnostic.eligible {
+                counts.inspected_instances += 1;
+                counts
+                    .inspected_commits
+                    .insert(diagnostic.commit_id.clone());
+            } else {
+                counts.lineage_instances += 1;
+                counts.lineage_commits.insert(diagnostic.commit_id.clone());
+            }
+        }
+        let mut summaries = Vec::new();
+        if counts.inspected_instances > 0 {
+            summaries.push(self.summary_line(
+                counts.inspected_instances,
+                counts.inspected_commits.len(),
+                "inspected commit",
+            ));
+        }
+        if counts.lineage_instances > 0 {
+            summaries.push(self.summary_line(
+                counts.lineage_instances,
+                counts.lineage_commits.len(),
+                "out-of-window lineage commit",
+            ));
+        }
+        summaries
+    }
+
+    fn summary_line(self, instances: usize, commits: usize, commits_label: &str) -> String {
+        let commits_label = plural(commits, commits_label);
+        let instances_label = plural(instances, "file-tracking instance");
+        let have = if commits == 1 { "has" } else { "have" };
+        let lacks = if commits == 1 { "lacks" } else { "lack" };
+        match self {
+            Self::FirstParentFileCorrespondence => format!(
+                "{commits} {commits_label} {lacks} first-parent file correspondence to the seed; no same-file identity is assumed."
+            ),
+            Self::AmbiguousMergeFileCorrespondence => format!(
+                "{instances} {instances_label} across {commits} {commits_label} {have} ambiguous merge file correspondence; affected file tracking stopped."
+            ),
+            Self::AmbiguousMergeRegionCorrespondence => format!(
+                "{instances} {instances_label} across {commits} {commits_label} {have} ambiguous merge region correspondence; changed-region tracking downgraded."
+            ),
+            Self::TimestampInversion => {
+                format!("{commits} {commits_label} have commit times earlier than the seed time.")
+            }
+        }
+    }
+}
+
+/// Pluralizes a singular noun phrase by appending `s` (e.g. "commit" ->
+/// "commits", "file-tracking instance" -> "file-tracking instances").
+fn plural(count: usize, singular: &str) -> String {
+    if count == 1 {
+        singular.to_owned()
+    } else {
+        format!("{singular}s")
+    }
+}
+
 pub(crate) struct Report {
+    pub(crate) verbose: bool,
     pub(crate) scope: Scope,
     pub(crate) inspected_count: usize,
     pub(crate) lineage_inspected_count: usize,
@@ -136,6 +276,7 @@ pub(crate) struct Report {
     pub(crate) matched_in_inspected_scope: usize,
     pub(crate) entries: Vec<Entry>,
     pub(crate) warnings: Vec<String>,
+    pub(crate) diagnostics: Vec<Diagnostic>,
 }
 
 pub(crate) struct Scope {
@@ -172,6 +313,7 @@ pub(in crate::analysis) fn run(
     to_rev: Option<String>,
     days: usize,
     max_commits: usize,
+    verbose: bool,
     options: Options,
 ) -> Result<Outcome, AppError> {
     let seconds = i64::try_from(days)
@@ -304,6 +446,7 @@ pub(in crate::analysis) fn run(
         );
     }
     let mut report = Report {
+        verbose,
         scope: Scope {
             seed: seed.clone(),
             endpoint,
@@ -324,6 +467,7 @@ pub(in crate::analysis) fn run(
         matched_in_inspected_scope: 0,
         entries: Vec::new(),
         warnings,
+        diagnostics: Vec::new(),
     };
     let mut states: HashMap<String, Incarnations> = HashMap::from([(seed.clone(), initial)]);
     let candidates: Vec<_> = graph
@@ -359,11 +503,17 @@ pub(in crate::analysis) fn run(
                 .get_or_insert_with(|| node.oid.clone());
             report.inspected_last = Some(node.oid.clone());
             if node.commit_time < seed_time {
-                report.warnings.push(format!(
-                    "Timestamp inversion at {}: signed elapsed {} seconds.",
-                    node.oid,
-                    node.commit_time - seed_time
-                ));
+                push_diagnostic(
+                    &mut report,
+                    DiagnosticCategory::TimestampInversion,
+                    &node.oid,
+                    eligible,
+                    format!(
+                        "Timestamp inversion at {}: signed elapsed {} seconds.",
+                        node.oid,
+                        node.commit_time - seed_time
+                    ),
+                );
             }
         } else {
             report.lineage_inspected_count += 1;
@@ -382,7 +532,16 @@ pub(in crate::analysis) fn run(
             .cloned()
             .unwrap_or_default();
         if state.is_empty() {
-            report.warnings.push(format!("{}: first-parent file correspondence to the seed is unavailable; no same-file identity is assumed.", node.oid));
+            push_diagnostic(
+                &mut report,
+                DiagnosticCategory::FirstParentFileCorrespondence,
+                &node.oid,
+                eligible,
+                format!(
+                    "{}: first-parent file correspondence to the seed is unavailable; no same-file identity is assumed.",
+                    node.oid
+                ),
+            );
         }
         if node.parents.len() > 1 {
             let mut identities: BTreeSet<_> = state.keys().copied().collect();
@@ -427,11 +586,19 @@ pub(in crate::analysis) fn run(
                             incarnation.regions =
                                 RegionTracking::Unavailable(RegionTrackingReason::AmbiguousMerge);
                         }
-                        report.warnings.push(format!(
-                            "{}: ambiguous merge region correspondence; changed-region tracking downgraded for {}.",
-                            node.oid,
-                            String::from_utf8_lossy(parent_paths[0].as_ref().expect("checked path"))
-                        ));
+                        push_diagnostic(
+                            &mut report,
+                            DiagnosticCategory::AmbiguousMergeRegionCorrespondence,
+                            &node.oid,
+                            eligible,
+                            format!(
+                                "{}: ambiguous merge region correspondence; changed-region tracking downgraded for {}.",
+                                node.oid,
+                                String::from_utf8_lossy(
+                                    parent_paths[0].as_ref().expect("checked path")
+                                )
+                            ),
+                        );
                     }
                     continue;
                 }
@@ -443,11 +610,17 @@ pub(in crate::analysis) fn run(
                     incarnation.regions =
                         RegionTracking::Unavailable(RegionTrackingReason::AmbiguousMerge);
                 }
-                report.warnings.push(format!(
-                    "{}: ambiguous merge file correspondence; file tracking stopped for {}.",
-                    node.oid,
-                    String::from_utf8_lossy(&path)
-                ));
+                push_diagnostic(
+                    &mut report,
+                    DiagnosticCategory::AmbiguousMergeFileCorrespondence,
+                    &node.oid,
+                    eligible,
+                    format!(
+                        "{}: ambiguous merge file correspondence; file tracking stopped for {}.",
+                        node.oid,
+                        String::from_utf8_lossy(&path)
+                    ),
+                );
             }
         }
         let changes = session.forward_changes(&node.oid)?;
@@ -604,6 +777,22 @@ pub(in crate::analysis) fn run(
         warnings: session.warnings().to_vec(),
         report: QueryReport::Followups(report),
     })
+}
+
+fn push_diagnostic(
+    report: &mut Report,
+    category: DiagnosticCategory,
+    commit_id: &str,
+    eligible: bool,
+    warning: String,
+) {
+    report.diagnostics.push(Diagnostic {
+        category,
+        commit_id: commit_id.to_owned(),
+        eligible,
+        warning_index: report.warnings.len(),
+    });
+    report.warnings.push(warning);
 }
 
 fn selection_matches(

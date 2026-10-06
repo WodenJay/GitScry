@@ -127,6 +127,11 @@ The time window ends at the seed's committer time plus --days. --max-commits bou
 inspection, including nonmatches; --limit bounds displayed results. Incomplete
 history and exhausted budgets are reported.
 
+Repetitive per-commit diagnostics (correspondence limitations, timestamp
+inversions) are aggregated by category in human-readable output; --verbose shows
+each per-commit diagnostic instead. Aggregation does not change the query or
+JSON output.
+
 Examples:
   gitscry followups HEAD~10
   gitscry followups v1.0 --path src/lib.rs --to-rev release --patch
@@ -153,6 +158,9 @@ Examples:
         /// Include bounded supporting cached patches.
         #[arg(long)]
         patch: bool,
+        /// Show every per-commit diagnostic instead of category summaries; does not change the query.
+        #[arg(long)]
+        verbose: bool,
         /// Output JSON instead of text.
         #[arg(long)]
         json: bool,

@@ -1172,3 +1172,253 @@ fn followups_resolves_unique_abbreviated_revert_reference() {
     assert_eq!(entries[0]["revert_reference"]["target_commit_id"], seed);
     assert_eq!(entries[0]["paths"], serde_json::json!([]));
 }
+
+#[test]
+fn followups_aggregates_repeated_diagnostics_by_default_and_verbose_restores_them() {
+    let repo = TestRepo::new();
+    let base = commit(
+        &repo,
+        "b",
+        "base
+",
+        "Base",
+        "2019-12-01T00:00:00Z",
+    );
+    git(repo.dir.path(), ["checkout", "-b", "topic"]);
+    let seed = commit(
+        &repo,
+        "a",
+        "seed
+",
+        "Seed",
+        "2020-01-01T00:00:00Z",
+    );
+    // Merging the seed branch with a first parent outside the seed lineage
+    // leaves the first-parent state empty; every later commit repeats the
+    // first-parent correspondence diagnostic.
+    git(repo.dir.path(), ["checkout", "main"]);
+    let out = git_command(repo.dir.path())
+        .args(["merge", "--no-ff", "topic", "-m", "Merge"])
+        .env("GIT_AUTHOR_DATE", "2020-01-05T00:00:00Z")
+        .env("GIT_COMMITTER_DATE", "2020-01-05T00:00:00Z")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let merge = repo.head();
+    commit(
+        &repo,
+        "b",
+        "after 1
+",
+        "After 1",
+        "2019-12-30T00:00:00Z",
+    );
+    commit(
+        &repo,
+        "b",
+        "after 2
+",
+        "After 2",
+        "2019-12-31T00:00:00Z",
+    );
+    commit(
+        &repo,
+        "b",
+        "out 1
+",
+        "Out 1",
+        "2020-04-01T00:00:00Z",
+    );
+    commit(
+        &repo,
+        "b",
+        "out 2
+",
+        "Out 2",
+        "2020-04-02T00:00:00Z",
+    );
+    assert_ne!(merge, base);
+    repo.index();
+
+    let report = json(
+        &repo,
+        &[
+            "followups",
+            &seed,
+            "--days",
+            "60",
+            "--max-commits",
+            "10",
+            "--json",
+        ],
+    );
+    // JSON keeps full warnings regardless of presentation mode.
+    let json_warnings = report["warnings"].as_array().unwrap().to_owned();
+    assert!(
+        json_warnings
+            .iter()
+            .any(|w| w.to_string().contains("Timestamp inversion at"))
+    );
+    assert!(
+        json_warnings
+            .iter()
+            .any(|w| w.to_string().contains("first-parent file correspondence"))
+    );
+
+    let out = repo.run(["followups", &seed, "--days", "60", "--max-commits", "10"]);
+    assert!(out.status.success());
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    // One summary per populated category, not one line per occurrence.
+    assert_eq!(
+        stderr.matches("first-parent file correspondence").count(),
+        2
+    );
+    assert_eq!(stderr.matches("earlier than the seed time").count(), 1);
+    // Counts separate eligible inspection from out-of-window lineage traversal.
+    assert!(stderr.contains("3 inspected commits lack first-parent"));
+    assert!(stderr.contains("2 inspected commits have commit times earlier than the seed time"));
+    assert_eq!(
+        stderr
+            .matches("Use --verbose for per-commit diagnostics.")
+            .count(),
+        1
+    );
+    // Aggregation omits per-commit diagnostic details.
+    assert!(!stderr.contains("signed elapsed"));
+    assert!(!stderr.contains("file tracking stopped for"));
+
+    let verbose = repo.run([
+        "followups",
+        &seed,
+        "--days",
+        "60",
+        "--max-commits",
+        "10",
+        "--verbose",
+    ]);
+    assert!(verbose.status.success());
+    let verbose_stderr = String::from_utf8(verbose.stderr).unwrap();
+    // Full per-commit diagnostics in generation order, no summary block.
+    assert_eq!(
+        verbose_stderr
+            .matches("first-parent file correspondence to the seed is unavailable")
+            .count(),
+        5
+    );
+    assert_eq!(verbose_stderr.matches("Timestamp inversion").count(), 2);
+    assert!(verbose_stderr.contains("signed elapsed"));
+    assert!(!verbose_stderr.contains("Use --verbose"));
+    assert!(!verbose_stderr.contains("earlier than the seed time"));
+
+    // Same query, same result: presentation only.
+    let verbose_json = json(
+        &repo,
+        &[
+            "followups",
+            &seed,
+            "--days",
+            "60",
+            "--max-commits",
+            "10",
+            "--verbose",
+            "--json",
+        ],
+    );
+    assert_eq!(report, verbose_json);
+    assert_eq!(out.stdout, verbose.stdout);
+}
+
+#[test]
+fn followups_distinguishes_file_and_region_merge_correspondence_categories() {
+    let repo = TestRepo::new();
+    let base = commit(
+        &repo,
+        "a",
+        "base
+",
+        "Base",
+        "2020-01-01T00:00:00Z",
+    );
+    git(repo.dir.path(), ["checkout", "-b", "side1"]);
+    commit(
+        &repo,
+        "a",
+        "side one
+",
+        "Side one",
+        "2020-01-02T00:00:00Z",
+    );
+    git(repo.dir.path(), ["checkout", "-b", "seed-branch", &base]);
+    let seed = commit(
+        &repo,
+        "a",
+        "seed
+",
+        "Seed",
+        "2020-01-03T00:00:00Z",
+    );
+    git(repo.dir.path(), ["checkout", "side1"]);
+    let out = git_command(repo.dir.path())
+        .args([
+            "merge",
+            "-s",
+            "ours",
+            "--no-ff",
+            "seed-branch",
+            "-m",
+            "Merge",
+        ])
+        .env("GIT_AUTHOR_DATE", "2020-01-04T00:00:00Z")
+        .env("GIT_COMMITTER_DATE", "2020-01-04T00:00:00Z")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    // Continuation commit after the merge: the seed file exists on side1's
+    // line but the merge carried no seed-line patches, so the region state
+    // from the seed parent disagrees with the nonexistent one from side1.
+    commit(
+        &repo,
+        "a",
+        "continuation
+",
+        "Continuation",
+        "2020-01-05T00:00:00Z",
+    );
+    git(repo.dir.path(), ["branch", "-f", "main", "HEAD"]);
+    repo.index();
+
+    let report = json(&repo, &["followups", &seed, "--json"]);
+    assert!(report["warnings"].as_array().unwrap().iter().any(|w| {
+        w.to_string()
+            .contains("ambiguous merge file correspondence")
+    }));
+
+    // Default output aggregates per-commit diagnostics into category summaries.
+    let out = repo.run(["followups", &seed]);
+    assert!(
+        out.status.success(),
+        "followups exit {:?}: stdout={} stderr={}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stderr = String::from_utf8(out.stderr).unwrap();
+    assert_eq!(
+        stderr
+            .matches("ambiguous merge file correspondence")
+            .count(),
+        1
+    );
+    assert!(stderr.contains("2 inspected commits lack first-parent file correspondence"));
+    assert!(stderr.contains(
+        "1 file-tracking instance across 1 inspected commit has ambiguous merge file correspondence"
+    ));
+    assert!(!stderr.contains("file tracking stopped for"));
+    assert!(stderr.contains("Use --verbose for per-commit diagnostics."));
+
+    let verbose = repo.run(["followups", &seed, "--verbose"]);
+    assert!(verbose.status.success());
+    let verbose_stderr = String::from_utf8(verbose.stderr).unwrap();
+    assert!(verbose_stderr.contains("ambiguous merge file correspondence; file tracking stopped"));
+    assert!(!verbose_stderr.contains("Use --verbose"));
+}

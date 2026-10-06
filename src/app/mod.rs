@@ -140,6 +140,7 @@ pub(crate) fn execute(
             max_commits,
             limit,
             patch,
+            verbose,
             ..
         } => (
             Request::Followups {
@@ -148,6 +149,7 @@ pub(crate) fn execute(
                 to_rev,
                 days,
                 max_commits,
+                verbose,
             },
             limit,
             patch,
