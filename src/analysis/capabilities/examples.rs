@@ -33,9 +33,7 @@ pub(crate) fn run(
         let mut score = candidate.signals.identified_score() + anchored as f64 * ANCHOR_WEIGHT;
         score += if coherent { COHERENT_WEIGHT } else { 0.0 };
         // Work that was later undone, and the revert itself, are not precedents to follow.
-        if reverts.is_revert(&candidate.oid)
-            || retrieval::link(session, &reverts, scope, candidate)?.is_some()
-        {
+        if reverts.is_revert(&candidate.oid) || retrieval::link(&reverts, candidate).is_some() {
             score -= REVERT_DEMOTION;
         }
         ranked.push(retrieval::Ranked {
@@ -67,7 +65,7 @@ pub(crate) fn run(
         if reverts.is_revert(&candidate.oid) {
             basis.push("demoted: a revert, not a precedent".to_owned());
             confidence = Confidence::Low;
-        } else if let Some(revert) = retrieval::link(session, &reverts, scope, candidate)? {
+        } else if let Some(revert) = retrieval::link(&reverts, candidate) {
             citations.push(
                 Citation::new(revert.oid.clone(), revert.subject.clone()).noting("later reverted"),
             );

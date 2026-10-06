@@ -14,6 +14,11 @@ const CAUSE_MARKERS: &[&str] = &[
     "since ",
     "due to",
     "reason:",
+    "cannot ",
+    "can't ",
+    "reverted ",
+    "reverts the changes from ",
+    "this is a revert of",
     "why:",
     "root cause",
     "caused by",
@@ -94,24 +99,52 @@ fn starts_with_any(subject: &str, prefixes: &[&str]) -> bool {
     prefixes.iter().any(|prefix| lowered.starts_with(prefix))
 }
 
-/// The object ID a `This reverts commit <oid>` trailer names, if the message has one.
-pub(super) fn reverted_commit(text: &str) -> Option<String> {
-    let lowered = text.to_ascii_lowercase();
-    let marker = "reverts commit ";
-    let mut cursor = 0;
-    while let Some(found) = lowered[cursor..].find(marker) {
-        let start = cursor + found + marker.len();
-        let hex = text[start..]
-            .chars()
-            .take_while(char::is_ascii_hexdigit)
-            .collect::<String>();
-        if hex.len() >= 7 {
-            return Some(hex);
+/// The object IDs explicit revert declarations in this message name, in order.
+///
+/// Only affirmative, already-performed declarations count, and only the wording history
+/// uses to name the undone work directly:
+///
+/// - `This reverts commit <oid>`
+/// - `This is a revert of commit <oid>` or `This is a revert of the code changes in commit <oid>`
+/// - `Reverts the changes from commit <oid>`
+/// - `Reverted <oid> because <explanation>`
+///
+/// Declarations are matched case-insensitively across wrapped lines, must start a sentence,
+/// and never match plans, negations, or quotations of someone else's message.
+pub(in crate::analysis) fn explicit_revert_declarations(text: &str) -> Vec<String> {
+    let mut declarations = Vec::new();
+    for sentence in sentences(text) {
+        let lowered = sentence.to_ascii_lowercase();
+        for marker in DECLARATION_MARKERS {
+            let mut cursor = 0;
+            while let Some(found) = lowered[cursor..].find(marker) {
+                let start = cursor + found + marker.len();
+                let hex = lowered[start..]
+                    .chars()
+                    .take_while(char::is_ascii_hexdigit)
+                    .collect::<String>();
+                if hex.len() >= 7 {
+                    declarations.push(hex);
+                }
+                cursor = start;
+            }
         }
-        cursor = start;
     }
-    None
+    declarations
 }
+
+/// Sentence starts that name undone work with an object ID directly.
+///
+/// A declaration must open the sentence, so a negated or planned revert ("does not revert",
+/// "will revert") and a quoted example never match: they cannot precede the marker inside
+/// the matched window.
+const DECLARATION_MARKERS: &[&str] = &[
+    "this reverts commit ",
+    "this is a revert of commit ",
+    "this is a revert of the code changes in commit ",
+    "reverts the changes from commit ",
+    "reverted ",
+];
 
 /// A failure reason, but only one history states.
 pub(super) fn stated_reason(subject: &str, body: &str) -> Option<String> {

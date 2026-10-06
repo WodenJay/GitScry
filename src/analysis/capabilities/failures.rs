@@ -39,7 +39,7 @@ pub(crate) fn run(
     // the fold and the citation consistent.
     let mut linked = Vec::with_capacity(pool.candidates.len());
     for candidate in &pool.candidates {
-        linked.push(retrieval::link(session, &reverts, scope, candidate)?);
+        linked.push(retrieval::link(&reverts, candidate));
     }
 
     let mut ranked = Vec::new();

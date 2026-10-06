@@ -5,18 +5,16 @@ use crate::{
     cache::{QuerySession, SearchFilter},
 };
 
-use super::super::provenance::{is_revert_subject, reverted_commit};
+use super::super::provenance::{explicit_revert_declarations, is_revert_subject};
 use super::message_parts;
 
-/// A cached commit whose subject reads like a revert, with what is needed to link it to the
-/// work it undid. The `This reverts commit` trailer is authoritative; most reverts in the
-/// wild omit it, so raw path identities are recorded as the fallback link.
+/// A cached commit whose message explicitly declares what it reverts, or whose subject
+/// reads like a revert. The declaration is authoritative; a subject alone never names a
+/// target, so revert-like commits without a declaration carry no revert relationship.
 pub(in crate::analysis) struct Revert {
-    pub(in crate::analysis) position: i64,
     pub(in crate::analysis) oid: String,
     pub(in crate::analysis) subject: String,
     pub(in crate::analysis) body: String,
-    pub(in crate::analysis) path_ids: Vec<Vec<u8>>,
     target: Option<String>,
 }
 
@@ -37,32 +35,7 @@ impl RevertIndex {
         self.by_target.get(oid).map(|index| &self.reverts[*index])
     }
 
-    /// Later reverts that cover every path this commit changed, earliest first.
-    ///
-    /// An undo touches everything the undone change touched, so requiring the revert to
-    /// cover all of the candidate's paths rejects a revert that merely shares a file with
-    /// unrelated work.
-    pub(in crate::analysis) fn undoings<'a>(
-        &'a self,
-        oid: &str,
-        path_ids: &[Vec<u8>],
-        position: i64,
-    ) -> impl Iterator<Item = &'a Revert> {
-        self.reverts
-            .iter()
-            .filter(move |revert| {
-                revert.oid != oid
-                    && revert.position > position
-                    && !path_ids.is_empty()
-                    && path_ids
-                        .iter()
-                        .all(|path_id| revert.path_ids.contains(path_id))
-            })
-            .collect::<Vec<_>>()
-            .into_iter()
-    }
-
-    /// The revert that names a cached commit in its trailer, when `oid` is that revert.
+    /// The revert that names a cached commit in its message, when `oid` is that revert.
     pub(in crate::analysis) fn resolved_revert(&self, oid: &str) -> Option<&Revert> {
         self.reverts
             .iter()
@@ -78,7 +51,9 @@ impl RevertIndex {
     }
 }
 
-/// Index every cached revert in cache order; the earliest resolved revert of a commit wins.
+/// Index every cached commit that reads like a revert or explicitly declares one, in cache
+/// order; the earliest resolved revert of a commit wins. A message declaring two different
+/// targets records no target at all: the declaration contract is single-target.
 pub(in crate::analysis) fn index(
     session: &QuerySession,
     scope: Option<&SearchFilter>,
@@ -98,18 +73,24 @@ pub(in crate::analysis) fn index(
     let mut reverts = Vec::new();
     for commit in commits {
         let (subject, body) = message_parts(&commit.message);
-        if !is_revert_subject(&subject) {
+        let single_target = explicit_revert_declarations(&format!("{subject}\n{body}"))
+            .into_iter()
+            .map(|hex| resolve_in_scope(&all_cached, &eligible, &hex))
+            .collect::<Option<Vec<_>>>()
+            .and_then(|targets| {
+                let unique = targets.into_iter().collect::<HashSet<_>>();
+                (unique.len() == 1)
+                    .then(|| unique.into_iter().next())
+                    .flatten()
+            });
+        if !is_revert_subject(&subject) && single_target.is_none() {
             continue;
         }
-        let target = reverted_commit(&format!("{subject}\n{body}"))
-            .and_then(|hex| resolve_in_scope(&all_cached, &eligible, &hex));
         reverts.push(Revert {
-            path_ids: session.projected_paths(&commit.oid)?,
             oid: commit.oid,
             subject,
             body,
-            position: commit.position,
-            target,
+            target: single_target,
         });
     }
     let mut by_target = HashMap::new();

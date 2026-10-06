@@ -1,6 +1,7 @@
 //! Bounded same-file material. Identity is branch-local and never resumes after ending.
 mod regions;
 
+use crate::analysis::provenance::explicit_revert_declarations;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::analysis::query::{Context, Options, Outcome, QueryReport, scope};
@@ -619,21 +620,14 @@ fn explicitly_references_seed(
     seed: &str,
     all_cached_oids: &HashSet<String>,
 ) -> bool {
-    String::from_utf8_lossy(message).lines().any(|line| {
-        let Some(reference) = line.trim().strip_prefix("This reverts commit ") else {
-            return false;
-        };
-        let reference = reference.strip_suffix('.').unwrap_or(reference);
-        if !reference.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return false;
-        }
-        crate::analysis::retrieval::resolve_oid_prefix(
-            all_cached_oids,
-            &reference.to_ascii_lowercase(),
-        )
-        .as_deref()
-            == Some(seed)
-    })
+    let text = String::from_utf8_lossy(message);
+    let resolved = explicit_revert_declarations(&text)
+        .into_iter()
+        .map(|hex| crate::analysis::retrieval::resolve_oid_prefix(all_cached_oids, &hex))
+        .collect::<Option<HashSet<_>>>();
+    // A declaration naming several different commits identifies nothing, so the seed is
+    // referenced only when the message resolves to the seed alone.
+    resolved.is_some_and(|targets| targets.len() == 1 && targets.contains(seed))
 }
 
 fn validate_path(path: &str) -> Result<(), AppError> {

@@ -1,4 +1,4 @@
-//! Commit messages, positions, projected paths and ordered commit scans.
+//! Commit messages, projected paths and ordered commit scans.
 
 use rusqlite::{Connection, OptionalExtension, params_from_iter};
 use std::collections::HashSet;
@@ -19,17 +19,6 @@ impl QuerySession {
 
     pub(crate) fn commit_message(&self, oid: &str) -> Result<Option<Vec<u8>>, AppError> {
         commit_message(&self.connection, oid)
-    }
-
-    pub(crate) fn commit_position(&self, oid: &str) -> Result<Option<i64>, AppError> {
-        self.connection
-            .query_row(
-                "SELECT position FROM commits WHERE oid = ?1",
-                [oid],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|error| search_error("reading commit position", error))
     }
 
     pub(crate) fn commits(&self) -> Result<Vec<StoredCommit>, AppError> {
@@ -109,12 +98,8 @@ fn commit_message(connection: &Connection, oid: &str) -> Result<Option<Vec<u8>>,
         .transpose()
 }
 
-/// A cached commit: its object ID, message, and cache position.
-///
-/// The position orders commits the way the cache generation was built, which separates
-/// commits a repository recorded in the same second.
+/// A cached commit: its object ID and message.
 pub(crate) struct StoredCommit {
-    pub(crate) position: i64,
     pub(crate) oid: String,
     pub(crate) message: Vec<u8>,
 }
@@ -122,14 +107,13 @@ pub(crate) struct StoredCommit {
 /// Every cached commit, oldest first.
 fn commits(connection: &Connection) -> Result<Vec<StoredCommit>, AppError> {
     let mut statement = connection
-        .prepare("SELECT position, oid, message, message_length FROM commits ORDER BY position")
+        .prepare("SELECT oid, message, message_length FROM commits ORDER BY position")
         .map_err(|error| search_error("preparing history scan", error))?;
     statement
         .query_map([], |row| {
             Ok(StoredCommit {
-                position: row.get(0)?,
-                oid: row.get(1)?,
-                message: decode_message_row(row, 2, 3)?,
+                oid: row.get(0)?,
+                message: decode_message_row(row, 1, 2)?,
             })
         })
         .map_err(|error| search_error("reading history scan", error))?
@@ -144,7 +128,7 @@ fn commits_scoped(
 ) -> Result<Vec<StoredCommit>, AppError> {
     let query = format!(
         "{SEARCH_SCOPE_CTE}
-         SELECT c.position, c.oid, c.message, c.message_length
+         SELECT c.oid, c.message, c.message_length
          FROM commits AS c
          JOIN eligible ON eligible.commit_id = c.commit_id
          ORDER BY c.position"
@@ -155,9 +139,8 @@ fn commits_scoped(
     statement
         .query_map(params_from_iter(scope_values(scope)), |row| {
             Ok(StoredCommit {
-                position: row.get(0)?,
-                oid: row.get(1)?,
-                message: decode_message_row(row, 2, 3)?,
+                oid: row.get(0)?,
+                message: decode_message_row(row, 1, 2)?,
             })
         })
         .map_err(|error| search_error("reading scoped history scan", error))?

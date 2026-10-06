@@ -77,7 +77,6 @@ impl QuerySession {
 /// A lexical candidate: one cache row with the paths it changed.
 pub(crate) struct SearchCandidate {
     pub(crate) commit_id: i64,
-    pub(crate) position: i64,
     pub(crate) oid: String,
     pub(crate) commit_time: i64,
     pub(crate) subject: String,
@@ -181,7 +180,6 @@ fn candidates_scoped(
                 body,
                 paths: Vec::new(),
                 bm25: row.get(5)?,
-                position: row.get(6)?,
             })
         })
         .map_err(|error| search_error("running scoped search", error))?;
@@ -236,7 +234,6 @@ fn candidates(
                 body,
                 paths: Vec::new(),
                 bm25: row.get(5)?,
-                position: row.get(6)?,
             })
         })
         .map_err(|error| search_error("running search", error))?;
@@ -325,7 +322,6 @@ fn semantic_materials(
                     body,
                     paths: Vec::new(),
                     bm25: 0.0,
-                    position: row.get(5)?,
                 })
             })
             .map_err(|error| search_error("reading semantic result materials", error))?;

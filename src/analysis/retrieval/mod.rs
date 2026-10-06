@@ -35,8 +35,6 @@ const CANDIDATE_MULTIPLIER: usize = 20;
 
 /// One candidate with everything retrieval knows about it.
 pub(in crate::analysis) struct Scored {
-    /// Position in the cache generation, which orders commits recorded in the same second.
-    pub(in crate::analysis) position: i64,
     pub(in crate::analysis) commit_id: i64,
     pub(in crate::analysis) oid: String,
     pub(in crate::analysis) commit_time: i64,
@@ -153,7 +151,6 @@ fn score_candidates(
                 &candidate.paths,
                 candidate.bm25,
             ),
-            position: candidate.position,
             commit_id: candidate.commit_id,
             oid: candidate.oid,
             commit_time: candidate.commit_time,
@@ -172,7 +169,6 @@ pub(in crate::analysis) fn test_scored_candidate(
     let intent = Intent::parse(&["test".to_owned()], &[]).expect("test intent is valid");
     let candidate = crate::cache::SearchCandidate {
         commit_id,
-        position: commit_id,
         oid: oid.to_owned(),
         commit_time: commit_id,
         subject: subject.to_owned(),
@@ -220,45 +216,24 @@ pub(in crate::analysis) fn corrective_follow_up(
     }
     Ok(None)
 }
-/// The revert history associates a candidate by its named trailer first, then by the earliest
-/// later descendant revert of the same paths with no intervening path touch.
-pub(in crate::analysis) fn link<'a>(
-    session: &QuerySession,
+/// Link an already verified change to the revert that history records against it, without
+/// requiring lexical retrieval signals.
+///
+/// Only an explicit revert declaration binds a revert to its target; shared paths alone
+/// never do.
+pub(in crate::analysis) fn link_change<'a>(
     reverts: &'a RevertIndex,
-    scope: Option<&SearchFilter>,
-    candidate: &Scored,
-) -> Result<Option<&'a Revert>, AppError> {
-    link_change(
-        session,
-        reverts,
-        scope,
-        &candidate.oid,
-        &candidate.paths,
-        candidate.position,
-    )
+    oid: &str,
+) -> Option<&'a Revert> {
+    reverts.of(oid)
 }
 
-/// Link an already verified change without requiring lexical retrieval signals.
-pub(in crate::analysis) fn link_change<'a>(
-    session: &QuerySession,
+/// Link a lexically scored candidate to the revert that history records against it.
+pub(in crate::analysis) fn link<'a>(
     reverts: &'a RevertIndex,
-    scope: Option<&SearchFilter>,
-    oid: &str,
-    paths: &[Vec<u8>],
-    position: i64,
-) -> Result<Option<&'a Revert>, AppError> {
-    if let Some(revert) = reverts.of(oid) {
-        return Ok(Some(revert));
-    }
-    for revert in reverts.undoings(oid, paths, position) {
-        if session.touched_between(position, revert.position, paths, scope)? {
-            continue;
-        }
-        if session.ancestors(&revert.oid)?.contains(oid) {
-            return Ok(Some(revert));
-        }
-    }
-    Ok(None)
+    candidate: &Scored,
+) -> Option<&'a Revert> {
+    link_change(reverts, &candidate.oid)
 }
 
 fn match_query(terms: &[String]) -> String {

@@ -26,11 +26,7 @@ pub(super) fn compose(
     let mut originals_by_revert: BTreeMap<&str, Vec<String>> = BTreeMap::new();
     for (_, _, suggestion) in &changes {
         let oid = suggestion.citations[0].oid.as_str();
-        let paths = session.projected_paths(oid)?;
-        if let Some(position) = session.commit_position(oid)?
-            && let Some(revert) =
-                retrieval::link_change(session, &reverts, scope, oid, &paths, position)?
-        {
+        if let Some(revert) = retrieval::link_change(&reverts, oid) {
             recordings.insert(oid.to_owned(), revert);
             originals_by_revert
                 .entry(&revert.oid)

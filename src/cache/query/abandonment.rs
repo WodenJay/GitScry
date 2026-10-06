@@ -11,22 +11,6 @@ use crate::cache::{QuerySession, decode_message_row};
 use std::collections::HashSet;
 
 impl QuerySession {
-    pub(crate) fn touched_between(
-        &self,
-        from_position: i64,
-        to_position: i64,
-        path_ids: &[Vec<u8>],
-        scope: Option<&SearchFilter>,
-    ) -> Result<bool, AppError> {
-        touch_between(
-            &self.connection,
-            from_position,
-            to_position,
-            path_ids,
-            scope,
-        )
-    }
-
     pub(crate) fn follow_ups(
         &self,
         revert_oid: &str,
@@ -36,64 +20,6 @@ impl QuerySession {
         follow_ups(&self.connection, revert_oid, path_ids, scope)
     }
 }
-/// Whether any commit strictly between two positions touched one of `path_ids`.
-///
-/// A revert only counts as undoing a candidate when that candidate was the last work on
-/// the path; otherwise the revert belongs to some later, unrelated change.
-fn touch_between(
-    connection: &Connection,
-    from_position: i64,
-    to_position: i64,
-    path_ids: &[Vec<u8>],
-    scope: Option<&SearchFilter>,
-) -> Result<bool, AppError> {
-    if path_ids.is_empty() || from_position >= to_position {
-        return Ok(false);
-    }
-    let scoped = scope.is_some();
-    let path_chunk_limit = SQL_PARAMETER_LIMIT - if scoped { 6 } else { 2 };
-    for path_chunk in path_ids.chunks(path_chunk_limit) {
-        let path_placeholders = numbered_placeholders(if scoped { 7 } else { 3 }, path_chunk.len());
-        let (query, values) = if let Some(scope) = scope {
-            (
-                format!(
-                    "{SEARCH_SCOPE_CTE}
-                     SELECT EXISTS(SELECT 1 FROM commits AS c
-                     JOIN eligible ON eligible.commit_id = c.commit_id
-                     JOIN commit_paths AS cp ON cp.commit_id = c.commit_id
-                     WHERE c.position > ?5 AND c.position < ?6
-                       AND cp.raw_path IN ({path_placeholders}))"
-                ),
-                scope_values(scope)
-                    .into_iter()
-                    .chain([Value::Integer(from_position), Value::Integer(to_position)])
-                    .chain(path_chunk.iter().cloned().map(Value::Blob))
-                    .collect::<Vec<_>>(),
-            )
-        } else {
-            (
-                format!(
-                    "SELECT EXISTS(SELECT 1 FROM commits AS c
-                     JOIN commit_paths AS cp ON cp.commit_id = c.commit_id
-                     WHERE c.position > ?1 AND c.position < ?2
-                       AND cp.raw_path IN ({path_placeholders}))"
-                ),
-                [Value::Integer(from_position), Value::Integer(to_position)]
-                    .into_iter()
-                    .chain(path_chunk.iter().cloned().map(Value::Blob))
-                    .collect::<Vec<_>>(),
-            )
-        };
-        let touched: i64 = connection
-            .query_row(&query, params_from_iter(values), |row| row.get(0))
-            .map_err(|error| search_error("checking intervening history", error))?;
-        if touched != 0 {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
 /// Descendant commits touching the abandoned paths, in cache order.
 fn follow_ups(
     connection: &Connection,
@@ -189,10 +115,6 @@ fn follow_ups(
     candidates.sort_unstable_by_key(|candidate| candidate.0);
     Ok(candidates
         .into_iter()
-        .map(|(position, oid, message)| StoredCommit {
-            position,
-            oid,
-            message,
-        })
+        .map(|(_, oid, message)| StoredCommit { oid, message })
         .collect())
 }
