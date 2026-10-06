@@ -811,11 +811,11 @@ fn discover_reusing(
     let identity_parents = active_parents.as_ref().unwrap_or(parents);
 
     let incomplete_origins = incomplete_windows(
-        &parents,
-        &commit_times,
-        &cached,
-        &eligible,
-        &excluded,
+        parents,
+        commit_times,
+        cached,
+        eligible,
+        excluded,
         scope,
         window_seconds,
     );
@@ -868,10 +868,10 @@ fn discover_reusing(
     }
 
     let relationships = RelationshipGraph {
-        children: &children,
-        commit_times: &commit_times,
-        eligible: &eligible,
-        parents: &parents,
+        children,
+        commit_times,
+        eligible,
+        parents,
         window_seconds,
     };
     let mut relationship_windows = HashMap::<String, BTreeSet<String>>::new();
@@ -909,7 +909,7 @@ fn discover_reusing(
     let selected_paths = origins.selected_paths;
     let mut candidate_paths = BTreeSet::new();
     for seed in candidate_seeds {
-        for commit in session.timeline_history(&seed, &identity_cached)? {
+        for commit in session.timeline_history(&seed, identity_cached)? {
             for path in commit.paths {
                 if tracked_paths.contains(&path)
                     && !selected_paths.contains(&path)
@@ -925,13 +925,13 @@ fn discover_reusing(
     let mut results = Vec::new();
 
     for path in candidate_paths {
-        let history = session.timeline_history(&path, &identity_cached)?;
+        let history = session.timeline_history(&path, identity_cached)?;
         let incarnation_changes = incarnation_changes(
             &history,
             &path,
             active_revision,
             identity_parents,
-            &identity_cached,
+            identity_cached,
         );
         if incarnation_changes.is_empty() {
             continue;
@@ -1053,7 +1053,7 @@ fn discover_reusing(
                         })
                         .and_then(|change| change.new_path.clone())
                         .unwrap_or_else(|| path.clone()),
-                    parent_distance: ancestor_distances(later_oid, &parents)[origin_oid],
+                    parent_distance: ancestor_distances(later_oid, parents)[origin_oid],
                     elapsed_seconds: commit_times[later_oid] - commit_times[origin_oid],
                 }
             })
