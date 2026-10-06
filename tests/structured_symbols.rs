@@ -176,6 +176,114 @@ fn regression_degradation_notices_are_unique() {
     );
 }
 
+fn commit_c(repo: &TestRepo, source: &str, subject: &str) -> String {
+    fs::create_dir_all(repo.dir.path().join("src")).unwrap();
+    fs::write(repo.dir.path().join("src/util.c"), source).unwrap();
+    git(repo.dir.path(), ["add", "."]);
+    git(repo.dir.path(), ["commit", "-m", subject]);
+    repo.head()
+}
+
+fn query_c(repo: &TestRepo, command: &str, selector: &str, revision: &str) -> serde_json::Value {
+    let args: Vec<&str> = if command == "regression" {
+        vec![
+            command,
+            "failure",
+            "--path",
+            "src/util.c",
+            "--symbol",
+            selector,
+            "--bad",
+            revision,
+            "--json",
+        ]
+    } else {
+        vec![
+            command,
+            "src/util.c",
+            "--symbol",
+            selector,
+            "--at",
+            revision,
+            "--json",
+        ]
+    };
+    let output = repo.run(args);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+#[test]
+fn c_commands_return_structured_history_and_exclude_neighbors() {
+    let repo = TestRepo::new();
+    let initial = commit_c(
+        &repo,
+        "int compute(int a) {\n    return a + 1;\n}\n\nint neighbor(void) {\n    return 0;\n}\n",
+        "Create compute",
+    );
+    let changed = commit_c(
+        &repo,
+        "int compute(int a) {\n    return a + 2;\n}\n\nint neighbor(void) {\n    return 0;\n}\n",
+        "Change compute",
+    );
+    let neighbor = commit_c(
+        &repo,
+        "int compute(int a) {\n    return a + 2;\n}\n\nint neighbor(void) {\n    return 1;\n}\n",
+        "Change neighbor",
+    );
+    repo.index();
+    let why = query_c(&repo, "why", "compute", &neighbor);
+    let selected = &why["symbol_selection"];
+    assert_eq!(selected["input_selector"], "compute", "{why}");
+    assert_eq!(selected["qualified_name"], "compute");
+    assert_eq!(selected["kind"], "function");
+    assert_eq!(selected["start_line"], 1);
+    assert_eq!(selected["end_line"], 3);
+    assert_eq!(selected["identifier_line"], 1);
+    assert_eq!(selected["language"], "c");
+    assert_eq!(selected["mode"], "structured");
+    assert_eq!(why["symbol_summary"]["introduction"]["commit_oid"], initial);
+    let rendered = why["target_related_modifications"].to_string();
+    assert!(rendered.contains(&changed), "{why}");
+    assert!(!rendered.contains(&neighbor), "{why}");
+    let regression = query_c(&repo, "regression", "compute", &neighbor);
+    let rendered = regression.to_string();
+    assert!(rendered.contains(&changed), "{regression}");
+    assert!(!rendered.contains(&neighbor), "{regression}");
+}
+
+#[test]
+fn c_prototypes_are_not_targets_and_conditional_collisions_stay_ambiguous() {
+    let repo = TestRepo::new();
+    let prototype = commit_c(&repo, "int compute(int a);\n", "Prototype only");
+    commit_c(
+        &repo,
+        "#ifdef FAST\nint compute(int a) {\n    return a;\n}\n#else\nint compute(int a) {\n    return -a;\n}\n#endif\n",
+        "Conditional collision",
+    );
+    repo.index();
+    let output = repo.run(["why", "src/util.c", "--symbol", "compute"]);
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("ambiguous"), "{stderr}");
+    assert!(!stderr.contains("lightweight symbol selection"), "{stderr}");
+    let output = repo.run([
+        "why",
+        "src/util.c",
+        "--symbol",
+        "compute",
+        "--at",
+        &prototype,
+    ]);
+    assert_eq!(output.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("no supported declaration"), "{stderr}");
+    assert!(!stderr.contains("lightweight symbol selection"), "{stderr}");
+}
 #[test]
 fn lightweight_results_disclose_mode_in_text_and_json_without_stripping_owners() {
     let repo = TestRepo::new();

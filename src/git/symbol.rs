@@ -1,6 +1,7 @@
 //! Source-only symbol location, shared by why and regression targets.
 //! Git objects and target anchors stay outside this module.
 
+mod c;
 mod go;
 mod python;
 mod rust;
@@ -125,6 +126,11 @@ pub(super) fn declarations(content: &[u8], path: &str) -> (Vec<Location>, Option
         match rust::extract(content) {
             Ok(locations) => return (locations, None),
             Err(reason) => ("rust", reason),
+        }
+    } else if path.ends_with(".c") {
+        match c::extract(content) {
+            Ok(locations) => return (locations, None),
+            Err(reason) => ("c", reason),
         }
     } else if path.ends_with(".go") {
         match go::extract(content) {
