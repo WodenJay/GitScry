@@ -47,17 +47,17 @@ fn source_survives(
     target_path: &str,
     selected: &symbol::Location,
     trace: &mut SymbolTrace,
-) -> bool {
-    let (declarations, notice) = symbol::declarations(source, source_path);
+) -> Result<bool, AppError> {
+    let (declarations, notice) = symbol::declarations(source, source_path)?;
     record_notice(trace, notice);
     let identity = symbol::identity(before, old);
-    declarations.iter().any(|candidate| {
+    Ok(declarations.iter().any(|candidate| {
         candidate.selection.qualified_name == old.selection.qualified_name
             || ((source_path != target_path
                 || candidate.identifier_line != selected.identifier_line
                 || candidate.identifier_column != selected.identifier_column)
                 && symbol::identity(source, candidate) == identity)
-    })
+    }))
 }
 
 fn unknown(reason: &str) -> AppError {
@@ -191,7 +191,7 @@ fn walk(
                             continue;
                         };
                         let after = target::read_blob_at(git, oid, old_path)?;
-                        let (declarations, notice) = symbol::declarations(&source, old_path);
+                        let (declarations, notice) = symbol::declarations(&source, old_path)?;
                         record_notice(trace, notice);
                         for old_span in declarations {
                             let old_name = &old_span.selection.qualified_name;
@@ -201,7 +201,8 @@ fn walk(
                             if symbol::identity(&source, &old_span)
                                 == symbol::identity(&current, &current_span)
                                 && after.as_ref().is_none_or(|after| {
-                                    symbol::declaration_lines(after, old_name, old_path).is_empty()
+                                    symbol::declaration_lines(after, old_name, old_path)
+                                        .is_ok_and(|lines| lines.is_empty())
                                 })
                             {
                                 return Err(unknown(
@@ -245,7 +246,7 @@ fn walk(
                 } else {
                     None
                 };
-                let (declarations, notice) = symbol::declarations(&source, source_path);
+                let (declarations, notice) = symbol::declarations(&source, source_path)?;
                 record_notice(trace, notice);
                 for old_span in declarations {
                     let old_name = &old_span.selection.qualified_name;
@@ -260,6 +261,7 @@ fn walk(
                                 &current_span,
                                 trace,
                             )
+                            .unwrap_or(false)
                         });
                     if changed
                         && !survives

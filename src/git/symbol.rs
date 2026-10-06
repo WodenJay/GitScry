@@ -4,8 +4,8 @@
 mod c;
 mod cpp;
 mod go;
-mod python;
 mod javascript;
+mod python;
 mod rust;
 
 /// The actual source interpretation and declaration selected at a pinned revision.
@@ -45,7 +45,7 @@ pub(super) fn locate_unique(content: &[u8], name: &str, path: &str) -> Result<Lo
     if name.trim().is_empty() {
         return Err(AppError::input("symbol must not be empty"));
     }
-    let (locations, notice) = declarations(content, path);
+    let (locations, notice) = declarations(content, path)?;
     let separator = qualification_separator(path);
     if let Some(notice) = &notice
         && name.contains(separator)
@@ -61,7 +61,7 @@ pub(super) fn locate_unique(content: &[u8], name: &str, path: &str) -> Result<Lo
             qualified == name
                 || qualified
                     .strip_suffix(name)
-                    .is_some_and(|prefix|  prefix.ends_with(separator) || prefix.ends_with('.'))
+                    .is_some_and(|prefix| prefix.ends_with(separator) || prefix.ends_with('.'))
         })
         .collect::<Vec<_>>();
     match matches.len() {
@@ -103,15 +103,19 @@ pub(super) fn locate_unique(content: &[u8], name: &str, path: &str) -> Result<Lo
     }
 }
 
-pub(super) fn declaration_lines(content: &[u8], name: &str, path: &str) -> Vec<usize> {
-    declarations(content, path)
+pub(super) fn declaration_lines(
+    content: &[u8],
+    name: &str,
+    path: &str,
+) -> Result<Vec<usize>, AppError> {
+    Ok(declarations(content, path)?
         .0
         .into_iter()
         .filter_map(|location| {
             (location.selection.qualified_name == name || location.name == name)
                 .then_some(location.identifier_line)
         })
-        .collect()
+        .collect())
 }
 
 /// Qualification uses each language's native separator; no cross-language mixing.
@@ -124,15 +128,24 @@ fn qualification_separator(path: &str) -> &'static str {
 }
 
 /// Enumerate only the interpretation selected by the extension, never try grammars.
-pub(super) fn declarations(content: &[u8], path: &str) -> (Vec<Location>, Option<String>) {
+/// A header (`.h`) is interpreted as both C and C++: agreeing interpretations
+/// are shared, a disagreement is an explicit structural error, and a fully
+/// failed interpretation falls back to the shared lightweight contract.
+pub(super) fn declarations(
+    content: &[u8],
+    path: &str,
+) -> Result<(Vec<Location>, Option<String>), AppError> {
+    if path.ends_with(".h") {
+        return header_declarations(content, path);
+    }
     let (language, reason) = if path.ends_with(".rs") {
         match rust::extract(content) {
-            Ok(locations) => return (locations, None),
+            Ok(locations) => return Ok((locations, None)),
             Err(reason) => ("rust", reason),
         }
     } else if path.ends_with(".c") {
         match c::extract(content) {
-            Ok(locations) => return (locations, None),
+            Ok(locations) => return Ok((locations, None)),
             Err(reason) => ("c", reason),
         }
     } else if path.ends_with(".cpp")
@@ -142,17 +155,17 @@ pub(super) fn declarations(content: &[u8], path: &str) -> (Vec<Location>, Option
         || path.ends_with(".hh")
     {
         match cpp::extract(content) {
-            Ok(locations) => return (locations, None),
+            Ok(locations) => return Ok((locations, None)),
             Err(reason) => ("cpp", reason),
         }
     } else if path.ends_with(".go") {
         match go::extract(content) {
-            Ok(locations) => return (locations, None),
+            Ok(locations) => return Ok((locations, None)),
             Err(reason) => ("go", reason),
         }
     } else if path.ends_with(".py") {
         match python::extract(content) {
-            Ok(locations) => return (locations, None),
+            Ok(locations) => return Ok((locations, None)),
             Err(reason) => ("python", reason),
         }
     } else if let Some(language) = javascript_language(path) {
@@ -164,16 +177,108 @@ pub(super) fn declarations(content: &[u8], path: &str) -> (Vec<Location>, Option
             javascript::Language::JavaScript
         };
         match javascript::extract(content, grammar) {
-            Ok(locations) => return (locations, None),
+            Ok(locations) => return Ok((locations, None)),
             Err(reason) => (language, reason),
         }
     } else {
         ("unsupported", "unsupported language".to_owned())
     };
-    let notice = format!(
+    Ok((
+        lightweight_locations(content, path, language, &reason),
+        Some(notice_for(path, &reason)),
+    ))
+}
+
+/// Header dual interpretation: the same source is parsed under both the C and
+/// the C++ grammar. Any error or missing node fails that interpretation.
+/// Exactly one successful interpretation is used; two successful
+/// interpretations must agree, or the header is a structural conflict.
+fn header_declarations(
+    content: &[u8],
+    path: &str,
+) -> Result<(Vec<Location>, Option<String>), AppError> {
+    let c_interpretation = c::extract(content);
+    let cpp_interpretation = cpp::extract(content);
+    match (c_interpretation, cpp_interpretation) {
+        (Ok(c_locations), Ok(cpp_locations)) => {
+            if interpretations_agree(&c_locations, &cpp_locations) {
+                let mut locations = c_locations;
+                for location in &mut locations {
+                    location.selection.language = "c/c++".to_owned();
+                }
+                return Ok((locations, None));
+            }
+            Err(AppError::input(format!(
+                "header interpretation conflict in {path}: C and C++ interpretations disagree; \
+                 C: {}; C++: {}",
+                describe_interpretation(&c_locations),
+                describe_interpretation(&cpp_locations)
+            )))
+        }
+        (Ok(locations), Err(_)) => Ok((locations, None)),
+        (Err(_), Ok(mut locations)) => {
+            for location in &mut locations {
+                location.selection.language = "cpp".to_owned();
+            }
+            Ok((locations, None))
+        }
+        (Err(c_reason), Err(cpp_reason)) => {
+            let reason = format!("{c_reason} and {cpp_reason}");
+            Ok((
+                lightweight_locations(content, path, "c/c++", &reason),
+                Some(notice_for(path, &reason)),
+            ))
+        }
+    }
+}
+
+/// Agreement compares matching candidates by qualified scope/name, normalized
+/// kind, and source range; agreement deduplicates via set equality, so empty
+/// sets also agree.
+fn interpretations_agree(c_locations: &[Location], cpp_locations: &[Location]) -> bool {
+    c_locations.len() == cpp_locations.len()
+        && c_locations.iter().all(|location| {
+            cpp_locations.iter().any(|other| {
+                location.selection.qualified_name == other.selection.qualified_name
+                    && location.selection.kind == other.selection.kind
+                    && location.span == other.span
+            })
+        })
+}
+
+fn describe_interpretation(locations: &[Location]) -> String {
+    if locations.is_empty() {
+        return "no candidates".to_owned();
+    }
+    locations
+        .iter()
+        .map(|location| {
+            format!(
+                "{} ({}, lines {}-{})",
+                location.selection.qualified_name,
+                location.selection.kind,
+                location.span.start,
+                location.span.end
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn notice_for(path: &str, reason: &str) -> String {
+    format!(
         "lightweight symbol selection in {path}: {reason}; structural ownership and ranges are unverified"
-    );
-    let locations = declaration_positions(content, path.ends_with(".rs"))
+    )
+}
+
+fn lightweight_locations(
+    content: &[u8],
+    path: &str,
+    language: &str,
+    reason: &str,
+) -> Vec<Location> {
+    let notice = notice_for(path, reason);
+    declaration_positions(content, path.ends_with(".rs"))
         .into_iter()
         .map(|(name, line, column)| {
             let end = symbol_span_end(content, line, path.ends_with(".rs"));
@@ -196,8 +301,7 @@ pub(super) fn declarations(content: &[u8], path: &str) -> (Vec<Location>, Option
                 notice: Some(notice.clone()),
             }
         })
-        .collect();
-    (locations, Some(notice))
+        .collect()
 }
 
 /// The bundled JavaScript/TypeScript interpretation for a path, if any.
@@ -743,7 +847,7 @@ mod tests {
             super::identity(renamed, &renamed_span),
         );
         assert_eq!(
-            super::declaration_lines(source, "parse", "source.rs"),
+            super::declaration_lines(source, "parse", "source.rs").unwrap(),
             vec![1]
         );
     }
@@ -827,7 +931,7 @@ mod tests {
             .is_err()
         );
         assert_eq!(
-            declaration_lines(b"fn target() {} fn target() {}\n", "target", "source.rs"),
+            declaration_lines(b"fn target() {} fn target() {}\n", "target", "source.rs").unwrap(),
             vec![1, 1]
         );
     }
@@ -867,6 +971,70 @@ mod tests {
                 .unwrap();
             assert_eq!(error.to_string(), message);
         }
+    }
+
+    #[test]
+    fn headers_use_dual_interpretation_when_both_grammars_succeed() {
+        // A plain C header parses cleanly under both grammars and agrees.
+        let source = b"struct config {\n    int size;\n};\n\nint limit;\n\nint compute(int a) {\n    return a;\n}\n";
+        let selected = locate(source, "compute", "source.h").unwrap();
+        assert_eq!(selected.selection.mode, "structured");
+        assert_eq!(selected.selection.language, "c/c++");
+        assert_eq!(selected.selection.kind, "function");
+        assert_eq!((selected.span.start, selected.span.end), (7, 9));
+        let limit = locate(source, "limit", "source.h").unwrap();
+        assert_eq!(limit.selection.kind, "variable");
+        assert_eq!(limit.selection.language, "c/c++");
+    }
+
+    #[test]
+    fn headers_use_the_single_successful_interpretation() {
+        // `class` is only valid C++; the C interpretation fails outright.
+        let source = b"class widget {\npublic:\n    int size() const { return 0; }\n};\n";
+        let selected = locate(source, "widget::size", "source.h").unwrap();
+        assert_eq!(selected.selection.mode, "structured");
+        assert_eq!(selected.selection.language, "cpp");
+        assert_eq!(selected.selection.kind, "method");
+        assert_eq!((selected.span.start, selected.span.end), (3, 3));
+    }
+
+    #[test]
+    fn header_agreement_on_empty_sets_stays_not_found() {
+        // A prototype-only header agrees on an empty candidate set.
+        let source = b"int compute(int a);\n";
+        let error = locate(source, "compute", "source.h")
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("no supported declaration"), "{error}");
+    }
+
+    #[test]
+    fn headers_who_fail_both_grammars_degrade_with_notice() {
+        // A syntax error in the first statement fails both grammars, so the
+        // shared lightweight contract takes over; `struct` declarations are
+        // still scannable there.
+        let source = b"int = broken;\n\nstruct config {\n    int size;\n};\n";
+        let selected = locate(source, "config", "source.h").unwrap();
+        assert_eq!(selected.selection.mode, "lightweight");
+        assert_eq!(selected.selection.language, "c/c++");
+        let notice = selected.notice.unwrap();
+        assert!(notice.contains("lightweight symbol selection"), "{notice}");
+        assert!(notice.contains("C parse failed"), "{notice}");
+        assert!(locate(source, "net::config", "source.h").is_err());
+    }
+
+    #[test]
+    fn header_lightweight_selection_is_unique_or_ambiguous() {
+        let unique = b"struct = broken;\n\nstruct next {\n    int mark;\n};\n";
+        let selected = locate(unique, "next", "source.h").unwrap();
+        assert_eq!(selected.selection.mode, "lightweight");
+        let ambiguous = b"struct target {\n    int size;\n\nstruct target {\n    int mark;\n};\n";
+        let error = locate(ambiguous, "target", "source.h")
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("ambiguous"), "{error}");
     }
 }
 
