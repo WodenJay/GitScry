@@ -1,6 +1,7 @@
 //! Source-only symbol location, shared by why and regression targets.
 //! Git objects and target anchors stay outside this module.
 
+mod go;
 mod python;
 mod rust;
 
@@ -111,14 +112,20 @@ pub(super) fn declaration_lines(content: &[u8], name: &str, path: &str) -> Vec<u
 
 /// Qualification uses each language's native separator; no cross-language mixing.
 fn qualification_separator(path: &str) -> &'static str {
-    if path.ends_with(".py") { "." } else { "::" }
+    if path.ends_with(".go") || path.ends_with(".py") { "." } else { "::" }
 }
+
 /// Enumerate only the interpretation selected by the extension, never try grammars.
 pub(super) fn declarations(content: &[u8], path: &str) -> (Vec<Location>, Option<String>) {
     let (language, reason) = if path.ends_with(".rs") {
         match rust::extract(content) {
             Ok(locations) => return (locations, None),
             Err(reason) => ("rust", reason),
+        }
+    } else if path.ends_with(".go") {
+        match go::extract(content) {
+            Ok(locations) => return (locations, None),
+            Err(reason) => ("go", reason),
         }
     } else if path.ends_with(".py") {
         match python::extract(content) {
