@@ -87,6 +87,9 @@ fn format_why_report(report: &Report) -> String {
         return "Why summary unavailable.".to_owned();
     };
     let mut lines = Vec::new();
+    if let Some(selection) = &report.symbol_selection {
+        lines.push(format_symbol_selection(selection));
+    }
     if let Some(scope) = &report.scope {
         lines.push(scope_summary(scope));
     }
@@ -196,6 +199,20 @@ fn format_why_report(report: &Report) -> String {
     lines.join("\n")
 }
 
+fn format_symbol_selection(selection: &crate::git::SymbolSelection) -> String {
+    format!(
+        "Symbol: {} -> {} ({}, lines {}-{}, identifier line {}, {}, {})",
+        escape::subject(&selection.input_selector),
+        escape::subject(&selection.qualified_name),
+        selection.kind,
+        selection.start_line,
+        selection.end_line,
+        selection.identifier_line,
+        selection.language,
+        selection.mode,
+    )
+}
+
 fn format_symbol_summary(summary: &SymbolSummary) -> Vec<String> {
     let mut lines = vec!["Symbol summary:".to_owned()];
     lines.push(format!("target: {}", escape::subject(&summary.target)));
@@ -298,6 +315,9 @@ pub(crate) fn format_report(report: &Report) -> String {
         }
         lines
     };
+    if let Some(selection) = &report.symbol_selection {
+        lines.insert(0, format_symbol_selection(selection));
+    }
     for source in report.relation_sources.iter().rev() {
         lines.insert(
             0,

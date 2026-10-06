@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::{app::AppError, cache::QuerySession, git::RegressionTarget};
 
@@ -94,10 +94,12 @@ fn run(
         .rposition(|commit| eligible_revisions.contains(&commit.oid));
     history.truncate(last_candidate.map_or(0, |index| index + 1));
     let missing_objects = session.has_missing_objects(&history)?;
-    let mut symbol_range = target
-        .symbol_line
-        .zip(target.symbol_end)
-        .map(|(start, end)| (start as i64, end as i64));
+    let symbol_trace = target.symbol_trace.as_ref();
+    let symbol_changes = symbol_trace
+        .into_iter()
+        .flat_map(|trace| &trace.modifications)
+        .map(|change| (change.oid.as_str(), change))
+        .collect::<HashMap<_, _>>();
     let mut priorities = HunkPriorities::new();
 
     let rename_boundary = history
@@ -108,8 +110,7 @@ fn run(
     for commit in history {
         let eligible = eligible_revisions.contains(&commit.oid);
         let hunks = session.history_hunks(&commit.oid)?;
-        // Material and excerpts see the same symbol range before tracing to the parent.
-        let mut overlaps_symbol = false;
+        let symbol_change = symbol_changes.get(commit.oid.as_str());
         let mut symptom_hunk = false;
         for hunk in hunks
             .iter()
@@ -117,11 +118,10 @@ fn run(
         {
             let symptom_match =
                 count_term_hits(intent.terms(), &String::from_utf8_lossy(&hunk.text)) > 0;
-            let symbol_match = symbol_range.is_some_and(|(start, end)| {
-                retrieval::hunk_overlaps_symbol(hunk, start.min(end), start.max(end))
+            let symbol_match = symbol_change.is_some_and(|change| {
+                retrieval::hunk_overlaps_symbol(hunk, change.start as i64, change.end as i64)
             });
             symptom_hunk |= symptom_match;
-            overlaps_symbol |= symbol_match;
             if eligible && with_patch && (symptom_match || symbol_match) {
                 let priority = match (symptom_match, symbol_match) {
                     (true, true) => 0,
@@ -135,19 +135,15 @@ fn run(
                     .insert(hunk.id(), priority);
             }
         }
-        let symbol_match = if let Some((start, end)) = &mut symbol_range {
-            let start_changed = retrieval::trace_line(&commit, &hunks, start).is_some();
-            let end_changed = retrieval::trace_line(&commit, &hunks, end).is_some();
-            overlaps_symbol || start_changed || end_changed
-        } else {
-            false
-        };
+        let symbol_match = symbol_trace.is_some_and(|trace| {
+            symbol_change.is_some() || trace.introduction.as_ref().ok() == Some(&commit.oid)
+        });
         if !eligible {
             continue;
         }
         let temporal = temporal_score(history_index, history_len);
         history_index += 1;
-        if symbol_range.is_some() && !symbol_match {
+        if target.symbol.is_some() && !symbol_match {
             continue;
         }
         let message = format!("{}\n{}", commit.subject, commit.body);
@@ -238,6 +234,14 @@ fn run(
 
     let mut report = super::super::report(ReportKind::Regression, materials, matched_count, limit);
     report.warnings.extend(target.warnings.iter().cloned());
+    report.symbol_selection = target.symbol_selection.clone().map(Box::new);
+    if let Some(trace) = symbol_trace
+        && let Err(reason) = &trace.introduction
+    {
+        report
+            .warnings
+            .push(format!("Symbol history is incomplete: {reason}"));
+    }
     if identity.is_none() {
         report.warnings.push(
             "warning: file incarnation could not be established at the pinned bad revision; regression suspects are withheld because cached history is incomplete."

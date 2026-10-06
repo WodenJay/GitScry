@@ -1,20 +1,63 @@
 //! Conservative incarnation tracking over native range history and local source objects.
 use std::collections::HashSet;
 
-use super::{
-    SymbolChange, SymbolTrace, WhyAnchor, WhyTarget, history, process::Git, symbol, target,
-};
+use super::{SymbolChange, SymbolTrace, history, process::Git, symbol, target};
 use crate::app::AppError;
 
-pub(super) fn trace(git: &Git, target: &WhyTarget) -> SymbolTrace {
+pub(super) fn trace(
+    git: &Git,
+    revision: &str,
+    path: &[u8],
+    selection: &symbol::Selection,
+) -> SymbolTrace {
     let mut trace = SymbolTrace {
         revisions: Vec::new(),
         modifications: Vec::new(),
         paths: Vec::new(),
         introduction: Err("Git returned no history for the symbol range".to_owned()),
+        warnings: Vec::new(),
     };
-    trace.introduction = walk(git, target, &mut trace).map_err(introduction_error);
+    trace.introduction =
+        walk(git, revision, path, selection, &mut trace).map_err(introduction_error);
     trace
+}
+
+fn record_notice(trace: &mut SymbolTrace, notice: Option<String>) {
+    if let Some(notice) = notice
+        && !trace.warnings.contains(&notice)
+    {
+        trace.warnings.push(notice);
+    }
+}
+
+// Qualification disambiguates this source version, not a suffix-search identity.
+fn locate_exact(content: &[u8], name: &str, path: &str) -> Result<symbol::Location, AppError> {
+    let location = symbol::locate_unique(content, name, path)?;
+    if location.selection.qualified_name != name {
+        return Err(unknown("historical declaration ownership changed"));
+    }
+    Ok(location)
+}
+
+fn source_survives(
+    source: &[u8],
+    before: &[u8],
+    old: &symbol::Location,
+    source_path: &str,
+    target_path: &str,
+    selected: &symbol::Location,
+    trace: &mut SymbolTrace,
+) -> bool {
+    let (declarations, notice) = symbol::declarations(source, source_path);
+    record_notice(trace, notice);
+    let identity = symbol::identity(before, old);
+    declarations.iter().any(|candidate| {
+        candidate.selection.qualified_name == old.selection.qualified_name
+            || ((source_path != target_path
+                || candidate.identifier_line != selected.identifier_line
+                || candidate.identifier_column != selected.identifier_column)
+                && symbol::identity(source, candidate) == identity)
+    })
 }
 
 fn unknown(reason: &str) -> AppError {
@@ -45,18 +88,21 @@ fn introduction_error(error: AppError) -> String {
     }
 }
 
-fn walk(git: &Git, target: &WhyTarget, trace: &mut SymbolTrace) -> Result<String, AppError> {
-    let WhyAnchor::Symbol { name, number } = &target.anchor else {
-        return Err(unknown("target is not a symbol"));
-    };
-    let mut name = name.clone();
-    let mut path = std::str::from_utf8(&target.path)
+fn walk(
+    git: &Git,
+    revision: &str,
+    path: &[u8],
+    selection: &symbol::Selection,
+    trace: &mut SymbolTrace,
+) -> Result<String, AppError> {
+    let mut name = selection.qualified_name.clone();
+    let mut path = std::str::from_utf8(path)
         .map_err(|_| unknown("symbol path is not UTF-8"))?
         .to_owned();
-    let mut revision = target.revision.clone();
+    let mut revision = revision.to_owned();
     let mut span = symbol::Span {
-        start: *number,
-        end: target.symbol_end.unwrap_or(*number),
+        start: selection.start_line,
+        end: selection.end_line,
     };
     let shallow = history::read_shallow_boundaries(git)?;
     let mut merge_uncertain = false;
@@ -79,12 +125,14 @@ fn walk(git: &Git, target: &WhyTarget, trace: &mut SymbolTrace) -> Result<String
             let (commit, changes, _) = history::read_trace_fix(git, oid)?;
             let current = target::read_blob_at(git, oid, &path)?
                 .ok_or_else(|| unknown("historical symbol source is unavailable"))?;
-            let current_span = symbol::locate_unique(&current, &name, &path)?;
+            let current_span = locate_exact(&current, &name, &path)?;
+            record_notice(trace, current_span.notice.clone());
             if commit.parents.len() > 1 {
                 let first_parent = &commit.parents[0];
                 if let Some(source) = target::read_blob_at(git, first_parent, &path)?
-                    && let Ok(previous_span) = symbol::locate_unique(&source, &name, &path)
+                    && let Ok(previous_span) = locate_exact(&source, &name, &path)
                 {
+                    record_notice(trace, previous_span.notice.clone());
                     if symbol::identity(&current, &current_span)
                         != symbol::identity(&source, &previous_span)
                     {
@@ -122,8 +170,9 @@ fn walk(git: &Git, target: &WhyTarget, trace: &mut SymbolTrace) -> Result<String
             };
             let previous = target::read_blob_at(git, parent, &path)?;
             if let Some(source) = &previous
-                && let Ok(previous_span) = symbol::locate_unique(source, &name, &path)
+                && let Ok(previous_span) = locate_exact(source, &name, &path)
             {
+                record_notice(trace, previous_span.notice.clone());
                 if native.contains(oid)
                     && symbol::identity(&current, &current_span)
                         != symbol::identity(source, &previous_span)
@@ -142,15 +191,17 @@ fn walk(git: &Git, target: &WhyTarget, trace: &mut SymbolTrace) -> Result<String
                             continue;
                         };
                         let after = target::read_blob_at(git, oid, old_path)?;
-                        for old_span in symbol::declarations(&source, old_path) {
-                            let old_name = &old_span.name;
+                        let (declarations, notice) = symbol::declarations(&source, old_path);
+                        record_notice(trace, notice);
+                        for old_span in declarations {
+                            let old_name = &old_span.selection.qualified_name;
                             if old_path == path && old_name == &name {
                                 continue;
                             }
                             if symbol::identity(&source, &old_span)
                                 == symbol::identity(&current, &current_span)
                                 && after.as_ref().is_none_or(|after| {
-                                    symbol::declaration_lines(after, old_name).is_empty()
+                                    symbol::declaration_lines(after, old_name, old_path).is_empty()
                                 })
                             {
                                 return Err(unknown(
@@ -194,11 +245,21 @@ fn walk(git: &Git, target: &WhyTarget, trace: &mut SymbolTrace) -> Result<String
                 } else {
                     None
                 };
-                for old_span in symbol::declarations(&source, source_path) {
-                    let old_name = &old_span.name;
+                let (declarations, notice) = symbol::declarations(&source, source_path);
+                record_notice(trace, notice);
+                for old_span in declarations {
+                    let old_name = &old_span.selection.qualified_name;
                     let survives = !changed
                         || after.as_ref().is_some_and(|after| {
-                            !symbol::declaration_lines(after, old_name).is_empty()
+                            source_survives(
+                                after,
+                                &source,
+                                &old_span,
+                                source_path,
+                                &path,
+                                &current_span,
+                                trace,
+                            )
                         });
                     if changed
                         && !survives

@@ -250,6 +250,7 @@ fn run_with_scope(
         target: None,
         scope: None,
         symbol_summary: None,
+        symbol_selection: None,
     })
 }
 

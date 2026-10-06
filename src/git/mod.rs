@@ -37,11 +37,13 @@ pub(crate) fn normalize_git_path(path: &[u8]) -> Vec<u8> {
 pub(crate) use target::TimelineTarget;
 pub(crate) use target::{DeletedLine, RegressionTarget, TraceFixTarget, WhyAnchor, WhyTarget};
 
+pub(crate) use symbol::Selection as SymbolSelection;
 pub(crate) struct SymbolTrace {
     pub(crate) revisions: Vec<String>,
     pub(crate) modifications: Vec<SymbolChange>,
     pub(crate) paths: Vec<Vec<u8>>,
     pub(crate) introduction: Result<String, String>,
+    pub(crate) warnings: Vec<String>,
 }
 
 pub(crate) struct SymbolChange {
@@ -117,14 +119,31 @@ impl Repository {
         anchor: WhyAnchor,
     ) -> Result<WhyTarget, AppError> {
         let mut target = target::pin(&self.git, Some(revision), path, anchor)?;
-        if matches!(&target.anchor, WhyAnchor::Symbol { .. }) {
-            target.symbol_trace = Some(self.trace_why_symbol(&target));
+        if let Some(selection) = &target.symbol_selection {
+            target.symbol_trace = Some(self.prepare_symbol_trace(
+                &target.revision,
+                &target.path,
+                selection,
+                &mut target.warnings,
+            ));
         }
         Ok(target)
     }
 
-    pub(crate) fn trace_why_symbol(&self, target: &WhyTarget) -> SymbolTrace {
-        symbol_history::trace(&self.git, target)
+    fn prepare_symbol_trace(
+        &self,
+        revision: &str,
+        path: &[u8],
+        selection: &SymbolSelection,
+        warnings: &mut Vec<String>,
+    ) -> SymbolTrace {
+        let trace = symbol_history::trace(&self.git, revision, path, selection);
+        for warning in &trace.warnings {
+            if !warnings.contains(warning) {
+                warnings.push(warning.clone());
+            }
+        }
+        trace
     }
 
     pub(crate) fn pin_timeline_target(
@@ -163,7 +182,17 @@ impl Repository {
         path: &str,
         symbol: Option<&str>,
     ) -> Result<RegressionTarget, AppError> {
-        target::pin_regression(&self.git, bad_revision, good_revision, path, symbol)
+        let mut target =
+            target::pin_regression(&self.git, bad_revision, good_revision, path, symbol)?;
+        if let Some(selection) = &target.symbol_selection {
+            target.symbol_trace = Some(self.prepare_symbol_trace(
+                &target.bad_revision,
+                &target.path,
+                selection,
+                &mut target.warnings,
+            ));
+        }
+        Ok(target)
     }
 
     pub(crate) fn pin_trace_fix(

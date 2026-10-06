@@ -15,6 +15,7 @@ pub(crate) struct WhyTarget {
     pub(crate) path: Vec<u8>,
     pub(crate) anchor: WhyAnchor,
     pub(crate) symbol_end: Option<usize>,
+    pub(crate) symbol_selection: Option<symbol::Selection>,
     pub(crate) blame: Option<Blame>,
     pub(crate) warnings: Vec<String>,
     pub(crate) anchor_valid: bool,
@@ -51,6 +52,7 @@ pub(in crate::git) fn pin(
             path: path.as_bytes().to_vec(),
             anchor,
             symbol_end: None,
+            symbol_selection: None,
             blame: None,
             anchor_valid: false,
             symbol_trace: None,
@@ -70,7 +72,12 @@ pub(in crate::git) fn pin(
                 "error: reading target path at {requested_revision}: {error}"
             ))
         })?;
-    let (anchor, number, symbol_end) = resolve_anchor(&anchor, &content, &path)?;
+    let (anchor, number, location) = resolve_anchor(&anchor, &content, &path)?;
+    let symbol_end = location.as_ref().map(|location| location.span.end);
+    let symbol_selection = location.as_ref().map(|location| location.selection.clone());
+    if let Some(notice) = location.and_then(|location| location.notice) {
+        warnings.push(notice);
+    }
     let ignore_file = blame_ignore_file(git)?;
     let (blame, used_ignore_file) =
         read_blame(git, &revision, &path, number, ignore_file.as_deref())?;
@@ -100,6 +107,7 @@ pub(in crate::git) fn pin(
         path: path.as_bytes().to_vec(),
         anchor,
         symbol_end,
+        symbol_selection,
         blame,
         anchor_valid: true,
         symbol_trace: None,
@@ -111,7 +119,7 @@ fn resolve_anchor(
     anchor: &WhyAnchor,
     content: &[u8],
     path: &str,
-) -> Result<(WhyAnchor, usize, Option<usize>), AppError> {
+) -> Result<(WhyAnchor, usize, Option<symbol::Location>), AppError> {
     match anchor {
         WhyAnchor::Line { number } => {
             let line_count = if content.is_empty() {
@@ -132,14 +140,15 @@ fn resolve_anchor(
             Ok((anchor.clone(), *number, None))
         }
         WhyAnchor::Symbol { name, .. } => {
-            let span = symbol::locate_unique(content, name, path)?.span;
+            let location = symbol::locate_unique(content, name, path)?;
+            let start = location.span.start;
             Ok((
                 WhyAnchor::Symbol {
                     name: name.clone(),
-                    number: span.start,
+                    number: start,
                 },
-                span.start,
-                Some(span.end),
+                start,
+                Some(location),
             ))
         }
     }
