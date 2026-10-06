@@ -112,6 +112,10 @@ pub(crate) enum Request {
         offset: usize,
         last: bool,
     },
+    Propagation {
+        source: String,
+        targets: Vec<String>,
+    },
 }
 
 pub(crate) struct Options {
@@ -131,6 +135,7 @@ pub(crate) enum QueryReport {
     TraceRemoval(super::TraceRemovalReport),
     TraceRemovalFragment(super::TraceRemovalFragmentReport),
     Hotspots(super::HotspotsReport),
+    Propagation(capabilities::propagation::Report),
 }
 
 impl QueryReport {
@@ -145,7 +150,8 @@ impl QueryReport {
             Self::Timeline(_)
             | Self::Hotspots(_)
             | Self::TraceRemoval(_)
-            | Self::TraceRemovalFragment(_) => &[],
+            | Self::TraceRemovalFragment(_)
+            | Self::Propagation(_) => &[],
         }
     }
 
@@ -160,7 +166,8 @@ impl QueryReport {
             Self::Timeline(_)
             | Self::Hotspots(_)
             | Self::TraceRemoval(_)
-            | Self::TraceRemovalFragment(_) => &[],
+            | Self::TraceRemovalFragment(_)
+            | Self::Propagation(_) => &[],
         }
     }
 }
@@ -185,6 +192,9 @@ pub(crate) fn execute(request: Request, options: Options) -> Result<Outcome, App
             paths,
             max_historical_checks,
         } => capabilities::conflicts::execute(paths, max_historical_checks, options.limit),
+        Request::Propagation { source, targets } => {
+            capabilities::propagation::execute(&source, &targets)
+        }
         Request::Followups {
             revision,
             paths,

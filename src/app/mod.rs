@@ -267,6 +267,14 @@ pub(crate) fn execute(
             false,
             Default::default(),
         ),
+        Command::Propagation {
+            source, targets, ..
+        } => (
+            Request::Propagation { source, targets },
+            1,
+            false,
+            Default::default(),
+        ),
         Command::Context {
             staged,
             hybrid,
@@ -472,7 +480,9 @@ pub(crate) fn execute(
             unreachable!("trace-removal has no GitHub link option")
         }
         query::QueryReport::Patterns(_) => unreachable!("patterns has no GitHub link option"),
-        query::QueryReport::Hotspots(_) => unreachable!("hotspots has no GitHub link option"),
+        query::QueryReport::Hotspots(_) | query::QueryReport::Propagation(_) => {
+            unreachable!("propagation has no GitHub link option")
+        }
         query::QueryReport::Analysis(report) => github::fetch(report, explicit_repo.as_deref()),
         query::QueryReport::FragmentSearch(report) => {
             github::fetch_fragments(report, explicit_repo.as_deref())
