@@ -243,6 +243,7 @@ fn run_with_scope(
         relation_sources: Vec::new(),
         matched_count,
         truncated: matched_count > limit,
+        patch_grouping: None,
         warnings: Vec::new(),
         notices: Vec::new(),
         patch_mode: false,

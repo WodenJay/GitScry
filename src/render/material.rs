@@ -299,11 +299,43 @@ pub(crate) fn format_report(report: &Report) -> String {
     let mut lines = if report.materials.is_empty() {
         vec![empty_message(kind).to_owned()]
     } else {
-        let mut lines = vec![header(report, kind)];
-        for material in &report.materials {
-            render_material(&mut lines, material);
+        vec![header(report, kind)]
+    };
+    if let Some(grouping) = &report.patch_grouping {
+        lines.push(format!(
+            "Patch grouping: {} equivalent groups, {} ungrouped candidates and {} empty matching commits skipped; {} of {} eligible cached commits checked; complete: {}.",
+            grouping.group_count,
+            grouping.ungrouped_count,
+            grouping.empty_count,
+            grouping.checked_count,
+            grouping.eligible_count,
+            if grouping.complete { "yes" } else { "no" },
+        ));
+        for indeterminate in &grouping.indeterminate {
+            lines.push(format!(
+                "  indeterminate patch {}: {}",
+                short_oid(&indeterminate.commit_oid),
+                escape::subject(&indeterminate.reason),
+            ));
         }
-        if report.truncated {
+    }
+    for material in &report.materials {
+        render_material(&mut lines, material);
+    }
+    if report.truncated {
+        if kind == GenericReportKind::Examples {
+            if let Some(grouping) = &report.patch_grouping {
+                let result_count = grouping.group_count + grouping.ungrouped_count;
+                lines.push(format!(
+                    "Showing {} of {} patch-group results ({} equivalent groups, {} ungrouped candidates) from {} matching commits; results truncated.",
+                    report.materials.len(),
+                    result_count,
+                    grouping.group_count,
+                    grouping.ungrouped_count,
+                    grouping.candidate_count,
+                ));
+            }
+        } else {
             let noun = match kind {
                 GenericReportKind::CodeSearch => "matching lines",
                 GenericReportKind::Related | GenericReportKind::Tests => "matching paths",
@@ -319,8 +351,7 @@ pub(crate) fn format_report(report: &Report) -> String {
                 report.matched_count,
             ));
         }
-        lines
-    };
+    }
     if let Some(selection) = &report.symbol_selection {
         lines.insert(0, format_symbol_selection(selection));
     }
@@ -571,7 +602,10 @@ fn render_relation(lines: &mut Vec<String>, material: &Material, relation: &Rela
 fn render_detail(lines: &mut Vec<String>, detail: &Option<Detail>) {
     match detail {
         // Steps read as what history did, never as what the caller must do.
-        Some(Detail::Steps(steps)) => {
+        Some(Detail::Steps {
+            steps,
+            patch_equivalence,
+        }) => {
             for step in steps.iter().take(STEPS_PER_RESULT) {
                 lines.push(format!("  step: {}", describe_step(step)));
             }
@@ -581,6 +615,33 @@ fn render_detail(lines: &mut Vec<String>, detail: &Option<Detail>) {
                     "  ... {remaining} more step{}",
                     if remaining == 1 { "" } else { "s" }
                 ));
+            }
+            if let Some(group) = patch_equivalence {
+                lines.push(format!(
+                    "  patch-equivalent group: {} members; representative: {}",
+                    group.member_count,
+                    short_oid(&group.representative_oid),
+                ));
+                lines.push(format!(
+                    "  group completeness within cached scope: {}",
+                    if group.complete {
+                        "complete"
+                    } else {
+                        "incomplete"
+                    },
+                ));
+                for member in &group.members {
+                    let role = if member.oid == group.representative_oid {
+                        "representative"
+                    } else {
+                        "equivalent member"
+                    };
+                    lines.push(format!(
+                        "  {role}: {} {}",
+                        short_oid(&member.oid),
+                        escape::subject(&member.subject),
+                    ));
+                }
             }
         }
         Some(Detail::Failure(failure)) => {

@@ -9,6 +9,7 @@ pub(crate) struct Report {
     pub(crate) code_matches: Vec<CodeMatch>,
     pub(crate) matched_count: usize,
     pub(crate) truncated: bool,
+    pub(crate) patch_grouping: Option<PatchGrouping>,
     pub(crate) patch_mode: bool,
     pub(crate) warnings: Vec<String>,
     pub(crate) notices: Vec<String>,
@@ -101,9 +102,46 @@ pub(crate) struct Material {
 }
 
 /// Capability-specific material beyond the shared citation/basis shape.
+#[derive(serde::Serialize)]
+pub(crate) struct PatchGrouping {
+    pub(crate) candidate_count: usize,
+    /// Empty matching commits are counted but never emitted as patch groups.
+    pub(crate) empty_count: usize,
+    pub(crate) group_count: usize,
+    pub(crate) ungrouped_count: usize,
+    pub(crate) eligible_count: usize,
+    pub(crate) checked_count: usize,
+    /// Complete over the commits eligible in the available cache; scope coverage is separate.
+    pub(crate) complete: bool,
+    pub(crate) indeterminate: Vec<PatchIndeterminate>,
+}
+
+#[derive(serde::Serialize)]
+pub(crate) struct PatchIndeterminate {
+    pub(crate) commit_oid: String,
+    pub(crate) reason: String,
+}
+
+#[derive(serde::Serialize)]
+pub(crate) struct PatchEquivalence {
+    pub(crate) representative_oid: String,
+    pub(crate) member_count: usize,
+    pub(crate) members: Vec<PatchGroupMember>,
+    /// Whether every cached commit eligible in the query scope was classified.
+    pub(crate) complete: bool,
+}
+
+#[derive(serde::Serialize)]
+pub(crate) struct PatchGroupMember {
+    pub(crate) oid: String,
+    pub(crate) subject: String,
+}
 pub(crate) enum Detail {
     /// Moves history demonstrated, offered as precedent rather than instruction.
-    Steps(Vec<Step>),
+    Steps {
+        steps: Vec<Step>,
+        patch_equivalence: Option<PatchEquivalence>,
+    },
     /// The failure provenance history records for an abandoned approach.
     Failure(Failure),
     /// Co-change support for a candidate path.
@@ -209,6 +247,7 @@ pub(crate) fn report(
         relation_sources: Vec::new(),
         matched_count,
         truncated: matched_count > limit,
+        patch_grouping: None,
         warnings: Vec::new(),
         notices: Vec::new(),
         why: None,
@@ -228,6 +267,7 @@ pub(crate) fn empty_report(kind: ReportKind) -> Report {
         relation_sources: Vec::new(),
         matched_count: 0,
         truncated: false,
+        patch_grouping: None,
         warnings: Vec::new(),
         notices: Vec::new(),
         why: None,

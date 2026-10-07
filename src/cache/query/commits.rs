@@ -5,7 +5,9 @@ use std::collections::HashSet;
 
 use super::search_error;
 use crate::app::AppError;
-use crate::cache::scope::{SEARCH_SCOPE_CTE, SearchFilter, scope_values};
+use crate::cache::scope::{
+    SEARCH_SCOPE_CTE, SearchFilter, changed_path_predicate, changed_path_values, scope_values,
+};
 use crate::cache::{QuerySession, decode_message_row};
 
 impl QuerySession {
@@ -149,23 +151,27 @@ fn commits_reachable_from(connection: &Connection, oid: &str) -> Result<Vec<Stri
         .map_err(|error| search_error("reading cached reachable history", error))
 }
 
-/// Commits eligible under the same revision and committer-time bounds as scoped search.
+/// Commits eligible under the same revision, committer-time, and changed-path bounds as scoped search.
 fn commits_scoped(
     connection: &Connection,
     scope: &SearchFilter,
 ) -> Result<Vec<StoredCommit>, AppError> {
+    let path_eligibility = changed_path_predicate(scope, 5);
     let query = format!(
         "{SEARCH_SCOPE_CTE}
          SELECT c.oid, c.message, c.message_length
          FROM commits AS c
          JOIN eligible ON eligible.commit_id = c.commit_id
+         {path_eligibility}
          ORDER BY c.position"
     );
+    let mut values = scope_values(scope).to_vec();
+    values.extend(changed_path_values(scope));
     let mut statement = connection
         .prepare(&query)
         .map_err(|error| search_error("preparing scoped history scan", error))?;
     statement
-        .query_map(params_from_iter(scope_values(scope)), |row| {
+        .query_map(params_from_iter(values), |row| {
             Ok(StoredCommit {
                 oid: row.get(0)?,
                 message: decode_message_row(row, 1, 2)?,
@@ -185,4 +191,74 @@ fn commit_oids(connection: &Connection) -> Result<HashSet<String>, AppError> {
         .map_err(|error| search_error("reading cached object IDs", error))?
         .collect::<Result<HashSet<_>, _>>()
         .map_err(|error| search_error("reading cached object IDs", error))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::commits_scoped;
+    use crate::cache::scope::SearchFilter;
+    use rusqlite::Connection;
+
+    #[test]
+    fn scoped_commit_scan_respects_path_bounds() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE commits (
+                    commit_id INTEGER PRIMARY KEY,
+                    position INTEGER NOT NULL,
+                    oid TEXT NOT NULL,
+                    commit_time INTEGER NOT NULL,
+                    message BLOB NOT NULL,
+                    message_length INTEGER NOT NULL
+                );
+                CREATE TABLE commit_paths (commit_id INTEGER NOT NULL, raw_path BLOB NOT NULL);
+                CREATE TEMP TABLE query_scope_revisions (role TEXT NOT NULL, oid TEXT NOT NULL);
+                INSERT INTO query_scope_revisions VALUES ('reachable', 'binary');",
+            )
+            .unwrap();
+        let (route_message, route_length) = crate::cache::payload::encode(b"route message");
+        let (binary_message, binary_length) = crate::cache::payload::encode(b"binary message");
+        connection
+            .execute(
+                "INSERT INTO commits VALUES (?1, ?2, ?3, 1, ?4, ?5)",
+                rusqlite::params![1, 1, "route", route_message, route_length],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO commits VALUES (?1, ?2, ?3, 1, ?4, ?5)",
+                rusqlite::params![2, 2, "binary", binary_message, binary_length],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO commit_paths VALUES (?1, ?2)",
+                rusqlite::params![1, b"src/route.rs".as_slice()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO commit_paths VALUES (?1, ?2)",
+                rusqlite::params![2, b"src/other.bin".as_slice()],
+            )
+            .unwrap();
+        let scope = SearchFilter {
+            from_oid: None,
+            to_oid: "route".to_owned(),
+            since: None,
+            until: None,
+            paths: vec!["src/route.rs".to_owned()],
+        };
+
+        let commits = commits_scoped(&connection, &scope).unwrap();
+
+        assert_eq!(
+            commits
+                .iter()
+                .map(|commit| commit.oid.as_str())
+                .collect::<Vec<_>>(),
+            ["route"]
+        );
+    }
 }

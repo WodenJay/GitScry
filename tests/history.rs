@@ -1636,3 +1636,318 @@ fn examples_and_failures_share_scope_validation_and_empty_output() {
         assert_eq!(unscoped["scope"]["coverage_complete"], true);
     }
 }
+
+#[test]
+fn examples_groups_equivalent_merge_and_child_before_limit_and_respects_scope() {
+    let repo = TestRepo::new();
+    repo.commit_at(
+        "src/route.rs",
+        b"route = before\n",
+        "Seed initial route",
+        "2020-01-01T00:00:00+0000",
+    );
+    git(repo.dir.path(), ["switch", "-c", "feature"]);
+    let child = repo.commit_at(
+        "src/route.rs",
+        b"route = after\n",
+        "Refine provider compatibility retry",
+        "2020-01-02T00:00:00+0000",
+    );
+    git(repo.dir.path(), ["switch", "main"]);
+    repo.commit_at(
+        "docs/integration.md",
+        b"integration notes\n",
+        "Document integration",
+        "2020-01-03T00:00:00+0000",
+    );
+    git(
+        repo.dir.path(),
+        [
+            "merge",
+            "--no-ff",
+            "feature",
+            "-m",
+            "Merge provider compatibility",
+        ],
+    );
+    let merge = repo.head();
+    repo.index();
+
+    let output = repo.run([
+        "examples",
+        "provider",
+        "compatibility",
+        "retry",
+        "--limit",
+        "1",
+        "--json",
+    ]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["matched_count"], 2);
+    assert_eq!(report["truncated"], false);
+    assert_eq!(report["patch_grouping"]["group_count"], 1);
+    assert_eq!(report["patch_grouping"]["complete"], true);
+    let materials = report["materials"].as_array().unwrap();
+    assert_eq!(materials.len(), 1);
+    assert_eq!(materials[0]["citations"][0]["oid"], child);
+    let group = &materials[0]["detail"]["patch_equivalence"];
+    assert_eq!(group["representative_oid"], child);
+    assert_eq!(group["member_count"], 2);
+    assert_eq!(group["complete"], true);
+    let members = group["members"].as_array().unwrap();
+    assert_eq!(members.len(), 2);
+    assert!(members.iter().any(|member| member["oid"] == child));
+    assert!(members.iter().any(|member| member["oid"] == merge));
+
+    let scoped = repo.run([
+        "examples",
+        "provider",
+        "compatibility",
+        "retry",
+        "--from-rev",
+        child.as_str(),
+        "--json",
+    ]);
+    assert_eq!(scoped.status.code(), Some(0), "{}", stderr(&scoped));
+    let scoped: serde_json::Value = serde_json::from_slice(&scoped.stdout).unwrap();
+    assert_eq!(scoped["matched_count"], 1);
+    assert_eq!(scoped["patch_grouping"]["group_count"], 1);
+    let group = &scoped["materials"][0]["detail"]["patch_equivalence"];
+    assert_eq!(group["member_count"], 1);
+    assert_eq!(group["members"][0]["oid"], merge);
+
+    let text_output = repo.run([
+        "examples",
+        "provider",
+        "compatibility",
+        "retry",
+        "--limit",
+        "1",
+    ]);
+    assert_eq!(
+        text_output.status.code(),
+        Some(0),
+        "{}",
+        stderr(&text_output)
+    );
+    let text = stdout(&text_output);
+    assert!(
+        text.contains("Patch grouping: 1 equivalent groups"),
+        "{text}"
+    );
+    assert!(text.contains("patch-equivalent group: 2 members"), "{text}");
+    assert!(text.contains("equivalent member:"), "{text}");
+    assert!(
+        text.contains("Refine provider compatibility retry"),
+        "{text}"
+    );
+}
+
+#[test]
+fn examples_keep_distinct_complete_patches_and_report_uninspectable_candidates() {
+    let repo = TestRepo::new();
+    repo.commit_at(
+        "src/route.rs",
+        b"value = base\n",
+        "Seed initial value",
+        "2020-01-01T00:00:00+0000",
+    );
+    git(repo.dir.path(), ["switch", "-c", "feature"]);
+    let child = repo.commit_at(
+        "src/route.rs",
+        b"value = feature\n",
+        "Provider compatibility update",
+        "2020-01-02T00:00:00+0000",
+    );
+    git(repo.dir.path(), ["switch", "main"]);
+    let side = repo.commit_at(
+        "src/route.rs",
+        b"value = main\n",
+        "Provider compatibility update",
+        "2020-01-03T00:00:00+0000",
+    );
+    let conflict = git_command(repo.dir.path())
+        .args([
+            "merge",
+            "--no-ff",
+            "feature",
+            "-m",
+            "Provider compatibility merge",
+        ])
+        .output()
+        .expect("run merge");
+    assert!(
+        !conflict.status.success(),
+        "expected a merge conflict: {}",
+        String::from_utf8_lossy(&conflict.stderr)
+    );
+    fs::write(
+        repo.dir.path().join("src/route.rs"),
+        b"value = integrated\n",
+    )
+    .expect("resolve merge");
+    git(repo.dir.path(), ["add", "src/route.rs"]);
+    let merge_output = git_command(repo.dir.path())
+        .args(["commit", "--no-edit"])
+        .env("GIT_AUTHOR_DATE", "2020-01-04T00:00:00+0000")
+        .env("GIT_COMMITTER_DATE", "2020-01-04T00:00:00+0000")
+        .output()
+        .expect("commit merge resolution");
+    assert!(
+        merge_output.status.success(),
+        "merge commit failed: {}",
+        String::from_utf8_lossy(&merge_output.stderr)
+    );
+    let merge = repo.head();
+    let inverse = repo.commit_at(
+        "src/route.rs",
+        b"value = main\n",
+        "Provider compatibility rollback",
+        "2020-01-05T00:00:00+0000",
+    );
+    let empty_output = git_command(repo.dir.path())
+        .args([
+            "commit",
+            "--allow-empty",
+            "-m",
+            "Provider compatibility empty",
+        ])
+        .env("GIT_AUTHOR_DATE", "2020-01-06T00:00:00+0000")
+        .env("GIT_COMMITTER_DATE", "2020-01-06T00:00:00+0000")
+        .output()
+        .expect("create empty commit");
+    assert!(
+        empty_output.status.success(),
+        "empty commit failed: {}",
+        String::from_utf8_lossy(&empty_output.stderr)
+    );
+    let empty = repo.head();
+    let binary = repo.commit_at(
+        "src/route.bin",
+        b"\0binary contents\n",
+        "Provider compatibility binary",
+        "2020-01-07T00:00:00+0000",
+    );
+
+    repo.index();
+
+    let output = repo.run([
+        "examples",
+        "provider",
+        "compatibility",
+        "--limit",
+        "5",
+        "--json",
+    ]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["matched_count"], 6);
+    assert_eq!(report["patch_grouping"]["group_count"], 4);
+    assert_eq!(report["patch_grouping"]["ungrouped_count"], 1);
+    assert_eq!(report["patch_grouping"]["empty_count"], 1);
+    assert_eq!(report["patch_grouping"]["complete"], false);
+    assert!(
+        report["patch_grouping"]["indeterminate"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["commit_oid"] == binary)
+    );
+    let materials = report["materials"].as_array().unwrap();
+    assert_eq!(materials.len(), 5);
+    assert!(
+        !materials
+            .iter()
+            .any(|material| material["citations"][0]["oid"] == empty)
+    );
+    for oid in [&child, &side, &merge, &inverse] {
+        let material = materials
+            .iter()
+            .find(|material| material["citations"][0]["oid"] == *oid)
+            .expect("distinct patch result");
+        let group = &material["detail"]["patch_equivalence"];
+        assert_eq!(group["representative_oid"], *oid);
+        assert_eq!(group["member_count"], 1);
+        assert_eq!(group["complete"], false);
+    }
+    let material = materials
+        .iter()
+        .find(|material| material["citations"][0]["oid"] == binary)
+        .expect("ungrouped result");
+    assert!(material["detail"]["patch_equivalence"].is_null());
+}
+
+#[test]
+fn examples_scans_past_duplicate_candidates_before_applying_limit() {
+    let repo = TestRepo::new();
+    repo.commit_at(
+        "src/route.rs",
+        b"route = before\n",
+        "Seed route",
+        "2020-01-01T00:00:00+0000",
+    );
+    let distinct = repo.commit_at(
+        "src/route.rs",
+        b"route = unique\n",
+        "Provider compatibility retry precedent",
+        "2020-01-02T00:00:00+0000",
+    );
+    repo.commit_at(
+        "src/route.rs",
+        b"route = before\n",
+        "Reset route",
+        "2020-01-03T00:00:00+0000",
+    );
+    repo.commit_at(
+        "src/route.rs",
+        b"route = after\n",
+        "Provider compatibility precedent",
+        "2020-01-04T00:00:00+0000",
+    );
+    for _ in 0..40 {
+        repo.commit_at(
+            "src/route.rs",
+            b"route = before\n",
+            "Reset route",
+            "2020-01-05T00:00:00+0000",
+        );
+        repo.commit_at(
+            "src/route.rs",
+            b"route = after\n",
+            "Provider compatibility precedent",
+            "2020-01-06T00:00:00+0000",
+        );
+    }
+
+    repo.index();
+
+    let output = repo.run([
+        "examples",
+        "provider",
+        "compatibility",
+        "retry",
+        "--limit",
+        "2",
+        "--json",
+    ]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["matched_count"], 42);
+    assert_eq!(report["patch_grouping"]["candidate_count"], 42);
+    assert_eq!(report["patch_grouping"]["group_count"], 2);
+    assert_eq!(report["patch_grouping"]["ungrouped_count"], 0);
+    assert_eq!(report["truncated"], false);
+    let materials = report["materials"].as_array().unwrap();
+    assert_eq!(materials.len(), 2);
+    assert_eq!(materials[0]["citations"][0]["oid"], distinct);
+    assert!(materials.iter().any(|material| {
+        let group = &material["detail"]["patch_equivalence"];
+        group["representative_oid"] == distinct && group["member_count"] == 1
+    }));
+    assert!(
+        materials
+            .iter()
+            .any(|material| { material["detail"]["patch_equivalence"]["member_count"] == 41 })
+    );
+}
