@@ -46,7 +46,7 @@ fn fixture() -> (TestRepo, String, String, String) {
 }
 
 #[test]
-fn reports_contained_and_indeterminate_across_multiple_targets_in_requested_order() {
+fn reports_contained_and_not_found_across_multiple_targets_in_requested_order() {
     let (repo, base, side, merged) = fixture();
 
     let value = json(repo.run([
@@ -61,7 +61,7 @@ fn reports_contained_and_indeterminate_across_multiple_targets_in_requested_orde
         "--json",
     ]));
 
-    assert_eq!(value["schema_version"], 1);
+    assert_eq!(value["schema_version"], 2);
     assert_eq!(value["source"], side);
     assert_eq!(value["coverage_complete"], true);
     assert_eq!(value["warnings"].as_array().unwrap().len(), 0);
@@ -78,14 +78,16 @@ fn reports_contained_and_indeterminate_across_multiple_targets_in_requested_orde
     assert_eq!(targets[0]["contained_by"], serde_json::json!([side]));
     assert_eq!(targets[0]["reason"], Value::Null);
 
-    // Not an ancestor: stays indeterminate with a concrete nonempty reason.
-    assert_eq!(targets[1]["status"], "indeterminate");
+    // Not an ancestor, and no whole-commit patch equivalent exists in a fully
+    // available history: a completed search reports not_found without a reason.
+    assert_eq!(targets[1]["status"], "not_found");
     assert_eq!(targets[1]["contained_by"], serde_json::json!([]));
-    let reason = targets[1]["reason"].as_str().unwrap();
-    assert!(!reason.is_empty(), "reason must explain the gap: {reason}");
+    assert_eq!(targets[1]["equivalents"], serde_json::json!([]));
+    assert_eq!(targets[1]["reason"], Value::Null);
 
-    // source=side is not an ancestor of target=base (wrong direction).
-    assert_eq!(targets[2]["status"], "indeterminate");
+    // source=side is not an ancestor of target=base (wrong direction) and the
+    // whole-commit patches differ (b.txt vs base's a.txt); the search completes.
+    assert_eq!(targets[2]["status"], "not_found");
     assert_eq!(targets[2]["contained_by"], serde_json::json!([]));
 
     let main_oid = git_stdout(repo.dir.path(), ["rev-parse", "main"]);
@@ -98,20 +100,16 @@ fn reports_contained_and_indeterminate_across_multiple_targets_in_requested_orde
 }
 
 #[test]
-fn human_output_names_status_and_reason_without_claiming_not_found() {
+fn human_output_names_status_without_hedging_a_completed_search() {
     let (repo, _, side, _) = fixture();
     let output = repo.run(["propagation", &side, "--to", "main", "--to", "unrelated"]);
     assert!(output.status.success());
     let text = String::from_utf8_lossy(&output.stdout);
     assert!(text.contains("contained"), "{text}");
-    assert!(text.contains("indeterminate"), "{text}");
-    assert!(!text.contains("not_found"), "{text}");
-    // Any indeterminate target must carry a reason; use a behavioral check
-    // rather than locking the exact prose.
-    assert!(
-        text.matches("indeterminate").count() <= text.matches(';').count() + 1,
-        "{text}"
-    );
+    // A completed search over fully available history reports not_found, not a
+    // vague indeterminate hedge.
+    assert!(text.contains("not_found"), "{text}");
+    assert!(!text.contains("indeterminate"), "{text}");
 }
 
 #[test]
@@ -182,7 +180,9 @@ fn refreshes_explicit_targets_while_head_stays_unchanged() {
     let head_before = repo.head();
 
     let value = json(repo.run(["propagation", &_side, "--to", "unrelated", "--json"]));
-    assert_eq!(value["targets"][0]["status"], "indeterminate");
+    // The unrelated branch's history is fully available; its whole-commit patches
+    // differ from side's, so the completed search reports not_found.
+    assert_eq!(value["targets"][0]["status"], "not_found");
     assert_eq!(
         value["targets"][0]["target_oid"],
         git_stdout(repo.dir.path(), ["rev-parse", "unrelated"])
@@ -234,4 +234,485 @@ fn deep_history_branch_resolves_containment_after_refresh() {
     assert_eq!(target["target_oid"], distant_head);
     assert_eq!(target["status"], "contained");
     assert_eq!(repo.head(), head_before);
+}
+
+#[test]
+fn cherry_picked_commit_with_a_new_message_is_an_equivalent() {
+    let repo = TestRepo::new();
+    let base = commit(&repo, "a.txt", "base\n", "base");
+    git(repo.dir.path(), ["checkout", "-b", "source"]);
+    let source = commit(&repo, "b.txt", "feature\n", "add feature");
+
+    // The target replays the same whole-commit patch onto the same base, so the
+    // patch identifier matches even though the commit SHA and message differ.
+    git(repo.dir.path(), ["checkout", "-b", "target", &base]);
+    git(repo.dir.path(), ["cherry-pick", "-x", &source]);
+    let replayed = repo.head();
+    assert_ne!(
+        replayed, source,
+        "the cherry-pick must be a distinct commit"
+    );
+    git(repo.dir.path(), ["checkout", "main"]);
+    repo.index();
+
+    let value = json(repo.run(["propagation", &source, "--to", "target", "--json"]));
+    let target = &value["targets"][0];
+    assert_eq!(target["status"], "equivalent");
+    assert_eq!(target["equivalents"], serde_json::json!([replayed]));
+    assert_eq!(target["contained_by"], serde_json::json!([]));
+    assert_eq!(target["matching_method"], "patch-id --verbatim");
+    assert!(
+        target["patch_identifier"]
+            .as_str()
+            .is_some_and(|id| id.len() == 40)
+    );
+    assert_eq!(value["coverage_complete"], true);
+}
+
+#[test]
+fn rebased_commit_is_an_equivalent() {
+    let repo = TestRepo::new();
+    let base = commit(&repo, "a.txt", "base\n", "base");
+    git(repo.dir.path(), ["checkout", "-b", "feature"]);
+    let source = commit(&repo, "s.txt", "feature\n", "add feature");
+
+    git(repo.dir.path(), ["checkout", "-b", "target", &base]);
+    commit(&repo, "t.txt", "target\n", "target change");
+    // Rebase the feature commit onto the target: the patch content is unchanged.
+    git(repo.dir.path(), ["checkout", "feature"]);
+    git(repo.dir.path(), ["rebase", "target"]);
+    let replayed = repo.head();
+    assert_ne!(replayed, source, "the rebase must rewrite the commit");
+    git(repo.dir.path(), ["checkout", "main"]);
+    repo.index();
+
+    let value = json(repo.run(["propagation", &source, "--to", "feature", "--json"]));
+    let target = &value["targets"][0];
+    assert_eq!(target["status"], "equivalent");
+    assert_eq!(target["equivalents"], serde_json::json!([replayed]));
+}
+
+#[test]
+fn historically_applied_patches_are_reported_in_history_order() {
+    let repo = TestRepo::new();
+    let base = commit(&repo, "a.txt", "base\n", "base");
+    // A distinct source commit carrying the same patch.
+    git(repo.dir.path(), ["checkout", "-b", "source"]);
+    let source = commit(&repo, "b.txt", "feature\n", "add feature");
+
+    // Apply, revert, then re-apply the patch on the target.
+    git(repo.dir.path(), ["checkout", "-b", "target", &base]);
+    let first = commit(&repo, "b.txt", "feature\n", "apply");
+    git(repo.dir.path(), ["rm", "b.txt"]);
+    git(repo.dir.path(), ["commit", "-m", "revert"]);
+    let last = commit(&repo, "b.txt", "feature\n", "reapply");
+    git(repo.dir.path(), ["checkout", "main"]);
+    repo.index();
+
+    let value = json(repo.run(["propagation", &source, "--to", "target", "--json"]));
+    let target = &value["targets"][0];
+    assert_eq!(target["status"], "equivalent");
+    // Both historical applications are reported, in deterministic target-history order.
+    assert_eq!(target["equivalents"], serde_json::json!([first, last]));
+}
+
+#[test]
+fn equivalent_reachable_only_through_a_merge_is_found_once() {
+    let repo = TestRepo::new();
+    let base = commit(&repo, "a.txt", "base\n", "base");
+    git(repo.dir.path(), ["checkout", "-b", "dup", &base]);
+    let duplicate = commit(&repo, "b.txt", "feature\n", "duplicate feature");
+    git(repo.dir.path(), ["checkout", "-b", "source", &base]);
+    let source = commit(&repo, "b.txt", "feature\n", "add feature");
+
+    git(repo.dir.path(), ["checkout", "-b", "target", &base]);
+    commit(&repo, "c.txt", "target\n", "target change");
+    merge_no_ff(&repo, "dup");
+    git(repo.dir.path(), ["checkout", "main"]);
+    repo.index();
+
+    let value = json(repo.run(["propagation", &source, "--to", "target", "--json"]));
+    let target = &value["targets"][0];
+    assert_eq!(target["status"], "equivalent");
+    // The commit is reachable only through the merge's second parent, and appears once.
+    assert_eq!(target["equivalents"], serde_json::json!([duplicate]));
+}
+
+#[test]
+fn whitespace_difference_is_not_equivalent() {
+    let repo = TestRepo::new();
+    let base = commit(&repo, "a.txt", "base\n", "base");
+    git(repo.dir.path(), ["checkout", "-b", "source"]);
+    let source = commit(&repo, "w.txt", "feature\n", "add feature");
+
+    git(repo.dir.path(), ["checkout", "-b", "target", &base]);
+    commit(
+        &repo,
+        "w.txt",
+        "feature \n",
+        "add feature with trailing space",
+    );
+    git(repo.dir.path(), ["checkout", "main"]);
+    repo.index();
+
+    let value = json(repo.run(["propagation", &source, "--to", "target", "--json"]));
+    let target = &value["targets"][0];
+    assert_eq!(target["status"], "not_found");
+    assert_eq!(target["equivalents"], serde_json::json!([]));
+    assert_eq!(value["coverage_complete"], true);
+}
+
+#[test]
+fn partial_backport_is_not_equivalent() {
+    let repo = TestRepo::new();
+    let base = commit(&repo, "a.txt", "base\n", "base");
+    git(repo.dir.path(), ["checkout", "-b", "source"]);
+    fs::write(repo.dir.path().join("x.txt"), "x\n").unwrap();
+    fs::write(repo.dir.path().join("y.txt"), "y\n").unwrap();
+    git(repo.dir.path(), ["add", "x.txt", "y.txt"]);
+    git(repo.dir.path(), ["commit", "-m", "add two files"]);
+    let source = repo.head();
+
+    // The target applies only one of the two files: the whole-commit patch differs.
+    git(repo.dir.path(), ["checkout", "-b", "target", &base]);
+    commit(&repo, "x.txt", "x\n", "add one file");
+    git(repo.dir.path(), ["checkout", "main"]);
+    repo.index();
+
+    let value = json(repo.run(["propagation", &source, "--to", "target", "--json"]));
+    assert_eq!(value["targets"][0]["status"], "not_found");
+}
+
+#[test]
+fn squashed_commits_are_not_equivalents() {
+    let repo = TestRepo::new();
+    let base = commit(&repo, "a.txt", "base\n", "base");
+    git(repo.dir.path(), ["checkout", "-b", "source"]);
+    let first = commit(&repo, "x.txt", "x\n", "add x");
+    let second = commit(&repo, "y.txt", "y\n", "add y");
+
+    // The target squashes both source commits into a single commit.
+    git(repo.dir.path(), ["checkout", "-b", "target", &base]);
+    fs::write(repo.dir.path().join("x.txt"), "x\n").unwrap();
+    fs::write(repo.dir.path().join("y.txt"), "y\n").unwrap();
+    git(repo.dir.path(), ["add", "x.txt", "y.txt"]);
+    git(repo.dir.path(), ["commit", "-m", "add x and y"]);
+    git(repo.dir.path(), ["checkout", "main"]);
+    repo.index();
+
+    for source in [&first, &second] {
+        let value = json(repo.run(["propagation", source, "--to", "target", "--json"]));
+        assert_eq!(
+            value["targets"][0]["status"], "not_found",
+            "a squashed commit must not match either source commit"
+        );
+    }
+}
+
+#[test]
+fn equivalent_is_reported_even_when_other_history_is_incomplete() {
+    let repo = TestRepo::new();
+    let base = commit(&repo, "a.txt", "base\n", "base");
+    git(repo.dir.path(), ["checkout", "-b", "source"]);
+    let source = commit(&repo, "b.txt", "feature\n", "add feature");
+    git(repo.dir.path(), ["checkout", "-b", "target", &base]);
+    let duplicate = commit(&repo, "b.txt", "feature\n", "duplicate feature");
+    git(repo.dir.path(), ["checkout", "main"]);
+    repo.index();
+
+    // Mark the root as a shallow boundary so the target history is incomplete.
+    fs::write(repo.common_dir().join("shallow"), format!("{base}\n")).unwrap();
+
+    let value = json(repo.run(["propagation", &source, "--to", "target", "--json"]));
+    let target = &value["targets"][0];
+    assert_eq!(target["status"], "equivalent");
+    assert_eq!(target["equivalents"], serde_json::json!([duplicate]));
+    assert!(
+        target["reason"]
+            .as_str()
+            .is_some_and(|reason| !reason.is_empty()),
+        "incompleteness is reported alongside the positive match"
+    );
+    assert_eq!(value["coverage_complete"], false);
+}
+
+#[test]
+fn unreadable_candidate_patch_reports_indeterminate_not_not_found() {
+    let repo = TestRepo::new();
+    let base = commit(&repo, "a.txt", "base\n", "base");
+    git(repo.dir.path(), ["checkout", "-b", "source"]);
+    let source = commit(&repo, "s.txt", "source\n", "add source");
+    git(repo.dir.path(), ["checkout", "-b", "target", &base]);
+    let target = commit(&repo, "t.txt", "target\n", "add target");
+    git(repo.dir.path(), ["checkout", "main"]);
+    repo.index();
+
+    // Remove a blob the target candidate needs so its patch cannot be read.
+    let blob = git_stdout(repo.dir.path(), ["rev-parse", &format!("{target}:t.txt")]);
+    let object = repo
+        .dir
+        .path()
+        .join(".git/objects")
+        .join(&blob[..2])
+        .join(&blob[2..]);
+    fs::remove_file(object).expect("remove blob object");
+
+    let value = json(repo.run(["propagation", &source, "--to", "target", "--json"]));
+    let result = &value["targets"][0];
+    assert_eq!(result["status"], "indeterminate");
+    assert!(
+        result["reason"]
+            .as_str()
+            .is_some_and(|reason| !reason.is_empty()),
+        "an unreadable candidate is an inspection gap, not a negative"
+    );
+    assert_eq!(value["coverage_complete"], false);
+}
+
+#[test]
+fn source_commit_without_a_patch_is_indeterminate() {
+    let repo = TestRepo::new();
+    let base = commit(&repo, "a.txt", "base\n", "base");
+    git(repo.dir.path(), ["checkout", "-b", "source"]);
+    git(repo.dir.path(), ["commit", "--allow-empty", "-m", "empty"]);
+    let source = repo.head();
+    git(repo.dir.path(), ["checkout", "-b", "target", &base]);
+    commit(&repo, "c.txt", "target\n", "target change");
+    git(repo.dir.path(), ["checkout", "main"]);
+    repo.index();
+
+    let value = json(repo.run(["propagation", &source, "--to", "target", "--json"]));
+    let target = &value["targets"][0];
+    assert_eq!(target["status"], "indeterminate");
+    assert!(
+        target["reason"]
+            .as_str()
+            .is_some_and(|reason| !reason.is_empty())
+    );
+}
+
+#[test]
+fn ambient_diff_configuration_does_not_change_equivalence() {
+    let repo = TestRepo::new();
+    let base = commit(&repo, "a.txt", "base\n", "base");
+    git(repo.dir.path(), ["checkout", "-b", "source"]);
+    fs::write(repo.dir.path().join("b.txt"), "feature\n").unwrap();
+    fs::write(repo.dir.path().join("c.txt"), "other feature\n").unwrap();
+    git(repo.dir.path(), ["add", "b.txt", "c.txt"]);
+    git(repo.dir.path(), ["commit", "-m", "add feature"]);
+    let source = repo.head();
+    git(repo.dir.path(), ["checkout", "-b", "target", &base]);
+    git(repo.dir.path(), ["cherry-pick", "-x", &source]);
+    let replayed = repo.head();
+    assert_ne!(
+        replayed, source,
+        "the cherry-pick must be a distinct commit"
+    );
+    git(repo.dir.path(), ["checkout", "main"]);
+    repo.index();
+
+    let clean = json(repo.run(["propagation", &source, "--to", "target", "--json"]));
+    assert_eq!(clean["targets"][0]["status"], "equivalent");
+
+    // Hostile ambient diff configuration must not change the identifier or result.
+    fs::write(repo.dir.path().join("order.txt"), "c.txt\nb.txt\n").unwrap();
+    for (key, value) in [
+        ("diff.context", "25"),
+        ("diff.orderFile", "order.txt"),
+        ("diff.renames", "copies"),
+        ("diff.noprefix", "true"),
+        ("diff.mnemonicPrefix", "true"),
+        ("diff.algorithm", "histogram"),
+        ("diff.indentHeuristic", "true"),
+    ] {
+        git(repo.dir.path(), ["config", key, value]);
+    }
+
+    let polluted = json(repo.run(["propagation", &source, "--to", "target", "--json"]));
+    assert_eq!(polluted["targets"][0]["status"], "equivalent");
+    assert_eq!(
+        polluted["targets"][0]["equivalents"],
+        serde_json::json!([replayed])
+    );
+    assert_eq!(
+        polluted["targets"][0]["patch_identifier"],
+        clean["targets"][0]["patch_identifier"]
+    );
+}
+
+#[test]
+fn shallow_target_without_an_equivalent_is_indeterminate() {
+    let repo = TestRepo::new();
+    let base = commit(&repo, "a.txt", "base\n", "base");
+    git(repo.dir.path(), ["checkout", "-b", "source"]);
+    let source = commit(&repo, "b.txt", "feature\n", "add feature");
+    git(repo.dir.path(), ["checkout", "-b", "target", &base]);
+    commit(&repo, "c.txt", "target\n", "target change");
+    git(repo.dir.path(), ["checkout", "main"]);
+    repo.index();
+
+    // A shallow boundary makes the history incomplete with no positive match, so
+    // the target must not claim a completed not_found.
+    fs::write(repo.common_dir().join("shallow"), format!("{base}\n")).unwrap();
+
+    let value = json(repo.run(["propagation", &source, "--to", "target", "--json"]));
+    let target = &value["targets"][0];
+    assert_eq!(target["status"], "indeterminate");
+    assert!(
+        target["reason"]
+            .as_str()
+            .is_some_and(|reason| !reason.is_empty()),
+        "incomplete history needs a concrete reason"
+    );
+    assert_eq!(value["coverage_complete"], false);
+}
+
+#[test]
+fn human_output_includes_equivalent_commit_and_patch_details() {
+    let repo = TestRepo::new();
+    let base = commit(&repo, "a.txt", "base\n", "base");
+    git(repo.dir.path(), ["checkout", "-b", "source"]);
+    let source = commit(&repo, "b.txt", "feature\n", "source patch");
+    git(repo.dir.path(), ["checkout", "-b", "target", &base]);
+    git(repo.dir.path(), ["cherry-pick", "-x", &source]);
+    let equivalent = repo.head();
+    git(repo.dir.path(), ["checkout", "main"]);
+    repo.index();
+
+    let output = repo.run(["propagation", &source, "--to", "target"]);
+    assert!(output.status.success());
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        text.contains(&format!("equivalent commit: {equivalent}")),
+        "{text}"
+    );
+    assert!(text.contains("patch identifier: "), "{text}");
+    assert!(
+        text.contains("matching method: patch-id --verbatim"),
+        "{text}"
+    );
+}
+
+#[test]
+fn shallow_source_boundary_uses_its_real_parent_for_patch_identity() {
+    let repo = TestRepo::new();
+    commit(&repo, "a.txt", "base\n", "base");
+    git(repo.dir.path(), ["checkout", "-b", "source"]);
+    let source = commit(&repo, "b.txt", "feature\n", "source patch");
+
+    // An unrelated root commit has the same tree as source but a different whole
+    // patch: it adds both files, while source adds only b.txt to its parent.
+    git(repo.dir.path(), ["checkout", "--orphan", "target"]);
+    git(repo.dir.path(), ["add", "-A"]);
+    git(repo.dir.path(), ["commit", "-m", "same tree as source"]);
+    let target = repo.head();
+    repo.index();
+
+    fs::write(repo.common_dir().join("shallow"), format!("{source}\n")).unwrap();
+    let value = json(repo.run(["propagation", &source, "--to", "target", "--json"]));
+    assert_eq!(value["targets"][0]["target_oid"], target);
+    assert_eq!(value["targets"][0]["status"], "not_found");
+}
+
+#[test]
+fn shallow_target_boundary_does_not_turn_candidate_patch_into_root_diff() {
+    let repo = TestRepo::new();
+    commit(&repo, "a.txt", "base\n", "base");
+
+    // The source is a root commit adding the full tree. The target candidate has
+    // the same resulting tree but only adds b.txt to its parent.
+    git(repo.dir.path(), ["checkout", "--orphan", "source"]);
+    fs::write(repo.dir.path().join("b.txt"), "feature\n").unwrap();
+    git(repo.dir.path(), ["add", "-A"]);
+    git(repo.dir.path(), ["commit", "-m", "root source patch"]);
+    let source = repo.head();
+
+    git(repo.dir.path(), ["checkout", "main"]);
+    git(repo.dir.path(), ["checkout", "-b", "target"]);
+    let candidate = commit(&repo, "b.txt", "feature\n", "candidate patch");
+    repo.index();
+
+    fs::write(repo.common_dir().join("shallow"), format!("{candidate}\n")).unwrap();
+    let value = json(repo.run(["propagation", &source, "--to", "target", "--json"]));
+    assert_eq!(value["targets"][0]["status"], "indeterminate");
+    assert_eq!(value["targets"][0]["equivalents"], serde_json::json!([]));
+    assert_eq!(value["coverage_complete"], false);
+}
+
+#[test]
+fn missing_commit_during_target_walk_returns_indeterminate() {
+    let repo = TestRepo::new();
+    let base = commit(&repo, "a.txt", "base\n", "base");
+    git(repo.dir.path(), ["checkout", "-b", "source"]);
+    let source = commit(&repo, "b.txt", "source\n", "source patch");
+    git(repo.dir.path(), ["checkout", "-b", "target", &base]);
+    commit(&repo, "c.txt", "target\n", "target patch");
+    repo.index();
+
+    // The published cache remains readable, but Git can no longer traverse the
+    // target's complete history from its local object store.
+    let object = repo
+        .common_dir()
+        .join("objects")
+        .join(&base[..2])
+        .join(&base[2..]);
+    fs::remove_file(object).unwrap();
+
+    let output = repo.run(["propagation", &source, "--to", "target", "--json"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["targets"][0]["status"], "indeterminate");
+    assert!(
+        value["targets"][0]["reason"]
+            .as_str()
+            .is_some_and(|reason| !reason.is_empty())
+    );
+    assert_eq!(value["coverage_complete"], false);
+}
+
+#[test]
+fn known_equivalent_survives_unreadable_history_elsewhere_in_target() {
+    let repo = TestRepo::new();
+    let base = commit(&repo, "a.txt", "base\n", "base");
+    git(repo.dir.path(), ["checkout", "-b", "source"]);
+    let source = commit(&repo, "b.txt", "feature\n", "source patch");
+    git(repo.dir.path(), ["checkout", "-b", "equivalent", &base]);
+    let equivalent = commit(&repo, "b.txt", "feature\n", "equivalent patch");
+    git(repo.dir.path(), ["checkout", "-b", "target", &base]);
+    let missing = commit(&repo, "c.txt", "other\n", "other history");
+    git(
+        repo.dir.path(),
+        ["merge", "--no-ff", "equivalent", "-m", "merge equivalent"],
+    );
+    repo.index();
+
+    // The target merge has a known equivalent on one parent and an unreadable
+    // unrelated commit on the other; keep the established positive match.
+    let object = repo
+        .common_dir()
+        .join("objects")
+        .join(&missing[..2])
+        .join(&missing[2..]);
+    fs::remove_file(object).unwrap();
+
+    let output = repo.run(["propagation", &source, "--to", "target", "--json"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let target = &value["targets"][0];
+    assert_eq!(target["status"], "equivalent");
+    assert_eq!(target["equivalents"], serde_json::json!([equivalent]));
+    assert!(
+        target["reason"]
+            .as_str()
+            .is_some_and(|reason| !reason.is_empty())
+    );
+    assert_eq!(value["coverage_complete"], false);
 }

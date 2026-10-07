@@ -24,6 +24,9 @@ impl QuerySession {
     pub(crate) fn commits(&self) -> Result<Vec<StoredCommit>, AppError> {
         commits(&self.connection)
     }
+    pub(crate) fn commits_reachable_from(&self, oid: &str) -> Result<Vec<String>, AppError> {
+        commits_reachable_from(&self.connection, oid)
+    }
 
     pub(crate) fn commits_scoped(
         &self,
@@ -119,6 +122,31 @@ fn commits(connection: &Connection) -> Result<Vec<StoredCommit>, AppError> {
         .map_err(|error| search_error("reading history scan", error))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| search_error("reading history scan", error))
+}
+
+/// Cached commits reachable from one revision, oldest first.
+fn commits_reachable_from(connection: &Connection, oid: &str) -> Result<Vec<String>, AppError> {
+    let mut statement = connection
+        .prepare(
+            "WITH RECURSIVE reachable(commit_id) AS (
+                SELECT commit_id FROM commits WHERE oid = ?1
+                UNION
+                SELECT parent.parent_id
+                FROM commit_parents AS parent
+                JOIN reachable AS child ON child.commit_id = parent.commit_id
+                WHERE parent.parent_id IS NOT NULL
+            )
+            SELECT commits.oid
+            FROM commits
+            JOIN reachable ON reachable.commit_id = commits.commit_id
+            ORDER BY commits.position",
+        )
+        .map_err(|error| search_error("preparing cached reachable history", error))?;
+    statement
+        .query_map([oid], |row| row.get(0))
+        .map_err(|error| search_error("reading cached reachable history", error))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| search_error("reading cached reachable history", error))
 }
 
 /// Commits eligible under the same revision and committer-time bounds as scoped search.
