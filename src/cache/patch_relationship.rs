@@ -14,6 +14,7 @@ pub(crate) struct PatchFingerprints {
 pub(crate) struct PatchFingerprint {
     pub(crate) integrity: String,
     pub(crate) fingerprint: Option<Vec<u8>>,
+    pub(crate) objects: String,
 }
 
 impl PatchFingerprints {
@@ -29,17 +30,17 @@ impl PatchFingerprints {
         lock.lock().map_err(cache_error)?;
         let connection =
             Connection::open(directory.join("patch-relationships.sqlite")).map_err(cache_error)?;
-        connection.execute_batch("CREATE TABLE IF NOT EXISTS fingerprints (oid TEXT PRIMARY KEY, integrity TEXT NOT NULL, fingerprint BLOB)").map_err(cache_error)?;
         let stored: i64 = connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .map_err(cache_error)?;
         if stored != version {
             connection
                 .execute_batch(&format!(
-                    "BEGIN; DELETE FROM fingerprints; PRAGMA user_version={version}; COMMIT;"
+                    "BEGIN; DROP TABLE IF EXISTS fingerprints; PRAGMA user_version={version}; COMMIT;"
                 ))
                 .map_err(cache_error)?;
         }
+        connection.execute_batch("CREATE TABLE IF NOT EXISTS fingerprints (oid TEXT PRIMARY KEY, integrity TEXT NOT NULL, fingerprint BLOB, objects TEXT NOT NULL)").map_err(cache_error)?;
         Ok(Self {
             connection,
             _lock: lock,
@@ -49,12 +50,13 @@ impl PatchFingerprints {
     pub(crate) fn get(&self, oid: &str) -> Result<Option<PatchFingerprint>, AppError> {
         self.connection
             .query_row(
-                "SELECT integrity, fingerprint FROM fingerprints WHERE oid=?1",
+                "SELECT integrity, fingerprint, objects FROM fingerprints WHERE oid=?1",
                 [oid],
                 |row| {
                     Ok(PatchFingerprint {
                         integrity: row.get(0)?,
                         fingerprint: row.get(1)?,
+                        objects: row.get(2)?,
                     })
                 },
             )
@@ -67,8 +69,9 @@ impl PatchFingerprints {
         oid: &str,
         integrity: &str,
         fingerprint: Option<&[u8]>,
+        objects: &[String],
     ) -> Result<(), AppError> {
-        self.connection.execute("INSERT OR REPLACE INTO fingerprints (oid, integrity, fingerprint) VALUES (?1, ?2, ?3)", params![oid, integrity, fingerprint]).map_err(cache_error)?;
+        self.connection.execute("INSERT OR REPLACE INTO fingerprints (oid, integrity, fingerprint, objects) VALUES (?1, ?2, ?3, ?4)", params![oid, integrity, fingerprint, objects.join("\n")]).map_err(cache_error)?;
         Ok(())
     }
 }

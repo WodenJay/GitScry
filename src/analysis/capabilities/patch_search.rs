@@ -10,6 +10,7 @@ use crate::{
 };
 use serde::Serialize;
 
+use std::collections::{HashMap, HashSet};
 #[derive(Serialize)]
 pub(crate) struct Report {
     pub(crate) schema_version: u8,
@@ -146,12 +147,37 @@ pub(crate) fn execute(
     let mut indeterminate = Vec::new();
     let mut checked = 0;
     if let Some(query_hash) = &query_hash {
+        // Cached normalization is reusable only while its source objects remain
+        // locally available. Batch existence checks without re-reading every patch.
+        let mut stored = HashMap::new();
+        let mut objects = HashSet::new();
+        for candidate in candidates.iter().take(cutoff.unwrap_or(usize::MAX)) {
+            if let Some(record) = fingerprints.get(&candidate.oid)? {
+                objects.extend(record.objects.lines().map(str::to_owned));
+                stored.insert(candidate.oid.clone(), record);
+            }
+        }
+        let missing: HashSet<_> = repository
+            .missing_objects(&objects.into_iter().collect::<Vec<_>>())?
+            .into_iter()
+            .collect();
         for candidate in &candidates {
             if cutoff.is_some_and(|limit| checked >= limit) {
                 break;
             }
             checked += 1;
-            let stored = fingerprints.get(&candidate.oid)?;
+            let stored = stored.remove(&candidate.oid);
+            if stored
+                .as_ref()
+                .is_some_and(|record| record.objects.lines().any(|oid| missing.contains(oid)))
+            {
+                fingerprints.put(&candidate.oid, "indeterminate", None, &[])?;
+                indeterminate.push(Indeterminate {
+                    commit_id: candidate.oid.clone(),
+                    reason: "cached patch source objects are unavailable".into(),
+                });
+                continue;
+            }
             let mut inspected = None;
             let hash = if let Some(stored) =
                 stored.filter(|stored| matches!(stored.integrity.as_str(), "complete" | "empty"))
@@ -169,12 +195,13 @@ pub(crate) fn execute(
                                 "complete"
                             },
                             Some(&hash),
+                            &patch.objects,
                         )?;
                         inspected = Some(patch);
                         Some(hash)
                     }
                     Err(reason) => {
-                        fingerprints.put(&candidate.oid, "indeterminate", None)?;
+                        fingerprints.put(&candidate.oid, "indeterminate", None, &[])?;
                         indeterminate.push(Indeterminate {
                             commit_id: candidate.oid.clone(),
                             reason,
@@ -206,7 +233,7 @@ pub(crate) fn execute(
                 }
                 Ok(_) => {}
                 Err(reason) => {
-                    fingerprints.put(&candidate.oid, "indeterminate", None)?;
+                    fingerprints.put(&candidate.oid, "indeterminate", None, &[])?;
                     indeterminate.push(Indeterminate {
                         commit_id: candidate.oid.clone(),
                         reason,

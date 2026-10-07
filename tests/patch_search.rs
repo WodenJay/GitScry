@@ -313,6 +313,40 @@ fn missing_candidate_blobs_are_reverified_and_repaired_after_warm_queries() {
 }
 
 #[test]
+fn warm_nonmatching_fingerprints_disclose_missing_material() {
+    let repo = TestRepo::new();
+    let base = commit(&repo, "file", b"old\n", "Base");
+    let query = commit(&repo, "file", b"new\n", "Query");
+    repo.index();
+    git(repo.dir.path(), ["checkout", "-b", "different", &base]);
+    let different = commit(&repo, "file", b"different\n", "Nonmatch");
+    let blob = repo.head_oid("HEAD:file");
+    let original = search(&repo, &query, &[]);
+    assert_eq!(original["matched_count"], 0);
+    assert_eq!(original["scope"]["coverage_complete"], true);
+    git(repo.dir.path(), ["checkout", "main"]);
+    let path = repo
+        .common_dir()
+        .join("objects")
+        .join(&blob[..2])
+        .join(&blob[2..]);
+    let saved = fs::read(&path).unwrap();
+    fs::remove_file(&path).unwrap();
+    let value = search(&repo, &query, &[]);
+    assert_eq!(value["matched_count"], 0);
+    assert_eq!(value["scope"]["coverage_complete"], false);
+    assert!(
+        value["scope"]["indeterminate"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|gap| gap["commit_id"] == different)
+    );
+    fs::write(path, saved).unwrap();
+    assert_eq!(search(&repo, &query, &[]), original);
+}
+
+#[test]
 fn full_patch_beyond_display_limits_is_compared_and_shallow_scope_is_disclosed() {
     let repo = TestRepo::new();
     let base = commit(&repo, "file", b"old\n", "Base");

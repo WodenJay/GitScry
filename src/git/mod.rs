@@ -64,6 +64,16 @@ impl Repository {
         history::read_complete_patch(&self.git, oid)
     }
 
+    pub(crate) fn patch_tree_objects(
+        &self,
+        oid: &str,
+        parent: Option<&str>,
+    ) -> Result<Vec<String>, AppError> {
+        let mut args = vec!["rev-parse".to_owned(), format!("{oid}^{{tree}}")];
+        args.extend(parent.map(|parent| format!("{parent}^{{tree}}")));
+        Ok(self.git.text(args)?.lines().map(str::to_owned).collect())
+    }
+
     /// Only locally available branch refs; never contacts a remote.
     pub(crate) fn patch_branch_tips(&self) -> Result<Vec<(String, String)>, AppError> {
         let refs = self.git.text([

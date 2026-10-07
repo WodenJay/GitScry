@@ -3,7 +3,7 @@ use crate::git::{Change, Hunk, Repository};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-pub(crate) const NORMALIZATION_VERSION: i64 = 1;
+pub(crate) const NORMALIZATION_VERSION: i64 = 2;
 
 #[derive(Serialize, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct FilePatch {
@@ -21,6 +21,7 @@ pub(crate) struct CompletePatch {
     pub(crate) parent: Option<String>,
     pub(crate) paths: Vec<Vec<u8>>,
     pub(crate) hunks: Vec<Hunk>,
+    pub(crate) objects: Vec<String>,
 }
 
 impl CompletePatch {
@@ -66,8 +67,34 @@ pub(crate) fn inspect(repository: &Repository, oid: &str) -> Result<CompletePatc
         return Err("patch contains an unaccounted file operation".into());
     }
     let parent = commit.parents.first().cloned();
+    let mut objects = vec![oid.to_owned()];
+    objects.extend(parent.iter().cloned());
+    objects.extend(
+        repository
+            .patch_tree_objects(oid, parent.as_deref())
+            .map_err(|error| error.to_string())?,
+    );
+    for change in &changes {
+        objects.extend(
+            change
+                .old_blob
+                .iter()
+                .chain(change.new_blob.iter())
+                .cloned(),
+        );
+    }
+    objects.sort();
+    objects.dedup();
+    if !repository
+        .missing_objects(&objects)
+        .map_err(|error| error.to_string())?
+        .is_empty()
+    {
+        return Err("complete patch source objects are unavailable".into());
+    }
     Ok(CompletePatch {
         normalized: files,
+        objects,
         comparison_basis: if parent.is_some() {
             "first_parent"
         } else {
