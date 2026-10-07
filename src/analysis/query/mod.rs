@@ -17,9 +17,27 @@ pub(in crate::analysis) use context::Context;
 
 pub(crate) use scope::SearchScopeOptions;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PatchRelationSelection {
+    Equivalent,
+    Inverse,
+    Both,
+}
+
+impl PatchRelationSelection {
+    pub(crate) fn includes_equivalent(self) -> bool {
+        matches!(self, Self::Equivalent | Self::Both)
+    }
+
+    pub(crate) fn includes_inverse(self) -> bool {
+        matches!(self, Self::Inverse | Self::Both)
+    }
+}
+
 pub(crate) enum Request {
     PatchSearch {
         revision: String,
+        relation: PatchRelationSelection,
         max_patch_checks: Option<usize>,
     },
     FragmentSearch {
@@ -213,8 +231,9 @@ pub(crate) fn execute(request: Request, options: Options) -> Result<Outcome, App
     match request {
         Request::PatchSearch {
             revision,
+            relation,
             max_patch_checks,
-        } => capabilities::patch_search::execute(revision, max_patch_checks, options),
+        } => capabilities::patch_search::execute(revision, max_patch_checks, relation, options),
         Request::FragmentSearch {
             input,
             path,

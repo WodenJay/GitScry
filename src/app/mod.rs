@@ -9,7 +9,7 @@ use crate::{
     analysis::{
         CodeDirection,
         capabilities::usage::{self, GroupBy},
-        query::{self, Options, Request, SearchScopeOptions},
+        query::{self, Options, PatchRelationSelection, Request, SearchScopeOptions},
     },
     cli::{CodeChange, Command, HistoricalScopeArgs, StatsGroup},
     git::WhyAnchor,
@@ -199,6 +199,7 @@ pub(crate) fn execute(
             patch_of,
             max_patch_checks,
             code,
+            relation,
             code_regex,
             code_file,
             hybrid,
@@ -220,10 +221,17 @@ pub(crate) fn execute(
                 require_single_path(&paths, "code modes")?;
                 paths.first().cloned()
             };
+            let relation = match relation.as_deref() {
+                Some("equivalent") => PatchRelationSelection::Equivalent,
+                Some("inverse") => PatchRelationSelection::Inverse,
+                None => PatchRelationSelection::Both,
+                Some(_) => unreachable!("clap validates patch relation values"),
+            };
             let request = match (query, code, code_regex, code_file, patch_of) {
                 (None, None, None, None, Some(revision)) => Request::PatchSearch {
                     revision,
                     max_patch_checks,
+                    relation,
                 },
                 (Some(words), None, None, None, None) => Request::Search { words, hybrid },
                 (None, Some(query), None, None, None) => Request::CodeSearch {
