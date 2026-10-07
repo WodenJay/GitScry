@@ -6,7 +6,7 @@ use crate::analysis::{
 };
 use crate::{
     app::AppError,
-    cache::{self, QuerySession, SearchFilter},
+    cache::{self, QuerySession},
     git,
 };
 use serde::Serialize;
@@ -945,7 +945,6 @@ pub(crate) fn execute(
                     &session,
                     &file.path,
                     &shared_reachable,
-                    &shared_scope,
                     &reverts,
                     RELATED_HISTORY_LIMIT,
                 )?
@@ -1022,7 +1021,6 @@ fn related_history(
     session: &QuerySession,
     path: &[u8],
     reachable: &HashSet<String>,
-    scope: &SearchFilter,
     reverts: &retrieval::RevertIndex,
     limit: usize,
 ) -> Result<(Vec<RelatedLead>, usize, bool), AppError> {
@@ -1042,14 +1040,7 @@ fn related_history(
     let mut paired_reverts = HashSet::new();
     let mut linked_reverts = HashMap::new();
     for commit in &history {
-        if let Some(revert) = retrieval::link_change(
-            session,
-            reverts,
-            Some(scope),
-            &commit.oid,
-            &commit.paths,
-            commit.position,
-        )? {
+        if let Some(revert) = retrieval::link_change(reverts, &commit.oid) {
             if history_oids.contains(&revert.oid) {
                 paired_reverts.insert(revert.oid.clone());
             }
@@ -1115,11 +1106,7 @@ fn related_history(
             "merge-base ancestry is shared by the pinned ours and theirs endpoints",
         ];
         if linked_revert.is_some() {
-            selection_basis.push(if reverts.of(&commit.oid).is_some() {
-                "revert trailer names this change"
-            } else {
-                "revert covers all changed paths without an intervening path touch"
-            });
+            selection_basis.push("a recorded revert names this change");
         } else if is_revert {
             selection_basis.push("commit subject identifies a revert or rollback");
         }

@@ -1170,7 +1170,7 @@ Cron sessions are noisy in search results, so we filter them here.",
 }
 
 #[test]
-fn failures_links_a_revert_whose_named_commit_is_absent() {
+fn failures_do_not_link_a_revert_whose_named_commit_is_absent() {
     let repo = TestRepo::new();
     let abandoned = repo.commit_at(
         "src/db/index.rs",
@@ -1196,25 +1196,26 @@ fn failures_links_a_revert_whose_named_commit_is_absent() {
     let output = repo.run(["failures", "exclude", "cron", "sessions"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     let text = stdout(&output);
-    let entry = block(&text, &abandoned[..12]);
-
-    // The undone paths confirm the link without the trailer, but no message states why.
-    assert!(entry.contains(&revert[..12]), "{entry}");
-    assert!(entry.contains("reason: Reason unknown"), "{entry}");
-    // The revert itself resolves to nothing, so it is not reported on its own.
+    // The declaration names an unknown commit, so it binds to nothing; the reverted
+    // paths alone must never attribute the revert to the abandoned change.
+    assert!(
+        !text.contains(&abandoned[..12]),
+        "an explicit revert naming an unknown commit was linked by shared paths:\n{text}"
+    );
     assert!(
         !text.contains(&format!(
             "
 - {} ",
             &revert[..12]
         )),
-        "an unresolved revert was reported as its own failed approach:
-{text}"
+        "an unresolved revert was reported as its own failed approach:\n{text}"
     );
 }
 
 #[test]
-fn failures_preserve_path_fallback_coverage_and_intervening_rejection() {
+fn failures_subject_only_revert_never_links_without_a_declaration() {
+    // Shared paths plus a revert-like subject identify nothing; only an explicit
+    // declaration names a target, so the abandoned change is reported without one.
     let valid = TestRepo::new();
     let abandoned = valid.commit_files_at(
         &[
@@ -1224,7 +1225,7 @@ fn failures_preserve_path_fallback_coverage_and_intervening_rejection() {
         "Exclude cron sessions from the FTS index",
         "2020-01-01T00:00:00+0000",
     );
-    let revert = valid.commit_files_at(
+    valid.commit_files_at(
         &[
             ("src/db/index.rs", b"cron sessions restored\n"),
             ("src/db/query.rs", b"cron sessions query restored\n"),
@@ -1233,12 +1234,16 @@ fn failures_preserve_path_fallback_coverage_and_intervening_rejection() {
         "2020-02-01T00:00:00+0000",
     );
     valid.index();
+    // Shared paths alone never attribute the revert; neither the abandoned change nor
+    // the subject-only revert is reported as failed-approach material.
     let output = valid.run(["failures", "exclude", "cron", "sessions"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     let text = stdout(&output);
-    let entry = block(&text, &abandoned[..12]);
-    assert!(entry.contains(&revert[..12]), "{entry}");
-
+    assert!(
+        !text.contains(&abandoned[..12]),
+        "a subject-only revert was linked through shared paths:\n{text}"
+    );
+    // An intervening path touch is irrelevant now: there is no link to reject.
     let rejected = TestRepo::new();
     let abandoned = rejected.commit_files_at(
         &[
@@ -1265,9 +1270,136 @@ fn failures_preserve_path_fallback_coverage_and_intervening_rejection() {
     rejected.index();
     let output = rejected.run(["failures", "exclude", "cron", "sessions"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
-    assert!(!stdout(&output).contains(&abandoned[..12]));
+    let text = stdout(&output);
+    assert!(
+        !text.contains(&abandoned[..12]),
+        "the subject-only revert candidate swallowed the abandoned change:\n{text}"
+    );
 }
 
+#[test]
+fn failures_do_not_link_explicit_revert_of_another_commit_through_shared_paths() {
+    // A changes only Cargo.lock; B changes the same file; a later revert explicitly
+    // names B. The shared file must not attribute the revert to A — including when an
+    // unrelated A update intervenes with no touch between A and the revert.
+    let repo = TestRepo::new();
+    let _first_a = repo.commit_files_at(
+        &[("Cargo.lock", b"package a\n")],
+        "Bump dependency for the parser",
+        "2020-01-01T00:00:00+0000",
+    );
+    let b = repo.commit_files_at(
+        &[("Cargo.lock", b"package a\npackage b\n")],
+        "Pin the regression suite lockfile",
+        "2020-02-01T00:00:00+0000",
+    );
+    // Intervening unrelated A update; the revert of B follows with no intervening
+    // touch of A's original change, so the old path fallback would have bound here.
+    let a = repo.commit_files_at(
+        &[("Cargo.lock", b"package a\npackage b\npackage a2\n")],
+        "Bump the unrelated lockfile entry",
+        "2020-02-15T00:00:00+0000",
+    );
+    let revert = repo.commit_files_at(
+        &[("Cargo.lock", b"package a\n")],
+        &format!(
+            "Restore the lockfile\n\nThis reverts commit {}.\n",
+            &b[..40]
+        ),
+        "2020-03-01T00:00:00+0000",
+    );
+    repo.index();
+    let output = repo.run(["failures", "pin", "lockfile"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    // Only B is reported, as the revert's resolved target; A stays out entirely.
+    let b_entry = block(&text, &b[..12]);
+    assert!(
+        b_entry.contains(&revert[..12]) && b_entry.contains("(reverts this change)"),
+        "the explicit revert of B was not reported against B:\n{b_entry}"
+    );
+    assert!(
+        !text.contains(&a[..12]),
+        "the revert of B was attributed to A through the shared lockfile:\n{text}"
+    );
+}
+
+#[test]
+fn failures_recognize_noncanonical_explicit_revert_declarations() {
+    let repo = TestRepo::new();
+    let abandoned = repo.commit_at(
+        "src/db/index.rs",
+        b"cron sessions\n",
+        "Exclude cron sessions from the FTS index",
+        "2020-01-01T00:00:00+0000",
+    );
+    let prefix = &abandoned[..12];
+    let revert = repo.commit_at(
+        "src/db/index.rs",
+        b"cron sessions restored\n",
+        &format!(
+            "Revert broken FTS exclusion
+
+             This is a revert of the code changes in commit
+             {prefix} as it served no functional
+             purpose."
+        ),
+        "2020-02-01T00:00:00+0000",
+    );
+    repo.index();
+    let output = repo.run(["failures", "exclude", "cron", "sessions"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    let entry = block(&text, &abandoned[..12]);
+    assert!(
+        entry.contains(&revert[..12]) && entry.contains("(reverts this change)"),
+        "a wrapped non-canonical declaration was not recognized:\n{entry}"
+    );
+}
+
+#[test]
+fn failures_ignore_conflicting_revert_declarations() {
+    let repo = TestRepo::new();
+    let first = repo.commit_at(
+        "src/db/index.rs",
+        b"cron sessions\n",
+        "Exclude cron sessions from the FTS index",
+        "2020-01-01T00:00:00+0000",
+    );
+    let second = repo.commit_at(
+        "src/db/index.rs",
+        b"cron sessions trimmed\n",
+        "Trim cron sessions from the FTS index",
+        "2020-01-02T00:00:00+0000",
+    );
+    repo.commit_at(
+        "src/db/index.rs",
+        b"cron sessions restored\n",
+        &format!(
+            "Revert the FTS exclusion
+
+             This reverts commit {}.
+             This reverts commit {}.",
+            &first[..40],
+            &second[..40]
+        ),
+        "2020-02-01T00:00:00+0000",
+    );
+    repo.index();
+    let output = repo.run(["failures", "cron", "sessions"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stdout(&output);
+    // Conflicting declarations resolve to nothing, so neither candidate carries the
+    // revert; both stay unreported unless their own text alone qualifies them.
+    assert!(
+        !text.contains(&first[..12]),
+        "conflicting declarations linked the revert to the first target:\n{text}"
+    );
+    assert!(
+        !text.contains(&second[..12]),
+        "conflicting declarations linked the revert to the second target:\n{text}"
+    );
+}
 #[test]
 fn failures_resolve_unique_abbreviated_revert_trailers() {
     let repo = TestRepo::new();
