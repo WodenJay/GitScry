@@ -108,6 +108,7 @@ pub(crate) fn execute(source: &str, targets: &[String]) -> Result<Outcome, AppEr
     for (target_ref, target_oid) in &resolved {
         let inspection = inspect_target(
             &repository,
+            &session,
             &cached,
             &shallow_boundaries,
             &source_oid,
@@ -140,6 +141,7 @@ struct Inspection {
 #[allow(clippy::too_many_arguments)]
 fn inspect_target(
     repository: &git::Repository,
+    session: &cache::QuerySession,
     cached: &HashSet<String>,
     shallow_boundaries: &[String],
     source_oid: &str,
@@ -147,17 +149,29 @@ fn inspect_target(
     target_ref: &str,
     target_oid: &str,
 ) -> Result<Inspection, AppError> {
-    let parents = repository.reachable_commit_parents(target_oid)?;
+    let (reachable, traversal_reason) = match repository.reachable_commit_parents(target_oid) {
+        Ok(parents) => (parents.into_keys().collect::<HashSet<_>>(), None),
+        Err(error) => (
+            session.ancestors(target_oid)?,
+            Some(history_traversal_reason(&error)),
+        ),
+    };
     let shallow_reachable = shallow_boundaries
         .iter()
-        .any(|boundary| parents.contains_key(boundary));
-    let uncached = parents.keys().filter(|oid| !cached.contains(*oid)).count();
-    let history_incomplete = shallow_reachable || uncached > 0;
-
-    if parents.contains_key(source_oid) {
+        .any(|boundary| reachable.contains(boundary));
+    let uncached = reachable
+        .iter()
+        .filter(|oid| !cached.contains(*oid))
+        .count();
+    let mut history_incomplete = traversal_reason.is_some() || shallow_reachable || uncached > 0;
+    if reachable.contains(source_oid) {
         // Exact reachability is authoritative; a positive result is reported even
         // when other target history remains unavailable.
-        let reason = history_incomplete.then_some(REASON_HISTORY_INCOMPLETE);
+        let reason = if let Some(traversal_reason) = &traversal_reason {
+            Some(format!("{REASON_HISTORY_INCOMPLETE}; {traversal_reason}"))
+        } else {
+            history_incomplete.then(|| REASON_HISTORY_INCOMPLETE.to_owned())
+        };
         let result = TargetResult {
             target_ref: target_ref.to_owned(),
             target_oid: target_oid.to_owned(),
@@ -167,7 +181,7 @@ fn inspect_target(
             equivalents: Vec::new(),
             patch_identifier: None,
             matching_method: Some(MATCHING_METHOD_REACHABILITY.to_owned()),
-            reason: reason.map(str::to_owned),
+            reason,
         };
         return Ok(Inspection {
             result,
@@ -177,22 +191,25 @@ fn inspect_target(
 
     // Not reachable: search the target's ordinary reachable commits for a
     // whole-commit patch equivalent to the source.
-    let mut reasons: Vec<&'static str> = Vec::new();
+    let mut reasons: Vec<String> = Vec::new();
     if history_incomplete {
-        reasons.push(REASON_HISTORY_INCOMPLETE);
+        reasons.push(REASON_HISTORY_INCOMPLETE.to_owned());
+        if let Some(traversal_reason) = &traversal_reason {
+            reasons.push(traversal_reason.clone());
+        }
     }
     let identifier = match source_patch {
         SourcePatch::Identifier(identifier) => Some(identifier.as_str()),
         SourcePatch::Merge => {
-            reasons.insert(0, REASON_SOURCE_MERGE);
+            reasons.insert(0, REASON_SOURCE_MERGE.to_owned());
             None
         }
         SourcePatch::NoPatch => {
-            reasons.insert(0, REASON_SOURCE_NO_PATCH);
+            reasons.insert(0, REASON_SOURCE_NO_PATCH.to_owned());
             None
         }
         SourcePatch::Unreadable => {
-            reasons.insert(0, REASON_SOURCE_PATCH_UNREADABLE);
+            reasons.insert(0, REASON_SOURCE_PATCH_UNREADABLE.to_owned());
             None
         }
     };
@@ -200,20 +217,33 @@ fn inspect_target(
         return Ok(indeterminate(target_ref, target_oid, source_oid, reasons));
     };
 
-    let order = repository.reachable_commits_in_history_order(target_oid)?;
-    let specs: Vec<PatchSpec> = order
-        .iter()
-        .filter(|oid| cached.contains(*oid))
-        .filter_map(|oid| {
-            let commit_parents = parents.get(oid)?;
-            if commit_parents.len() > 1 {
-                return None;
+    let order = if traversal_reason.is_some() {
+        cached_history_order(session, target_oid)?
+    } else {
+        match repository.reachable_commits_in_history_order(target_oid) {
+            Ok(order) => order,
+            Err(error) => {
+                if !history_incomplete {
+                    reasons.push(REASON_HISTORY_INCOMPLETE.to_owned());
+                }
+                history_incomplete = true;
+                reasons.push(history_traversal_reason(&error));
+                cached_history_order(session, target_oid)?
             }
-            Some(PatchSpec::new(oid.clone(), commit_parents.first().cloned()))
-        })
-        .collect();
-    let lookups = repository.commit_patch_ids(&specs)?;
+        }
+    };
     let mut patches_unreadable = false;
+    let mut specs = Vec::new();
+    for oid in order.iter().filter(|oid| cached.contains(*oid)) {
+        match repository.commit_parents(oid) {
+            Ok(commit_parents) if commit_parents.len() > 1 => {}
+            Ok(commit_parents) => {
+                specs.push(PatchSpec::new(oid.clone(), commit_parents.first().cloned()))
+            }
+            Err(_) => patches_unreadable = true,
+        }
+    }
+    let lookups = repository.commit_patch_ids(&specs)?;
     let mut equivalents = Vec::new();
     for (oid, lookup) in &lookups {
         match lookup {
@@ -223,7 +253,7 @@ fn inspect_target(
         }
     }
     if patches_unreadable {
-        reasons.push(REASON_TARGET_PATCH_UNREADABLE);
+        reasons.push(REASON_TARGET_PATCH_UNREADABLE.to_owned());
     }
     let complete = !history_incomplete && !patches_unreadable;
 
@@ -262,11 +292,27 @@ fn inspect_target(
     Ok(indeterminate(target_ref, target_oid, source_oid, reasons))
 }
 
+fn history_traversal_reason(error: &AppError) -> String {
+    let detail = error
+        .to_string()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("target history could not be traversed: {detail}")
+}
+
+fn cached_history_order(
+    session: &cache::QuerySession,
+    target_oid: &str,
+) -> Result<Vec<String>, AppError> {
+    session.commits_reachable_from(target_oid)
+}
+
 fn indeterminate(
     target_ref: &str,
     target_oid: &str,
     source_oid: &str,
-    reasons: Vec<&'static str>,
+    reasons: Vec<String>,
 ) -> Inspection {
     let reason = if reasons.is_empty() {
         "patch equivalence could not be completed".to_owned()

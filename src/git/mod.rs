@@ -304,43 +304,44 @@ impl Repository {
         Ok(graph)
     }
 
-    /// Return a single commit's parents, distinguishing root, ordinary, and
-    /// merge commits without walking its ancestry.
+    /// Return a commit's raw parents, including parents hidden by shallow history.
     pub(crate) fn commit_parents(&self, oid: &str) -> Result<Vec<String>, AppError> {
-        let output = self.git.text(["rev-list", "--no-walk", "--parents", oid])?;
-        let mut lines = output.lines();
-        let Some(line) = lines.next() else {
-            return Err(AppError::operational(
-                "error: Git revision graph contained an invalid object ID",
-            ));
+        let output = self.git.output(["cat-file", "commit", oid], &[])?;
+        let parse_oid = |object_id: &[u8]| {
+            let object_id = std::str::from_utf8(object_id).map_err(|_| {
+                AppError::operational("error: Git commit object contained an invalid object ID")
+            })?;
+            if matches!(object_id.len(), 40 | 64)
+                && object_id.bytes().all(|byte| byte.is_ascii_hexdigit())
+            {
+                Ok(object_id.to_owned())
+            } else {
+                Err(AppError::operational(
+                    "error: Git commit object contained an invalid object ID",
+                ))
+            }
         };
-        if lines.next().is_some() {
+        let mut parents = Vec::new();
+        let mut has_tree = false;
+        let mut has_separator = false;
+        for header in output.split(|byte| *byte == b'\n') {
+            if header.is_empty() {
+                has_separator = true;
+                break;
+            }
+            if let Some(tree) = header.strip_prefix(b"tree ") {
+                parse_oid(tree)?;
+                has_tree = true;
+            } else if let Some(parent) = header.strip_prefix(b"parent ") {
+                parents.push(parse_oid(parent)?);
+            }
+        }
+        if !has_tree || !has_separator {
             return Err(AppError::operational(
-                "error: Git revision graph contained an invalid object ID",
+                "error: Git commit object contained invalid headers",
             ));
         }
-        let mut fields = line.split_ascii_whitespace();
-        let parsed = fields.next().ok_or_else(|| {
-            AppError::operational("error: Git revision graph contained an invalid object ID")
-        })?;
-        if parsed != oid {
-            return Err(AppError::operational(
-                "error: Git revision graph contained an invalid object ID",
-            ));
-        }
-        fields
-            .map(|parent| {
-                if matches!(parent.len(), 40 | 64)
-                    && parent.bytes().all(|byte| byte.is_ascii_hexdigit())
-                {
-                    Ok(parent.to_owned())
-                } else {
-                    Err(AppError::operational(
-                        "error: Git revision graph contained an invalid object ID",
-                    ))
-                }
-            })
-            .collect()
+        Ok(parents)
     }
 
     /// Whole-commit patch identifiers under the fixed diff rules in [`patch`].

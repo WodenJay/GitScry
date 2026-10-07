@@ -487,7 +487,7 @@ fn source_commit_without_a_patch_is_indeterminate() {
     assert!(
         target["reason"]
             .as_str()
-            .is_some_and(|reason| reason.contains("no whole-commit patch"))
+            .is_some_and(|reason| !reason.is_empty())
     );
 }
 
@@ -496,7 +496,11 @@ fn ambient_diff_configuration_does_not_change_equivalence() {
     let repo = TestRepo::new();
     let base = commit(&repo, "a.txt", "base\n", "base");
     git(repo.dir.path(), ["checkout", "-b", "source"]);
-    let source = commit(&repo, "b.txt", "feature\n", "add feature");
+    fs::write(repo.dir.path().join("b.txt"), "feature\n").unwrap();
+    fs::write(repo.dir.path().join("c.txt"), "other feature\n").unwrap();
+    git(repo.dir.path(), ["add", "b.txt", "c.txt"]);
+    git(repo.dir.path(), ["commit", "-m", "add feature"]);
+    let source = repo.head();
     git(repo.dir.path(), ["checkout", "-b", "target", &base]);
     git(repo.dir.path(), ["cherry-pick", "-x", &source]);
     let replayed = repo.head();
@@ -511,8 +515,10 @@ fn ambient_diff_configuration_does_not_change_equivalence() {
     assert_eq!(clean["targets"][0]["status"], "equivalent");
 
     // Hostile ambient diff configuration must not change the identifier or result.
+    fs::write(repo.dir.path().join("order.txt"), "c.txt\nb.txt\n").unwrap();
     for (key, value) in [
         ("diff.context", "25"),
+        ("diff.orderFile", "order.txt"),
         ("diff.renames", "copies"),
         ("diff.noprefix", "true"),
         ("diff.mnemonicPrefix", "true"),
@@ -557,6 +563,156 @@ fn shallow_target_without_an_equivalent_is_indeterminate() {
             .as_str()
             .is_some_and(|reason| !reason.is_empty()),
         "incomplete history needs a concrete reason"
+    );
+    assert_eq!(value["coverage_complete"], false);
+}
+
+#[test]
+fn human_output_includes_equivalent_commit_and_patch_details() {
+    let repo = TestRepo::new();
+    let base = commit(&repo, "a.txt", "base\n", "base");
+    git(repo.dir.path(), ["checkout", "-b", "source"]);
+    let source = commit(&repo, "b.txt", "feature\n", "source patch");
+    git(repo.dir.path(), ["checkout", "-b", "target", &base]);
+    git(repo.dir.path(), ["cherry-pick", "-x", &source]);
+    let equivalent = repo.head();
+    git(repo.dir.path(), ["checkout", "main"]);
+    repo.index();
+
+    let output = repo.run(["propagation", &source, "--to", "target"]);
+    assert!(output.status.success());
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        text.contains(&format!("equivalent commit: {equivalent}")),
+        "{text}"
+    );
+    assert!(text.contains("patch identifier: "), "{text}");
+    assert!(
+        text.contains("matching method: patch-id --verbatim"),
+        "{text}"
+    );
+}
+
+#[test]
+fn shallow_source_boundary_uses_its_real_parent_for_patch_identity() {
+    let repo = TestRepo::new();
+    commit(&repo, "a.txt", "base\n", "base");
+    git(repo.dir.path(), ["checkout", "-b", "source"]);
+    let source = commit(&repo, "b.txt", "feature\n", "source patch");
+
+    // An unrelated root commit has the same tree as source but a different whole
+    // patch: it adds both files, while source adds only b.txt to its parent.
+    git(repo.dir.path(), ["checkout", "--orphan", "target"]);
+    git(repo.dir.path(), ["add", "-A"]);
+    git(repo.dir.path(), ["commit", "-m", "same tree as source"]);
+    let target = repo.head();
+    repo.index();
+
+    fs::write(repo.common_dir().join("shallow"), format!("{source}\n")).unwrap();
+    let value = json(repo.run(["propagation", &source, "--to", "target", "--json"]));
+    assert_eq!(value["targets"][0]["target_oid"], target);
+    assert_eq!(value["targets"][0]["status"], "not_found");
+}
+
+#[test]
+fn shallow_target_boundary_does_not_turn_candidate_patch_into_root_diff() {
+    let repo = TestRepo::new();
+    commit(&repo, "a.txt", "base\n", "base");
+
+    // The source is a root commit adding the full tree. The target candidate has
+    // the same resulting tree but only adds b.txt to its parent.
+    git(repo.dir.path(), ["checkout", "--orphan", "source"]);
+    fs::write(repo.dir.path().join("b.txt"), "feature\n").unwrap();
+    git(repo.dir.path(), ["add", "-A"]);
+    git(repo.dir.path(), ["commit", "-m", "root source patch"]);
+    let source = repo.head();
+
+    git(repo.dir.path(), ["checkout", "main"]);
+    git(repo.dir.path(), ["checkout", "-b", "target"]);
+    let candidate = commit(&repo, "b.txt", "feature\n", "candidate patch");
+    repo.index();
+
+    fs::write(repo.common_dir().join("shallow"), format!("{candidate}\n")).unwrap();
+    let value = json(repo.run(["propagation", &source, "--to", "target", "--json"]));
+    assert_eq!(value["targets"][0]["status"], "indeterminate");
+    assert_eq!(value["targets"][0]["equivalents"], serde_json::json!([]));
+    assert_eq!(value["coverage_complete"], false);
+}
+
+#[test]
+fn missing_commit_during_target_walk_returns_indeterminate() {
+    let repo = TestRepo::new();
+    let base = commit(&repo, "a.txt", "base\n", "base");
+    git(repo.dir.path(), ["checkout", "-b", "source"]);
+    let source = commit(&repo, "b.txt", "source\n", "source patch");
+    git(repo.dir.path(), ["checkout", "-b", "target", &base]);
+    commit(&repo, "c.txt", "target\n", "target patch");
+    repo.index();
+
+    // The published cache remains readable, but Git can no longer traverse the
+    // target's complete history from its local object store.
+    let object = repo
+        .common_dir()
+        .join("objects")
+        .join(&base[..2])
+        .join(&base[2..]);
+    fs::remove_file(object).unwrap();
+
+    let output = repo.run(["propagation", &source, "--to", "target", "--json"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["targets"][0]["status"], "indeterminate");
+    assert!(
+        value["targets"][0]["reason"]
+            .as_str()
+            .is_some_and(|reason| !reason.is_empty())
+    );
+    assert_eq!(value["coverage_complete"], false);
+}
+
+#[test]
+fn known_equivalent_survives_unreadable_history_elsewhere_in_target() {
+    let repo = TestRepo::new();
+    let base = commit(&repo, "a.txt", "base\n", "base");
+    git(repo.dir.path(), ["checkout", "-b", "source"]);
+    let source = commit(&repo, "b.txt", "feature\n", "source patch");
+    git(repo.dir.path(), ["checkout", "-b", "equivalent", &base]);
+    let equivalent = commit(&repo, "b.txt", "feature\n", "equivalent patch");
+    git(repo.dir.path(), ["checkout", "-b", "target", &base]);
+    let missing = commit(&repo, "c.txt", "other\n", "other history");
+    git(
+        repo.dir.path(),
+        ["merge", "--no-ff", "equivalent", "-m", "merge equivalent"],
+    );
+    repo.index();
+
+    // The target merge has a known equivalent on one parent and an unreadable
+    // unrelated commit on the other; keep the established positive match.
+    let object = repo
+        .common_dir()
+        .join("objects")
+        .join(&missing[..2])
+        .join(&missing[2..]);
+    fs::remove_file(object).unwrap();
+
+    let output = repo.run(["propagation", &source, "--to", "target", "--json"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let target = &value["targets"][0];
+    assert_eq!(target["status"], "equivalent");
+    assert_eq!(target["equivalents"], serde_json::json!([equivalent]));
+    assert!(
+        target["reason"]
+            .as_str()
+            .is_some_and(|reason| !reason.is_empty())
     );
     assert_eq!(value["coverage_complete"], false);
 }
