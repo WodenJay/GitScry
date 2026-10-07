@@ -86,7 +86,7 @@ struct JsonReport<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     materials: Option<Vec<JsonMaterial<'a>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    fix_versions: Option<&'a crate::analysis::capabilities::patch_search::TraceFixVersions>,
+    fix_versions: Option<&'a crate::analysis::capabilities::trace_fix::TraceFixVersions>,
     #[serde(skip_serializing_if = "Option::is_none")]
     target_related_modifications: Option<Vec<JsonWhyModification<'a>>>,
     #[serde(skip_serializing_if = "Option::is_none")]

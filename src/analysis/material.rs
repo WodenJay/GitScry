@@ -16,7 +16,7 @@ pub(crate) struct Report {
     pub(crate) target: Option<RelationTarget>,
     pub(crate) scope: Option<SearchScopeInfo>,
     pub(crate) fix_versions:
-        Option<Box<crate::analysis::capabilities::patch_search::TraceFixVersions>>,
+        Option<Box<crate::analysis::capabilities::trace_fix::TraceFixVersions>>,
     pub(crate) symbol_summary: Option<SymbolSummary>,
     pub(crate) symbol_selection: Option<Box<crate::git::SymbolSelection>>,
     pub(crate) relation_sources: Vec<super::capabilities::RelationSource>,

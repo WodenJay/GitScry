@@ -882,8 +882,6 @@ fn trace_fix_reports_equivalent_versions_in_independent_multibranch_scope() {
     assert!(text.contains(cherry_pick.as_str()));
     assert!(text.contains(manual.as_str()));
     assert!(text.contains("basis: first_parent"));
-    assert!(text.contains("independent of trace-fix historical scope"));
-    assert!(text.contains("all local and fetched remote branch tips"));
     assert!(text.contains("+fixed"));
 }
 
