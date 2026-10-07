@@ -852,19 +852,14 @@ Examples:
     },
 
     #[command(
-        group(
-            ArgGroup::new("fate_selector")
-                .required(true)
-                .multiple(false)
-                .args(["line"]),
-        ),
         about = "Trace a historical line's fate forward through history",
         after_help = r#"Choose exactly one target: --line. The selected line is validated at --at,
 then tracked forward through cached history to --to-rev (HEAD fixed at
 invocation by default). Unchanged lines follow preceding insertions and
 deletions and detected renames; unrelated edits shift coordinates without
-becoming events. A rewritten selected line is recorded as a change with a
-bounded replacement association, and tracking continues from the replacement.
+becoming events. A rewritten selected line is recorded with bounded
+replacement material; tracking then stops as unknown because the hunk does not
+establish line identity.
 
 Run `gitscry index` first. Queries refresh locally available HEAD history;
 index another branch before selecting an uncached --at or --to-rev revision
@@ -892,7 +887,7 @@ Examples:
         /// Local revision containing the starting path and line; required.
         #[arg(long, value_name = "REV")]
         at: String,
-        /// Descendant endpoint of the trace; defaults to current HEAD. Explicit endpoints must be available after refresh or already published.
+        /// Descendant endpoint; explicit revisions must be available after refresh or already published.
         #[arg(long, value_name = "REV")]
         to_rev: Option<String>,
         /// Positive inspection ceiling over forward commits; the start validation is excluded.

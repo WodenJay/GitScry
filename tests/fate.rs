@@ -139,6 +139,7 @@ fn fate_equal_endpoints_reports_validated_location_without_events() {
         &["fate", "a.txt", "--line", "2", "--at", &start, "--json"],
     );
     assert_eq!(report["kind"], "fate");
+    assert_eq!(report["schema_version"], 1);
     assert_eq!(report["start_revision"], start);
     assert_eq!(report["endpoint"], start);
     assert_eq!(report["final_state"], "reached_endpoint");
@@ -193,7 +194,7 @@ fn fate_maps_lines_through_unrelated_edits_without_events() {
 }
 
 #[test]
-fn fate_reports_reached_endpoint_with_events() {
+fn fate_stops_as_unknown_after_line_rewrite() {
     let repo = TestRepo::new();
     let start = commit(
         &repo,
@@ -203,11 +204,69 @@ fn fate_reports_reached_endpoint_with_events() {
         "2020-01-01T00:00:00Z",
     );
     // Rewrite beta in place (one deletion, one addition).
-    commit(
+    let rewrite = commit(
         &repo,
         "a.txt",
         "alpha\nBETA\n",
         "Rewrite beta",
+        "2020-01-02T00:00:00Z",
+    );
+    commit(
+        &repo,
+        "a.txt",
+        "alpha\nGAMMA\n",
+        "Rewrite again",
+        "2020-01-03T00:00:00Z",
+    );
+    repo.index();
+    let report = json(
+        &repo,
+        &[
+            "fate", "a.txt", "--line", "2", "--at", &start, "--patch", "--json",
+        ],
+    );
+    assert_eq!(report["final_state"], "unknown");
+    assert_eq!(report["stopped_at"], rewrite);
+    assert_eq!(report["stop_reason"]["code"], "line_rewritten");
+    let events = report["events"].as_array().unwrap();
+    assert_eq!(events.len(), 1);
+    let patch = &events[0]["patch"];
+    assert_eq!(patch["status"], "available");
+    assert!(
+        patch["hunks"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("-beta")
+    );
+    assert_eq!(events[0]["relationship"], "rewrite");
+    assert_eq!(events[0]["before"]["path"], "a.txt");
+    assert_eq!(events[0]["before"]["line"], 2);
+    assert_eq!(events[0]["after"]["path"], "a.txt");
+    assert_eq!(events[0]["after"]["line"], 2);
+    assert_eq!(report["last_location"]["line"], 2);
+    assert_eq!(report["schema_version"], 2);
+    let text_output = repo.run(["fate", "a.txt", "--line", "2", "--at", &start, "--patch"]);
+    assert_eq!(text_output.status.code(), Some(0));
+    let text = String::from_utf8_lossy(&text_output.stdout);
+    assert!(text.contains("patch excerpt: available"), "{text}");
+    assert!(text.contains("-beta"), "{text}");
+}
+
+#[test]
+fn fate_reports_line_deletion_when_file_remains() {
+    let repo = TestRepo::new();
+    let start = commit(
+        &repo,
+        "a.txt",
+        "alpha\nbeta\ngamma\n",
+        "Add",
+        "2020-01-01T00:00:00Z",
+    );
+    let removal = commit(
+        &repo,
+        "a.txt",
+        "alpha\ngamma\n",
+        "Delete beta",
         "2020-01-02T00:00:00Z",
     );
     repo.index();
@@ -215,14 +274,10 @@ fn fate_reports_reached_endpoint_with_events() {
         &repo,
         &["fate", "a.txt", "--line", "2", "--at", &start, "--json"],
     );
-    assert_eq!(report["final_state"], "reached_endpoint");
-    let events = report["events"].as_array().unwrap();
-    assert_eq!(events.len(), 1);
-    assert_eq!(events[0]["relationship"], "rewrite");
-    assert_eq!(events[0]["before"]["path"], "a.txt");
-    assert_eq!(events[0]["before"]["line"], 2);
-    assert_eq!(events[0]["after"]["path"], "a.txt");
-    assert_eq!(events[0]["after"]["line"], 2);
+    assert_eq!(report["final_state"], "deleted");
+    assert_eq!(report["stopped_at"], removal);
+    assert_eq!(report["stop_reason"]["code"], "removed");
+    assert_eq!(report["events"].as_array().unwrap().len(), 1);
     assert_eq!(report["last_location"]["line"], 2);
 }
 
@@ -250,7 +305,12 @@ fn fate_survives_renames_and_coordinates() {
         &["fate", "old.rs", "--line", "2", "--at", &start, "--json"],
     );
     assert_eq!(report["final_state"], "reached_endpoint");
-    assert_eq!(report["events"].as_array().unwrap().len(), 0);
+    let events = report["events"].as_array().unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["relationship"], "rename");
+    assert_eq!(events[0]["before"]["path"], "old.rs");
+    assert_eq!(events[0]["after"]["path"], "new.rs");
+    assert_eq!(events[0]["after"]["line"], 2);
     let location = &report["last_location"];
     assert_eq!(location["path"], "new.rs");
     assert_eq!(location["line"], 3);
@@ -356,18 +416,18 @@ fn fate_max_commits_bounds_inspection_and_reports_incomplete() {
         "Add",
         "2020-01-01T00:00:00Z",
     );
-    commit(
+    rename(
         &repo,
         "a.txt",
-        "alpha\nBETA\n",
-        "Rewrite",
+        "b.txt",
+        "Rename one",
         "2020-01-02T00:00:00Z",
     );
-    commit(
+    rename(
         &repo,
-        "a.txt",
-        "alpha\nGAMMA\n",
-        "Rewrite again",
+        "b.txt",
+        "c.txt",
+        "Rename two",
         "2020-01-03T00:00:00Z",
     );
     repo.index();
@@ -409,15 +469,18 @@ fn fate_limit_defaults_to_last_20_and_keeps_summary() {
         "Add",
         "2020-01-01T00:00:00Z",
     );
-    // 25 rewrites of the target line.
+    // 25 file renames preserve the tracked line and produce 25 events.
+    let mut path = "a.txt".to_owned();
     for index in 0..25 {
-        commit(
+        let next_path = format!("a{}.txt", index + 1);
+        rename(
             &repo,
-            "a.txt",
-            &format!("alpha\nv{index:02}\n"),
-            &format!("Rewrite {index}"),
+            &path,
+            &next_path,
+            &format!("Rename {index}"),
             &format!("2020-01-{:02}T00:00:00Z", index + 2),
         );
+        path = next_path;
     }
     repo.index();
     let report = json(
@@ -484,6 +547,7 @@ fn fate_text_output_carries_summary() {
     let output = repo.run(["fate", "a.txt", "--line", "2", "--at", &start]);
     assert_eq!(output.status.code(), Some(0));
     let text = String::from_utf8_lossy(&output.stdout);
-    assert!(text.contains("reached_endpoint"), "{text}");
+    assert!(text.contains("unknown"), "{text}");
+    assert!(text.contains("1 event(s) recorded"), "{text}");
     assert!(text.contains(&start), "{text}");
 }

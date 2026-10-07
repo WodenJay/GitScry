@@ -39,12 +39,12 @@ pub(super) fn format_report(report: &Report) -> String {
             .max_commits
             .map(|ceiling| format!(" of a {} commit budget", ceiling))
             .unwrap_or_default(),
+        report.total_events,
         if report.traversal_truncated {
             "; traversal truncated by the budget"
         } else {
             ""
         },
-        report.total_events,
     ));
     if report.display_truncated {
         lines.push(format!(
@@ -66,6 +66,7 @@ pub(super) fn format_report(report: &Report) -> String {
                 .unwrap_or_else(|| "deleted".to_owned()),
         ));
         lines.push(format!("    {}", super::escape::subject(&event.subject)));
+        super::material::render_patch(&mut lines, event.patch.as_ref(), "    ");
         lines.push(format!(
             "    Inspect commit/diff with `git show {}`.",
             event.commit_id
@@ -85,7 +86,7 @@ pub(super) fn format_json_report(
         .map(JsonEvent::from)
         .collect::<Vec<_>>();
     let output = JsonReport {
-        schema_version: 1,
+        schema_version: if report.patch_mode { 2 } else { 1 },
         kind: "fate",
         start_revision: &report.start_revision,
         endpoint: &report.endpoint,
@@ -166,6 +167,8 @@ struct JsonEvent<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     after: Option<JsonLocation<'a>>,
     parent_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    patch: Option<super::json::JsonPatch<'a>>,
 }
 
 impl<'a> From<&'a Event> for JsonEvent<'a> {
@@ -184,6 +187,7 @@ impl<'a> From<&'a Event> for JsonEvent<'a> {
                 line: after.line,
             }),
             parent_count: event.parent_count,
+            patch: event.patch.as_ref().map(json::json_patch),
         }
     }
 }

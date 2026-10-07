@@ -12,8 +12,8 @@ use crate::cache::{PatchHistoryHunk, QuerySession};
 use crate::git::Repository;
 
 use super::normalize_git_path_string;
-use crate::analysis::SearchScopeInfo;
 use crate::analysis::query::{Context, Options, Outcome, QueryReport, scope};
+use crate::analysis::{PatchExcerpt, SearchScopeInfo};
 use crate::{app::AppError, cache::followups::ForwardCommit};
 
 const MAX_HUNKS: usize = 4_096;
@@ -55,6 +55,7 @@ pub(crate) struct Event {
     pub(crate) before: Location,
     pub(crate) after: Option<Location>,
     pub(crate) parent_count: usize,
+    pub(crate) patch: Option<PatchExcerpt>,
 }
 
 pub(crate) struct Report {
@@ -71,6 +72,7 @@ pub(crate) struct Report {
     pub(crate) traversal_truncated: bool,
     pub(crate) total_events: usize,
     pub(crate) display_truncated: bool,
+    pub(crate) patch_mode: bool,
     pub(crate) limit: usize,
     pub(crate) events: Vec<Event>,
     pub(crate) scope: Option<SearchScopeInfo>,
@@ -78,7 +80,8 @@ pub(crate) struct Report {
 
 enum Forward {
     Kept { new_line: i64 },
-    Deleted { replacement: Option<i64> },
+    Deleted,
+    Rewritten { replacement: Option<i64> },
 }
 
 pub(in crate::analysis) fn execute(
@@ -97,16 +100,16 @@ pub(in crate::analysis) fn execute(
         })?;
     let session = &context.session;
 
-    let (endpoint, endpoint_frontier) = match to_rev {
+    let (endpoint, traversal_endpoint, endpoint_frontier) = match to_rev {
         Some(revision) => {
             let endpoint = repository.resolve_commit(&revision)?;
             session.require_revision(&endpoint)?;
-            (endpoint, false)
+            (endpoint.clone(), endpoint, false)
         }
         None => {
             let head = context.pinned_head.clone();
             if session.contains_revision(&head)? {
-                (head, false)
+                (head.clone(), head, false)
             } else {
                 let history = scope::reachable_history(session, &repository, &head)?;
                 let frontier = history.revisions.first().cloned().ok_or_else(|| {
@@ -114,14 +117,14 @@ pub(in crate::analysis) fn execute(
                         "no commits reachable from current HEAD are available after query refresh; run `gitscry index` to publish reachable history",
                     )
                 })?;
-                (frontier, true)
+                (head, frontier, true)
             }
         }
     };
 
     let mut warnings = target.warnings.clone();
-    let coverage = scope::reachable_history(session, &repository, &endpoint)?;
-    if !coverage.coverage_complete {
+    let coverage = scope::reachable_history(session, &repository, &traversal_endpoint)?;
+    if endpoint_frontier || !coverage.coverage_complete {
         warnings.push(
             "Endpoint-reachable local history is incomplete; fate tracking covers only commits available in the published cache. Run `gitscry index` after making additional history available."
                 .into(),
@@ -155,6 +158,7 @@ pub(in crate::analysis) fn execute(
                 traversal_truncated: false,
                 total_events: 0,
                 display_truncated: false,
+                patch_mode: options.patch,
                 limit: options.limit,
                 events: Vec::new(),
                 scope: None,
@@ -163,7 +167,7 @@ pub(in crate::analysis) fn execute(
         ));
     }
 
-    let graph = session.forward_graph(&endpoint)?;
+    let graph = session.forward_graph(&traversal_endpoint)?;
     let tracked = descendants(&graph, &target.revision);
 
     let mut state = Location {
@@ -234,6 +238,13 @@ pub(in crate::analysis) fn execute(
                 before: state.clone(),
                 after: None,
                 parent_count: node.parents.len(),
+                patch: event_patch(
+                    session,
+                    options.patch,
+                    &node.oid,
+                    change.ordinal,
+                    state.line,
+                )?,
             });
             stop = Some((
                 node.oid.clone(),
@@ -260,7 +271,32 @@ pub(in crate::analysis) fn execute(
             .new_path
             .clone()
             .unwrap_or_else(|| state.path.clone());
+        let renamed = change
+            .old_path
+            .as_ref()
+            .is_some_and(|old_path| old_path != &new_path);
         if change.old_blob == change.new_blob {
+            if renamed {
+                events.push(Event {
+                    commit_id: node.oid.clone(),
+                    subject: session.forward_subject(&node.oid)?,
+                    commit_time: node.commit_time,
+                    relationship: "rename",
+                    before: state.clone(),
+                    after: Some(Location {
+                        path: new_path.clone(),
+                        line: state.line,
+                    }),
+                    parent_count: node.parents.len(),
+                    patch: event_patch(
+                        session,
+                        options.patch,
+                        &node.oid,
+                        change.ordinal,
+                        state.line,
+                    )?,
+                });
+            }
             state.path = new_path;
             last_revision = node.oid.clone();
             continue;
@@ -288,46 +324,85 @@ pub(in crate::analysis) fn execute(
         }
         match map_line_forward(&history.hunks, state.line) {
             Some(Forward::Kept { new_line }) => {
-                state.path = new_path;
-                state.line = new_line;
-            }
-            Some(Forward::Deleted { replacement }) => match replacement {
-                Some(new_line) => {
+                if renamed {
                     events.push(Event {
                         commit_id: node.oid.clone(),
                         subject: session.forward_subject(&node.oid)?,
                         commit_time: node.commit_time,
-                        relationship: "rewrite",
+                        relationship: "rename",
                         before: state.clone(),
                         after: Some(Location {
                             path: new_path.clone(),
                             line: new_line,
                         }),
                         parent_count: node.parents.len(),
+                        patch: event_patch(
+                            session,
+                            options.patch,
+                            &node.oid,
+                            change.ordinal,
+                            state.line,
+                        )?,
                     });
-                    state.path = new_path;
-                    state.line = new_line;
                 }
-                None => {
-                    events.push(Event {
-                        commit_id: node.oid.clone(),
-                        subject: session.forward_subject(&node.oid)?,
-                        commit_time: node.commit_time,
-                        relationship: "removed",
-                        before: state.clone(),
-                        after: None,
-                        parent_count: node.parents.len(),
-                    });
-                    stop = Some((
-                        node.oid.clone(),
-                        FinalState::Deleted,
-                        StopReason {
-                            code: "removed",
-                            explanation: "the tracked line was deleted",
-                        },
-                    ));
-                }
-            },
+                state.path = new_path;
+                state.line = new_line;
+            }
+            Some(Forward::Rewritten { replacement }) => {
+                events.push(Event {
+                    commit_id: node.oid.clone(),
+                    subject: session.forward_subject(&node.oid)?,
+                    commit_time: node.commit_time,
+                    relationship: "rewrite",
+                    before: state.clone(),
+                    after: replacement.map(|line| Location {
+                        path: new_path,
+                        line,
+                    }),
+                    parent_count: node.parents.len(),
+                    patch: event_patch(
+                        session,
+                        options.patch,
+                        &node.oid,
+                        change.ordinal,
+                        state.line,
+                    )?,
+                });
+                stop = Some((
+                    node.oid.clone(),
+                    FinalState::Unknown,
+                    StopReason {
+                        code: "line_rewritten",
+                        explanation: "the replacement is not established as the same historical line",
+                    },
+                ));
+            }
+            Some(Forward::Deleted) => {
+                events.push(Event {
+                    commit_id: node.oid.clone(),
+                    subject: session.forward_subject(&node.oid)?,
+                    commit_time: node.commit_time,
+                    relationship: "removed",
+                    before: state.clone(),
+                    after: None,
+                    parent_count: node.parents.len(),
+                    patch: event_patch(
+                        session,
+                        options.patch,
+                        &node.oid,
+                        change.ordinal,
+                        state.line,
+                    )?,
+                });
+                stop = Some((
+                    node.oid.clone(),
+                    FinalState::Deleted,
+                    StopReason {
+                        code: "removed",
+                        explanation: "the tracked line was deleted",
+                    },
+                ));
+            }
             None => {
                 stop = Some((
                     node.oid.clone(),
@@ -395,6 +470,7 @@ pub(in crate::analysis) fn execute(
             traversal_truncated,
             total_events,
             display_truncated,
+            patch_mode: options.patch,
             limit: options.limit,
             events: displayed,
             scope: None,
@@ -411,6 +487,26 @@ fn finished(session: &QuerySession, report: Report, warnings: Vec<String>) -> Ou
         warnings: all_warnings,
         report: QueryReport::Fate(report),
     }
+}
+
+fn event_patch(
+    session: &QuerySession,
+    include_patch: bool,
+    oid: &str,
+    change_ordinal: i64,
+    line: i64,
+) -> Result<Option<PatchExcerpt>, AppError> {
+    if !include_patch {
+        return Ok(None);
+    }
+    let patch = crate::analysis::patch::selected_patch_excerpt(session, oid, |hunk| {
+        if hunk.change_ordinal != change_ordinal || hunk.old_lines <= 0 {
+            return None;
+        }
+        let end = hunk.old_start.checked_add(hunk.old_lines)?;
+        (line >= hunk.old_start && line < end).then_some(0)
+    })?;
+    Ok(Some(patch))
 }
 
 /// Cache positions are the published reverse-topological Git order, not timestamps.
@@ -452,13 +548,14 @@ fn map_line_forward(hunks: &[PatchHistoryHunk], line: i64) -> Option<Forward> {
         let mut deleted_total = 0i64;
         let mut added_total = 0i64;
         let mut added_position: Option<i64> = None;
-        let mut outcome: Option<Forward> = None;
+        let mut target_deleted = false;
+        let mut target_new_line = None;
         for diff_line in text.split_inclusive(|byte| *byte == b'\n') {
             match diff_line.first() {
                 Some(b'-') => {
                     deleted_total += 1;
                     if old == line {
-                        outcome = Some(Forward::Deleted { replacement: None });
+                        target_deleted = true;
                     }
                     old += 1;
                     old_count += 1;
@@ -473,7 +570,7 @@ fn map_line_forward(hunks: &[PatchHistoryHunk], line: i64) -> Option<Forward> {
                 }
                 Some(b' ') => {
                     if old == line {
-                        outcome = Some(Forward::Kept { new_line: new });
+                        target_new_line = Some(new);
                     }
                     old += 1;
                     new += 1;
@@ -487,19 +584,18 @@ fn map_line_forward(hunks: &[PatchHistoryHunk], line: i64) -> Option<Forward> {
         if old_count != hunk.old_lines || new_count != hunk.new_lines {
             return None;
         }
-        return match outcome {
-            Some(Forward::Deleted { .. }) => {
-                let replacement = (deleted_total == 1 && added_total == 1)
-                    .then_some(())
-                    .and(added_position);
-                replacement.map(|line| {
-                    Some(Forward::Deleted {
-                        replacement: Some(line),
-                    })
-                })?
+        if target_deleted {
+            if added_total == 0 {
+                return Some(Forward::Deleted);
             }
-            other => other,
-        };
+            let replacement = (deleted_total == 1 && added_total == 1)
+                .then_some(())
+                .and(added_position);
+            return Some(Forward::Rewritten { replacement });
+        }
+        return Some(Forward::Kept {
+            new_line: target_new_line?,
+        });
     }
     Some(Forward::Kept { new_line })
 }
