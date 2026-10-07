@@ -882,15 +882,19 @@ Examples:
         github_repo: Option<String>,
     },
     #[command(
-        about = "Check whether a commit is contained in specific target branches",
+        about = "Check whether a commit is contained in, or patch-equivalent within, target branches",
         after_help = r#"Requires an initialized cache (`gitscry index`). Refreshes local history from the
 requested targets only; never fetches, scans unrelated branches, or moves HEAD.
 Source and targets are resolved to commits once at invocation start.
 
 A source commit reachable from a target, including through merged
-non-first-parent ancestry, is `contained`. Exact non-reachability is not a
-completed negative search: patch equivalence is not checked yet, so unmatched
-targets stay `indeterminate` with that reason.
+non-first-parent ancestry, is `contained`. Otherwise the source's whole-commit
+patch is compared against the ordinary commits reachable from the target using
+`git patch-id --verbatim`; every commit with the same patch is reported as an
+`equivalent` in target-history order. A target is `not_found` only when that
+search completed. Incomplete history, a source the local store cannot read, or a
+merge source whose patch equivalence is unsupported leave the target
+`indeterminate` with the concrete reason.
 
 Examples:
   gitscry propagation 4ca5b49 --to main --to release-1.0
@@ -899,7 +903,7 @@ Examples:
     Propagation {
         /// Source commit whose propagation is checked.
         source: String,
-        /// Target ref to check containment against; repeatable, order preserved.
+        /// Target ref to check containment or patch equivalence against; repeatable, order preserved.
         #[arg(long = "to", value_name = "REF")]
         targets: Vec<String>,
         /// Output JSON instead of text.

@@ -46,7 +46,7 @@ fn fixture() -> (TestRepo, String, String, String) {
 }
 
 #[test]
-fn reports_contained_and_indeterminate_across_multiple_targets_in_requested_order() {
+fn reports_contained_and_not_found_across_multiple_targets_in_requested_order() {
     let (repo, base, side, merged) = fixture();
 
     let value = json(repo.run([
@@ -61,7 +61,7 @@ fn reports_contained_and_indeterminate_across_multiple_targets_in_requested_orde
         "--json",
     ]));
 
-    assert_eq!(value["schema_version"], 1);
+    assert_eq!(value["schema_version"], 2);
     assert_eq!(value["source"], side);
     assert_eq!(value["coverage_complete"], true);
     assert_eq!(value["warnings"].as_array().unwrap().len(), 0);
@@ -78,14 +78,16 @@ fn reports_contained_and_indeterminate_across_multiple_targets_in_requested_orde
     assert_eq!(targets[0]["contained_by"], serde_json::json!([side]));
     assert_eq!(targets[0]["reason"], Value::Null);
 
-    // Not an ancestor: stays indeterminate with a concrete nonempty reason.
-    assert_eq!(targets[1]["status"], "indeterminate");
+    // Not an ancestor, and no whole-commit patch equivalent exists in a fully
+    // available history: a completed search reports not_found without a reason.
+    assert_eq!(targets[1]["status"], "not_found");
     assert_eq!(targets[1]["contained_by"], serde_json::json!([]));
-    let reason = targets[1]["reason"].as_str().unwrap();
-    assert!(!reason.is_empty(), "reason must explain the gap: {reason}");
+    assert_eq!(targets[1]["equivalents"], serde_json::json!([]));
+    assert_eq!(targets[1]["reason"], Value::Null);
 
-    // source=side is not an ancestor of target=base (wrong direction).
-    assert_eq!(targets[2]["status"], "indeterminate");
+    // source=side is not an ancestor of target=base (wrong direction) and the
+    // whole-commit patches differ (b.txt vs base's a.txt); the search completes.
+    assert_eq!(targets[2]["status"], "not_found");
     assert_eq!(targets[2]["contained_by"], serde_json::json!([]));
 
     let main_oid = git_stdout(repo.dir.path(), ["rev-parse", "main"]);
@@ -98,20 +100,16 @@ fn reports_contained_and_indeterminate_across_multiple_targets_in_requested_orde
 }
 
 #[test]
-fn human_output_names_status_and_reason_without_claiming_not_found() {
+fn human_output_names_status_without_hedging_a_completed_search() {
     let (repo, _, side, _) = fixture();
     let output = repo.run(["propagation", &side, "--to", "main", "--to", "unrelated"]);
     assert!(output.status.success());
     let text = String::from_utf8_lossy(&output.stdout);
     assert!(text.contains("contained"), "{text}");
-    assert!(text.contains("indeterminate"), "{text}");
-    assert!(!text.contains("not_found"), "{text}");
-    // Any indeterminate target must carry a reason; use a behavioral check
-    // rather than locking the exact prose.
-    assert!(
-        text.matches("indeterminate").count() <= text.matches(';').count() + 1,
-        "{text}"
-    );
+    // A completed search over fully available history reports not_found, not a
+    // vague indeterminate hedge.
+    assert!(text.contains("not_found"), "{text}");
+    assert!(!text.contains("indeterminate"), "{text}");
 }
 
 #[test]
@@ -182,7 +180,9 @@ fn refreshes_explicit_targets_while_head_stays_unchanged() {
     let head_before = repo.head();
 
     let value = json(repo.run(["propagation", &_side, "--to", "unrelated", "--json"]));
-    assert_eq!(value["targets"][0]["status"], "indeterminate");
+    // The unrelated branch's history is fully available; its whole-commit patches
+    // differ from side's, so the completed search reports not_found.
+    assert_eq!(value["targets"][0]["status"], "not_found");
     assert_eq!(
         value["targets"][0]["target_oid"],
         git_stdout(repo.dir.path(), ["rev-parse", "unrelated"])

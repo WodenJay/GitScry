@@ -7,6 +7,7 @@ pub(crate) use current::{CurrentChange, current_regular_file};
 mod history;
 mod merge_tree;
 pub(crate) use merge_tree::{MergeTree, Replay, StageEntry, TreeEntry};
+mod patch;
 mod process;
 mod symbol;
 mod symbol_history;
@@ -17,6 +18,7 @@ use std::{collections::HashMap, path::PathBuf};
 use crate::app::{AppError, IndexStage};
 
 pub(crate) use history::{Change, Commit, HistoryTarget, Hunk, PatchStream, Snapshot};
+pub(crate) use patch::{PatchLookup, PatchSpec};
 use process::Git;
 
 /// Canonicalize repository-relative paths like Git tree paths.
@@ -300,6 +302,53 @@ impl Repository {
             graph.insert(oid, parents);
         }
         Ok(graph)
+    }
+
+    /// Return a single commit's parents, distinguishing root, ordinary, and
+    /// merge commits without walking its ancestry.
+    pub(crate) fn commit_parents(&self, oid: &str) -> Result<Vec<String>, AppError> {
+        let output = self.git.text(["rev-list", "--no-walk", "--parents", oid])?;
+        let mut lines = output.lines();
+        let Some(line) = lines.next() else {
+            return Err(AppError::operational(
+                "error: Git revision graph contained an invalid object ID",
+            ));
+        };
+        if lines.next().is_some() {
+            return Err(AppError::operational(
+                "error: Git revision graph contained an invalid object ID",
+            ));
+        }
+        let mut fields = line.split_ascii_whitespace();
+        let parsed = fields.next().ok_or_else(|| {
+            AppError::operational("error: Git revision graph contained an invalid object ID")
+        })?;
+        if parsed != oid {
+            return Err(AppError::operational(
+                "error: Git revision graph contained an invalid object ID",
+            ));
+        }
+        fields
+            .map(|parent| {
+                if matches!(parent.len(), 40 | 64)
+                    && parent.bytes().all(|byte| byte.is_ascii_hexdigit())
+                {
+                    Ok(parent.to_owned())
+                } else {
+                    Err(AppError::operational(
+                        "error: Git revision graph contained an invalid object ID",
+                    ))
+                }
+            })
+            .collect()
+    }
+
+    /// Whole-commit patch identifiers under the fixed diff rules in [`patch`].
+    pub(crate) fn commit_patch_ids(
+        &self,
+        specs: &[PatchSpec],
+    ) -> Result<Vec<(String, PatchLookup)>, AppError> {
+        patch::commit_patch_ids(&self.git, specs)
     }
 
     pub(crate) fn reachable_commit_times(
