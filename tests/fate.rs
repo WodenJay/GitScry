@@ -612,7 +612,7 @@ fn fate_patch_selects_target_relevant_hunks_amid_unrelated_edits() {
     assert!(text.contains("+BETA"), "{text}");
     // Unrelated same-file (distant) and sibling-file edits stay out of the
     // attached hunk text.
-    assert!(!text.contains("unrelated edit"), "{text}");
+    assert!(!text.contains("UNRELATED"), "{text}");
     assert!(!text.contains("noise"), "{text}");
 }
 
