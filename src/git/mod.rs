@@ -38,6 +38,12 @@ pub(crate) use target::FateTarget;
 pub(crate) use target::TimelineTarget;
 pub(crate) use target::{DeletedLine, RegressionTarget, TraceFixTarget, WhyAnchor, WhyTarget};
 
+/// A located historical declaration: inclusive line span plus structured selection.
+pub(crate) struct SymbolLocation {
+    pub(crate) start_line: usize,
+    pub(crate) end_line: usize,
+    pub(crate) selection: SymbolSelection,
+}
 pub(crate) use symbol::Selection as SymbolSelection;
 pub(crate) struct SymbolTrace {
     pub(crate) revisions: Vec<String>,
@@ -159,9 +165,37 @@ impl Repository {
         &self,
         revision: &str,
         path: &str,
-        line: usize,
+        line: Option<usize>,
+        symbol: Option<&str>,
     ) -> Result<FateTarget, AppError> {
-        target::pin_fate(&self.git, revision, path, line)
+        target::pin_fate(&self.git, revision, path, line, symbol)
+    }
+
+    /// Read a blob's contents at a revision; `None` when the path is absent or not a blob.
+    pub(crate) fn read_blob(
+        &self,
+        revision: &str,
+        path: &[u8],
+    ) -> Result<Option<Vec<u8>>, AppError> {
+        let Ok(path) = std::str::from_utf8(path) else {
+            return Ok(None);
+        };
+        target::read_blob_at(&self.git, revision, path)
+    }
+
+    /// Resolve a symbol declaration uniquely inside one source version.
+    pub(crate) fn locate_symbol(
+        &self,
+        content: &[u8],
+        name: &str,
+        path: &str,
+    ) -> Result<SymbolLocation, AppError> {
+        let location = symbol::locate_unique(content, name, path)?;
+        Ok(SymbolLocation {
+            start_line: location.span.start,
+            end_line: location.span.end,
+            selection: location.selection,
+        })
     }
 
     pub(crate) fn file_paths_at(

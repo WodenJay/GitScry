@@ -908,14 +908,21 @@ Examples:
     },
 
     #[command(
-        about = "Trace a historical line's fate forward through history",
-        after_help = r#"Choose exactly one target: --line. The selected line is validated at --at,
-then tracked forward through cached history to --to-rev (HEAD fixed at
-invocation by default). Unchanged lines follow preceding insertions and
-deletions and detected renames; unrelated edits shift coordinates without
-becoming events. A rewritten selected line is recorded with bounded
-replacement material; tracking then stops as unknown because the hunk does not
-establish line identity.
+        about = "Trace a historical line's or symbol's fate forward through history",
+        after_help = r#"Choose exactly one target: --line or --symbol. The selected target is
+validated at --at, then tracked forward through cached history to --to-rev
+(HEAD fixed at invocation by default). Unchanged lines follow preceding
+insertions and deletions and detected renames; unrelated edits shift
+coordinates without becoming events. A rewritten selected line is recorded
+with bounded replacement material; tracking then stops as unknown because the
+hunk does not establish line identity.
+
+With --symbol, the declaration is resolved at --at and its body is tracked:
+uniquely mapped local edits are modification events, and coordinate shifts and
+detected renames are followed without inventing events. Whole-body rewrites
+that keep the name, declaration replacement, unreliable boundary extraction,
+and unresolved moves stop explicitly as unknown; a surviving name alone never
+restarts a stopped trace.
 
 Run `gitscry index` first. Queries refresh locally available HEAD history;
 index another branch before selecting an uncached --at or --to-rev revision
@@ -932,14 +939,18 @@ stay visible.
 Examples:
   gitscry fate src/lib.rs --line 12 --at HEAD~5
   gitscry fate src/lib.rs --line 12 --at v1.0 --to-rev release --patch
-  gitscry fate src/lib.rs --line 12 --at v1.0 --max-commits 500 --json"#
+  gitscry fate src/lib.rs --line 12 --at v1.0 --max-commits 500 --json
+  gitscry fate src/lib.rs --symbol parse --at v1.0 --json"#
     )]
     Fate {
         /// Repository-relative file path at the starting revision.
         path: String,
-        /// One-based line number at the starting revision.
-        #[arg(long, value_parser = parse_line)]
-        line: usize,
+        /// One-based line number at the starting revision (exclusive with --symbol).
+        #[arg(long, value_parser = parse_line, conflicts_with = "symbol")]
+        line: Option<usize>,
+        /// Symbol name at the starting revision (exclusive with --line).
+        #[arg(long)]
+        symbol: Option<String>,
         /// Local revision containing the starting path and line; required.
         #[arg(long, value_name = "REV")]
         at: String,

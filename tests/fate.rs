@@ -551,3 +551,197 @@ fn fate_text_output_carries_summary() {
     assert!(text.contains("1 event(s) recorded"), "{text}");
     assert!(text.contains(&start), "{text}");
 }
+
+#[test]
+fn fate_symbol_tracks_local_edits_and_stops_on_whole_body_rewrite() {
+    let repo = TestRepo::new();
+    let start = commit(
+        &repo,
+        "lib.rs",
+        "fn alpha() {\n    let a = 1;\n}\nfn beta() {}\n",
+        "Create",
+        "2020-01-01T00:00:00Z",
+    );
+    // Local edit inside the body: tracked as a modification, tracing continues.
+    let edit = commit(
+        &repo,
+        "lib.rs",
+        "fn alpha() {\n    let a = 2;\n}\nfn beta() {}\n",
+        "Adjust alpha",
+        "2020-01-02T00:00:00Z",
+    );
+    repo.index();
+    let report = json(
+        &repo,
+        &[
+            "fate", "lib.rs", "--symbol", "alpha", "--at", &start, "--json",
+        ],
+    );
+    assert_eq!(report["final_state"], "reached_endpoint", "{report}");
+    assert_eq!(report["symbol_selection"]["qualified_name"], "alpha");
+    assert_eq!(report["symbol_selection"]["kind"], "function");
+    assert_eq!(report["symbol_selection"]["start_line"], 1);
+    assert_eq!(report["symbol_selection"]["end_line"], 3);
+    let events = report["events"].as_array().unwrap();
+    assert_eq!(events.len(), 1, "{report}");
+    assert_eq!(events[0]["commit_id"], edit);
+    assert_eq!(events[0]["relationship"], "modified");
+    assert_eq!(events[0]["before"]["start_line"], 1);
+    assert_eq!(events[0]["after"]["start_line"], 1);
+
+    // Whole-body rewrite keeping the name must stop as unknown.
+    let start = commit(
+        &repo,
+        "lib.rs",
+        "fn alpha() {\n    let a = 1;\n}\nfn beta() {}\n",
+        "Create",
+        "2020-01-01T00:00:00Z",
+    );
+    let rewrite = commit(
+        &repo,
+        "lib.rs",
+        "fn alpha() {\n    let b = 10;\n    let c = 20;\n    let d = 30;\n}\nfn beta() {}\n",
+        "Rewrite alpha body",
+        "2020-01-02T00:00:00Z",
+    );
+    repo.index();
+    let report = json(
+        &repo,
+        &[
+            "fate", "lib.rs", "--symbol", "alpha", "--at", &start, "--json",
+        ],
+    );
+    assert_eq!(report["final_state"], "unknown", "{report}");
+    assert_eq!(report["stopped_at"], rewrite);
+    assert_eq!(report["stop_reason"]["code"], "symbol_body_rewritten");
+    assert_eq!(report["last_location"]["path"], "lib.rs");
+}
+
+#[test]
+fn fate_symbol_rejects_missing_and_ambiguous_and_line_overlap() {
+    let repo = TestRepo::new();
+    commit(
+        &repo,
+        "lib.rs",
+        "mod net {\n    fn parse() {}\n    fn parse_v2() {}\n}\nfn parse() {}\n",
+        "Create",
+        "2020-01-01T00:00:00Z",
+    );
+    repo.index();
+
+    let missing = repo.run([
+        "fate", "lib.rs", "--symbol", "absent", "--at", "HEAD", "--json",
+    ]);
+    assert_eq!(missing.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&missing.stderr);
+    assert!(stderr.contains("no supported declaration"), "{stderr}");
+
+    let ambiguous = repo.run(["fate", "lib.rs", "--symbol", "parse", "--at", "HEAD"]);
+    assert_eq!(ambiguous.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&ambiguous.stderr);
+    assert!(stderr.contains("ambiguous"), "{stderr}");
+    assert!(stderr.contains("net::parse"), "{stderr}");
+
+    let exclusive = repo.run([
+        "fate", "lib.rs", "--symbol", "parse", "--line", "1", "--at", "HEAD",
+    ]);
+    assert_ne!(exclusive.status.code(), Some(0));
+}
+
+#[test]
+fn fate_symbol_survives_renames_and_coordinate_shifts() {
+    let repo = TestRepo::new();
+    let start = commit(
+        &repo,
+        "old.rs",
+        "fn tracked() {\n    let a = 1;\n}\nfn other() {}\n",
+        "Create",
+        "2020-01-01T00:00:00Z",
+    );
+    rename(&repo, "old.rs", "new.rs", "Rename", "2020-01-02T00:00:00Z");
+    // Unrelated insertion before the symbol shifts its start line.
+    let edit = commit(
+        &repo,
+        "new.rs",
+        "fn first() {}\n\nfn tracked() {\n    let a = 1;\n}\nfn other() {}\n",
+        "Insert before",
+        "2020-01-03T00:00:00Z",
+    );
+    repo.index();
+    let report = json(
+        &repo,
+        &[
+            "fate", "old.rs", "--symbol", "tracked", "--at", &start, "--json",
+        ],
+    );
+    assert_eq!(report["final_state"], "reached_endpoint", "{report}");
+    let events = report["events"].as_array().unwrap();
+    assert_eq!(events.len(), 2, "{report}");
+    assert_eq!(events[0]["relationship"], "rename");
+    assert_eq!(events[0]["after"]["path"], "new.rs");
+    assert_eq!(events[1]["relationship"], "shifted");
+    assert_eq!(events[1]["commit_id"], edit);
+    assert_eq!(events[1]["after"]["start_line"], 3);
+    let location = &report["last_location"];
+    assert_eq!(location["path"], "new.rs");
+    assert_eq!(location["start_line"], 3);
+}
+
+#[test]
+fn fate_symbol_stops_on_declaration_replacement() {
+    let repo = TestRepo::new();
+    let start = commit(
+        &repo,
+        "lib.rs",
+        "fn tracked() {\n    let a = 1;\n}\n",
+        "Create",
+        "2020-01-01T00:00:00Z",
+    );
+    // The declaration itself is replaced: same lines, different name.
+    let replacement = commit(
+        &repo,
+        "lib.rs",
+        "fn renamed() {\n    let a = 1;\n}\n",
+        "Replace declaration",
+        "2020-01-02T00:00:00Z",
+    );
+    repo.index();
+    let report = json(
+        &repo,
+        &[
+            "fate", "lib.rs", "--symbol", "tracked", "--at", &start, "--json",
+        ],
+    );
+    assert_eq!(report["final_state"], "unknown", "{report}");
+    assert_eq!(report["stopped_at"], replacement);
+    assert_eq!(report["stop_reason"]["code"], "symbol_declaration_replaced");
+}
+
+#[test]
+fn fate_symbol_comment_only_survival_is_not_a_modification() {
+    let repo = TestRepo::new();
+    let start = commit(
+        &repo,
+        "lib.rs",
+        "fn tracked() {\n    let a = 1;\n}\n",
+        "Create",
+        "2020-01-01T00:00:00Z",
+    );
+    // Comment and whitespace changes inside the body do not modify the code.
+    let _comment = commit(
+        &repo,
+        "lib.rs",
+        "fn tracked() {\n    // note\n    let a = 1;\n}\n",
+        "Add comment",
+        "2020-01-02T00:00:00Z",
+    );
+    repo.index();
+    let report = json(
+        &repo,
+        &[
+            "fate", "lib.rs", "--symbol", "tracked", "--at", &start, "--json",
+        ],
+    );
+    assert_eq!(report["final_state"], "reached_endpoint", "{report}");
+    assert_eq!(report["events"].as_array().unwrap().len(), 0, "{report}");
+}

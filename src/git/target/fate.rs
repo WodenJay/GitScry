@@ -1,13 +1,18 @@
-//! Fate target pinning: a validated historical line at one revision.
+//! Fate target pinning: a validated historical line or symbol at one revision.
 
 use super::{read_shallow_boundaries, read_tree_entry, resolve_revision, validate_path};
 use crate::app::AppError;
 use crate::git::process::Git;
+use crate::git::symbol;
 
 pub(crate) struct FateTarget {
     pub(crate) revision: String,
     pub(crate) path: Vec<u8>,
     pub(crate) line: usize,
+    /// Present when the target was selected by `--symbol`.
+    pub(crate) symbol_selection: Option<symbol::Selection>,
+    /// One-based end line of the symbol span; `None` for line targets.
+    pub(crate) symbol_end_line: Option<usize>,
     pub(crate) warnings: Vec<String>,
 }
 
@@ -15,7 +20,8 @@ pub(in crate::git) fn pin(
     git: &Git,
     revision: &str,
     path: &str,
-    line: usize,
+    line: Option<usize>,
+    symbol_name: Option<&str>,
 ) -> Result<FateTarget, AppError> {
     let path = validate_path(path)?;
     if revision.contains('\0') {
@@ -49,15 +55,28 @@ pub(in crate::git) fn pin(
             count
         }
     };
-    if line == 0 || line > line_count {
-        return Err(AppError::input(format!(
-            "line {line} is outside {path} at the starting revision"
-        )));
-    }
+    let (line, symbol_selection, symbol_end_line) = if let Some(name) = symbol_name {
+        let location = symbol::locate_unique(&content, name, &path)?;
+        if let Some(notice) = &location.notice {
+            warnings.push(notice.clone());
+        }
+        let end = location.span.end;
+        (location.span.start, Some(location.selection), Some(end))
+    } else {
+        let line = line.unwrap_or(0);
+        if line == 0 || line > line_count {
+            return Err(AppError::input(format!(
+                "line {line} is outside {path} at the starting revision"
+            )));
+        }
+        (line, None, None)
+    };
     Ok(FateTarget {
         revision,
         path: path.as_bytes().to_vec(),
         line,
+        symbol_selection,
+        symbol_end_line,
         warnings,
     })
 }

@@ -119,7 +119,8 @@ pub(crate) enum Request {
     },
     Fate {
         path: String,
-        line: usize,
+        line: Option<usize>,
+        symbol: Option<String>,
         at: String,
         to_rev: Option<String>,
         max_commits: Option<usize>,
@@ -310,10 +311,11 @@ pub(crate) fn execute(request: Request, options: Options) -> Result<Outcome, App
         Request::Fate {
             path,
             line,
+            symbol,
             at,
             to_rev,
             max_commits,
-        } => capabilities::fate::execute(path, line, at, to_rev, max_commits, options),
+        } => capabilities::fate::execute(path, line, symbol, at, to_rev, max_commits, options),
     }
 }
 

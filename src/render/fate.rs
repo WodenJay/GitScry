@@ -5,6 +5,7 @@ use super::{
     material,
 };
 use crate::analysis::capabilities::fate::{Event, Report};
+use crate::git::SymbolSelection;
 
 pub(super) fn format_report(report: &Report) -> String {
     let mut lines = vec![format!(
@@ -13,6 +14,9 @@ pub(super) fn format_report(report: &Report) -> String {
         report.line,
         report.start_revision
     )];
+    if let Some(selection) = &report.symbol_selection {
+        lines.push(material::format_symbol_selection(selection));
+    }
     lines.push(format!("Endpoint: {}", report.endpoint));
     if let Some(scope) = &report.scope {
         lines.push(material::scope_summary(scope));
@@ -92,16 +96,22 @@ pub(super) fn format_json_report(
         endpoint: &report.endpoint,
         path: json::json_path(&report.path),
         line: report.line,
+        symbol_selection: report.symbol_selection.as_ref(),
         final_state: report.final_state.code(),
         stopped_at: report.stopped_at.as_deref(),
         stop_reason: report.stop_reason.as_ref().map(|reason| JsonStopReason {
             code: reason.code,
             explanation: reason.explanation,
         }),
-        last_location: report.last_location.as_ref().map(|location| JsonLocation {
-            path: json::json_path(&location.path),
-            line: location.line,
+        last_location: report.last_location.as_ref().map(|location| {
+            json_location(
+                &location.path,
+                Some(location.line),
+                report.last_span.map(|span| span.0),
+                report.last_span.map(|span| span.1),
+            )
         }),
+        last_span: report.last_span,
         inspected_commits: report.inspected_commits,
         max_commits: report.max_commits,
         traversal_truncated: report.traversal_truncated,
@@ -124,6 +134,8 @@ struct JsonReport<'a> {
     endpoint: &'a str,
     path: JsonPath<'a>,
     line: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    symbol_selection: Option<&'a SymbolSelection>,
     final_state: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     stopped_at: Option<&'a str>,
@@ -131,6 +143,8 @@ struct JsonReport<'a> {
     stop_reason: Option<JsonStopReason<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     last_location: Option<JsonLocation<'a>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_span: Option<(i64, i64)>,
     inspected_commits: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_commits: Option<usize>,
@@ -154,7 +168,26 @@ struct JsonStopReason<'a> {
 #[derive(Serialize)]
 struct JsonLocation<'a> {
     path: JsonPath<'a>,
-    line: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    line: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    start_line: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    end_line: Option<i64>,
+}
+
+fn json_location<'a>(
+    path: &'a [u8],
+    line: Option<i64>,
+    start_line: Option<i64>,
+    end_line: Option<i64>,
+) -> JsonLocation<'a> {
+    JsonLocation {
+        path: json::json_path(path),
+        line,
+        start_line,
+        end_line,
+    }
 }
 
 #[derive(Serialize)]
@@ -173,18 +206,26 @@ struct JsonEvent<'a> {
 
 impl<'a> From<&'a Event> for JsonEvent<'a> {
     fn from(event: &'a Event) -> Self {
+        let (start, end) = event.before_span.unwrap_or((0, 0));
+        let after_span = event.after_span;
         Self {
             commit_id: &event.commit_id,
             timestamp: event.commit_time,
             subject: &event.subject,
             relationship: event.relationship,
-            before: JsonLocation {
-                path: json::json_path(&event.before.path),
-                line: event.before.line,
-            },
-            after: event.after.as_ref().map(|after| JsonLocation {
-                path: json::json_path(&after.path),
-                line: after.line,
+            before: json_location(
+                &event.before.path,
+                Some(event.before.line),
+                Some(start),
+                Some(end),
+            ),
+            after: event.after.as_ref().map(|after| {
+                json_location(
+                    &after.path,
+                    Some(after.line),
+                    after_span.map(|span| span.0),
+                    after_span.map(|span| span.1),
+                )
             }),
             parent_count: event.parent_count,
             patch: event.patch.as_ref().map(json::json_patch),

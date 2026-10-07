@@ -7,7 +7,7 @@ use crate::{
     git::Repository,
 };
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(crate) struct SearchScopeOptions {
     pub(crate) from_rev: Option<String>,
     pub(crate) to_rev: Option<String>,

@@ -205,7 +205,7 @@ fn format_why_report(report: &Report) -> String {
     lines.join("\n")
 }
 
-fn format_symbol_selection(selection: &crate::git::SymbolSelection) -> String {
+pub(super) fn format_symbol_selection(selection: &crate::git::SymbolSelection) -> String {
     format!(
         "Symbol: {} -> {} ({}, lines {}-{}, identifier line {}, {}, {})",
         escape::subject(&selection.input_selector),
