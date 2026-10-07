@@ -474,7 +474,12 @@ fn execute_line(
                 LineMoveCandidates::default()
             };
             let move_candidates = candidates.added;
-            let unverified_candidates = candidates.unverified;
+            let same_file_rewrite = matches!(&line_mapping, Some(Forward::Rewritten { .. }));
+            let unverified_candidates = candidates
+                .unverified
+                .into_iter()
+                .filter(|(path, _)| !same_file_rewrite || path.as_slice() != state.path)
+                .collect::<BTreeSet<_>>();
             if move_candidates.len() == 1 && unverified_candidates.is_empty() {
                 let (candidate_path, candidate_line) = move_candidates
                     .into_iter()
@@ -565,6 +570,9 @@ fn execute_line(
                 state.line = new_line;
             }
             Some(Forward::Rewritten { replacement }) => {
+                let candidates = rewritten_line_associations(&history.hunks, state.line, &new_path);
+                (associations, associations_truncated) =
+                    bounded_associations(associations.into_iter().chain(candidates));
                 events.push(Event {
                     commit_id: node.oid.clone(),
                     subject: session.forward_subject(&node.oid)?,
@@ -777,9 +785,9 @@ fn source_line_bytes(content: &[u8]) -> Vec<Vec<u8>> {
     lines
 }
 
-fn join_source_lines(lines: &[Vec<u8>]) -> Vec<u8> {
+fn join_source_lines<'a>(lines: impl IntoIterator<Item = &'a [u8]>) -> Vec<u8> {
     let mut source = Vec::new();
-    for (index, line) in lines.iter().enumerate() {
+    for (index, line) in lines.into_iter().enumerate() {
         if index > 0 {
             source.push(b'\n');
         }
@@ -810,7 +818,7 @@ fn line_move_context(content: &[u8], line: i64, path: &[u8]) -> Option<LineMoveC
     }
     let language = source_language_for_path(path);
     Some(LineMoveContext {
-        source: join_source_lines(&context_lines),
+        source: join_source_lines(context_lines.iter().map(|line| line.as_slice())),
         lines: context_lines,
         target_offset: target_index - start,
         language,
@@ -822,11 +830,10 @@ fn line_move_context(content: &[u8], line: i64, path: &[u8]) -> Option<LineMoveC
 }
 
 fn line_context_matches(
-    content: &[u8],
     lines: &[Vec<u8>],
     target_index: usize,
     context: &LineMoveContext,
-    path: &[u8],
+    can_normalize_indentation: bool,
 ) -> bool {
     let Some(start) = target_index.checked_sub(context.target_offset) else {
         return false;
@@ -837,17 +844,62 @@ fn line_context_matches(
     let Some(candidate_lines) = lines.get(start..end) else {
         return false;
     };
-    let candidate_language = source_language_for_path(path);
-    let can_normalize_indentation = context.can_normalize_indentation
-        && candidate_language == context.language
-        && context
-            .language
-            .is_some_and(|language| !contains_multiline_literal(content, language));
     strict_source_equal(
         &context.source,
-        &join_source_lines(candidate_lines),
+        &join_source_lines(candidate_lines.iter().map(|line| line.as_slice())),
         context.language,
         can_normalize_indentation,
+    )
+}
+
+fn line_context_neighbors_match(
+    lines: &[Vec<u8>],
+    target_index: usize,
+    context: &LineMoveContext,
+    can_normalize_indentation: bool,
+) -> bool {
+    if !can_normalize_indentation {
+        return false;
+    }
+    let Some(start) = target_index.checked_sub(context.target_offset) else {
+        return false;
+    };
+    let Some(end) = start.checked_add(context.lines.len()) else {
+        return false;
+    };
+    let Some(candidate_lines) = lines.get(start..end) else {
+        return false;
+    };
+    let old_neighbor_count = context
+        .lines
+        .iter()
+        .enumerate()
+        .filter(|(index, line)| {
+            *index != context.target_offset && !line.iter().all(u8::is_ascii_whitespace)
+        })
+        .count();
+    if old_neighbor_count < MIN_MOVE_CONTEXT_LINES {
+        return false;
+    }
+
+    strict_source_equal(
+        &join_source_lines(
+            context
+                .lines
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| *index != context.target_offset)
+                .map(|(_, line)| line.as_slice()),
+        ),
+        &join_source_lines(
+            candidate_lines
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| *index != context.target_offset)
+                .map(|(_, line)| line.as_slice()),
+        ),
+        context.language,
+        true,
     )
 }
 
@@ -876,17 +928,37 @@ fn find_line_move_candidates(
             continue;
         };
         let lines = source_line_bytes(&content);
+        let candidate_language = source_language_for_path(path);
+        let can_normalize_indentation = context.can_normalize_indentation
+            && candidate_language == context.language
+            && candidate_language
+                .is_some_and(|language| !contains_multiline_literal(&content, language));
         let mut matched_lines = BTreeSet::new();
+        let mut contextual_lines = BTreeSet::new();
         for (index, _) in lines.iter().enumerate() {
-            if !line_context_matches(&content, &lines, index, context, path) {
-                continue;
-            }
+            let is_match =
+                if line_context_matches(&lines, index, context, can_normalize_indentation) {
+                    &mut matched_lines
+                } else if line_context_neighbors_match(
+                    &lines,
+                    index,
+                    context,
+                    can_normalize_indentation,
+                ) {
+                    &mut contextual_lines
+                } else {
+                    continue;
+                };
             let Ok(line) = i64::try_from(index + 1) else {
                 continue;
             };
-            matched_lines.insert(line);
+            is_match.insert(line);
         }
-        if matched_lines.is_empty() {
+        let candidate_lines = matched_lines
+            .union(&contextual_lines)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        if candidate_lines.is_empty() {
             continue;
         }
         let history =
@@ -895,14 +967,18 @@ fn find_line_move_candidates(
             &history.hunks,
             history.missing_objects,
             history.truncated,
-            &matched_lines,
+            &candidate_lines,
         );
-        for line in matched_lines {
+        for line in candidate_lines {
             let destination = (path.clone(), line);
-            let candidates_for_status = match &added_lines {
-                Some(added_lines) if added_lines.contains(&line) => &mut candidates.added,
-                Some(_) => continue,
-                None => &mut candidates.unverified,
+            let strict_match = matched_lines.contains(&line);
+            let candidates_for_status = match (&added_lines, strict_match) {
+                (Some(added_lines), true) if added_lines.contains(&line) => &mut candidates.added,
+                (Some(added_lines), false) if added_lines.contains(&line) => {
+                    &mut candidates.unverified
+                }
+                (Some(_), _) => continue,
+                (None, _) => &mut candidates.unverified,
             };
             candidates_for_status.insert(destination);
             if candidates_for_status.len() > MAX_MOVE_ASSOCIATIONS + 1 {
@@ -972,14 +1048,12 @@ fn find_symbol_move_candidates(
         let Some(candidate_bytes) = symbol_source_bytes(&content, (start, end)) else {
             continue;
         };
-        if !strict_source_equal(
+        let strict_match = strict_source_equal(
             search.strict_target,
             &candidate_bytes,
             Some(search.language),
             true,
-        ) {
-            continue;
-        }
+        );
         let association = Association {
             location: Location {
                 path: path.clone(),
@@ -988,13 +1062,15 @@ fn find_symbol_move_candidates(
             span: Some((start, end)),
         };
         match span_addition_status(session, oid, change.ordinal, (start, end))? {
-            AddedMaterialStatus::Added => candidates.added.push(SymbolMoveCandidate {
-                path: path.clone(),
-                symbol,
-                start,
-                end,
-            }),
-            AddedMaterialStatus::Unavailable => {
+            AddedMaterialStatus::Added if strict_match => {
+                candidates.added.push(SymbolMoveCandidate {
+                    path: path.clone(),
+                    symbol,
+                    start,
+                    end,
+                });
+            }
+            AddedMaterialStatus::Added | AddedMaterialStatus::Unavailable => {
                 candidates.unverified.insert(association);
                 if candidates.unverified.len() > MAX_MOVE_ASSOCIATIONS + 1 {
                     candidates.unverified.pop_last();
@@ -1086,6 +1162,60 @@ fn map_line_forward(hunks: &[PatchHistoryHunk], line: i64) -> Option<Forward> {
         });
     }
     Some(Forward::Kept { new_line })
+}
+
+fn rewritten_line_associations(
+    hunks: &[PatchHistoryHunk],
+    target_line: i64,
+    path: &[u8],
+) -> Vec<Association> {
+    let Some(hunk) = hunks.iter().find(|hunk| {
+        target_line >= hunk.old_start && target_line < hunk.old_start + hunk.old_lines
+    }) else {
+        return Vec::new();
+    };
+    let Some(text) = hunk.text.as_ref() else {
+        return Vec::new();
+    };
+    let mut old_line = hunk.old_start;
+    let mut new_line = hunk.new_start;
+    let mut target_deleted = false;
+    let mut added_lines = Vec::new();
+    for diff_line in text.split_inclusive(|byte| *byte == b'\n') {
+        match diff_line.first() {
+            Some(b'-') => {
+                target_deleted |= old_line == target_line;
+                old_line += 1;
+            }
+            Some(b'+') => {
+                added_lines.push(new_line);
+                new_line += 1;
+            }
+            Some(b' ') => {
+                if target_deleted {
+                    break;
+                }
+                added_lines.clear();
+                old_line += 1;
+                new_line += 1;
+            }
+            Some(b'@' | b'\\') => {}
+            _ => return Vec::new(),
+        }
+    }
+    if !target_deleted {
+        return Vec::new();
+    }
+    added_lines
+        .into_iter()
+        .map(|line| Association {
+            location: Location {
+                path: path.to_vec(),
+                line,
+            },
+            span: None,
+        })
+        .collect()
 }
 
 /// Track a historical symbol declaration forward through linear history.
@@ -1741,6 +1871,15 @@ fn execute_symbol(
         let symbol_modified = old_symbol_identity != new_symbol_identity;
         let unchanged_body = old_identity == new_identity;
         let Some(unchanged_correspondence) = correspondence else {
+            let candidate = Association {
+                location: Location {
+                    path: new_path.clone(),
+                    line: new_start,
+                },
+                span: Some((new_start, new_end)),
+            };
+            (associations, associations_truncated) =
+                bounded_associations(associations.into_iter().chain([candidate]));
             stop = Some((
                 node.oid.clone(),
                 FinalState::Unknown,
@@ -1763,6 +1902,15 @@ fn execute_symbol(
                     explanation: "the declaration body was rewritten; unchanged body code no longer establishes continuity",
                 }
             };
+            let candidate = Association {
+                location: Location {
+                    path: new_path.clone(),
+                    line: new_start,
+                },
+                span: Some((new_start, new_end)),
+            };
+            (associations, associations_truncated) =
+                bounded_associations(associations.into_iter().chain([candidate]));
             stop = Some((node.oid.clone(), FinalState::Unknown, reason));
             break;
         }
