@@ -18,6 +18,8 @@ pub(in crate::analysis) fn execute(
     options: Options,
 ) -> Result<Outcome, AppError> {
     let repository = Repository::discover()?;
+    let version_limit = options.limit;
+    let include_patch = options.patch;
     let (context, target) = Context::prepare_target(
         &repository,
         Some(revision.as_str()),
@@ -30,13 +32,34 @@ pub(in crate::analysis) fn execute(
         &context.session,
         &target,
         &reachable,
-        options.limit,
+        version_limit,
         context.scope.is_some(),
     )?;
-    if options.patch {
+    if include_patch {
         patch::attach_trace_fix_patch_excerpts(&context.session, &mut report)?;
     }
-    Ok(context.finish(QueryReport::Analysis(report)))
+    let mut outcome = context.finish(QueryReport::Analysis(report));
+    let versions_outcome = crate::analysis::capabilities::patch_search::execute(
+        target.revision.clone(),
+        None,
+        Options {
+            limit: version_limit,
+            patch: false,
+            scope: crate::analysis::query::SearchScopeOptions::default(),
+        },
+    )?;
+    let QueryReport::PatchSearch(versions) = versions_outcome.report else {
+        unreachable!("patch-search execution returns a patch-search report")
+    };
+    let QueryReport::Analysis(report) = &mut outcome.report else {
+        unreachable!("trace-fix assembles an analysis report")
+    };
+    report.fix_versions = Some(Box::new(
+        crate::analysis::capabilities::patch_search::trace_fix_versions(versions),
+    ));
+    outcome.progress.extend(versions_outcome.progress);
+    outcome.warnings.extend(versions_outcome.warnings);
+    Ok(outcome)
 }
 
 pub(crate) struct TraceFixPatchAnchor {

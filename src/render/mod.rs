@@ -47,6 +47,10 @@ fn format_report(
         QueryReport::TraceRemovalFragment(report) => trace_removal::format_fragment_report(report),
         QueryReport::Analysis(report) => {
             let mut output = material::format_report(report);
+            if let Some(versions) = &report.fix_versions {
+                output.push_str("\n\nEquivalent-version scope: all local and fetched remote branch tips, independent of trace-fix historical scope and filters.\n");
+                output.push_str(&patch_search::format_trace_fix_versions(versions));
+            }
             if let Some(github_links) = github_links {
                 output.push_str("\n\n");
                 output.push_str(&github_links::format(github_links));

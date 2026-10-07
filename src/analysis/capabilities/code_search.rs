@@ -249,6 +249,7 @@ fn run_with_scope(
         why: None,
         target: None,
         scope: None,
+        fix_versions: None,
         symbol_summary: None,
         symbol_selection: None,
     })

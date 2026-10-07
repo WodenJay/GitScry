@@ -43,13 +43,13 @@ pub(in crate::analysis) fn resolve_for_patch(
     let mut revisions = BTreeSet::new();
     let mut coverage_complete = true;
     for (_, tip) in tips {
-        let history = reachable_history(session, repository, tip)?;
+        let history = reachable_history_for_patch(session, repository, tip)?;
         coverage_complete &= history.coverage_complete;
         revisions.extend(history.revisions);
     }
     let to_rev = if let Some(requested) = &options.to_rev {
         let oid = repository.resolve_commit(requested)?;
-        let history = reachable_history(session, repository, &oid)?;
+        let history = reachable_history_for_patch(session, repository, &oid)?;
         coverage_complete &= history.coverage_complete;
         let upper: HashSet<_> = history.revisions.into_iter().collect();
         revisions.retain(|oid| upper.contains(oid));
@@ -198,6 +198,28 @@ pub(in crate::analysis) fn reachable_history(
     revision: &str,
 ) -> Result<ReachableHistory, AppError> {
     let available = repository.reachable_commits(revision)?;
+    reachable_history_from_available(session, repository, available)
+}
+
+pub(in crate::analysis) fn reachable_history_for_patch(
+    session: &QuerySession,
+    repository: &Repository,
+    revision: &str,
+) -> Result<ReachableHistory, AppError> {
+    match repository.reachable_commits(revision) {
+        Ok(available) => reachable_history_from_available(session, repository, available),
+        Err(_) => Ok(ReachableHistory {
+            revisions: session.commits_reachable_from(revision)?,
+            coverage_complete: false,
+        }),
+    }
+}
+
+fn reachable_history_from_available(
+    session: &QuerySession,
+    repository: &Repository,
+    available: Vec<String>,
+) -> Result<ReachableHistory, AppError> {
     let shallow_boundaries = repository.shallow_boundaries()?;
     let shallow_reachable = shallow_boundaries
         .iter()

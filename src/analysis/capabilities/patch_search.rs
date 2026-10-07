@@ -23,6 +23,126 @@ pub(crate) struct Report {
     pub(crate) scope: Scope,
     pub(crate) warnings: Vec<String>,
 }
+
+const MAX_TRACE_FIX_VERSION_HUNKS: usize = 64;
+const MAX_TRACE_FIX_VERSION_TEXT_BYTES: usize = 2 * 1024;
+
+#[derive(Serialize)]
+pub(crate) struct TraceFixVersions {
+    pub(crate) schema_version: u8,
+    pub(crate) kind: &'static str,
+    pub(crate) query: TraceFixVersionMaterial,
+    pub(crate) matches: Vec<TraceFixVersionMaterial>,
+    pub(crate) matched_count: usize,
+    pub(crate) returned_count: usize,
+    pub(crate) limit: usize,
+    pub(crate) scope: Scope,
+    pub(crate) warnings: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct TraceFixVersionMaterial {
+    pub(crate) commit_id: String,
+    pub(crate) subject: String,
+    pub(crate) integrity: &'static str,
+    pub(crate) reason: Option<String>,
+    pub(crate) relation: Option<&'static str>,
+    pub(crate) normalization_version: i64,
+    pub(crate) comparison_basis: Option<&'static str>,
+    pub(crate) parent: Option<String>,
+    pub(crate) paths: Vec<Vec<u8>>,
+    pub(crate) hunk_count: usize,
+    pub(crate) hunks: Vec<TraceFixVersionHunk>,
+    pub(crate) hunks_truncated: bool,
+}
+
+#[derive(Serialize)]
+pub(crate) struct TraceFixVersionHunk {
+    pub(crate) change_ordinal: i64,
+    pub(crate) ordinal: i64,
+    pub(crate) old_start: i64,
+    pub(crate) old_lines: i64,
+    pub(crate) new_start: i64,
+    pub(crate) new_lines: i64,
+    pub(crate) text: Option<String>,
+    pub(crate) text_lossy: bool,
+    pub(crate) text_truncated: bool,
+}
+
+pub(crate) fn trace_fix_versions(report: Report) -> TraceFixVersions {
+    let mut remaining_hunks = MAX_TRACE_FIX_VERSION_HUNKS;
+    let mut remaining_text_bytes = MAX_TRACE_FIX_VERSION_TEXT_BYTES;
+    let query = trace_fix_version_material(
+        report.query,
+        &mut remaining_hunks,
+        &mut remaining_text_bytes,
+    );
+    let matches = report
+        .matches
+        .into_iter()
+        .map(|material| {
+            trace_fix_version_material(material, &mut remaining_hunks, &mut remaining_text_bytes)
+        })
+        .collect();
+    TraceFixVersions {
+        schema_version: report.schema_version,
+        kind: "trace-fix-versions",
+        query,
+        matches,
+        matched_count: report.matched_count,
+        returned_count: report.returned_count,
+        limit: report.limit,
+        scope: report.scope,
+        warnings: report.warnings,
+    }
+}
+
+fn trace_fix_version_material(
+    material: PatchMaterial,
+    remaining_hunks: &mut usize,
+    remaining_text_bytes: &mut usize,
+) -> TraceFixVersionMaterial {
+    let hunk_count = material.patch.len();
+    let hunks = material
+        .patch
+        .into_iter()
+        .take(*remaining_hunks)
+        .map(|hunk| {
+            *remaining_hunks -= 1;
+            let text_len = hunk.text.len().min(*remaining_text_bytes);
+            let text_truncated = text_len < hunk.text.len();
+            let text_lossy = std::str::from_utf8(&hunk.text[..text_len]).is_err();
+            let text = (text_len > 0)
+                .then(|| String::from_utf8_lossy(&hunk.text[..text_len]).into_owned());
+            *remaining_text_bytes -= text_len;
+            TraceFixVersionHunk {
+                change_ordinal: hunk.change_ordinal,
+                ordinal: hunk.ordinal,
+                old_start: hunk.old_start,
+                old_lines: hunk.old_lines,
+                new_start: hunk.new_start,
+                new_lines: hunk.new_lines,
+                text,
+                text_lossy,
+                text_truncated,
+            }
+        })
+        .collect::<Vec<_>>();
+    TraceFixVersionMaterial {
+        commit_id: material.commit_id,
+        subject: material.subject,
+        integrity: material.integrity,
+        reason: material.reason,
+        relation: material.relation,
+        normalization_version: material.normalization_version,
+        comparison_basis: material.comparison_basis,
+        parent: material.parent,
+        paths: material.paths,
+        hunk_count,
+        hunks_truncated: hunks.len() < hunk_count,
+        hunks,
+    }
+}
 #[derive(Serialize)]
 pub(crate) struct Scope {
     pub(crate) branch_tips: Vec<(String, String)>,
