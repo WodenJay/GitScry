@@ -21,7 +21,11 @@ fn search(repo: &TestRepo, revision: &str, extra: &[&str]) -> Value {
         "--json",
     ];
     args.extend_from_slice(extra);
-    let output = repo.run(args);
+    let output = TestRepo::command_at(repo.dir.path(), repo.user_data_dir())
+        .args(args)
+        .env("GITSCRY_FULL_OUTPUT", "1")
+        .output()
+        .unwrap();
     assert!(
         output.status.success(),
         "{}",
@@ -243,4 +247,89 @@ fn matches_renames_and_modes_without_losing_operation_material() {
     let value = search(&repo, &mode_query, &[]);
     assert_eq!(value["matched_count"], 1);
     assert_eq!(value["matches"][0]["files"][0]["new_mode"], "100755");
+}
+
+#[test]
+fn backfills_invalidates_and_extends_derived_cache_without_changing_material() {
+    let repo = TestRepo::new();
+    let base = commit(&repo, "file", b"old\n", "Base");
+    let query = commit(&repo, "file", b"new\n", "Query");
+    repo.index(); // A pre-feature history cache has no patch fingerprints.
+    git(repo.dir.path(), ["checkout", "-b", "release", &base]);
+    commit(&repo, "file", b"new\n", "Reapplication");
+    let original = search(&repo, &query, &[]);
+    let derived = repo.cache_dir().join("patch-relationships.sqlite");
+    let connection = rusqlite::Connection::open(&derived).unwrap();
+    connection.execute_batch("PRAGMA user_version=999").unwrap();
+    drop(connection);
+    assert_eq!(search(&repo, &query, &[]), original);
+    fs::remove_file(derived).unwrap();
+    assert_eq!(search(&repo, &query, &[]), original);
+    git(repo.dir.path(), ["checkout", "-b", "next-release", &base]);
+    commit(&repo, "file", b"new\n", "New history");
+    assert_eq!(search(&repo, &query, &[])["matched_count"], 2);
+    assert_eq!(
+        search(&repo, &query, &["--from-rev", &base])["matched_count"],
+        2
+    );
+    assert_eq!(
+        search(&repo, &query, &["--since", "2100-01-01"])["matched_count"],
+        0
+    );
+}
+
+#[test]
+fn missing_candidate_blobs_are_reverified_and_repaired_after_warm_queries() {
+    let repo = TestRepo::new();
+    let base = commit(&repo, "file", b"old\n", "Base");
+    let query = commit(&repo, "file", b"new\n", "Query");
+    repo.index();
+    git(repo.dir.path(), ["checkout", "-b", "shifted", &base]);
+    commit(&repo, "file", b"context\nold\n", "Shift base");
+    let equivalent = commit(&repo, "file", b"context\nnew\n", "Shifted equivalent");
+    let original = search(&repo, &query, &[]);
+    assert_eq!(original["matched_count"], 1);
+    let blob = repo.head_oid("HEAD:file");
+    let blob_path = repo
+        .common_dir()
+        .join("objects")
+        .join(&blob[..2])
+        .join(&blob[2..]);
+    let saved = fs::read(&blob_path).unwrap();
+    git(repo.dir.path(), ["checkout", "main"]);
+    fs::remove_file(&blob_path).unwrap();
+    let value = search(&repo, &query, &[]);
+    assert_eq!(value["matched_count"], 0, "{value:#}");
+    assert_eq!(value["scope"]["coverage_complete"], false);
+    assert!(
+        value["scope"]["indeterminate"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|gap| gap["commit_id"] == equivalent)
+    );
+    fs::write(blob_path, saved).unwrap();
+    assert_eq!(search(&repo, &query, &[]), original);
+}
+
+#[test]
+fn full_patch_beyond_display_limits_is_compared_and_shallow_scope_is_disclosed() {
+    let repo = TestRepo::new();
+    let base = commit(&repo, "file", b"old\n", "Base");
+    let large: Vec<u8> = (0..12000)
+        .flat_map(|i| format!("new line {i}\n").into_bytes())
+        .collect();
+    let query = commit(&repo, "file", &large, "Large query");
+    repo.index();
+    git(repo.dir.path(), ["checkout", "-b", "release", &base]);
+    let equivalent = commit(&repo, "file", &large, "Large equivalent");
+    assert_eq!(search(&repo, &query, &[])["matched_count"], 1);
+    let mut extra = large.clone();
+    extra.extend_from_slice(b"extra modification\n");
+    commit(&repo, "file", &extra, "Extra change");
+    assert_eq!(search(&repo, &query, &[])["matched_count"], 1);
+    fs::write(repo.common_dir().join("shallow"), format!("{base}\n")).unwrap();
+    let value = search(&repo, &query, &[]);
+    assert_eq!(value["scope"]["coverage_complete"], false);
+    assert_eq!(value["matches"][0]["commit_id"], equivalent);
 }
