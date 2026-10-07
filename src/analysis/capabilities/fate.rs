@@ -6,7 +6,7 @@
 //! rewritten line is one bounded replacement event and then tracking stops.
 //! Unsupported or missing correspondence stops explicitly as unknown.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 use crate::cache::{PatchHistoryHunk, QuerySession};
 use crate::git::Repository;
@@ -19,6 +19,22 @@ use crate::{app::AppError, cache::followups::ForwardCommit};
 
 const MAX_HUNKS: usize = 4_096;
 const MAX_HUNK_BYTES: usize = 16 * 1024;
+const MAX_MOVE_ASSOCIATIONS: usize = 8;
+
+fn bounded_associations(
+    associations: impl IntoIterator<Item = Association>,
+) -> (Vec<Association>, bool) {
+    let mut bounded = BTreeSet::new();
+    let mut truncated = false;
+    for association in associations {
+        bounded.insert(association);
+        if bounded.len() > MAX_MOVE_ASSOCIATIONS {
+            bounded.pop_last();
+            truncated = true;
+        }
+    }
+    (bounded.into_iter().collect(), truncated)
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FinalState {
@@ -42,10 +58,16 @@ pub(crate) struct StopReason {
     pub(crate) explanation: &'static str,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct Location {
     pub(crate) path: Vec<u8>,
     pub(crate) line: i64,
+}
+
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct Association {
+    pub(crate) location: Location,
+    pub(crate) span: Option<(i64, i64)>,
 }
 
 pub(crate) struct Event {
@@ -73,6 +95,8 @@ pub(crate) struct Report {
     pub(crate) final_state: FinalState,
     pub(crate) stopped_at: Option<String>,
     pub(crate) stop_reason: Option<StopReason>,
+    pub(crate) associations: Vec<Association>,
+    pub(crate) associations_truncated: bool,
     pub(crate) last_location: Option<Location>,
     /// Inclusive line span at `last_location` when the target is a symbol.
     pub(crate) last_span: Option<(i64, i64)>,
@@ -182,6 +206,8 @@ fn execute_line(
                 final_state: FinalState::ReachedEndpoint,
                 stopped_at: None,
                 stop_reason: None,
+                associations: Vec::new(),
+                associations_truncated: false,
                 last_location: Some(Location {
                     path: target.path,
                     line: i64::from(u32::try_from(target.line).unwrap_or(0)),
@@ -211,6 +237,8 @@ fn execute_line(
     };
     let mut last_revision = target.revision.clone();
     let mut events: Vec<Event> = Vec::new();
+    let mut associations = Vec::new();
+    let mut associations_truncated = false;
     let mut inspected = 0usize;
     let ceiling = max_commits.unwrap_or(usize::MAX);
     let mut traversal_truncated = false;
@@ -360,7 +388,101 @@ fn execute_line(
             ));
             break;
         }
-        match map_line_forward(&history.hunks, state.line) {
+        let line_mapping = map_line_forward(&history.hunks, state.line);
+        if matches!(
+            &line_mapping,
+            Some(Forward::Deleted | Forward::Rewritten { .. })
+        ) {
+            let old_content = repository.read_blob(&last_revision, &state.path)?;
+            let context = old_content
+                .as_deref()
+                .and_then(|content| line_move_context(content, state.line, &state.path));
+            let mut move_candidates = BTreeSet::new();
+            if let Some(context) = context {
+                for candidate_change in &changes {
+                    let Some(candidate_path) = candidate_change.new_path.as_ref() else {
+                        continue;
+                    };
+                    if candidate_change.status.starts_with('D')
+                        || candidate_change.status.starts_with('T')
+                    {
+                        continue;
+                    }
+                    let Some(candidate_content) =
+                        repository.read_blob(&node.oid, candidate_path)?
+                    else {
+                        continue;
+                    };
+                    let candidate_lines = source_line_bytes(&candidate_content);
+                    for candidate_index in 0..candidate_lines.len() {
+                        if line_context_matches(
+                            &candidate_content,
+                            &candidate_lines,
+                            candidate_index,
+                            &context,
+                            candidate_path,
+                        ) {
+                            let Ok(candidate_line) = i64::try_from(candidate_index + 1) else {
+                                continue;
+                            };
+                            move_candidates.insert((candidate_path.clone(), candidate_line));
+                            if move_candidates.len() > MAX_MOVE_ASSOCIATIONS + 1 {
+                                move_candidates.pop_last();
+                            }
+                        }
+                    }
+                }
+            }
+            if move_candidates.len() == 1 {
+                let (candidate_path, candidate_line) = move_candidates
+                    .into_iter()
+                    .next()
+                    .expect("one move candidate was counted");
+                events.push(Event {
+                    commit_id: node.oid.clone(),
+                    subject: session.forward_subject(&node.oid)?,
+                    commit_time: node.commit_time,
+                    relationship: "move",
+                    before: state.clone(),
+                    before_span: None,
+                    after_span: None,
+                    after: Some(Location {
+                        path: candidate_path.clone(),
+                        line: candidate_line,
+                    }),
+                    parent_count: node.parents.len(),
+                    patch: event_patch(
+                        session,
+                        options.patch,
+                        &node.oid,
+                        change.ordinal,
+                        state.line,
+                    )?,
+                });
+                state.path = candidate_path;
+                state.line = candidate_line;
+                last_revision = node.oid.clone();
+                continue;
+            }
+            if move_candidates.len() > 1 {
+                let candidates = move_candidates.into_iter().map(|(path, line)| Association {
+                    location: Location { path, line },
+                    span: None,
+                });
+                (associations, associations_truncated) = bounded_associations(candidates);
+                stop = Some((
+                    node.oid.clone(),
+                    FinalState::Unknown,
+                    StopReason {
+                        code: "ambiguous_move_candidates",
+                        explanation: "the unchanged line has multiple strict-context matches; its move cannot be established uniquely",
+                    },
+                ));
+                break;
+            }
+        }
+
+        match line_mapping {
             Some(Forward::Kept { new_line }) => {
                 if renamed {
                     events.push(Event {
@@ -509,6 +631,8 @@ fn execute_line(
             final_state,
             stopped_at,
             stop_reason,
+            associations,
+            associations_truncated,
             last_location,
             last_span: None,
             inspected_commits: inspected,
@@ -574,6 +698,105 @@ fn descendants(graph: &[ForwardCommit], seed: &str) -> HashSet<String> {
 
 /// Map a tracked old-file line forward through one change's cached hunks.
 /// Returns `None` when the cached hunk ranges cannot be mapped reliably.
+const MOVE_CONTEXT_RADIUS: usize = 3;
+const MIN_MOVE_CONTEXT_LINES: usize = 3;
+
+struct LineMoveContext {
+    lines: Vec<Vec<u8>>,
+    target_offset: usize,
+    source: Vec<u8>,
+    language: Option<&'static str>,
+    can_normalize_indentation: bool,
+}
+
+fn source_line_bytes(content: &[u8]) -> Vec<Vec<u8>> {
+    if content.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = content
+        .split(|byte| *byte == b'\n')
+        .map(<[u8]>::to_vec)
+        .collect::<Vec<_>>();
+    if content.ends_with(b"\n") {
+        lines.pop();
+    }
+    lines
+}
+
+fn join_source_lines(lines: &[Vec<u8>]) -> Vec<u8> {
+    let mut source = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        if index > 0 {
+            source.push(b'\n');
+        }
+        source.extend_from_slice(line);
+    }
+    source
+}
+
+fn line_move_context(content: &[u8], line: i64, path: &[u8]) -> Option<LineMoveContext> {
+    let lines = source_line_bytes(content);
+    let target_index = usize::try_from(line.checked_sub(1)?).ok()?;
+    let target = lines.get(target_index)?;
+    if target.iter().all(u8::is_ascii_whitespace) {
+        return None;
+    }
+    let start = target_index.saturating_sub(MOVE_CONTEXT_RADIUS);
+    let end = target_index
+        .saturating_add(MOVE_CONTEXT_RADIUS + 1)
+        .min(lines.len());
+    let context_lines = lines[start..end].to_vec();
+    if context_lines
+        .iter()
+        .filter(|line| !line.iter().all(u8::is_ascii_whitespace))
+        .count()
+        < MIN_MOVE_CONTEXT_LINES
+    {
+        return None;
+    }
+    let language = source_language_for_path(path);
+    Some(LineMoveContext {
+        source: join_source_lines(&context_lines),
+        lines: context_lines,
+        target_offset: target_index - start,
+        language,
+        can_normalize_indentation: language.is_some_and(|language| {
+            supports_indentation_normalization(language)
+                && !contains_multiline_literal(content, language)
+        }),
+    })
+}
+
+fn line_context_matches(
+    content: &[u8],
+    lines: &[Vec<u8>],
+    target_index: usize,
+    context: &LineMoveContext,
+    path: &[u8],
+) -> bool {
+    let Some(start) = target_index.checked_sub(context.target_offset) else {
+        return false;
+    };
+    let Some(end) = start.checked_add(context.lines.len()) else {
+        return false;
+    };
+    let Some(candidate_lines) = lines.get(start..end) else {
+        return false;
+    };
+    let candidate_language = source_language_for_path(path);
+    let can_normalize_indentation = context.can_normalize_indentation
+        && candidate_language == context.language
+        && context
+            .language
+            .is_some_and(|language| !contains_multiline_literal(content, language));
+    strict_source_equal(
+        &context.source,
+        &join_source_lines(candidate_lines),
+        context.language,
+        can_normalize_indentation,
+    )
+}
+
 fn map_line_forward(hunks: &[PatchHistoryHunk], line: i64) -> Option<Forward> {
     let mut ordered: Vec<&PatchHistoryHunk> = hunks.iter().collect();
     ordered.sort_by_key(|hunk| hunk.old_start);
@@ -682,7 +905,7 @@ fn execute_symbol(
         .symbol_selection
         .clone()
         .expect("symbol target has a selection");
-    let qualified_name = selection.qualified_name.clone();
+    let mut qualified_name = selection.qualified_name.clone();
     let mut symbol_language = selection.language.clone();
 
     if target.revision == endpoint {
@@ -697,6 +920,8 @@ fn execute_symbol(
                 final_state: FinalState::ReachedEndpoint,
                 stopped_at: None,
                 stop_reason: None,
+                associations: Vec::new(),
+                associations_truncated: false,
                 last_location: Some(Location {
                     path: target.path,
                     line: i64::try_from(target.line)
@@ -733,6 +958,8 @@ fn execute_symbol(
     let mut state_body_span = target.symbol_body_span;
     let mut last_revision = target.revision.clone();
     let mut events: Vec<Event> = Vec::new();
+    let mut associations = Vec::new();
+    let mut associations_truncated = false;
     let mut inspected = 0usize;
     let ceiling = max_commits.unwrap_or(usize::MAX);
     let mut traversal_truncated = false;
@@ -864,6 +1091,143 @@ fn execute_symbol(
         ) {
             Ok(location) => location,
             Err(_) => {
+                let strict_target = repository
+                    .read_blob(&last_revision, &state_path)?
+                    .as_deref()
+                    .and_then(|content| symbol_source_bytes(content, (state_start, state_end)));
+                let mut move_candidates = Vec::new();
+                let mut exact_candidates = 0usize;
+                if let Some(strict_target) = strict_target {
+                    let symbol_name = qualified_name
+                        .rsplit("::")
+                        .next()
+                        .unwrap_or(&qualified_name);
+                    for candidate_change in &changes {
+                        let Some(candidate_path) = candidate_change.new_path.as_ref() else {
+                            continue;
+                        };
+                        if candidate_path == &state_path
+                            || candidate_change.status.starts_with('D')
+                            || candidate_change.status.starts_with('T')
+                        {
+                            continue;
+                        }
+                        let Ok(candidate_path_text) = std::str::from_utf8(candidate_path) else {
+                            continue;
+                        };
+                        let Some(candidate_content) =
+                            repository.read_blob(&node.oid, candidate_path)?
+                        else {
+                            continue;
+                        };
+                        let Ok(candidate) = repository.locate_symbol(
+                            &candidate_content,
+                            symbol_name,
+                            candidate_path_text,
+                        ) else {
+                            continue;
+                        };
+                        let Ok(candidate_start) = i64::try_from(candidate.start_line) else {
+                            continue;
+                        };
+                        let Ok(candidate_end) = i64::try_from(candidate.end_line) else {
+                            continue;
+                        };
+                        let Some(candidate_bytes) = symbol_source_bytes(
+                            &candidate_content,
+                            (candidate_start, candidate_end),
+                        ) else {
+                            continue;
+                        };
+                        if !strict_source_equal(
+                            &strict_target,
+                            &candidate_bytes,
+                            Some(symbol_language.as_str()),
+                            candidate.selection.language == symbol_language,
+                        ) {
+                            continue;
+                        }
+                        exact_candidates += 1;
+                        move_candidates.push((
+                            candidate_path.clone(),
+                            candidate,
+                            candidate_start,
+                            candidate_end,
+                        ));
+                        move_candidates.sort_by(|left, right| {
+                            left.0
+                                .cmp(&right.0)
+                                .then_with(|| left.2.cmp(&right.2))
+                                .then_with(|| left.3.cmp(&right.3))
+                        });
+                        if move_candidates.len() > MAX_MOVE_ASSOCIATIONS + 1 {
+                            move_candidates.pop();
+                        }
+                    }
+                }
+                if exact_candidates == 1
+                    && span_was_deleted(
+                        session,
+                        &node.oid,
+                        change.ordinal,
+                        (state_start, state_end),
+                    ) == Some(true)
+                {
+                    if let Some((candidate_path, candidate, new_start, new_end)) =
+                        move_candidates.pop()
+                    {
+                        push_symbol_event(
+                            &mut events,
+                            session,
+                            &node.oid,
+                            node.commit_time,
+                            "move",
+                            node.parents.len(),
+                            &state_path,
+                            state_start,
+                            state_end,
+                            Some(&candidate_path),
+                            new_start,
+                            new_end,
+                            options.patch,
+                            change.ordinal,
+                        )?;
+                        state_path = candidate_path;
+                        state_start = new_start;
+                        state_end = new_end;
+                        state_body_span = candidate.body_span;
+                        symbol_language = candidate.selection.language.clone();
+                        qualified_name = candidate.selection.qualified_name.clone();
+                        last_revision = node.oid.clone();
+                        continue;
+                    }
+                }
+                if exact_candidates > 1
+                    && span_was_deleted(
+                        session,
+                        &node.oid,
+                        change.ordinal,
+                        (state_start, state_end),
+                    ) == Some(true)
+                {
+                    let candidates =
+                        move_candidates
+                            .into_iter()
+                            .map(|(path, _, start, end)| Association {
+                                location: Location { path, line: start },
+                                span: Some((start, end)),
+                            });
+                    (associations, associations_truncated) = bounded_associations(candidates);
+                    stop = Some((
+                        node.oid.clone(),
+                        FinalState::Unknown,
+                        StopReason {
+                            code: "ambiguous_move_candidates",
+                            explanation: "the unchanged symbol has multiple strict-source matches; its move cannot be established uniquely",
+                        },
+                    ));
+                    break;
+                }
                 // The declaration no longer resolves uniquely in the new version:
                 // replacement, rename, or removal of the declaration.
                 if renamed {
@@ -912,6 +1276,132 @@ fn execute_symbol(
         let new_end = i64::try_from(new_location.end_line)
             .map_err(|_| AppError::input("line does not fit the coordinate space"))?;
 
+        let old_content_for_move = repository.read_blob(&last_revision, &state_path)?;
+        let complete_target_matches = old_content_for_move
+            .as_deref()
+            .and_then(|old_content| {
+                let old_source = symbol_source_bytes(old_content, (state_start, state_end))?;
+                let new_source = symbol_source_bytes(&new_content, (new_start, new_end))?;
+                Some(strict_source_equal(
+                    &old_source,
+                    &new_source,
+                    Some(symbol_language.as_str()),
+                    new_location.selection.language == symbol_language,
+                ))
+            })
+            .unwrap_or(false);
+        if complete_target_matches
+            && span_was_deleted(session, &node.oid, change.ordinal, (state_start, state_end))
+                == Some(true)
+        {
+            let mut alternatives = BTreeSet::from([Association {
+                location: Location {
+                    path: new_path.clone(),
+                    line: new_start,
+                },
+                span: Some((new_start, new_end)),
+            }]);
+            if let Some(strict_target) = old_content_for_move
+                .as_deref()
+                .and_then(|content| symbol_source_bytes(content, (state_start, state_end)))
+            {
+                let symbol_name = qualified_name
+                    .rsplit("::")
+                    .next()
+                    .unwrap_or(&qualified_name);
+                for candidate_change in &changes {
+                    let Some(candidate_path) = candidate_change.new_path.as_ref() else {
+                        continue;
+                    };
+                    if candidate_path == &new_path
+                        || candidate_change.status.starts_with('D')
+                        || candidate_change.status.starts_with('T')
+                    {
+                        continue;
+                    }
+                    let Ok(candidate_path_text) = std::str::from_utf8(candidate_path) else {
+                        continue;
+                    };
+                    let Some(candidate_content) =
+                        repository.read_blob(&node.oid, candidate_path)?
+                    else {
+                        continue;
+                    };
+                    let Ok(candidate) = repository.locate_symbol(
+                        &candidate_content,
+                        symbol_name,
+                        candidate_path_text,
+                    ) else {
+                        continue;
+                    };
+                    let Ok(candidate_start) = i64::try_from(candidate.start_line) else {
+                        continue;
+                    };
+                    let Ok(candidate_end) = i64::try_from(candidate.end_line) else {
+                        continue;
+                    };
+                    let Some(candidate_bytes) =
+                        symbol_source_bytes(&candidate_content, (candidate_start, candidate_end))
+                    else {
+                        continue;
+                    };
+                    if strict_source_equal(
+                        &strict_target,
+                        &candidate_bytes,
+                        Some(symbol_language.as_str()),
+                        candidate.selection.language == symbol_language,
+                    ) {
+                        alternatives.insert(Association {
+                            location: Location {
+                                path: candidate_path.clone(),
+                                line: candidate_start,
+                            },
+                            span: Some((candidate_start, candidate_end)),
+                        });
+                        if alternatives.len() > MAX_MOVE_ASSOCIATIONS + 1 {
+                            alternatives.pop_last();
+                        }
+                    }
+                }
+            }
+            if alternatives.len() > 1 {
+                (associations, associations_truncated) = bounded_associations(alternatives);
+                stop = Some((
+                    node.oid.clone(),
+                    FinalState::Unknown,
+                    StopReason {
+                        code: "ambiguous_move_candidates",
+                        explanation: "the unchanged symbol has multiple strict-source matches; its move cannot be established uniquely",
+                    },
+                ));
+                break;
+            }
+            push_symbol_event(
+                &mut events,
+                session,
+                &node.oid,
+                node.commit_time,
+                "move",
+                node.parents.len(),
+                &state_path,
+                state_start,
+                state_end,
+                Some(&new_path),
+                new_start,
+                new_end,
+                options.patch,
+                change.ordinal,
+            )?;
+            state_path = new_path.clone();
+            state_start = new_start;
+            state_end = new_end;
+            state_body_span = new_location.body_span;
+            symbol_language = new_location.selection.language.clone();
+            qualified_name = new_location.selection.qualified_name.clone();
+            last_revision = node.oid.clone();
+            continue;
+        }
+
         if renamed {
             push_symbol_event(
                 &mut events,
@@ -934,7 +1424,7 @@ fn execute_symbol(
         // Name resolution chooses the candidate; diff correspondence must still
         // map every declaration line and preserve actual body code.
         let new_body_span = new_location.body_span;
-        let Some(old_content) = repository.read_blob(&last_revision, &state_path)? else {
+        let Some(old_content) = old_content_for_move else {
             stop = Some((
                 node.oid.clone(),
                 FinalState::Unknown,
@@ -1130,6 +1620,8 @@ fn execute_symbol(
             final_state,
             stopped_at,
             stop_reason,
+            associations,
+            associations_truncated,
             last_location,
             last_span,
             inspected_commits: inspected,
@@ -1354,6 +1846,265 @@ fn code_identity(
             identity.push(b'\n');
             identity
         })
+}
+
+fn span_was_deleted(
+    session: &crate::cache::QuerySession,
+    oid: &str,
+    change_ordinal: i64,
+    span: (i64, i64),
+) -> Option<bool> {
+    if span.0 > span.1 {
+        return Some(false);
+    }
+    let history = session
+        .patch_history_for_change(oid, change_ordinal, MAX_HUNKS, MAX_HUNK_BYTES)
+        .ok()?;
+    if history.missing_objects
+        || history.truncated
+        || history.hunks.iter().any(|hunk| hunk.text.is_none())
+    {
+        return None;
+    }
+    for line in span.0..=span.1 {
+        match map_line_forward(&history.hunks, line)? {
+            Forward::Deleted | Forward::Rewritten { replacement: None } => {}
+            Forward::Kept { .. }
+            | Forward::Rewritten {
+                replacement: Some(_),
+            } => {
+                return Some(false);
+            }
+        }
+    }
+    Some(true)
+}
+
+fn strict_source_equal(
+    left: &[u8],
+    right: &[u8],
+    language: Option<&str>,
+    allow_indentation_normalization: bool,
+) -> bool {
+    if left == right {
+        return true;
+    }
+    let Some(language) = language.filter(|_| allow_indentation_normalization) else {
+        return false;
+    };
+    let Some(left) = normalize_source_for_move(left, language) else {
+        return false;
+    };
+    let Some(right) = normalize_source_for_move(right, language) else {
+        return false;
+    };
+    left == right
+}
+
+fn source_language_for_path(path: &[u8]) -> Option<&'static str> {
+    let extension = std::str::from_utf8(path.rsplit(|byte| *byte == b'.').next()?).ok()?;
+    match extension.to_ascii_lowercase().as_str() {
+        "rs" => Some("rust"),
+        "py" | "pyw" => Some("python"),
+        "js" | "jsx" | "mjs" | "cjs" => Some("javascript"),
+        "ts" | "tsx" | "mts" | "cts" => Some("typescript"),
+        "go" => Some("go"),
+        "java" => Some("java"),
+        "kt" | "kts" => Some("kotlin"),
+        "cc" | "cpp" | "cxx" | "hpp" | "hxx" => Some("cpp"),
+        _ => None,
+    }
+}
+
+fn supports_indentation_normalization(language: &str) -> bool {
+    matches!(
+        language,
+        "rust" | "python" | "javascript" | "typescript" | "go" | "java" | "kotlin" | "cpp"
+    )
+}
+
+fn contains_multiline_literal(source: &[u8], language: &str) -> bool {
+    match language {
+        "rust" => contains_multiline_rust_raw_string(source),
+        "python" => {
+            contains_multiline_delimited(source, &[b'\"', b'\"', b'\"'])
+                || contains_multiline_delimited(source, b"'''")
+        }
+        "javascript" | "typescript" | "go" => contains_multiline_delimited(source, b"`"),
+        "java" | "kotlin" => contains_multiline_delimited(source, &[b'\"', b'\"', b'\"']),
+        "cpp" => contains_multiline_cpp_raw_string(source),
+        _ => true,
+    }
+}
+
+fn contains_multiline_delimited(source: &[u8], delimiter: &[u8]) -> bool {
+    let mut search_from = 0;
+    while search_from + delimiter.len() <= source.len() {
+        let Some(relative_open) = source[search_from..]
+            .windows(delimiter.len())
+            .position(|window| window == delimiter)
+        else {
+            return false;
+        };
+        let open = search_from + relative_open;
+        let body_start = open + delimiter.len();
+        let mut cursor = body_start;
+        while cursor + delimiter.len() <= source.len() {
+            if source[cursor] == b'\\' {
+                cursor = cursor.saturating_add(2);
+                continue;
+            }
+            if source[cursor..].starts_with(delimiter) {
+                if source[body_start..cursor].contains(&b'\n') {
+                    return true;
+                }
+                search_from = cursor + delimiter.len();
+                break;
+            }
+            cursor += 1;
+        }
+        if cursor + delimiter.len() > source.len() {
+            return source[body_start..].contains(&b'\n');
+        }
+    }
+    false
+}
+
+fn contains_multiline_rust_raw_string(source: &[u8]) -> bool {
+    for open in 0..source.len() {
+        if source[open] != b'r' {
+            continue;
+        }
+        let mut quote = open + 1;
+        while source.get(quote) == Some(&b'#') {
+            quote += 1;
+        }
+        if source.get(quote) != Some(&b'\"') {
+            continue;
+        }
+        let body_start = quote + 1;
+        let mut closing = vec![b'\"'];
+        closing.extend(std::iter::repeat_n(b'#', quote - open - 1));
+        if let Some(relative_close) = source[body_start..]
+            .windows(closing.len())
+            .position(|window| window == closing)
+            && source[body_start..body_start + relative_close].contains(&b'\n')
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn contains_multiline_cpp_raw_string(source: &[u8]) -> bool {
+    let mut search_from = 0;
+    while let Some(relative_open) = source[search_from..]
+        .windows(2)
+        .position(|window| window == [b'R', b'\"'])
+    {
+        let open = search_from + relative_open;
+        let delimiter_start = open + 2;
+        let Some(relative_paren) = source[delimiter_start..]
+            .iter()
+            .position(|byte| *byte == b'(')
+        else {
+            return false;
+        };
+        let paren = delimiter_start + relative_paren;
+        let delimiter = &source[delimiter_start..paren];
+        if delimiter.len() > 16 {
+            search_from = paren + 1;
+            continue;
+        }
+        let body_start = paren + 1;
+        let mut closing = vec![b')'];
+        closing.extend_from_slice(delimiter);
+        closing.push(b'\"');
+        if let Some(relative_close) = source[body_start..]
+            .windows(closing.len())
+            .position(|window| window == closing)
+        {
+            if source[body_start..body_start + relative_close].contains(&b'\n') {
+                return true;
+            }
+            search_from = body_start + relative_close + closing.len();
+        } else {
+            return source[body_start..].contains(&b'\n');
+        }
+    }
+    false
+}
+
+fn normalize_source_for_move(source: &[u8], language: &str) -> Option<Vec<u8>> {
+    if !supports_indentation_normalization(language) || contains_multiline_literal(source, language)
+    {
+        return None;
+    }
+    let chunks = source
+        .split_inclusive(|byte| *byte == b'\n')
+        .collect::<Vec<_>>();
+    let mut lines = Vec::with_capacity(chunks.len());
+    let mut newline_terminated = Vec::with_capacity(chunks.len());
+    for chunk in chunks {
+        let has_newline = chunk.ends_with(b"\n");
+        let mut line = if has_newline {
+            &chunk[..chunk.len() - 1]
+        } else {
+            chunk
+        };
+        if has_newline {
+            line = line.strip_suffix(b"\r").unwrap_or(line);
+        }
+        lines.push(line.to_vec());
+        newline_terminated.push(has_newline);
+    }
+    let mut common_indent: Option<Vec<u8>> = None;
+    for line in &lines {
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        let indent = line
+            .iter()
+            .take_while(|byte| matches!(byte, b' ' | 9))
+            .copied()
+            .collect::<Vec<_>>();
+        if let Some(common) = common_indent.as_mut() {
+            let shared = common
+                .iter()
+                .zip(&indent)
+                .take_while(|(left, right)| left == right)
+                .count();
+            common.truncate(shared);
+        } else {
+            common_indent = Some(indent);
+        }
+    }
+    let common_indent = common_indent.unwrap_or_default();
+    let mut normalized = Vec::new();
+    for (line, has_newline) in lines.into_iter().zip(newline_terminated) {
+        let start = if line.iter().all(u8::is_ascii_whitespace) {
+            line.iter()
+                .take_while(|byte| matches!(byte, b' ' | 9))
+                .count()
+        } else {
+            common_indent.len()
+        };
+        normalized.extend_from_slice(&line[start..]);
+        if has_newline {
+            normalized.push(b'\n');
+        }
+    }
+    Some(normalized)
+}
+
+fn symbol_source_bytes(content: &[u8], span: (i64, i64)) -> Option<Vec<u8>> {
+    let start = usize::try_from(span.0.checked_sub(1)?).ok()?;
+    let end = usize::try_from(span.1).ok()?;
+    let lines = content
+        .split_inclusive(|byte| *byte == b'\n')
+        .collect::<Vec<_>>();
+    let source = lines.get(start..end)?.concat();
+    (!source.is_empty()).then_some(source)
 }
 
 fn normalized_code_lines(content: &[u8], language: &str) -> Vec<Vec<u8>> {

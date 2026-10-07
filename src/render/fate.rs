@@ -36,6 +36,19 @@ pub(super) fn format_report(report: &Report) -> String {
         )),
         None => lines.push("Last confirmed location: none.".to_owned()),
     }
+    if !report.associations.is_empty() {
+        lines.push("Possible move locations:".to_owned());
+        for association in &report.associations {
+            let path = super::escape::path(&association.location.path);
+            match association.span {
+                Some((start, end)) => lines.push(format!("  {path} lines {start}-{end}")),
+                None => lines.push(format!("  {path} line {}", association.location.line)),
+            }
+        }
+    }
+    if report.associations_truncated {
+        lines.push("Additional move locations omitted (candidate limit reached).".to_owned());
+    }
     lines.push(format!(
         "Inspected {} forward commit(s){}; {} event(s) recorded{}.",
         report.inspected_commits,
@@ -103,6 +116,19 @@ pub(super) fn format_json_report(
             code: reason.code,
             explanation: reason.explanation,
         }),
+        associations: report
+            .associations
+            .iter()
+            .map(|association| {
+                json_location(
+                    &association.location.path,
+                    Some(association.location.line),
+                    association.span.map(|span| span.0),
+                    association.span.map(|span| span.1),
+                )
+            })
+            .collect(),
+        associations_truncated: report.associations_truncated,
         last_location: report.last_location.as_ref().map(|location| {
             json_location(
                 &location.path,
@@ -141,6 +167,10 @@ struct JsonReport<'a> {
     stopped_at: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stop_reason: Option<JsonStopReason<'a>>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    associations: Vec<JsonLocation<'a>>,
+    #[serde(skip_serializing_if = "is_false")]
+    associations_truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     last_location: Option<JsonLocation<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -165,6 +195,9 @@ struct JsonStopReason<'a> {
     explanation: &'a str,
 }
 
+fn is_false(value: &bool) -> bool {
+    !value
+}
 #[derive(Serialize)]
 struct JsonLocation<'a> {
     path: JsonPath<'a>,
