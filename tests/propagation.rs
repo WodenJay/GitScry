@@ -270,6 +270,131 @@ fn cherry_picked_commit_with_a_new_message_is_an_equivalent() {
 }
 
 #[test]
+fn root_patch_uses_the_empty_tree_baseline() {
+    let repo = TestRepo::new();
+    let base = commit(&repo, "a.txt", "root material a\n", "base");
+
+    git(repo.dir.path(), ["checkout", "--orphan", "source-root"]);
+    git(repo.dir.path(), ["rm", "-rf", "."]);
+    fs::write(repo.dir.path().join("a.txt"), "root material a\n").unwrap();
+    fs::write(repo.dir.path().join("b.txt"), "root material b\n").unwrap();
+    git(repo.dir.path(), ["add", "-A"]);
+    git(repo.dir.path(), ["commit", "-m", "root patch"]);
+    let source = repo.head();
+
+    git(repo.dir.path(), ["checkout", "--orphan", "matching-root"]);
+    git(repo.dir.path(), ["rm", "-rf", "."]);
+    fs::write(repo.dir.path().join("a.txt"), "root material a\n").unwrap();
+    fs::write(repo.dir.path().join("b.txt"), "root material b\n").unwrap();
+    git(repo.dir.path(), ["add", "-A"]);
+    git(repo.dir.path(), ["commit", "-m", "same root patch"]);
+    let matching_root = repo.head();
+
+    git(repo.dir.path(), ["checkout", "-b", "partial-root", &base]);
+    commit(&repo, "b.txt", "root material b\n", "add only b");
+    git(repo.dir.path(), ["checkout", "main"]);
+    repo.index();
+
+    let value = json(repo.run([
+        "propagation",
+        &source,
+        "--to",
+        "matching-root",
+        "--to",
+        "partial-root",
+        "--json",
+    ]));
+    let targets = value["targets"].as_array().unwrap();
+    assert_eq!(targets[0]["status"], "equivalent");
+    assert_eq!(
+        targets[0]["equivalents"],
+        serde_json::json!([matching_root])
+    );
+    assert_eq!(targets[1]["status"], "not_found");
+    assert_eq!(targets[1]["equivalents"], serde_json::json!([]));
+    assert_eq!(value["coverage_complete"], true);
+}
+
+#[test]
+fn rename_patch_equivalence_uses_source_and_destination_paths() {
+    let repo = TestRepo::new();
+    let base = commit(&repo, "old.txt", "moved content\n", "base");
+    git(repo.dir.path(), ["checkout", "-b", "source"]);
+    git(repo.dir.path(), ["mv", "old.txt", "new.txt"]);
+    git(repo.dir.path(), ["commit", "-m", "rename source file"]);
+    let source = repo.head();
+
+    git(repo.dir.path(), ["checkout", "-b", "different-name", &base]);
+    git(repo.dir.path(), ["mv", "old.txt", "other.txt"]);
+    git(repo.dir.path(), ["commit", "-m", "rename to another path"]);
+    let different_name = repo.head();
+
+    git(repo.dir.path(), ["checkout", "-b", "same-name", &base]);
+    git(repo.dir.path(), ["mv", "old.txt", "new.txt"]);
+    git(repo.dir.path(), ["commit", "-m", "replay rename"]);
+    let replayed = repo.head();
+    git(repo.dir.path(), ["checkout", "main"]);
+    repo.index();
+
+    let value = json(repo.run([
+        "propagation",
+        &source,
+        "--to",
+        "different-name",
+        "--to",
+        "same-name",
+        "--json",
+    ]));
+    let targets = value["targets"].as_array().unwrap();
+    assert_eq!(targets[0]["target_oid"], different_name);
+    assert_eq!(targets[0]["status"], "not_found");
+    assert_eq!(targets[1]["target_oid"], replayed);
+    assert_eq!(targets[1]["status"], "equivalent");
+    assert_eq!(targets[1]["equivalents"], serde_json::json!([replayed]));
+}
+
+#[test]
+fn binary_patch_equivalence_uses_complete_binary_content() {
+    let repo = TestRepo::new();
+    let base = commit(&repo, "asset.bin", "\0base\n", "base");
+    git(repo.dir.path(), ["checkout", "-b", "source"]);
+    let source = commit(&repo, "asset.bin", "\0source\n", "binary source patch");
+
+    git(repo.dir.path(), ["checkout", "-b", "different", &base]);
+    let different = commit(
+        &repo,
+        "asset.bin",
+        "\0different\n",
+        "different binary patch",
+    );
+    git(repo.dir.path(), ["checkout", "-b", "replayed", &base]);
+    let replayed = commit(&repo, "asset.bin", "\0source\n", "replayed binary patch");
+    git(repo.dir.path(), ["checkout", "main"]);
+    repo.index();
+
+    let value = json(repo.run([
+        "propagation",
+        &source,
+        "--to",
+        "different",
+        "--to",
+        "replayed",
+        "--json",
+    ]));
+    let targets = value["targets"].as_array().unwrap();
+    assert_eq!(targets[0]["target_oid"], different);
+    assert_eq!(targets[0]["status"], "not_found");
+    assert_eq!(targets[1]["target_oid"], replayed);
+    assert_eq!(targets[1]["status"], "equivalent");
+    assert_eq!(targets[1]["equivalents"], serde_json::json!([replayed]));
+    assert!(
+        targets[1]["patch_identifier"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty())
+    );
+}
+
+#[test]
 fn rebased_commit_is_an_equivalent() {
     let repo = TestRepo::new();
     let base = commit(&repo, "a.txt", "base\n", "base");
@@ -495,6 +620,67 @@ fn unreadable_candidate_patch_reports_indeterminate_not_not_found() {
 }
 
 #[test]
+fn mode_only_change_is_equivalent_when_replayed() {
+    let repo = TestRepo::new();
+    let base = commit(&repo, "mode.txt", "tracked\n", "base");
+    git(repo.dir.path(), ["checkout", "-b", "source"]);
+    git(repo.dir.path(), ["update-index", "--chmod=+x", "mode.txt"]);
+    git(repo.dir.path(), ["commit", "-m", "make file executable"]);
+    let source = repo.head();
+
+    git(repo.dir.path(), ["checkout", "-b", "target", &base]);
+    git(repo.dir.path(), ["update-index", "--chmod=+x", "mode.txt"]);
+    git(
+        repo.dir.path(),
+        ["commit", "-m", "make file executable elsewhere"],
+    );
+    let replayed = repo.head();
+    git(repo.dir.path(), ["checkout", "main"]);
+    repo.index();
+
+    let value = json(repo.run(["propagation", &source, "--to", "target", "--json"]));
+    let target = &value["targets"][0];
+    assert_eq!(target["status"], "equivalent");
+    assert_eq!(target["equivalents"], serde_json::json!([replayed]));
+    assert!(
+        target["patch_identifier"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty())
+    );
+    assert_eq!(value["coverage_complete"], true);
+}
+
+#[test]
+fn mode_only_changes_to_different_paths_are_not_equivalent() {
+    let repo = TestRepo::new();
+    commit(&repo, "source-mode.txt", "tracked\n", "base source");
+    commit(&repo, "target-mode.txt", "tracked\n", "base target");
+    let base = repo.head();
+    git(repo.dir.path(), ["checkout", "-b", "source"]);
+    git(
+        repo.dir.path(),
+        ["update-index", "--chmod=+x", "source-mode.txt"],
+    );
+    git(repo.dir.path(), ["commit", "-m", "change source mode"]);
+    let source = repo.head();
+
+    git(repo.dir.path(), ["checkout", "-b", "target", &base]);
+    git(
+        repo.dir.path(),
+        ["update-index", "--chmod=+x", "target-mode.txt"],
+    );
+    git(repo.dir.path(), ["commit", "-m", "change other mode"]);
+    git(repo.dir.path(), ["checkout", "main"]);
+    repo.index();
+
+    let value = json(repo.run(["propagation", &source, "--to", "target", "--json"]));
+    let target = &value["targets"][0];
+    assert_ne!(target["status"], "equivalent");
+    assert_eq!(target["equivalents"], serde_json::json!([]));
+    assert_eq!(value["coverage_complete"], true);
+}
+
+#[test]
 fn source_commit_without_a_patch_is_indeterminate() {
     let repo = TestRepo::new();
     let base = commit(&repo, "a.txt", "base\n", "base");
@@ -514,6 +700,83 @@ fn source_commit_without_a_patch_is_indeterminate() {
             .as_str()
             .is_some_and(|reason| !reason.is_empty())
     );
+}
+
+#[test]
+fn empty_commits_are_exact_when_reachable_and_never_patch_matches() {
+    let repo = TestRepo::new();
+    let base = commit(&repo, "a.txt", "base\n", "base");
+    git(repo.dir.path(), ["checkout", "-b", "source"]);
+    git(
+        repo.dir.path(),
+        ["commit", "--allow-empty", "-m", "empty source"],
+    );
+    let source = repo.head();
+
+    git(repo.dir.path(), ["checkout", "-b", "descendant", &source]);
+    commit(&repo, "b.txt", "descendant\n", "descendant");
+    let descendant = repo.head();
+
+    git(repo.dir.path(), ["checkout", "-b", "empty-target", &base]);
+    git(
+        repo.dir.path(),
+        ["commit", "--allow-empty", "-m", "empty target"],
+    );
+    let empty_target = repo.head();
+    git(repo.dir.path(), ["checkout", "main"]);
+    repo.index();
+
+    let value = json(repo.run([
+        "propagation",
+        &source,
+        "--to",
+        "descendant",
+        "--to",
+        "empty-target",
+        "--json",
+    ]));
+    let targets = value["targets"].as_array().unwrap();
+    assert_eq!(targets[0]["target_oid"], descendant);
+    assert_eq!(targets[0]["status"], "contained");
+    assert_eq!(targets[0]["contained_by"], serde_json::json!([source]));
+    assert_eq!(targets[1]["target_oid"], empty_target);
+    assert_eq!(targets[1]["status"], "indeterminate");
+    assert_eq!(targets[1]["equivalents"], serde_json::json!([]));
+    assert!(
+        targets[1]["reason"]
+            .as_str()
+            .is_some_and(|reason| !reason.is_empty())
+    );
+    assert_eq!(targets[1]["patch_identifier"], Value::Null);
+    assert_eq!(value["coverage_complete"], false);
+}
+
+#[test]
+fn empty_file_rename_is_equivalent_when_replayed() {
+    let repo = TestRepo::new();
+    let base = commit(&repo, "empty.txt", "", "base");
+    git(repo.dir.path(), ["checkout", "-b", "source"]);
+    git(repo.dir.path(), ["mv", "empty.txt", "renamed.txt"]);
+    git(repo.dir.path(), ["commit", "-m", "rename empty file"]);
+    let source = repo.head();
+
+    git(repo.dir.path(), ["checkout", "-b", "target", &base]);
+    git(repo.dir.path(), ["mv", "empty.txt", "renamed.txt"]);
+    git(repo.dir.path(), ["commit", "-m", "replay empty rename"]);
+    let replayed = repo.head();
+    git(repo.dir.path(), ["checkout", "main"]);
+    repo.index();
+
+    let value = json(repo.run(["propagation", &source, "--to", "target", "--json"]));
+    let target = &value["targets"][0];
+    assert_eq!(target["status"], "equivalent");
+    assert_eq!(target["equivalents"], serde_json::json!([replayed]));
+    assert!(
+        target["patch_identifier"]
+            .as_str()
+            .is_some_and(|id| !id.is_empty())
+    );
+    assert_eq!(value["coverage_complete"], true);
 }
 
 #[test]
@@ -541,6 +804,11 @@ fn ambient_diff_configuration_does_not_change_equivalence() {
 
     // Hostile ambient diff configuration must not change the identifier or result.
     fs::write(repo.dir.path().join("order.txt"), "c.txt\nb.txt\n").unwrap();
+    fs::write(
+        repo.dir.path().join(".gitattributes"),
+        "*.txt diff=hostile\n",
+    )
+    .unwrap();
     for (key, value) in [
         ("diff.context", "25"),
         ("diff.orderFile", "order.txt"),
@@ -549,6 +817,8 @@ fn ambient_diff_configuration_does_not_change_equivalence() {
         ("diff.mnemonicPrefix", "true"),
         ("diff.algorithm", "histogram"),
         ("diff.indentHeuristic", "true"),
+        ("diff.external", "gitscry-missing-external-diff"),
+        ("diff.hostile.textconv", "gitscry-missing-textconv"),
     ] {
         git(repo.dir.path(), ["config", key, value]);
     }

@@ -14,12 +14,13 @@ use crate::app::AppError;
 
 /// Fixed diff generation. `--verbatim` keeps whitespace significant, while the
 /// remaining options neutralise ambient configuration and external helpers.
-const DIFF_ARGS: [&str; 17] = [
+const DIFF_ARGS: [&str; 18] = [
     "diff-tree",
     "--stdin",
     "--root",
     "-r",
     "-p",
+    "--binary",
     "--full-index",
     "--no-color",
     "--no-ext-diff",
@@ -61,6 +62,8 @@ pub(crate) enum PatchLookup {
     Identifier(String),
     /// The commit has no patch to identify: its diff is empty.
     NoPatch,
+    /// The commit changes files, but Git produced no usable patch identifier.
+    Unrepresentable,
     /// The commit's patch could not be read from the local object store.
     Unreadable,
 }
@@ -81,7 +84,7 @@ pub(super) fn commit_patch_ids(
         Ok(diff) => {
             let identifiers = git.output(["patch-id", "--verbatim"], &diff)?;
             let by_commit = parse_identifiers(&identifiers)?;
-            Ok(collect(specs, &by_commit))
+            collect(git, specs, &by_commit)
         }
         Err(_) => {
             // A missing object aborts the batched diff. Fall back to one commit
@@ -92,17 +95,55 @@ pub(super) fn commit_patch_ids(
     }
 }
 
-fn collect(specs: &[PatchSpec], by_commit: &HashMap<String, String>) -> Vec<(String, PatchLookup)> {
+fn collect(
+    git: &Git,
+    specs: &[PatchSpec],
+    by_commit: &HashMap<String, String>,
+) -> Result<Vec<(String, PatchLookup)>, AppError> {
     specs
         .iter()
         .map(|spec| {
-            let lookup = by_commit
-                .get(&spec.oid)
-                .map(|identifier| PatchLookup::Identifier(identifier.clone()))
-                .unwrap_or(PatchLookup::NoPatch);
-            (spec.oid.clone(), lookup)
+            let lookup = lookup_identifier(git, spec, by_commit)?;
+            Ok((spec.oid.clone(), lookup))
         })
         .collect()
+}
+
+fn lookup_identifier(
+    git: &Git,
+    spec: &PatchSpec,
+    by_commit: &HashMap<String, String>,
+) -> Result<PatchLookup, AppError> {
+    if let Some(identifier) = by_commit.get(&spec.oid) {
+        return Ok(PatchLookup::Identifier(identifier.clone()));
+    }
+    let args = match &spec.first_parent {
+        Some(parent) => vec![
+            "diff-tree",
+            "--quiet",
+            "-r",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--ignore-submodules=none",
+            parent.as_str(),
+            spec.oid.as_str(),
+        ],
+        None => vec![
+            "diff-tree",
+            "--quiet",
+            "--root",
+            "-r",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--ignore-submodules=none",
+            spec.oid.as_str(),
+        ],
+    };
+    Ok(if git.success(args)? {
+        PatchLookup::NoPatch
+    } else {
+        PatchLookup::Unrepresentable
+    })
 }
 
 fn lookup_one(git: &Git, spec: &PatchSpec) -> Result<(String, PatchLookup), AppError> {
@@ -112,10 +153,7 @@ fn lookup_one(git: &Git, spec: &PatchSpec) -> Result<(String, PatchLookup), AppE
     };
     let identifiers = git.output(["patch-id", "--verbatim"], &diff)?;
     let by_commit = parse_identifiers(&identifiers)?;
-    let lookup = by_commit
-        .get(&spec.oid)
-        .map(|identifier| PatchLookup::Identifier(identifier.clone()))
-        .unwrap_or(PatchLookup::NoPatch);
+    let lookup = lookup_identifier(git, spec, &by_commit)?;
     Ok((spec.oid.clone(), lookup))
 }
 
@@ -156,7 +194,9 @@ fn parse_identifiers(output: &[u8]) -> Result<HashMap<String, String>, AppError>
                 "error: Git patch identifier output was malformed",
             ));
         }
-        by_commit.insert(commit.to_owned(), identifier.to_owned());
+        if !identifier.bytes().all(|byte| byte == b'0') {
+            by_commit.insert(commit.to_owned(), identifier.to_owned());
+        }
     }
     Ok(by_commit)
 }

@@ -21,6 +21,10 @@ const REASON_SOURCE_NO_PATCH: &str =
 const REASON_SOURCE_PATCH_UNREADABLE: &str =
     "source patch could not be read from the local object store";
 const REASON_TARGET_PATCH_UNREADABLE: &str = "some target commits could not be read for patch equivalence; the local object store is missing objects";
+const REASON_SOURCE_PATCH_UNREPRESENTABLE: &str =
+    "source patch has changes that Git could not represent with a patch identifier";
+const REASON_TARGET_PATCH_UNREPRESENTABLE: &str =
+    "some target commits have changes that Git could not represent with a patch identifier";
 const MATCHING_METHOD_REACHABILITY: &str = "exact_reachability";
 const MATCHING_METHOD_PATCH_ID: &str = "patch-id --verbatim";
 
@@ -65,6 +69,7 @@ enum SourcePatch {
     Identifier(String),
     Merge,
     NoPatch,
+    Unrepresentable,
     Unreadable,
 }
 
@@ -208,6 +213,10 @@ fn inspect_target(
             reasons.insert(0, REASON_SOURCE_NO_PATCH.to_owned());
             None
         }
+        SourcePatch::Unrepresentable => {
+            reasons.insert(0, REASON_SOURCE_PATCH_UNREPRESENTABLE.to_owned());
+            None
+        }
         SourcePatch::Unreadable => {
             reasons.insert(0, REASON_SOURCE_PATCH_UNREADABLE.to_owned());
             None
@@ -233,6 +242,7 @@ fn inspect_target(
         }
     };
     let mut patches_unreadable = false;
+    let mut patches_unrepresentable = false;
     let mut specs = Vec::new();
     for oid in order.iter().filter(|oid| cached.contains(*oid)) {
         match repository.commit_parents(oid) {
@@ -249,13 +259,17 @@ fn inspect_target(
         match lookup {
             PatchLookup::Identifier(found) if found == identifier => equivalents.push(oid.clone()),
             PatchLookup::Unreadable => patches_unreadable = true,
+            PatchLookup::Unrepresentable => patches_unrepresentable = true,
             _ => {}
         }
     }
     if patches_unreadable {
         reasons.push(REASON_TARGET_PATCH_UNREADABLE.to_owned());
+        if patches_unrepresentable {
+            reasons.push(REASON_TARGET_PATCH_UNREPRESENTABLE.to_owned());
+        }
     }
-    let complete = !history_incomplete && !patches_unreadable;
+    let complete = !history_incomplete && !patches_unreadable && !patches_unrepresentable;
 
     if !equivalents.is_empty() {
         // A positive match is reported as equivalent regardless of remaining
@@ -345,6 +359,7 @@ fn source_patch(repository: &git::Repository, source_oid: &str) -> Result<Source
     Ok(match lookups.into_iter().next().map(|(_, lookup)| lookup) {
         Some(PatchLookup::Identifier(identifier)) => SourcePatch::Identifier(identifier),
         Some(PatchLookup::NoPatch) => SourcePatch::NoPatch,
+        Some(PatchLookup::Unrepresentable) => SourcePatch::Unrepresentable,
         Some(PatchLookup::Unreadable) | None => SourcePatch::Unreadable,
     })
 }
