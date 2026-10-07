@@ -558,35 +558,38 @@ fn fate_patch_selects_target_relevant_hunks_amid_unrelated_edits() {
     let start = commit(
         &repo,
         "a.txt",
-        "alpha\nbeta\ngamma\n",
+        "alpha\nbeta\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\n",
         "Add",
         "2020-01-01T00:00:00Z",
     );
-    // One commit rewrites the tracked line and also adds an unrelated region to
-    // the same file; the attached patch must carry only the hunk that touches
-    // the tracked line, never unrelated same-file or sibling-file edits.
-    fs::write(repo.dir.path().join("other.txt"), "seed\n").expect("seed other file");
-    git(repo.dir.path(), ["add", "--all"]);
-    git_command(repo.dir.path())
-        .args(["commit", "-m", "Seed unrelated file"])
-        .env("GIT_AUTHOR_DATE", "2020-01-01T00:00:01Z")
-        .env("GIT_COMMITTER_DATE", "2020-01-01T00:00:01Z")
-        .output()
-        .expect("run git seed commit");
+    // The rewrite commit rewrites the tracked line (line 2) and an unrelated
+    // distant line (line 12, beyond the 3-line git context window) plus a
+    // sibling file; only the hunk touching the tracked line may be attached.
+    commit(
+        &repo,
+        "other.txt",
+        "seed\n",
+        "Seed unrelated file",
+        "2020-01-01T00:00:01Z",
+    );
     fs::write(
         repo.dir.path().join("a.txt"),
-        "alpha\nBETA\nunrelated tail\n",
+        "alpha\nBETA\nc\nd\ne\nf\ng\nh\ni\nj\nk\nUNRELATED\n",
     )
     .expect("rewrite tracked file");
     fs::write(repo.dir.path().join("other.txt"), "noise\n").expect("edit unrelated file");
     git(repo.dir.path(), ["add", "--all"]);
-    let rewrite = git_command(repo.dir.path())
-        .args(["commit", "-m", "Rewrite beta with noise"])
+    let rewrite_output = git_command(repo.dir.path())
+        .args(["commit", "-m", "Rewrite beta with distant noise"])
         .env("GIT_AUTHOR_DATE", "2020-01-02T00:00:00Z")
         .env("GIT_COMMITTER_DATE", "2020-01-02T00:00:00Z")
         .output()
         .expect("run git rewrite commit");
-    assert!(rewrite.status.success());
+    assert!(
+        rewrite_output.status.success(),
+        "git commit failed: {}",
+        String::from_utf8_lossy(&rewrite_output.stderr)
+    );
     let rewrite = repo.head();
     repo.index();
 
@@ -607,6 +610,9 @@ fn fate_patch_selects_target_relevant_hunks_amid_unrelated_edits() {
     let text = hunks[0]["text"].as_str().unwrap();
     assert!(text.contains("-beta"), "{text}");
     assert!(text.contains("+BETA"), "{text}");
+    // Unrelated same-file (distant) and sibling-file edits stay out of the
+    // attached hunk text.
+    assert!(!text.contains("unrelated edit"), "{text}");
     assert!(!text.contains("noise"), "{text}");
 }
 
