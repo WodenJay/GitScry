@@ -62,15 +62,25 @@ fn format_report(
 }
 
 fn format_index_report(report: &app::IndexReport) -> String {
-    let mut message = format!(
-        "Indexed {} commit{} reachable from current HEAD.",
-        report.current_head_commit_count,
-        if report.current_head_commit_count == 1 {
-            ""
-        } else {
-            "s"
+    let count = report.selected_commit_count;
+    let mut message = if report.selected.is_empty() {
+        format!(
+            "Indexed {count} commit{} reachable from current HEAD.",
+            if count == 1 { "" } else { "s" }
+        )
+    } else {
+        let mut message = format!(
+            "Indexed {count} commit{} reachable from the selected revisions:",
+            if count == 1 { "" } else { "s" }
+        );
+        for (reference, tip) in &report.selected {
+            message.push_str(&format!(
+                "
+- {reference} at {tip}"
+            ));
         }
-    );
+        message
+    };
     if report.semantic_disabled {
         message.push_str(
             " Semantic indexing was disabled repository-wide; all cached semantic vectors were removed.",
@@ -133,9 +143,10 @@ pub(crate) fn waiting_for_cache(message: &str) {
 
 pub(crate) fn run(command: Command) -> i32 {
     let json_output = command.uses_json();
+    let index_scope = command.index_scope();
     let stderr = io::stderr();
     let is_terminal = stderr.is_terminal();
-    let mut progress = IndexProgress::new(stderr.lock(), is_terminal);
+    let mut progress = IndexProgress::new(stderr.lock(), is_terminal, index_scope);
     let result = app::execute(command, &mut |stage| progress.report(stage));
     match progress.finish() {
         Ok(()) => finish_with_format(result, json_output),
@@ -146,15 +157,18 @@ pub(crate) fn run(command: Command) -> i32 {
 struct IndexProgress<W> {
     output: W,
     is_terminal: bool,
+    /// Describes explicitly selected revisions; empty for current-HEAD indexing.
+    index_scope: String,
     active: bool,
     error: Option<io::Error>,
 }
 
 impl<W: Write> IndexProgress<W> {
-    fn new(output: W, is_terminal: bool) -> Self {
+    fn new(output: W, is_terminal: bool, index_scope: String) -> Self {
         Self {
             output,
             is_terminal,
+            index_scope,
             active: false,
             error: None,
         }
@@ -192,10 +206,14 @@ impl<W: Write> IndexProgress<W> {
                 write!(self.output, "{line}").and_then(|()| self.output.flush())
             }
         } else if matches!(stage, IndexStage::ReadingCommits) {
-            writeln!(
-                self.output,
-                "Indexing history reachable from current HEAD..."
-            )
+            if self.index_scope.is_empty() {
+                writeln!(
+                    self.output,
+                    "Indexing history reachable from current HEAD..."
+                )
+            } else {
+                writeln!(self.output, "{}", self.index_scope)
+            }
         } else if matches!(stage, IndexStage::BuildingSemanticIndex) {
             writeln!(self.output, "Building semantic index...")
         } else {
@@ -349,7 +367,7 @@ mod tests {
     #[test]
     fn terminal_progress_reaches_complete() {
         let mut output = Vec::new();
-        let mut progress = IndexProgress::new(&mut output, true);
+        let mut progress = IndexProgress::new(&mut output, true, String::new());
         for stage in [
             IndexStage::ReadingCommits,
             IndexStage::ReadingChanges,
@@ -388,7 +406,7 @@ mod tests {
     #[test]
     fn redirected_progress_preserves_plain_text_contract() {
         let mut output = Vec::new();
-        let mut progress = IndexProgress::new(&mut output, false);
+        let mut progress = IndexProgress::new(&mut output, false, String::new());
         for stage in [
             IndexStage::ReadingCommits,
             IndexStage::ReadingChanges,

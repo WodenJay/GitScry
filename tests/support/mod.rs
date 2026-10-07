@@ -34,6 +34,10 @@ impl TestRepo {
         git_stdout(self.dir.path(), ["rev-parse", "HEAD"])
     }
 
+    pub(crate) fn head_oid(&self, revision: &str) -> String {
+        git_stdout(self.dir.path(), ["rev-parse", revision])
+    }
+
     pub(crate) fn common_dir(&self) -> PathBuf {
         git_common_dir(self.dir.path())
     }

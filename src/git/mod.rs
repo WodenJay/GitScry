@@ -227,6 +227,19 @@ impl Repository {
         Self::parse_reachable_commits(&output)
     }
 
+    /// Commit union reachable from all tips, newest-first (rev-list default order).
+    pub(crate) fn reachable_commits_from_tips(
+        &self,
+        tips: &[String],
+    ) -> Result<Vec<String>, AppError> {
+        let output = self.git.text(
+            ["rev-list"]
+                .into_iter()
+                .chain(tips.iter().map(String::as_str)),
+        )?;
+        Self::parse_reachable_commits(&output)
+    }
+
     pub(crate) fn reachable_commits_in_history_order(
         &self,
         tip: &str,

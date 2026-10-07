@@ -17,6 +17,7 @@ use crate::{
 use super::{SCHEMA_VERSION, SQL_PARAMETER_LIMIT, SharedLock, cache_error, write};
 
 struct CacheState {
+    #[allow(dead_code)] // persisted metadata; no longer drives publication validation
     tip: String,
     object_format: String,
     shallow_boundaries: Vec<String>,
@@ -36,40 +37,45 @@ enum Inspection {
 
 pub(crate) struct PreparedCache {
     pub(crate) progress: Vec<String>,
-    pub(crate) current_head_commit_count: usize,
-    pub(crate) pinned_tip: String,
+    pub(crate) selections: Vec<Selection>,
+    pub(crate) selected_commit_count: usize,
+    pub(crate) pinned_tips: Vec<String>,
     pub(crate) semantic_enabled: bool,
     _lock: SharedLock,
 }
 
 impl PreparedCache {
-    pub(crate) fn release(self) -> (Vec<String>, usize, bool, String) {
+    pub(crate) fn release(self) -> (Vec<String>, Vec<Selection>, usize, bool, Vec<String>) {
         let Self {
             progress,
-            current_head_commit_count,
-            pinned_tip,
+            selections,
+            selected_commit_count,
+            pinned_tips,
             semantic_enabled,
             _lock,
         } = self;
         drop(_lock);
         (
             progress,
-            current_head_commit_count,
+            selections,
+            selected_commit_count,
             semantic_enabled,
-            pinned_tip,
+            pinned_tips,
         )
     }
 }
 
 struct Expected {
-    tip: String,
+    /// Resolved, deduplicated commit IDs of the requested starting points.
+    tips: Vec<String>,
     object_format: String,
     shallow_boundaries: Vec<String>,
 }
 
 fn publication_matches_target(state: &CacheState, expected: &Expected) -> bool {
-    // `tip` is the most recent publisher, not all cached HEADs.
-    state.commits.contains(&expected.tip)
+    // Every pinned starting point must be cached; `tip` is the most recent
+    // publisher, not the complete set of cached histories.
+    expected.tips.iter().all(|tip| state.commits.contains(tip))
         && state.object_format == expected.object_format
         && state.shallow_boundaries == expected.shallow_boundaries
 }
@@ -78,7 +84,7 @@ enum Plan {
     Fresh {
         state: CacheState,
         missing_objects: Vec<String>,
-        current_head_commit_count: usize,
+        selected_commit_count: usize,
     },
     Incremental {
         state: CacheState,
@@ -92,21 +98,52 @@ enum Plan {
     },
 }
 
+/// One requested revision pinned to its resolved commit ID.
+pub(crate) struct Selection {
+    pub(crate) reference: String,
+    pub(crate) tip: String,
+}
+
+pub(crate) fn resolve_selections(
+    repository: &Repository,
+    refs: &[String],
+) -> Result<(Vec<Selection>, Vec<String>), AppError> {
+    let mut selections = Vec::new();
+    let mut tips = Vec::new();
+    for reference in refs {
+        let tip = repository.resolve_commit(reference)?;
+        if !tips.contains(&tip) {
+            tips.push(tip.clone());
+        }
+        selections.push(Selection {
+            reference: reference.clone(),
+            tip,
+        });
+    }
+    Ok((selections, tips))
+}
+
 pub(crate) fn prepare(
     repository: &Repository,
+    refs: &[String],
     report: &mut dyn FnMut(IndexStage),
 ) -> Result<PreparedCache, AppError> {
-    let tip = repository.resolve_commit("HEAD")?;
-    prepare_at(repository, tip, report)
+    let (selections, tips) = if refs.is_empty() {
+        (Vec::new(), vec![repository.resolve_commit("HEAD")?])
+    } else {
+        resolve_selections(repository, refs)?
+    };
+    prepare_at(repository, selections, tips, report)
 }
 
 pub(crate) fn prepare_at(
     repository: &Repository,
-    tip: String,
+    selections: Vec<Selection>,
+    tips: Vec<String>,
     report: &mut dyn FnMut(IndexStage),
 ) -> Result<PreparedCache, AppError> {
     let expected = Expected {
-        tip,
+        tips,
         object_format: repository.object_format()?,
         shallow_boundaries: repository.shallow_boundaries()?,
     };
@@ -116,15 +153,16 @@ pub(crate) fn prepare_at(
     if let Plan::Fresh {
         state,
         missing_objects,
-        current_head_commit_count,
+        selected_commit_count,
     } = plan
     {
         add_warnings(&mut progress, &expected, &missing_objects);
         return Ok(PreparedCache {
             progress,
-            current_head_commit_count,
+            selections,
+            selected_commit_count,
             semantic_enabled: state.semantic_enabled,
-            pinned_tip: expected.tip.clone(),
+            pinned_tips: expected.tips.clone(),
             _lock: shared,
         });
     }
@@ -136,7 +174,7 @@ pub(crate) fn prepare_at(
     if let Plan::Fresh {
         state,
         missing_objects,
-        current_head_commit_count,
+        selected_commit_count,
     } = plan
     {
         drop(exclusive);
@@ -144,14 +182,15 @@ pub(crate) fn prepare_at(
         add_warnings(&mut progress, &expected, &missing_objects);
         return Ok(PreparedCache {
             progress,
-            current_head_commit_count,
+            selections,
+            selected_commit_count,
             semantic_enabled: state.semantic_enabled,
-            pinned_tip: expected.tip.clone(),
+            pinned_tips: expected.tips.clone(),
             _lock: shared,
         });
     }
 
-    let current_head_commit_count = match plan {
+    let selected_commit_count = match plan {
         Plan::Rebuild {
             damaged,
             semantic_enabled,
@@ -162,7 +201,7 @@ pub(crate) fn prepare_at(
             report(IndexStage::ReadingCommits);
             let snapshot = repository.read_history_at(
                 HistoryTarget {
-                    tip: expected.tip.clone(),
+                    tips: expected.tips.clone(),
                     object_format: expected.object_format.clone(),
                     shallow_boundaries: expected.shallow_boundaries.clone(),
                 },
@@ -203,9 +242,10 @@ pub(crate) fn prepare_at(
     add_warnings(&mut progress, &expected, &state.missing_objects);
     Ok(PreparedCache {
         progress,
-        current_head_commit_count,
+        selections,
+        selected_commit_count,
         semantic_enabled: state.semantic_enabled,
-        pinned_tip: expected.tip.clone(),
+        pinned_tips: expected.tips.clone(),
         _lock: shared,
     })
 }
@@ -217,7 +257,7 @@ pub(crate) fn refresh_query(
 ) -> Result<super::QuerySession, AppError> {
     let mut session = super::open_query(repository)?;
     let expected = Expected {
-        tip: tip.to_owned(),
+        tips: vec![tip.to_owned()],
         object_format: repository.object_format()?,
         shallow_boundaries: repository.shallow_boundaries()?,
     };
@@ -305,7 +345,7 @@ pub(crate) fn refresh_query(
 fn refresh_semantics(repository: &Repository, tip: &str) -> Result<(), AppError> {
     super::maintain_semantic(
         repository,
-        tip,
+        &[tip.to_owned()],
         super::SemanticPreference::Preserve,
         super::SemanticResourcePolicy::ExistingOnly,
         &mut crate::render::refresh_progress,
@@ -353,7 +393,7 @@ fn refresh_plan(
                 Ok(Plan::Fresh {
                     state,
                     missing_objects,
-                    current_head_commit_count: reachable_commits.len(),
+                    selected_commit_count: reachable_commits.len(),
                 })
             } else {
                 Ok(Plan::Incremental {
@@ -377,7 +417,7 @@ fn append_incremental(
     reachable_commits: Vec<String>,
     report: &mut dyn FnMut(IndexStage),
 ) -> Result<usize, AppError> {
-    let current_head_commit_count = reachable_commits.len();
+    let selected_commit_count = reachable_commits.len();
     report(IndexStage::ReadingCommits);
     let reachable = reachable_commits.iter().cloned().collect::<HashSet<_>>();
     let mut refresh = commits_for_objects(&repository.common_dir, &changed_objects)?;
@@ -390,7 +430,7 @@ fn append_incremental(
     refresh.dedup();
     let snapshot = repository.read_incremental_history_at(
         HistoryTarget {
-            tip: expected.tip.clone(),
+            tips: expected.tips.clone(),
             object_format: expected.object_format.clone(),
             shallow_boundaries: expected.shallow_boundaries.clone(),
         },
@@ -401,7 +441,7 @@ fn append_incremental(
     )?;
     report(IndexStage::WritingCache);
     write::append(&super::cache_path(&repository.common_dir), &snapshot)?;
-    Ok(current_head_commit_count)
+    Ok(selected_commit_count)
 }
 
 fn evaluate(
@@ -429,7 +469,7 @@ fn evaluate(
         });
     }
 
-    let reachable_commits = repository.reachable_commits(&expected.tip)?;
+    let reachable_commits = repository.reachable_commits_from_tips(&expected.tips)?;
     let current_missing = repository.missing_objects(&state.referenced_objects)?;
     let previous_missing = state
         .missing_objects
@@ -458,9 +498,14 @@ fn evaluate(
         .map(String::as_str)
         .collect::<HashSet<_>>();
 
-    if state.tip == expected.tip
-        && state.shallow_boundaries == expected.shallow_boundaries
+    // Freshness requires full coverage of all selected reachable histories;
+    // the most recent publisher matching one target is not sufficient.
+    if state.shallow_boundaries == expected.shallow_boundaries
         && changed_objects.is_empty()
+        && expected
+            .tips
+            .iter()
+            .all(|tip| cached_commits.contains(tip.as_str()))
         && reachable_commits
             .iter()
             .all(|commit| cached_commits.contains(commit.as_str()))
@@ -468,7 +513,7 @@ fn evaluate(
         Ok(Plan::Fresh {
             state,
             missing_objects: current_missing,
-            current_head_commit_count: reachable_commits.len(),
+            selected_commit_count: reachable_commits.len(),
         })
     } else {
         Ok(Plan::Incremental {
@@ -838,7 +883,7 @@ mod tests {
     #[test]
     fn publication_accepts_a_pinned_head_cached_before_another_head() {
         let expected = Expected {
-            tip: "pinned-tip".to_owned(),
+            tips: vec!["pinned-tip".to_owned()],
             object_format: "sha1".to_owned(),
             shallow_boundaries: Vec::new(),
         };

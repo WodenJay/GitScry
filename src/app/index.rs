@@ -3,13 +3,15 @@ use crate::{cache, git};
 use super::{AppError, IndexReport, IndexStage, Outcome};
 
 pub(super) fn run(
+    refs: Vec<String>,
     semantic: bool,
     no_semantic: bool,
     report: &mut dyn FnMut(IndexStage),
 ) -> Result<Outcome, AppError> {
     let repository = git::Repository::discover()?;
-    let prepared = cache::prepare(&repository, report)?;
-    let (progress, current_head_commit_count, semantic_enabled, pinned_tip) = prepared.release();
+    let prepared = cache::prepare(&repository, &refs, report)?;
+    let (progress, selections, selected_commit_count, semantic_enabled, pinned_tips) =
+        prepared.release();
     let preference = match (semantic, no_semantic) {
         (true, false) => cache::SemanticPreference::Enable,
         (false, true) => cache::SemanticPreference::Disable,
@@ -19,7 +21,7 @@ pub(super) fn run(
     if !matches!(preference, cache::SemanticPreference::Preserve) || semantic_enabled {
         cache::maintain_semantic(
             &repository,
-            &pinned_tip,
+            &pinned_tips,
             preference,
             cache::SemanticResourcePolicy::Ensure,
             report,
@@ -37,7 +39,11 @@ pub(super) fn run(
         github_links: None,
         clear_report: None,
         index_report: Some(IndexReport {
-            current_head_commit_count,
+            selected: selections
+                .into_iter()
+                .map(|selection| (selection.reference, selection.tip))
+                .collect(),
+            selected_commit_count,
             semantic_disabled: no_semantic,
         }),
         prune_report: None,

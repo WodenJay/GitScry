@@ -19,7 +19,7 @@ pub(crate) struct Snapshot {
 }
 
 pub(crate) struct HistoryTarget {
-    pub(crate) tip: String,
+    pub(crate) tips: Vec<String>,
     pub(crate) object_format: String,
     pub(crate) shallow_boundaries: Vec<String>,
 }
@@ -108,7 +108,7 @@ pub(super) fn read(
     target: HistoryTarget,
     report: &mut dyn FnMut(IndexStage),
 ) -> Result<Snapshot, AppError> {
-    let graph = read_graph(git, &target.tip)?;
+    let graph = read_graph(git, &target.tips)?;
     read_selected(git, target, &graph, &graph, Vec::new(), report)
 }
 
@@ -120,7 +120,7 @@ pub(super) fn read_incremental(
     known_missing_objects: Vec<String>,
     report: &mut dyn FnMut(IndexStage),
 ) -> Result<Snapshot, AppError> {
-    let graph = read_graph(git, &target.tip)?;
+    let graph = read_graph(git, &target.tips)?;
     let cached = cached_commits.iter().collect::<HashSet<_>>();
     let refresh = refresh_commits.iter().collect::<HashSet<_>>();
     let selected = graph
@@ -205,8 +205,13 @@ fn collect_type_change_ordinals<'a>(
     type_change_ordinals
 }
 
-fn read_graph(git: &Git, tip: &str) -> Result<Vec<String>, AppError> {
-    let graph = git.output(["rev-list", "--reverse", "--topo-order", tip], &[])?;
+fn read_graph(git: &Git, tips: &[String]) -> Result<Vec<String>, AppError> {
+    let graph = git.output(
+        ["rev-list", "--reverse", "--topo-order"]
+            .into_iter()
+            .chain(tips.iter().map(String::as_str)),
+        &[],
+    )?;
     parse_graph(&graph)
 }
 
@@ -295,7 +300,11 @@ fn read_selected(
         type_change_ordinals,
     };
     Ok(Snapshot {
-        tip: target.tip,
+        tip: target
+            .tips
+            .last()
+            .expect("history target has a tip")
+            .clone(),
         object_format: target.object_format,
         shallow_boundaries: target.shallow_boundaries,
         missing_objects,

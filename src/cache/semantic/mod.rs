@@ -42,7 +42,7 @@ pub(crate) enum SemanticResourcePolicy {
 
 pub(crate) fn maintain(
     repository: &Repository,
-    pinned_tip: &str,
+    pinned_tips: &[String],
     preference: SemanticPreference,
     resource_policy: SemanticResourcePolicy,
     report: &mut dyn FnMut(IndexStage),
@@ -52,7 +52,7 @@ pub(crate) fn maintain(
 
     if matches!(preference, SemanticPreference::Preserve)
         && matches!(resource_policy, SemanticResourcePolicy::ExistingOnly)
-        && semantic_ready_for_tip(common_dir, pinned_tip)?
+        && semantic_ready_for_tips(common_dir, pinned_tips)?
     {
         return Ok(());
     }
@@ -81,20 +81,19 @@ pub(crate) fn maintain(
     }
 
     validate_completed_generation(&connection)?;
-    let reachable_oids = repository.reachable_commits(pinned_tip)?;
+    let reachable_oids = repository.reachable_commits_from_tips(pinned_tips)?;
     let commit_count = set_coverage_scope(&connection, &reachable_oids)?;
     if usize::try_from(commit_count).ok() != Some(reachable_oids.len()) {
         return Err(AppError::operational(
-            "error: the published cache does not contain the pinned current-HEAD history; retry `gitscry index`",
+            "error: the published cache does not contain the selected history; retry `gitscry index`",
         ));
     }
-
-    let tip = pinned_tip;
+    let coverage_tip = coverage_tip(pinned_tips);
     let encoder_fingerprint = semantic::encoder_fingerprint();
     let mut preprocessor = None;
     let ready = match is_ready_with_policy(
         &connection,
-        tip,
+        &coverage_tip,
         commit_count,
         &encoder_fingerprint,
         &mut preprocessor,
@@ -153,7 +152,7 @@ pub(crate) fn maintain(
         &[
             ("semantic_enabled", "1"),
             ("semantic_ready", "1"),
-            ("semantic_coverage_tip", tip),
+            ("semantic_coverage_tip", &coverage_tip),
             ("semantic_coverage_count", coverage_count.as_str()),
             ("semantic_encoder_fingerprint", encoder_fingerprint.as_str()),
             ("semantic_runtime_provenance", runtime_provenance.as_str()),
@@ -251,13 +250,36 @@ fn commit_document(message: &[u8], paths: &[Vec<u8>]) -> CommitDocument {
     }
 }
 
-fn semantic_ready_for_tip(common_dir: &std::path::Path, tip: &str) -> Result<bool, AppError> {
+/// Stable marker identifying the selected-history union; single-tip selections
+/// keep the plain commit ID.
+fn coverage_tip(pinned_tips: &[String]) -> String {
+    if pinned_tips.len() == 1 {
+        pinned_tips[0].clone()
+    } else {
+        let mut joined = pinned_tips.join("\n");
+        joined.push('\n');
+        format!("multi:{}", hex(&Sha256::digest(joined.as_bytes())))
+    }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn semantic_ready_for_tips(
+    common_dir: &std::path::Path,
+    pinned_tips: &[String],
+) -> Result<bool, AppError> {
     let mut progress = Vec::new();
     let _lock = super::acquire_shared(common_dir, &mut progress)?;
     let path = super::cache_path(common_dir);
     let connection = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|error| cache_error("opening cache to check semantic readiness", error))?;
-    ready_marker_matches(&connection, tip, &semantic::encoder_fingerprint())
+    ready_marker_matches(
+        &connection,
+        &coverage_tip(pinned_tips),
+        &semantic::encoder_fingerprint(),
+    )
 }
 
 fn ready_marker_matches(
@@ -889,8 +911,8 @@ mod tests {
                 .unwrap();
         }
         drop(connection);
-        assert!(semantic_ready_for_tip(common_dir, "tip").unwrap());
-        assert!(!semantic_ready_for_tip(common_dir, "other").unwrap());
+        assert!(semantic_ready_for_tips(common_dir, &["tip".to_owned()]).unwrap());
+        assert!(!semantic_ready_for_tips(common_dir, &["other".to_owned()]).unwrap());
     }
     #[test]
     fn ready_semantic_index_validates_vectors_not_runtime_provenance() {
