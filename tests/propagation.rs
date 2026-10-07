@@ -235,3 +235,301 @@ fn deep_history_branch_resolves_containment_after_refresh() {
     assert_eq!(target["status"], "contained");
     assert_eq!(repo.head(), head_before);
 }
+
+#[test]
+fn cherry_picked_commit_with_a_new_message_is_an_equivalent() {
+    let repo = TestRepo::new();
+    let base = commit(&repo, "a.txt", "base\n", "base");
+    git(repo.dir.path(), ["checkout", "-b", "source"]);
+    let source = commit(&repo, "b.txt", "feature\n", "add feature");
+
+    // The target replays the same whole-commit patch onto the same base, so the
+    // patch identifier matches even though the commit SHA and message differ.
+    git(repo.dir.path(), ["checkout", "-b", "target", &base]);
+    git(repo.dir.path(), ["cherry-pick", "-x", &source]);
+    let replayed = repo.head();
+    assert_ne!(
+        replayed, source,
+        "the cherry-pick must be a distinct commit"
+    );
+    git(repo.dir.path(), ["checkout", "main"]);
+    repo.index();
+
+    let value = json(repo.run(["propagation", &source, "--to", "target", "--json"]));
+    let target = &value["targets"][0];
+    assert_eq!(target["status"], "equivalent");
+    assert_eq!(target["equivalents"], serde_json::json!([replayed]));
+    assert_eq!(target["contained_by"], serde_json::json!([]));
+    assert_eq!(target["matching_method"], "patch-id --verbatim");
+    assert!(
+        target["patch_identifier"]
+            .as_str()
+            .is_some_and(|id| id.len() == 40)
+    );
+    assert_eq!(value["coverage_complete"], true);
+}
+
+#[test]
+fn rebased_commit_is_an_equivalent() {
+    let repo = TestRepo::new();
+    let base = commit(&repo, "a.txt", "base\n", "base");
+    git(repo.dir.path(), ["checkout", "-b", "feature"]);
+    let source = commit(&repo, "s.txt", "feature\n", "add feature");
+
+    git(repo.dir.path(), ["checkout", "-b", "target", &base]);
+    commit(&repo, "t.txt", "target\n", "target change");
+    // Rebase the feature commit onto the target: the patch content is unchanged.
+    git(repo.dir.path(), ["checkout", "feature"]);
+    git(repo.dir.path(), ["rebase", "target"]);
+    let replayed = repo.head();
+    assert_ne!(replayed, source, "the rebase must rewrite the commit");
+    git(repo.dir.path(), ["checkout", "main"]);
+    repo.index();
+
+    let value = json(repo.run(["propagation", &source, "--to", "feature", "--json"]));
+    let target = &value["targets"][0];
+    assert_eq!(target["status"], "equivalent");
+    assert_eq!(target["equivalents"], serde_json::json!([replayed]));
+}
+
+#[test]
+fn historically_applied_patches_are_reported_in_history_order() {
+    let repo = TestRepo::new();
+    let base = commit(&repo, "a.txt", "base\n", "base");
+    // A distinct source commit carrying the same patch.
+    git(repo.dir.path(), ["checkout", "-b", "source"]);
+    let source = commit(&repo, "b.txt", "feature\n", "add feature");
+
+    // Apply, revert, then re-apply the patch on the target.
+    git(repo.dir.path(), ["checkout", "-b", "target", &base]);
+    let first = commit(&repo, "b.txt", "feature\n", "apply");
+    git(repo.dir.path(), ["rm", "b.txt"]);
+    git(repo.dir.path(), ["commit", "-m", "revert"]);
+    let last = commit(&repo, "b.txt", "feature\n", "reapply");
+    git(repo.dir.path(), ["checkout", "main"]);
+    repo.index();
+
+    let value = json(repo.run(["propagation", &source, "--to", "target", "--json"]));
+    let target = &value["targets"][0];
+    assert_eq!(target["status"], "equivalent");
+    // Both historical applications are reported, in deterministic target-history order.
+    assert_eq!(target["equivalents"], serde_json::json!([first, last]));
+}
+
+#[test]
+fn equivalent_reachable_only_through_a_merge_is_found_once() {
+    let repo = TestRepo::new();
+    let base = commit(&repo, "a.txt", "base\n", "base");
+    git(repo.dir.path(), ["checkout", "-b", "dup", &base]);
+    let duplicate = commit(&repo, "b.txt", "feature\n", "duplicate feature");
+    git(repo.dir.path(), ["checkout", "-b", "source", &base]);
+    let source = commit(&repo, "b.txt", "feature\n", "add feature");
+
+    git(repo.dir.path(), ["checkout", "-b", "target", &base]);
+    commit(&repo, "c.txt", "target\n", "target change");
+    merge_no_ff(&repo, "dup");
+    git(repo.dir.path(), ["checkout", "main"]);
+    repo.index();
+
+    let value = json(repo.run(["propagation", &source, "--to", "target", "--json"]));
+    let target = &value["targets"][0];
+    assert_eq!(target["status"], "equivalent");
+    // The commit is reachable only through the merge's second parent, and appears once.
+    assert_eq!(target["equivalents"], serde_json::json!([duplicate]));
+}
+
+#[test]
+fn whitespace_difference_is_not_equivalent() {
+    let repo = TestRepo::new();
+    let base = commit(&repo, "a.txt", "base\n", "base");
+    git(repo.dir.path(), ["checkout", "-b", "source"]);
+    let source = commit(&repo, "w.txt", "feature\n", "add feature");
+
+    git(repo.dir.path(), ["checkout", "-b", "target", &base]);
+    commit(
+        &repo,
+        "w.txt",
+        "feature \n",
+        "add feature with trailing space",
+    );
+    git(repo.dir.path(), ["checkout", "main"]);
+    repo.index();
+
+    let value = json(repo.run(["propagation", &source, "--to", "target", "--json"]));
+    let target = &value["targets"][0];
+    assert_eq!(target["status"], "not_found");
+    assert_eq!(target["equivalents"], serde_json::json!([]));
+    assert_eq!(value["coverage_complete"], true);
+}
+
+#[test]
+fn partial_backport_is_not_equivalent() {
+    let repo = TestRepo::new();
+    let base = commit(&repo, "a.txt", "base\n", "base");
+    git(repo.dir.path(), ["checkout", "-b", "source"]);
+    fs::write(repo.dir.path().join("x.txt"), "x\n").unwrap();
+    fs::write(repo.dir.path().join("y.txt"), "y\n").unwrap();
+    git(repo.dir.path(), ["add", "x.txt", "y.txt"]);
+    git(repo.dir.path(), ["commit", "-m", "add two files"]);
+    let source = repo.head();
+
+    // The target applies only one of the two files: the whole-commit patch differs.
+    git(repo.dir.path(), ["checkout", "-b", "target", &base]);
+    commit(&repo, "x.txt", "x\n", "add one file");
+    git(repo.dir.path(), ["checkout", "main"]);
+    repo.index();
+
+    let value = json(repo.run(["propagation", &source, "--to", "target", "--json"]));
+    assert_eq!(value["targets"][0]["status"], "not_found");
+}
+
+#[test]
+fn squashed_commits_are_not_equivalents() {
+    let repo = TestRepo::new();
+    let base = commit(&repo, "a.txt", "base\n", "base");
+    git(repo.dir.path(), ["checkout", "-b", "source"]);
+    let first = commit(&repo, "x.txt", "x\n", "add x");
+    let second = commit(&repo, "y.txt", "y\n", "add y");
+
+    // The target squashes both source commits into a single commit.
+    git(repo.dir.path(), ["checkout", "-b", "target", &base]);
+    fs::write(repo.dir.path().join("x.txt"), "x\n").unwrap();
+    fs::write(repo.dir.path().join("y.txt"), "y\n").unwrap();
+    git(repo.dir.path(), ["add", "x.txt", "y.txt"]);
+    git(repo.dir.path(), ["commit", "-m", "add x and y"]);
+    git(repo.dir.path(), ["checkout", "main"]);
+    repo.index();
+
+    for source in [&first, &second] {
+        let value = json(repo.run(["propagation", source, "--to", "target", "--json"]));
+        assert_eq!(
+            value["targets"][0]["status"], "not_found",
+            "a squashed commit must not match either source commit"
+        );
+    }
+}
+
+#[test]
+fn equivalent_is_reported_even_when_other_history_is_incomplete() {
+    let repo = TestRepo::new();
+    let base = commit(&repo, "a.txt", "base\n", "base");
+    git(repo.dir.path(), ["checkout", "-b", "source"]);
+    let source = commit(&repo, "b.txt", "feature\n", "add feature");
+    git(repo.dir.path(), ["checkout", "-b", "target", &base]);
+    let duplicate = commit(&repo, "b.txt", "feature\n", "duplicate feature");
+    git(repo.dir.path(), ["checkout", "main"]);
+    repo.index();
+
+    // Mark the root as a shallow boundary so the target history is incomplete.
+    fs::write(repo.common_dir().join("shallow"), format!("{base}\n")).unwrap();
+
+    let value = json(repo.run(["propagation", &source, "--to", "target", "--json"]));
+    let target = &value["targets"][0];
+    assert_eq!(target["status"], "equivalent");
+    assert_eq!(target["equivalents"], serde_json::json!([duplicate]));
+    assert!(
+        target["reason"]
+            .as_str()
+            .is_some_and(|reason| !reason.is_empty()),
+        "incompleteness is reported alongside the positive match"
+    );
+    assert_eq!(value["coverage_complete"], false);
+}
+
+#[test]
+fn unreadable_candidate_patch_reports_indeterminate_not_not_found() {
+    let repo = TestRepo::new();
+    let base = commit(&repo, "a.txt", "base\n", "base");
+    git(repo.dir.path(), ["checkout", "-b", "source"]);
+    let source = commit(&repo, "s.txt", "source\n", "add source");
+    git(repo.dir.path(), ["checkout", "-b", "target", &base]);
+    let target = commit(&repo, "t.txt", "target\n", "add target");
+    git(repo.dir.path(), ["checkout", "main"]);
+    repo.index();
+
+    // Remove a blob the target candidate needs so its patch cannot be read.
+    let blob = git_stdout(repo.dir.path(), ["rev-parse", &format!("{target}:t.txt")]);
+    let object = repo
+        .dir
+        .path()
+        .join(".git/objects")
+        .join(&blob[..2])
+        .join(&blob[2..]);
+    fs::remove_file(object).expect("remove blob object");
+
+    let value = json(repo.run(["propagation", &source, "--to", "target", "--json"]));
+    let result = &value["targets"][0];
+    assert_eq!(result["status"], "indeterminate");
+    assert!(
+        result["reason"]
+            .as_str()
+            .is_some_and(|reason| !reason.is_empty()),
+        "an unreadable candidate is an inspection gap, not a negative"
+    );
+    assert_eq!(value["coverage_complete"], false);
+}
+
+#[test]
+fn source_commit_without_a_patch_is_indeterminate() {
+    let repo = TestRepo::new();
+    let base = commit(&repo, "a.txt", "base\n", "base");
+    git(repo.dir.path(), ["checkout", "-b", "source"]);
+    git(repo.dir.path(), ["commit", "--allow-empty", "-m", "empty"]);
+    let source = repo.head();
+    git(repo.dir.path(), ["checkout", "-b", "target", &base]);
+    commit(&repo, "c.txt", "target\n", "target change");
+    git(repo.dir.path(), ["checkout", "main"]);
+    repo.index();
+
+    let value = json(repo.run(["propagation", &source, "--to", "target", "--json"]));
+    let target = &value["targets"][0];
+    assert_eq!(target["status"], "indeterminate");
+    assert!(
+        target["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("no whole-commit patch"))
+    );
+}
+
+#[test]
+fn ambient_diff_configuration_does_not_change_equivalence() {
+    let repo = TestRepo::new();
+    let base = commit(&repo, "a.txt", "base\n", "base");
+    git(repo.dir.path(), ["checkout", "-b", "source"]);
+    let source = commit(&repo, "b.txt", "feature\n", "add feature");
+    git(repo.dir.path(), ["checkout", "-b", "target", &base]);
+    git(repo.dir.path(), ["cherry-pick", "-x", &source]);
+    let replayed = repo.head();
+    assert_ne!(
+        replayed, source,
+        "the cherry-pick must be a distinct commit"
+    );
+    git(repo.dir.path(), ["checkout", "main"]);
+    repo.index();
+
+    let clean = json(repo.run(["propagation", &source, "--to", "target", "--json"]));
+    assert_eq!(clean["targets"][0]["status"], "equivalent");
+
+    // Hostile ambient diff configuration must not change the identifier or result.
+    for (key, value) in [
+        ("diff.context", "25"),
+        ("diff.renames", "copies"),
+        ("diff.noprefix", "true"),
+        ("diff.mnemonicPrefix", "true"),
+        ("diff.algorithm", "histogram"),
+        ("diff.indentHeuristic", "true"),
+    ] {
+        git(repo.dir.path(), ["config", key, value]);
+    }
+
+    let polluted = json(repo.run(["propagation", &source, "--to", "target", "--json"]));
+    assert_eq!(polluted["targets"][0]["status"], "equivalent");
+    assert_eq!(
+        polluted["targets"][0]["equivalents"],
+        serde_json::json!([replayed])
+    );
+    assert_eq!(
+        polluted["targets"][0]["patch_identifier"],
+        clean["targets"][0]["patch_identifier"]
+    );
+}
