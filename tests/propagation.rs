@@ -384,6 +384,31 @@ fn partial_backport_is_not_equivalent() {
 }
 
 #[test]
+fn split_source_commit_is_not_equivalent_to_partial_target_commits() {
+    let repo = TestRepo::new();
+    let base = commit(&repo, "a.txt", "base\n", "base");
+    git(repo.dir.path(), ["checkout", "-b", "source"]);
+    fs::write(repo.dir.path().join("x.txt"), "x\n").unwrap();
+    fs::write(repo.dir.path().join("y.txt"), "y\n").unwrap();
+    git(repo.dir.path(), ["add", "x.txt", "y.txt"]);
+    git(repo.dir.path(), ["commit", "-m", "add two files"]);
+    let source = repo.head();
+
+    // The target splits the source patch across two ordinary commits.
+    git(repo.dir.path(), ["checkout", "-b", "target", &base]);
+    commit(&repo, "x.txt", "x\n", "add x");
+    commit(&repo, "y.txt", "y\n", "add y");
+    git(repo.dir.path(), ["checkout", "main"]);
+    repo.index();
+
+    let value = json(repo.run(["propagation", &source, "--to", "target", "--json"]));
+    let target = &value["targets"][0];
+    assert_eq!(target["status"], "not_found");
+    assert_eq!(target["equivalents"], serde_json::json!([]));
+    assert_eq!(value["coverage_complete"], true);
+}
+
+#[test]
 fn squashed_commits_are_not_equivalents() {
     let repo = TestRepo::new();
     let base = commit(&repo, "a.txt", "base\n", "base");
