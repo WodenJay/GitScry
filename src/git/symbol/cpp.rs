@@ -1,5 +1,5 @@
 //! Bundled C++ extraction. Trees and grammar details never escape the locator.
-use super::{Location, Selection, Span};
+use super::{BodySpan, Location, Selection, Span};
 use tree_sitter::{Node, Parser};
 
 pub(super) fn extract(source: &[u8]) -> Result<Vec<Location>, String> {
@@ -309,6 +309,7 @@ fn push(
         identifier_line,
         identifier_column,
         span: Span { start, end },
+        body_span: node.child_by_field_name("body").map(BodySpan::from_node),
         notice: None,
     });
 }

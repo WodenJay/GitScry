@@ -29,6 +29,25 @@ pub(super) struct Span {
     pub(super) end: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct BodySpan {
+    pub(crate) start_line: usize,
+    pub(crate) end_line: usize,
+    pub(crate) start_byte: usize,
+    pub(crate) end_byte: usize,
+}
+
+impl BodySpan {
+    pub(super) fn from_node(node: tree_sitter::Node<'_>) -> Self {
+        Self {
+            start_line: node.start_position().row + 1,
+            end_line: node.end_position().row + usize::from(node.end_position().column > 0),
+            start_byte: node.start_byte(),
+            end_byte: node.end_byte(),
+        }
+    }
+}
+
 /// A local declaration, with its identifier kept separate from its source range.
 pub(super) struct Location {
     pub(super) name: String,
@@ -38,6 +57,7 @@ pub(super) struct Location {
     pub(super) identifier_line: usize,
     pub(super) identifier_column: usize,
     pub(super) span: Span,
+    pub(super) body_span: Option<BodySpan>,
 }
 
 /// Require a unique declaration; a clean structured parse is authoritative.
@@ -298,6 +318,7 @@ fn lightweight_locations(
                 identifier_line: line,
                 identifier_column: column,
                 span: Span { start: line, end },
+                body_span: None,
                 notice: Some(notice.clone()),
             }
         })

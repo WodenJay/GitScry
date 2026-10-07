@@ -502,6 +502,7 @@ pub(crate) fn execute(
         Command::Fate {
             path,
             line,
+            symbol,
             at,
             to_rev,
             max_commits,
@@ -512,6 +513,7 @@ pub(crate) fn execute(
             Request::Fate {
                 path,
                 line,
+                symbol,
                 at,
                 to_rev,
                 max_commits,
