@@ -42,6 +42,12 @@ impl QueryTarget for crate::git::TimelineTarget {
     }
 }
 
+impl QueryTarget for crate::git::FateTarget {
+    fn revision(&self) -> &str {
+        &self.revision
+    }
+}
+
 impl QueryTarget for crate::git::TraceFixTarget {
     fn revision(&self) -> &str {
         &self.revision
@@ -171,6 +177,7 @@ impl Context {
             QueryReport::Timeline(report) => report.scope = scope,
             QueryReport::TraceRemoval(report) => report.scope = scope,
             QueryReport::TraceRemovalFragment(report) => report.scope = scope,
+            QueryReport::Fate(report) => report.scope = scope,
             QueryReport::Hotspots(report) => report.scope = scope,
             QueryReport::Propagation(_) => {}
         }

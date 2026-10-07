@@ -493,6 +493,27 @@ pub(crate) fn execute(
                 paths: Vec::new(),
             },
         ),
+        Command::Fate {
+            path,
+            line,
+            at,
+            to_rev,
+            max_commits,
+            limit,
+            patch,
+            ..
+        } => (
+            Request::Fate {
+                path,
+                line,
+                at,
+                to_rev,
+                max_commits,
+            },
+            limit,
+            patch,
+            SearchScopeOptions::default(),
+        ),
         Command::Stats { .. } => unreachable!("stats command handled before query dispatch"),
     };
     let result = query::execute(
@@ -522,6 +543,7 @@ pub(crate) fn execute(
         query::QueryReport::Timeline(report) => {
             github::fetch_timeline(report, explicit_repo.as_deref())
         }
+        query::QueryReport::Fate(_) => unreachable!("fate has no GitHub link option"),
     });
     Ok(Outcome {
         progress: result.progress,

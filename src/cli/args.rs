@@ -906,6 +906,59 @@ Examples:
         #[arg(long)]
         json: bool,
     },
+
+    #[command(
+        about = "Trace a historical line's fate forward through history",
+        after_help = r#"Choose exactly one target: --line. The selected line is validated at --at,
+then tracked forward through cached history to --to-rev (HEAD fixed at
+invocation by default). Unchanged lines follow preceding insertions and
+deletions and detected renames; unrelated edits shift coordinates without
+becoming events. A rewritten selected line is recorded with bounded
+replacement material; tracking then stops as unknown because the hunk does not
+establish line identity.
+
+Run `gitscry index` first. Queries refresh locally available HEAD history;
+index another branch before selecting an uncached --at or --to-rev revision
+from it. The starting revision must be an ancestor of the endpoint. Equal
+endpoints report the validated location without events. Unsupported moves,
+merge history, and incomplete material stop explicitly as unknown; deletion is
+reported only from an observed removal with no replacement found.
+
+Traversal has no default ceiling. Positive --max-commits bounds inspected
+forward commits and reports incomplete when exhausted. --limit defaults to
+the last 20 events and never limits traversal; the summary and stop reason
+stay visible.
+
+Examples:
+  gitscry fate src/lib.rs --line 12 --at HEAD~5
+  gitscry fate src/lib.rs --line 12 --at v1.0 --to-rev release --patch
+  gitscry fate src/lib.rs --line 12 --at v1.0 --max-commits 500 --json"#
+    )]
+    Fate {
+        /// Repository-relative file path at the starting revision.
+        path: String,
+        /// One-based line number at the starting revision.
+        #[arg(long, value_parser = parse_line)]
+        line: usize,
+        /// Local revision containing the starting path and line; required.
+        #[arg(long, value_name = "REV")]
+        at: String,
+        /// Descendant endpoint; explicit revisions must be available after refresh or already published.
+        #[arg(long, value_name = "REV")]
+        to_rev: Option<String>,
+        /// Positive inspection ceiling over forward commits; the start validation is excluded.
+        #[arg(long, value_name = "N", value_parser = parse_limit)]
+        max_commits: Option<usize>,
+        /// Displayed change-event limit from the end; traversal is unaffected.
+        #[arg(long, default_value = "20", value_parser = parse_limit)]
+        limit: usize,
+        /// Include bounded cached patches for displayed events.
+        #[arg(long)]
+        patch: bool,
+        /// Output JSON instead of text.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -939,6 +992,7 @@ impl Command {
             | Self::Hotspots { json, .. }
             | Self::Timeline { json, .. }
             | Self::Propagation { json, .. }
+            | Self::Fate { json, .. }
             | Self::Stats { json, .. } => *json,
             Self::Clear { .. } | Self::Prune { .. } => false,
             Self::Update | Self::Index { .. } => false,
@@ -978,6 +1032,7 @@ impl Command {
             Self::TraceFix { .. } => Some("trace-fix"),
             Self::Timeline { .. } => Some("timeline"),
             Self::Propagation { .. } => Some("propagation"),
+            Self::Fate { .. } => Some("fate"),
         }
     }
 }

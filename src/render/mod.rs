@@ -7,6 +7,7 @@ mod clear;
 mod conflicts;
 mod context;
 mod escape;
+mod fate;
 mod followups;
 mod fragment_search;
 mod github_links;
@@ -58,6 +59,7 @@ fn format_report(
             }
             output
         }
+        QueryReport::Fate(report) => fate::format_report(report),
     }
 }
 
@@ -121,6 +123,9 @@ fn format_json_report(
         }
         QueryReport::Timeline(report) => {
             timeline::format_json_report(report, additional_warnings, github_links)
+        }
+        QueryReport::Fate(report) => {
+            fate::format_json_report(report, additional_warnings, github_links)
         }
     }
 }

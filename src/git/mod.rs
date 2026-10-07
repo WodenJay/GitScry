@@ -34,6 +34,7 @@ pub(crate) fn normalize_git_path(path: &[u8]) -> Vec<u8> {
     normalized
 }
 
+pub(crate) use target::FateTarget;
 pub(crate) use target::TimelineTarget;
 pub(crate) use target::{DeletedLine, RegressionTarget, TraceFixTarget, WhyAnchor, WhyTarget};
 
@@ -152,6 +153,15 @@ impl Repository {
         path: &str,
     ) -> Result<TimelineTarget, AppError> {
         target::pin_timeline(&self.git, revision, path)
+    }
+
+    pub(crate) fn pin_fate_target(
+        &self,
+        revision: &str,
+        path: &str,
+        line: usize,
+    ) -> Result<FateTarget, AppError> {
+        target::pin_fate(&self.git, revision, path, line)
     }
 
     pub(crate) fn file_paths_at(
