@@ -347,6 +347,20 @@ fn warm_nonmatching_fingerprints_disclose_missing_material() {
 }
 
 #[test]
+fn human_patch_paths_use_git_quoting() {
+    let repo = TestRepo::new();
+    let base = commit(&repo, "my file", b"old\n", "Base");
+    let query = commit(&repo, "my file", b"new\n", "Query");
+    repo.index();
+    git(repo.dir.path(), ["checkout", "-b", "release", &base]);
+    commit(&repo, "my file", b"new\n", "Reapplication");
+    let output = repo.run(["search", "--patch-of", &query]);
+    assert!(output.status.success());
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(text.contains("  \"my\\040file\"\n"), "{text}");
+}
+
+#[test]
 fn full_patch_beyond_display_limits_is_compared_and_shallow_scope_is_disclosed() {
     let repo = TestRepo::new();
     let base = commit(&repo, "file", b"old\n", "Base");

@@ -24,7 +24,10 @@ pub(super) fn format_report(report: &Report) -> String {
         report.scope.coverage_complete
     );
     if let Some(reason) = &report.query.reason {
-        output.push_str(&format!("Query indeterminate: {reason}\n"));
+        output.push_str(&format!(
+            "Query indeterminate: {}\n",
+            super::escape::subject(reason)
+        ));
     }
     if report.query.integrity == "empty" {
         output.push_str("No input patch: the selected commit has an empty patch.\n");
@@ -38,16 +41,14 @@ pub(super) fn format_report(report: &Report) -> String {
             result.parent.as_deref().unwrap_or("root")
         ));
         for path in &result.paths {
-            output.push_str(&format!(
-                "  {}\n",
-                super::escape::subject(&String::from_utf8_lossy(path))
-            ));
+            output.push_str(&format!("  {}\n", super::escape::path(path)));
         }
     }
     for gap in &report.scope.indeterminate {
         output.push_str(&format!(
             "\nIndeterminate {}: {}\n",
-            gap.commit_id, gap.reason
+            gap.commit_id,
+            super::escape::subject(&gap.reason)
         ));
     }
     output.push_str("\nComplete-patch content equality does not establish semantic equivalence or propagation direction.");
