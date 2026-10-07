@@ -60,10 +60,7 @@ pub(crate) struct Repository {
 }
 
 impl Repository {
-    pub(crate) fn complete_patch(
-        &self,
-        oid: &str,
-    ) -> Result<(Commit, Option<Vec<Change>>, Option<Vec<Hunk>>), AppError> {
+    pub(crate) fn complete_patch(&self, oid: &str) -> Result<history::PatchData, AppError> {
         history::read_complete_patch(&self.git, oid)
     }
 

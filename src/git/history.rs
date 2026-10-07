@@ -138,17 +138,17 @@ pub(super) fn read_incremental(
     )
 }
 
-type TraceFixData = (Commit, Option<Vec<Change>>, Option<Vec<Hunk>>);
+pub(super) type PatchData = (Commit, Option<Vec<Change>>, Option<Vec<Hunk>>);
 
-pub(super) fn read_trace_fix(git: &Git, fix_oid: &str) -> Result<TraceFixData, AppError> {
+pub(super) fn read_trace_fix(git: &Git, fix_oid: &str) -> Result<PatchData, AppError> {
     read_patch_data(git, fix_oid, false)
 }
 
-pub(super) fn read_complete_patch(git: &Git, oid: &str) -> Result<TraceFixData, AppError> {
+pub(super) fn read_complete_patch(git: &Git, oid: &str) -> Result<PatchData, AppError> {
     read_patch_data(git, oid, true)
 }
 
-fn read_patch_data(git: &Git, fix_oid: &str, complete: bool) -> Result<TraceFixData, AppError> {
+fn read_patch_data(git: &Git, fix_oid: &str, complete: bool) -> Result<PatchData, AppError> {
     let commits = read_commits(git, &[fix_oid.to_owned()])?;
     let commit = commits
         .into_iter()
