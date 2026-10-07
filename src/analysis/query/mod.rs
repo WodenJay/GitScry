@@ -33,6 +33,7 @@ pub(crate) enum Request {
         to_rev: Option<String>,
         days: usize,
         max_commits: usize,
+        verbose: bool,
     },
     Hotspots {
         path_prefix: Option<String>,
@@ -112,6 +113,10 @@ pub(crate) enum Request {
         offset: usize,
         last: bool,
     },
+    Propagation {
+        source: String,
+        targets: Vec<String>,
+    },
 }
 
 pub(crate) struct Options {
@@ -131,9 +136,19 @@ pub(crate) enum QueryReport {
     TraceRemoval(super::TraceRemovalReport),
     TraceRemovalFragment(super::TraceRemovalFragmentReport),
     Hotspots(super::HotspotsReport),
+    Propagation(capabilities::propagation::Report),
 }
 
 impl QueryReport {
+    /// Warnings for human-readable stderr. Mirrors `warnings` for every report
+    /// except those that present dynamic diagnostics differently by default.
+    pub(crate) fn human_warnings(&self) -> std::borrow::Cow<'_, [String]> {
+        match self {
+            Self::Followups(report) => report.human_warnings(),
+            _ => std::borrow::Cow::Borrowed(self.warnings()),
+        }
+    }
+
     pub(crate) fn warnings(&self) -> &[String] {
         match self {
             Self::FragmentSearch(_) => &[],
@@ -145,7 +160,8 @@ impl QueryReport {
             Self::Timeline(_)
             | Self::Hotspots(_)
             | Self::TraceRemoval(_)
-            | Self::TraceRemovalFragment(_) => &[],
+            | Self::TraceRemovalFragment(_)
+            | Self::Propagation(_) => &[],
         }
     }
 
@@ -160,7 +176,8 @@ impl QueryReport {
             Self::Timeline(_)
             | Self::Hotspots(_)
             | Self::TraceRemoval(_)
-            | Self::TraceRemovalFragment(_) => &[],
+            | Self::TraceRemovalFragment(_)
+            | Self::Propagation(_) => &[],
         }
     }
 }
@@ -185,13 +202,25 @@ pub(crate) fn execute(request: Request, options: Options) -> Result<Outcome, App
             paths,
             max_historical_checks,
         } => capabilities::conflicts::execute(paths, max_historical_checks, options.limit),
+        Request::Propagation { source, targets } => {
+            capabilities::propagation::execute(&source, &targets)
+        }
         Request::Followups {
             revision,
             paths,
             to_rev,
             days,
             max_commits,
-        } => capabilities::followups::run(revision, paths, to_rev, days, max_commits, options),
+            verbose,
+        } => capabilities::followups::run(
+            revision,
+            paths,
+            to_rev,
+            days,
+            max_commits,
+            verbose,
+            options,
+        ),
         Request::Context {
             staged,
             hybrid,

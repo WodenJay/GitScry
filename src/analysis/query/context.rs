@@ -172,6 +172,7 @@ impl Context {
             QueryReport::TraceRemoval(report) => report.scope = scope,
             QueryReport::TraceRemovalFragment(report) => report.scope = scope,
             QueryReport::Hotspots(report) => report.scope = scope,
+            QueryReport::Propagation(_) => {}
         }
         Outcome {
             progress: self.session.progress().to_vec(),

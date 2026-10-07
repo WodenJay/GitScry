@@ -140,6 +140,7 @@ pub(crate) fn execute(
             max_commits,
             limit,
             patch,
+            verbose,
             ..
         } => (
             Request::Followups {
@@ -148,6 +149,7 @@ pub(crate) fn execute(
                 to_rev,
                 days,
                 max_commits,
+                verbose,
             },
             limit,
             patch,
@@ -264,6 +266,14 @@ pub(crate) fn execute(
                 max_historical_checks,
             },
             limit,
+            false,
+            Default::default(),
+        ),
+        Command::Propagation {
+            source, targets, ..
+        } => (
+            Request::Propagation { source, targets },
+            1,
             false,
             Default::default(),
         ),
@@ -472,7 +482,9 @@ pub(crate) fn execute(
             unreachable!("trace-removal has no GitHub link option")
         }
         query::QueryReport::Patterns(_) => unreachable!("patterns has no GitHub link option"),
-        query::QueryReport::Hotspots(_) => unreachable!("hotspots has no GitHub link option"),
+        query::QueryReport::Hotspots(_) | query::QueryReport::Propagation(_) => {
+            unreachable!("propagation has no GitHub link option")
+        }
         query::QueryReport::Analysis(report) => github::fetch(report, explicit_repo.as_deref()),
         query::QueryReport::FragmentSearch(report) => {
             github::fetch_fragments(report, explicit_repo.as_deref())

@@ -769,6 +769,10 @@ fn semantic_vectors_survive_rebuild_by_commit_identity() {
     repo.commit("two.txt", b"two\n", "second commit");
     let second = repo.head();
     assert!(repo.run(["index"]).status.success());
+    // Every rebuild below must take the encoder-unavailable path (exit 1), so
+    // run a binary whose install directory has no pinned ONNX Runtime; the
+    // shared target directory may have one installed.
+    let missing_runtime = IsolatedExecutable::new();
 
     let cache_path = repo.cache_dir().join("cache.sqlite");
     let cache = Connection::open(&cache_path).unwrap();
@@ -847,13 +851,7 @@ fn semantic_vectors_survive_rebuild_by_commit_identity() {
         .unwrap();
     drop(cache);
 
-    let rebuilt = support::isolated_gitscry_command(repo.user_data_dir())
-        .arg("index")
-        .current_dir(repo.dir.path())
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", repo.dir.path().join("global-config"))
-        .output()
-        .unwrap();
+    let rebuilt = missing_runtime.run(repo.dir.path(), &["index"]);
     assert_eq!(
         rebuilt.status.code(),
         Some(1),
@@ -916,13 +914,7 @@ fn semantic_vectors_survive_rebuild_by_commit_identity() {
         .unwrap();
     drop(cache);
 
-    let resumed = support::isolated_gitscry_command(repo.user_data_dir())
-        .arg("index")
-        .current_dir(repo.dir.path())
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", repo.dir.path().join("global-config"))
-        .output()
-        .unwrap();
+    let resumed = missing_runtime.run(repo.dir.path(), &["index"]);
     assert_eq!(
         resumed.status.code(),
         Some(1),
@@ -976,13 +968,7 @@ fn semantic_vectors_survive_rebuild_by_commit_identity() {
         )
         .unwrap();
     drop(cache);
-    let legacy_rebuilt = support::isolated_gitscry_command(repo.user_data_dir())
-        .arg("index")
-        .current_dir(repo.dir.path())
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", repo.dir.path().join("global-config"))
-        .output()
-        .unwrap();
+    let legacy_rebuilt = missing_runtime.run(repo.dir.path(), &["index"]);
     assert_eq!(
         legacy_rebuilt.status.code(),
         Some(1),
@@ -1021,13 +1007,7 @@ fn semantic_vectors_survive_rebuild_by_commit_identity() {
         )
         .unwrap();
     drop(cache);
-    let damaged = support::isolated_gitscry_command(repo.user_data_dir())
-        .arg("index")
-        .current_dir(repo.dir.path())
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", repo.dir.path().join("global-config"))
-        .output()
-        .unwrap();
+    let damaged = missing_runtime.run(repo.dir.path(), &["index"]);
     assert_eq!(damaged.status.code(), Some(1));
     let cache = Connection::open(cache_path).unwrap();
     let (ready, count): (String, i64) = cache

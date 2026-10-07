@@ -127,6 +127,11 @@ The time window ends at the seed's committer time plus --days. --max-commits bou
 inspection, including nonmatches; --limit bounds displayed results. Incomplete
 history and exhausted budgets are reported.
 
+Repetitive per-commit diagnostics (correspondence limitations, timestamp
+inversions) are aggregated by category in human-readable output; --verbose shows
+each per-commit diagnostic instead. Aggregation does not change the query or
+JSON output.
+
 Examples:
   gitscry followups HEAD~10
   gitscry followups v1.0 --path src/lib.rs --to-rev release --patch
@@ -153,6 +158,9 @@ Examples:
         /// Include bounded supporting cached patches.
         #[arg(long)]
         patch: bool,
+        /// Show every per-commit diagnostic instead of category summaries; does not change the query.
+        #[arg(long)]
+        verbose: bool,
         /// Output JSON instead of text.
         #[arg(long)]
         json: bool,
@@ -850,6 +858,31 @@ Examples:
         #[arg(long = "github-repo", value_name = "OWNER/REPO")]
         github_repo: Option<String>,
     },
+    #[command(
+        about = "Check whether a commit is contained in specific target branches",
+        after_help = r#"Requires an initialized cache (`gitscry index`). Refreshes local history from the
+requested targets only; never fetches, scans unrelated branches, or moves HEAD.
+Source and targets are resolved to commits once at invocation start.
+
+A source commit reachable from a target, including through merged
+non-first-parent ancestry, is `contained`. Exact non-reachability is not a
+completed negative search: patch equivalence is not checked yet, so unmatched
+targets stay `indeterminate` with that reason.
+
+Examples:
+  gitscry propagation 4ca5b49 --to main --to release-1.0
+  gitscry propagation HEAD~3 --to origin/main --json"#
+    )]
+    Propagation {
+        /// Source commit whose propagation is checked.
+        source: String,
+        /// Target ref to check containment against; repeatable, order preserved.
+        #[arg(long = "to", value_name = "REF")]
+        targets: Vec<String>,
+        /// Output JSON instead of text.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum)]
@@ -882,6 +915,7 @@ impl Command {
             | Self::TraceRemoval { json, .. }
             | Self::Hotspots { json, .. }
             | Self::Timeline { json, .. }
+            | Self::Propagation { json, .. }
             | Self::Stats { json, .. } => *json,
             Self::Clear { .. } | Self::Prune { .. } => false,
             Self::Update | Self::Index { .. } => false,
@@ -909,6 +943,7 @@ impl Command {
             Self::Why { .. } => Some("why"),
             Self::TraceFix { .. } => Some("trace-fix"),
             Self::Timeline { .. } => Some("timeline"),
+            Self::Propagation { .. } => Some("propagation"),
         }
     }
 }

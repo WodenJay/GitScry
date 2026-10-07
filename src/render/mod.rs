@@ -17,6 +17,7 @@ mod prune;
 
 mod hotspots;
 mod patterns;
+mod propagation;
 mod timeline;
 mod trace_removal;
 mod usage;
@@ -37,6 +38,7 @@ fn format_report(
         QueryReport::Followups(report) => followups::format_report(report),
         QueryReport::Patterns(report) => patterns::format_report(report),
         QueryReport::Hotspots(report) => hotspots::format_report(report),
+        QueryReport::Propagation(report) => propagation::format_report(report),
         QueryReport::Context(report) => context::format_report(report),
         QueryReport::TraceRemoval(report) => trace_removal::format_report(report),
         QueryReport::TraceRemovalFragment(report) => trace_removal::format_fragment_report(report),
@@ -94,6 +96,9 @@ fn format_json_report(
         }
         QueryReport::Patterns(report) => patterns::format_json_report(report, additional_warnings),
         QueryReport::Hotspots(report) => hotspots::format_json_report(report, additional_warnings),
+        QueryReport::Propagation(report) => {
+            propagation::format_json_report(report, additional_warnings)
+        }
         QueryReport::Context(report) => context::format_json_report(report, additional_warnings),
         QueryReport::TraceRemoval(report) => {
             trace_removal::format_json_report(report, additional_warnings)
@@ -301,7 +306,7 @@ fn write_outcome(outcome: Outcome, json_output: bool) -> io::Result<()> {
             writeln!(stderr, "{warning}")?;
         }
         if let Some(report) = &outcome.report {
-            for warning in report.warnings() {
+            for warning in report.human_warnings().iter() {
                 writeln!(stderr, "{warning}")?;
             }
         }
