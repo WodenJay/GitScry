@@ -69,8 +69,21 @@ impl From<HistoricalScopeArgs> for SearchScopeOptions {
             to_rev: options.to_rev,
             since: options.since,
             until: options.until,
+            paths: Vec::new(),
         }
     }
+}
+
+/// Code modes keep a single exact historical path; QUERY mode carries repeatable
+/// paths as scope options.
+fn require_single_path(paths: &[String], mode: &str) -> Result<(), AppError> {
+    if paths.len() > 1 {
+        return Err(AppError::input(format!(
+            "error: --path with {mode} accepts at most one path; {} were given",
+            paths.len()
+        )));
+    }
+    Ok(())
 }
 
 pub(crate) fn execute(
@@ -188,7 +201,7 @@ pub(crate) fn execute(
             code_file,
             hybrid,
             change,
-            path,
+            paths,
             limit,
             patch,
             scope,
@@ -198,26 +211,37 @@ pub(crate) fn execute(
                 CodeChange::Added => CodeDirection::Added,
                 CodeChange::Removed => CodeDirection::Removed,
             });
+            let is_query_mode = query.is_some();
+            let code_path = if is_query_mode {
+                None
+            } else {
+                require_single_path(&paths, "code modes")?;
+                paths.first().cloned()
+            };
             let request = match (query, code, code_regex, code_file) {
                 (Some(words), None, None, None) => Request::Search { words, hybrid },
                 (None, Some(query), None, None) => Request::CodeSearch {
                     query,
-                    path,
+                    path: code_path,
                     direction,
                 },
                 (None, None, Some(pattern), None) => Request::CodeRegexSearch {
                     pattern,
-                    path,
+                    path: code_path,
                     direction,
                 },
                 (None, None, None, Some(input)) => Request::FragmentSearch {
                     input,
-                    path,
+                    path: code_path,
                     direction,
                 },
                 _ => unreachable!("clap enforces exactly one search mode"),
             };
-            (request, limit, patch, scope.into())
+            let mut options = SearchScopeOptions::from(scope);
+            if is_query_mode {
+                options.paths = paths;
+            }
+            (request, limit, patch, options)
         }
         Command::TraceRemoval {
             code,
@@ -420,6 +444,7 @@ pub(crate) fn execute(
                     to_rev,
                     since,
                     until,
+                    paths: Vec::new(),
                 },
             )
         }
@@ -465,6 +490,7 @@ pub(crate) fn execute(
                 to_rev,
                 since,
                 until,
+                paths: Vec::new(),
             },
         ),
         Command::Stats { .. } => unreachable!("stats command handled before query dispatch"),

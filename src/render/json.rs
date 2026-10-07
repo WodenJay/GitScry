@@ -258,6 +258,8 @@ pub(super) struct JsonSearchScope<'a> {
     target_rev: Option<&'a str>,
     since: Option<&'a str>,
     until: Option<&'a str>,
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    paths: &'a [String],
     cache_tip: &'a str,
     coverage_complete: bool,
 }
@@ -269,6 +271,7 @@ pub(super) fn json_scope(scope: &SearchScopeInfo) -> JsonSearchScope<'_> {
         target_rev: scope.target_rev.as_deref(),
         since: scope.since.as_deref(),
         until: scope.until.as_deref(),
+        paths: &scope.paths,
         cache_tip: &scope.cache_tip,
         coverage_complete: scope.coverage_complete,
     }

@@ -71,6 +71,12 @@ pub(super) fn scope_summary(scope: &SearchScopeInfo) -> String {
     if let Some(until) = &scope.until {
         criteria.push(format!("committer time through {until}"));
     }
+    if !scope.paths.is_empty() {
+        criteria.push(format!(
+            "historical changed paths within {}",
+            scope.paths.join(", ")
+        ));
+    }
     let coverage = if scope.coverage_complete {
         "complete".to_owned()
     } else {

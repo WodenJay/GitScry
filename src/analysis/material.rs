@@ -44,6 +44,9 @@ pub(crate) struct SearchScopeInfo {
     pub(crate) target_rev: Option<String>,
     pub(crate) since: Option<String>,
     pub(crate) until: Option<String>,
+    /// Normalized QUERY-mode historical changed-path boundary; empty when the
+    /// query did not restrict paths.
+    pub(crate) paths: Vec<String>,
     pub(crate) cache_tip: String,
     pub(crate) coverage_complete: bool,
 }
