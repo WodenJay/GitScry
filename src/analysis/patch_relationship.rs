@@ -6,17 +6,17 @@ use sha2::{Digest, Sha256};
 pub(crate) const NORMALIZATION_VERSION: i64 = 1;
 
 #[derive(Serialize, PartialEq, Eq, PartialOrd, Ord)]
-struct FilePatch {
+pub(crate) struct FilePatch {
     old_path: Option<Vec<u8>>,
     new_path: Option<Vec<u8>>,
-    operation: u8,
+    operation: char,
     old_mode: String,
     new_mode: String,
     edits: Vec<Vec<u8>>,
 }
 
 pub(crate) struct CompletePatch {
-    normalized: Vec<FilePatch>,
+    pub(crate) normalized: Vec<FilePatch>,
     pub(crate) comparison_basis: &'static str,
     pub(crate) parent: Option<String>,
     pub(crate) paths: Vec<Vec<u8>>,
@@ -145,7 +145,7 @@ fn normalize_file(change: &Change, hunks: &[Hunk]) -> Result<FilePatch, String> 
             .status
             .as_bytes()
             .first()
-            .ok_or("missing operation")?,
+            .ok_or("missing operation")? as char,
         old_mode: change.old_mode.clone(),
         new_mode: change.new_mode.clone(),
         edits,

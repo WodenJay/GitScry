@@ -53,6 +53,7 @@ pub(crate) struct PatchMaterial {
     pub(crate) parent: Option<String>,
     pub(crate) paths: Vec<Vec<u8>>,
     pub(crate) patch: Vec<PatchHunk>,
+    pub(crate) files: Vec<patch_relationship::FilePatch>,
 }
 #[derive(Serialize)]
 pub(crate) struct PatchHunk {
@@ -89,6 +90,7 @@ fn material(
         comparison_basis: Some(patch.comparison_basis),
         parent: patch.parent,
         paths: patch.paths,
+        files: patch.normalized,
         patch: patch
             .hunks
             .into_iter()
@@ -231,6 +233,7 @@ pub(crate) fn execute(
             parent: None,
             paths: Vec::new(),
             patch: Vec::new(),
+            files: Vec::new(),
         },
     };
     let matched_count = matches.len();

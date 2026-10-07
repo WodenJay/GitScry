@@ -159,3 +159,88 @@ fn patch_input_rejects_partial_paths_other_modes_and_future_relations() {
             .success()
     );
 }
+
+#[test]
+fn roots_empty_patches_merges_and_fetched_remote_tips_have_explicit_bases() {
+    let repo = TestRepo::new();
+    let root = commit(&repo, "file", b"old\n", "Root");
+    repo.index();
+    git(repo.dir.path(), ["checkout", "--orphan", "other-root"]);
+    git(repo.dir.path(), ["rm", "-rf", "."]);
+    let other_root = commit(&repo, "file", b"old\n", "Independent root");
+    let value = search(&repo, &root, &[]);
+    assert_eq!(value["matched_count"], 1);
+    assert_eq!(value["matches"][0]["commit_id"], other_root);
+    assert_eq!(value["matches"][0]["comparison_basis"], "root_introduction");
+    git(repo.dir.path(), ["checkout", "main"]);
+    git(repo.dir.path(), ["checkout", "-b", "feature"]);
+    let query = commit(&repo, "file", b"new\n", "Feature");
+    git(repo.dir.path(), ["checkout", "main"]);
+    commit(&repo, "unrelated", b"one\n", "Unrelated mainline");
+    git(
+        repo.dir.path(),
+        ["merge", "--no-ff", "feature", "-m", "Merge"],
+    );
+    let merge = repo.head();
+    let value = search(&repo, &query, &[]);
+    assert_eq!(value["matched_count"], 1);
+    assert_eq!(value["matches"][0]["commit_id"], merge);
+    assert_eq!(value["matches"][0]["comparison_basis"], "first_parent");
+    git(repo.dir.path(), ["checkout", "-b", "integration", &root]);
+    commit(&repo, "unrelated", b"one\n", "Integration base");
+    git(
+        repo.dir.path(),
+        ["merge", "--no-ff", "--no-commit", "feature"],
+    );
+    commit(&repo, "unrelated", b"extra\n", "Unique merge integration");
+    assert_eq!(search(&repo, &query, &[])["matched_count"], 1);
+    git(repo.dir.path(), ["checkout", "-b", "remote-only", &root]);
+    git(repo.dir.path(), ["cherry-pick", &query]);
+    let remote = repo.head();
+    git(
+        repo.dir.path(),
+        ["update-ref", "refs/remotes/origin/release", &remote],
+    );
+    git(repo.dir.path(), ["checkout", "main"]);
+    git(repo.dir.path(), ["branch", "-D", "remote-only"]);
+    let value = search(&repo, &query, &[]);
+    assert_eq!(value["matched_count"], 2);
+    assert!(
+        value["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["commit_id"] == remote)
+    );
+    git(repo.dir.path(), ["commit", "--allow-empty", "-m", "Empty"]);
+    let value = search(&repo, "HEAD", &[]);
+    assert_eq!(value["query"]["integrity"], "empty");
+    assert_eq!(value["matched_count"], 0);
+}
+
+#[test]
+fn matches_renames_and_modes_without_losing_operation_material() {
+    let repo = TestRepo::new();
+    let base = commit(&repo, "file", b"same\n", "Base");
+    git(repo.dir.path(), ["mv", "file", "renamed"]);
+    git(repo.dir.path(), ["commit", "-m", "Rename query"]);
+    let query = repo.head();
+    repo.index();
+    git(repo.dir.path(), ["checkout", "-b", "rename", &base]);
+    git(repo.dir.path(), ["mv", "file", "renamed"]);
+    git(repo.dir.path(), ["commit", "-m", "Reapply rename"]);
+    let value = search(&repo, &query, &[]);
+    assert_eq!(value["matched_count"], 1);
+    assert_eq!(value["matches"][0]["files"][0]["operation"], "R");
+    assert_eq!(value["matches"][0]["files"][0]["old_mode"], "100644");
+    git(repo.dir.path(), ["checkout", "main"]);
+    git(repo.dir.path(), ["update-index", "--chmod=+x", "renamed"]);
+    git(repo.dir.path(), ["commit", "-m", "Executable query"]);
+    let mode_query = repo.head();
+    git(repo.dir.path(), ["checkout", "rename"]);
+    git(repo.dir.path(), ["update-index", "--chmod=+x", "renamed"]);
+    git(repo.dir.path(), ["commit", "-m", "Reapply mode"]);
+    let value = search(&repo, &mode_query, &[]);
+    assert_eq!(value["matched_count"], 1);
+    assert_eq!(value["matches"][0]["files"][0]["new_mode"], "100755");
+}
