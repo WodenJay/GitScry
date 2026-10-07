@@ -8,6 +8,8 @@ mod history;
 mod hotspots;
 pub(crate) mod usage;
 pub(crate) use hotspots::{FileIncarnation, FileIncarnationHistory, FileTouches};
+mod patch_relationship;
+pub(crate) use patch_relationship::PatchFingerprints;
 mod payload;
 mod prune;
 mod query;

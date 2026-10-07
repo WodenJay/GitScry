@@ -7,6 +7,7 @@
 pub(crate) mod capabilities;
 mod material;
 mod patch;
+mod patch_relationship;
 mod provenance;
 pub(crate) mod query;
 mod retrieval;

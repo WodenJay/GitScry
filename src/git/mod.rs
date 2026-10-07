@@ -60,6 +60,29 @@ pub(crate) struct Repository {
 }
 
 impl Repository {
+    pub(crate) fn complete_patch(
+        &self,
+        oid: &str,
+    ) -> Result<(Commit, Option<Vec<Change>>, Option<Vec<Hunk>>), AppError> {
+        history::read_complete_patch(&self.git, oid)
+    }
+
+    /// Only locally available branch refs; never contacts a remote.
+    pub(crate) fn patch_branch_tips(&self) -> Result<Vec<(String, String)>, AppError> {
+        let refs = self.git.text([
+            "for-each-ref",
+            "--format=%(refname) %(objectname)",
+            "refs/heads",
+            "refs/remotes",
+        ])?;
+        Ok(refs
+            .lines()
+            .filter_map(|line| {
+                line.split_once(' ')
+                    .map(|(name, oid)| (name.to_owned(), oid.to_owned()))
+            })
+            .collect())
+    }
     pub(crate) fn merge_conflict(&self) -> Result<MergeConflict, AppError> {
         conflicts::pin(self)
     }

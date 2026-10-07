@@ -141,6 +141,14 @@ pub(super) fn read_incremental(
 type TraceFixData = (Commit, Option<Vec<Change>>, Option<Vec<Hunk>>);
 
 pub(super) fn read_trace_fix(git: &Git, fix_oid: &str) -> Result<TraceFixData, AppError> {
+    read_patch_data(git, fix_oid, false)
+}
+
+pub(super) fn read_complete_patch(git: &Git, oid: &str) -> Result<TraceFixData, AppError> {
+    read_patch_data(git, oid, true)
+}
+
+fn read_patch_data(git: &Git, fix_oid: &str, complete: bool) -> Result<TraceFixData, AppError> {
     let commits = read_commits(git, &[fix_oid.to_owned()])?;
     let commit = commits
         .into_iter()
@@ -151,19 +159,21 @@ pub(super) fn read_trace_fix(git: &Git, fix_oid: &str) -> Result<TraceFixData, A
         None => format!("{fix_oid}\n"),
     };
     let known = [fix_oid].into_iter().collect::<HashSet<_>>();
-    let changes = match git.output(
-        [
-            "diff-tree",
-            "--stdin",
-            "--root",
-            "-r",
-            "-M",
-            "--raw",
-            "-z",
-            "--full-index",
-        ],
-        input.as_bytes(),
-    ) {
+    let mut raw_args = vec![
+        "diff-tree",
+        "--stdin",
+        "--root",
+        "-r",
+        "-M",
+        "--raw",
+        "-z",
+        "--full-index",
+    ];
+    if complete {
+        raw_args.splice(0..0, ["-c", "diff.renameLimit=0"]);
+        raw_args.extend(["--no-relative", "--ignore-submodules=none"]);
+    }
+    let changes = match git.output(raw_args, input.as_bytes()) {
         Ok(raw) => Some(parse_changes(&raw, &known)?),
         Err(_) => None,
     };
@@ -171,21 +181,40 @@ pub(super) fn read_trace_fix(git: &Git, fix_oid: &str) -> Result<TraceFixData, A
         .as_ref()
         .map(|changes| collect_type_change_ordinals(changes.iter()))
         .unwrap_or_default();
-    let hunks = match git.output(
-        [
-            "diff-tree",
-            "--stdin",
-            "--root",
-            "-r",
-            "-M",
-            "-p",
-            "--full-index",
-            "--no-color",
-            "--no-ext-diff",
-            "--no-textconv",
-        ],
-        input.as_bytes(),
-    ) {
+    let mut patch_args = vec![
+        "diff-tree",
+        "--stdin",
+        "--root",
+        "-r",
+        "-M",
+        "-p",
+        "--full-index",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+    ];
+    if complete {
+        patch_args.splice(
+            0..0,
+            [
+                "-c",
+                "diff.renameLimit=0",
+                "-c",
+                "diff.suppressBlankEmpty=false",
+                "-c",
+                "core.quotePath=true",
+            ],
+        );
+        patch_args.extend([
+            "--unified=0",
+            "--inter-hunk-context=0",
+            "--diff-algorithm=myers",
+            "--no-indent-heuristic",
+            "--no-relative",
+            "--ignore-submodules=none",
+        ]);
+    }
+    let hunks = match git.output(patch_args, input.as_bytes()) {
         Ok(patch) => Some(parse_hunks(&patch, &known, &type_change_ordinals)?),
         Err(_) => None,
     };
