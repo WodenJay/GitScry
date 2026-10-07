@@ -13,6 +13,8 @@ pub(crate) struct FateTarget {
     pub(crate) symbol_selection: Option<symbol::Selection>,
     /// One-based end line of the symbol span; `None` for line targets.
     pub(crate) symbol_end_line: Option<usize>,
+    /// Body source range used only as actual-code correspondence material.
+    pub(crate) symbol_body_span: Option<symbol::BodySpan>,
     pub(crate) warnings: Vec<String>,
 }
 
@@ -55,28 +57,36 @@ pub(in crate::git) fn pin(
             count
         }
     };
-    let (line, symbol_selection, symbol_end_line) = if let Some(name) = symbol_name {
-        let location = symbol::locate_unique(&content, name, &path)?;
-        if let Some(notice) = &location.notice {
-            warnings.push(notice.clone());
-        }
-        let end = location.span.end;
-        (location.span.start, Some(location.selection), Some(end))
-    } else {
-        let line = line.unwrap_or(0);
-        if line == 0 || line > line_count {
-            return Err(AppError::input(format!(
-                "line {line} is outside {path} at the starting revision"
-            )));
-        }
-        (line, None, None)
-    };
+    let (line, symbol_selection, symbol_end_line, symbol_body_span) =
+        if let Some(name) = symbol_name {
+            let location = symbol::locate_unique(&content, name, &path)?;
+            if let Some(notice) = &location.notice {
+                warnings.push(notice.clone());
+            }
+            let end = location.span.end;
+            let body_span = location.body_span;
+            (
+                location.span.start,
+                Some(location.selection),
+                Some(end),
+                body_span,
+            )
+        } else {
+            let line = line.unwrap_or(0);
+            if line == 0 || line > line_count {
+                return Err(AppError::input(format!(
+                    "line {line} is outside {path} at the starting revision"
+                )));
+            }
+            (line, None, None, None)
+        };
     Ok(FateTarget {
         revision,
         path: path.as_bytes().to_vec(),
         line,
         symbol_selection,
         symbol_end_line,
+        symbol_body_span,
         warnings,
     })
 }

@@ -42,8 +42,10 @@ pub(crate) use target::{DeletedLine, RegressionTarget, TraceFixTarget, WhyAnchor
 pub(crate) struct SymbolLocation {
     pub(crate) start_line: usize,
     pub(crate) end_line: usize,
+    pub(crate) body_span: Option<symbol::BodySpan>,
     pub(crate) selection: SymbolSelection,
 }
+pub(crate) use symbol::BodySpan as SymbolBodySpan;
 pub(crate) use symbol::Selection as SymbolSelection;
 pub(crate) struct SymbolTrace {
     pub(crate) revisions: Vec<String>,
@@ -194,6 +196,7 @@ impl Repository {
         Ok(SymbolLocation {
             start_line: location.span.start,
             end_line: location.span.end,
+            body_span: location.body_span,
             selection: location.selection,
         })
     }

@@ -102,6 +102,11 @@ pub(in crate::analysis) fn execute(
     max_commits: Option<usize>,
     options: Options,
 ) -> Result<Outcome, AppError> {
+    if line.is_some() == symbol.is_some() {
+        return Err(AppError::input(
+            "exactly one of --line or --symbol must be provided",
+        ));
+    }
     let path = normalize_git_path_string(&path);
     let repository = Repository::discover()?;
     let (context, target) =
@@ -141,29 +146,15 @@ fn execute_line(
     max_commits: Option<usize>,
     options: Options,
 ) -> Result<Outcome, AppError> {
-    let (endpoint, traversal_endpoint, endpoint_frontier) = match to_rev {
-        Some(revision) => {
-            let endpoint = repository.resolve_commit(&revision)?;
-            session.require_revision(&endpoint)?;
-            (endpoint.clone(), endpoint, false)
-        }
-        None => {
-            let head = context.pinned_head.clone();
-            if session.contains_revision(&head)? {
-                (head.clone(), head, false)
-            } else {
-                let history = scope::reachable_history(session, repository, &head)?;
-                let frontier = history.revisions.first().cloned().ok_or_else(|| {
-                    AppError::input(
-                        "no commits reachable from current HEAD are available after query refresh; run `gitscry index` to publish reachable history",
-                    )
-                })?;
-                (head, frontier, true)
-            }
-        }
-    };
-
     let mut warnings = target.warnings.clone();
+    let (endpoint, traversal_endpoint, endpoint_frontier) = resolve_endpoint(
+        session,
+        repository,
+        context,
+        to_rev.as_deref(),
+        &mut warnings,
+    )?;
+
     let coverage = scope::reachable_history(session, repository, &traversal_endpoint)?;
     if endpoint_frontier || !coverage.coverage_complete {
         warnings.push(
@@ -692,6 +683,7 @@ fn execute_symbol(
         .clone()
         .expect("symbol target has a selection");
     let qualified_name = selection.qualified_name.clone();
+    let mut symbol_language = selection.language.clone();
 
     if target.revision == endpoint {
         return Ok(finished(
@@ -738,6 +730,7 @@ fn execute_symbol(
         .map_err(|_| AppError::input("line does not fit the coordinate space"))?;
     let mut state_end = i64::try_from(target.symbol_end_line.unwrap_or(target.line))
         .map_err(|_| AppError::input("line does not fit the coordinate space"))?;
+    let mut state_body_span = target.symbol_body_span;
     let mut last_revision = target.revision.clone();
     let mut events: Vec<Event> = Vec::new();
     let mut inspected = 0usize;
@@ -938,37 +931,90 @@ fn execute_symbol(
             )?;
         }
 
-        let new_identity = code_identity(&new_content, new_start, new_end);
-        let old_content = repository.read_blob(&last_revision, &state_path)?;
-        let old_identity = old_content
-            .as_deref()
-            .map(|content| code_identity(content, state_start, state_end));
-
-        if old_identity.as_deref() != Some(new_identity.as_slice()) {
-            // The normalized body changed: allow only a local edit whose old
-            // span maps line-by-line onto the new span with at least one
-            // unchanged body line as correspondence material.
-            let local_edit = old_content.is_some_and(|content| {
-                is_local_body_edit(
-                    session,
-                    &node.oid,
-                    change.ordinal,
-                    &content,
-                    (state_start, state_end),
-                    (new_start, new_end),
-                )
-            });
-            if !local_edit {
-                stop = Some((
-                    node.oid.clone(),
-                    FinalState::Unknown,
-                    StopReason {
-                        code: "symbol_body_rewritten",
-                        explanation: "the declaration body was rewritten; unchanged body code no longer establishes continuity",
-                    },
-                ));
-                break;
-            }
+        // Name resolution chooses the candidate; diff correspondence must still
+        // map every declaration line and preserve actual body code.
+        let new_body_span = new_location.body_span;
+        let Some(old_content) = repository.read_blob(&last_revision, &state_path)? else {
+            stop = Some((
+                node.oid.clone(),
+                FinalState::Unknown,
+                StopReason {
+                    code: "symbol_source_unavailable",
+                    explanation: "the tracked file's previous contents are unavailable at this commit",
+                },
+            ));
+            break;
+        };
+        let correspondence = spans_map_forward(
+            session,
+            &node.oid,
+            change.ordinal,
+            SymbolSource {
+                span: (state_start, state_end),
+                body_span: state_body_span,
+                content: &old_content,
+                language: &symbol_language,
+            },
+            SymbolSource {
+                span: (new_start, new_end),
+                body_span: new_body_span,
+                content: &new_content,
+                language: &new_location.selection.language,
+            },
+        );
+        let old_identity = code_identity(
+            &old_content,
+            (state_start, state_end),
+            state_body_span,
+            &symbol_language,
+        );
+        let new_identity = code_identity(
+            &new_content,
+            (new_start, new_end),
+            new_body_span,
+            &new_location.selection.language,
+        );
+        let old_symbol_identity = code_identity(
+            &old_content,
+            (state_start, state_end),
+            None,
+            &symbol_language,
+        );
+        let new_symbol_identity = code_identity(
+            &new_content,
+            (new_start, new_end),
+            None,
+            &new_location.selection.language,
+        );
+        let symbol_modified = old_symbol_identity != new_symbol_identity;
+        let unchanged_body = old_identity == new_identity;
+        let Some(unchanged_correspondence) = correspondence else {
+            stop = Some((
+                node.oid.clone(),
+                FinalState::Unknown,
+                StopReason {
+                    code: "unreliable_boundary_correspondence",
+                    explanation: "diff correspondence could not map the symbol boundaries uniquely across this change",
+                },
+            ));
+            break;
+        };
+        if !unchanged_correspondence {
+            let reason = if unchanged_body {
+                StopReason {
+                    code: "unreliable_boundary_correspondence",
+                    explanation: "the declaration has no unchanged actual body code to establish continuity",
+                }
+            } else {
+                StopReason {
+                    code: "symbol_body_rewritten",
+                    explanation: "the declaration body was rewritten; unchanged body code no longer establishes continuity",
+                }
+            };
+            stop = Some((node.oid.clone(), FinalState::Unknown, reason));
+            break;
+        }
+        if symbol_modified {
             push_symbol_event(
                 &mut events,
                 session,
@@ -1007,6 +1053,8 @@ fn execute_symbol(
         state_path = new_path;
         state_start = new_start;
         state_end = new_end;
+        state_body_span = new_body_span;
+        symbol_language = new_location.selection.language.clone();
         last_revision = node.oid.clone();
     }
 
@@ -1182,79 +1230,159 @@ fn push_symbol_event(
     Ok(())
 }
 
-/// Decide whether the body change is a local edit: the old span's lines must
-/// map one-to-one onto the new span through the cached hunks, with at least
-/// one unchanged body line kept as correspondence material.
-fn is_local_body_edit(
+/// Require every old declaration line to map into the new span and at least one actual body-code
+/// line to survive unchanged. Name resolution alone cannot establish continuity.
+struct SymbolSource<'a> {
+    span: (i64, i64),
+    body_span: Option<crate::git::SymbolBodySpan>,
+    content: &'a [u8],
+    language: &'a str,
+}
+
+fn spans_map_forward(
     session: &crate::cache::QuerySession,
     oid: &str,
     change_ordinal: i64,
-    old_content: &[u8],
-    old_span: (i64, i64),
-    new_span: (i64, i64),
-) -> bool {
-    let (old_start, old_end) = old_span;
-    let (new_start, new_end) = new_span;
-    if new_end - new_start != old_end - old_start {
-        return false;
-    }
-    let Ok(history) =
-        session.patch_history_for_change(oid, change_ordinal, MAX_HUNKS, MAX_HUNK_BYTES)
-    else {
-        return false;
-    };
+    old: SymbolSource<'_>,
+    new: SymbolSource<'_>,
+) -> Option<bool> {
+    let (old_start, old_end) = old.span;
+    let (new_start, new_end) = new.span;
+    let history = session
+        .patch_history_for_change(oid, change_ordinal, MAX_HUNKS, MAX_HUNK_BYTES)
+        .ok()?;
     if history.missing_objects
         || history.truncated
         || history.hunks.iter().any(|hunk| hunk.text.is_none())
     {
-        return false;
+        return None;
     }
-    let old_lines = old_content
-        .split(|byte| *byte == b'\n')
-        .skip(old_start.saturating_sub(1) as usize)
-        .take((old_end - old_start + 1) as usize)
-        .collect::<Vec<_>>();
-    if old_lines.is_empty() {
-        return false;
-    }
-    let mut kept = 0usize;
-    for (offset, _) in old_lines.iter().enumerate() {
-        match map_line_forward(&history.hunks, old_start + offset as i64) {
-            Some(Forward::Kept { new_line }) => {
+    let old_body_lines = old
+        .body_span
+        .and_then(|body| body_code_lines(old.content, body, old.language));
+    let new_body_lines = new
+        .body_span
+        .and_then(|body| body_code_lines(new.content, body, new.language));
+    let mut unchanged_body_code = false;
+    for old_line in old_start..=old_end {
+        match map_line_forward(&history.hunks, old_line)? {
+            Forward::Kept { new_line } => {
                 if new_line < new_start || new_line > new_end {
-                    return false;
+                    return None;
                 }
-                kept += 1;
+                if let (Some(old_body), Some(old_lines), Some(new_body), Some(new_lines)) = (
+                    old.body_span,
+                    &old_body_lines,
+                    new.body_span,
+                    &new_body_lines,
+                ) && has_body_code_on_line(old_body, old_lines, old_line)
+                    && has_body_code_on_line(new_body, new_lines, new_line)
+                {
+                    unchanged_body_code = true;
+                }
             }
-            Some(Forward::Rewritten {
+            Forward::Rewritten {
                 replacement: Some(new_line),
-            }) => {
+            } => {
                 if new_line < new_start || new_line > new_end {
-                    return false;
+                    return None;
                 }
             }
-            _ => return false,
+            Forward::Deleted | Forward::Rewritten { replacement: None } => return None,
         }
     }
-    kept > 0
+    Some(unchanged_body_code)
 }
 
-/// Normalized code body: strip comments and whitespace, drop empty lines.
-/// Name survival alone never satisfies this comparison.
-fn code_identity(content: &[u8], start: i64, end: i64) -> Vec<u8> {
+fn body_code_lines(
+    content: &[u8],
+    body: crate::git::SymbolBodySpan,
+    language: &str,
+) -> Option<Vec<Vec<u8>>> {
+    Some(normalized_code_lines(
+        content.get(body.start_byte..body.end_byte)?,
+        language,
+    ))
+}
+
+fn has_body_code_on_line(body: crate::git::SymbolBodySpan, lines: &[Vec<u8>], line: i64) -> bool {
+    let Ok(start) = i64::try_from(body.start_line) else {
+        return false;
+    };
+    let Ok(end) = i64::try_from(body.end_line) else {
+        return false;
+    };
+    if line < start || line > end {
+        return false;
+    }
+    let index = usize::try_from(line - start).unwrap_or(usize::MAX);
+    lines.get(index).is_some_and(|line| has_actual_code(line))
+}
+
+fn has_actual_code(code: &[u8]) -> bool {
+    code.iter().any(|byte| {
+        byte.is_ascii_alphanumeric() || matches!(byte, b'"' | b'\'') || !byte.is_ascii()
+    })
+}
+
+fn code_identity(
+    content: &[u8],
+    span: (i64, i64),
+    body: Option<crate::git::SymbolBodySpan>,
+    language: &str,
+) -> Vec<u8> {
+    let source = body
+        .and_then(|body| content.get(body.start_byte..body.end_byte))
+        .map(<[u8]>::to_vec)
+        .unwrap_or_else(|| {
+            let (start, end) = span;
+            content
+                .split_inclusive(|byte| *byte == b'\n')
+                .enumerate()
+                .filter(|(index, _)| {
+                    let line = i64::try_from(index + 1).unwrap_or(i64::MAX);
+                    line >= start && line <= end
+                })
+                .flat_map(|(_, line)| line.iter().copied())
+                .collect()
+        });
+    normalized_code_lines(&source, language)
+        .into_iter()
+        .filter(|line| !line.is_empty())
+        .fold(Vec::new(), |mut identity, line| {
+            identity.extend_from_slice(&line);
+            identity.push(b'\n');
+            identity
+        })
+}
+
+fn normalized_code_lines(content: &[u8], language: &str) -> Vec<Vec<u8>> {
     let mut result = Vec::new();
     let mut in_block_comment = false;
-    for (index, line) in content
-        .split(|byte| byte == &b'\n')
-        .enumerate()
-        .skip(start.saturating_sub(1) as usize)
-    {
-        if index as i64 > end {
-            break;
-        }
+    let mut python_triple_quote = None;
+    for line in content.split(|byte| *byte == b'\n') {
         let mut code = Vec::new();
         let mut iterator = line.iter().copied().peekable();
         while let Some(byte) = iterator.next() {
+            if let Some(quote) = python_triple_quote {
+                code.push(byte);
+                if byte == b'\\' {
+                    if let Some(escaped) = iterator.next() {
+                        code.push(escaped);
+                    }
+                    continue;
+                }
+                if byte == quote && iterator.peek() == Some(&quote) {
+                    let mut closing = iterator.clone();
+                    closing.next();
+                    if closing.peek() == Some(&quote) {
+                        code.push(iterator.next().expect("triple quote has second byte"));
+                        code.push(iterator.next().expect("triple quote has third byte"));
+                        python_triple_quote = None;
+                    }
+                }
+                continue;
+            }
             if in_block_comment {
                 if byte == b'*' && iterator.peek() == Some(&b'/') {
                     iterator.next();
@@ -1262,13 +1390,29 @@ fn code_identity(content: &[u8], start: i64, end: i64) -> Vec<u8> {
                 }
                 continue;
             }
-            if byte == b'/' && iterator.peek() == Some(&b'/') {
+            if language != "python" && byte == b'/' && iterator.peek() == Some(&b'/') {
                 break;
             }
-            if byte == b'/' && iterator.peek() == Some(&b'*') {
+            if language != "python" && byte == b'/' && iterator.peek() == Some(&b'*') {
                 iterator.next();
                 in_block_comment = true;
                 continue;
+            }
+            if language == "python" && byte == b'#' {
+                break;
+            }
+            if language == "python" && matches!(byte, b'"' | b'\'') {
+                let mut opening = iterator.clone();
+                if opening.peek() == Some(&byte) {
+                    opening.next();
+                    if opening.peek() == Some(&byte) {
+                        code.extend([byte, byte, byte]);
+                        iterator.next();
+                        iterator.next();
+                        python_triple_quote = Some(byte);
+                        continue;
+                    }
+                }
             }
             if byte == b'"' || byte == b'\'' {
                 let quote = byte;
@@ -1287,24 +1431,15 @@ fn code_identity(content: &[u8], start: i64, end: i64) -> Vec<u8> {
             }
             code.push(byte);
         }
-        let trimmed: Vec<u8> = code
+        let first = code
             .iter()
-            .copied()
-            .skip_while(|byte| byte.is_ascii_whitespace())
-            .collect();
-        let trimmed: Vec<u8> = trimmed
+            .position(|byte| !byte.is_ascii_whitespace())
+            .unwrap_or(code.len());
+        let last = code
             .iter()
-            .copied()
-            .rev()
-            .skip_while(|byte| byte.is_ascii_whitespace())
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect();
-        if !trimmed.is_empty() {
-            result.extend_from_slice(&trimmed);
-            result.push(b'\n');
-        }
+            .rposition(|byte| !byte.is_ascii_whitespace())
+            .map_or(first, |index| index + 1);
+        result.push(code[first..last].to_vec());
     }
     result
 }

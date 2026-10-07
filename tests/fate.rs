@@ -78,7 +78,14 @@ fn fate_requires_exactly_one_selector_and_at() {
     let missing_at = repo.run(["fate", "a.txt", "--line", "1"]);
     assert_ne!(missing_at.status.code(), Some(0));
 
-    // --symbol is not part of this slice.
+    let missing_selector = repo.run(["fate", "a.txt", "--at", "HEAD"]);
+    assert_eq!(missing_selector.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&missing_selector.stderr);
+    assert!(
+        stderr.contains("exactly one of --line or --symbol"),
+        "{stderr}"
+    );
+    // Missing symbol targets must be rejected.
     let symbol = repo.run(["fate", "a.txt", "--symbol", "x", "--at", "HEAD"]);
     assert_ne!(symbol.status.code(), Some(0));
 }
@@ -558,7 +565,7 @@ fn fate_symbol_tracks_local_edits_and_stops_on_whole_body_rewrite() {
     let start = commit(
         &repo,
         "lib.rs",
-        "fn alpha() {\n    let a = 1;\n}\nfn beta() {}\n",
+        "fn alpha() {\n    let a = 1;\n    let keep = 0;\n}\nfn beta() {}\n",
         "Create",
         "2020-01-01T00:00:00Z",
     );
@@ -566,9 +573,16 @@ fn fate_symbol_tracks_local_edits_and_stops_on_whole_body_rewrite() {
     let edit = commit(
         &repo,
         "lib.rs",
-        "fn alpha() {\n    let a = 2;\n}\nfn beta() {}\n",
+        "fn alpha() {\n    let a = 2;\n    let keep = 0;\n}\nfn beta() {}\n",
         "Adjust alpha",
         "2020-01-02T00:00:00Z",
+    );
+    let insertion = commit(
+        &repo,
+        "lib.rs",
+        "fn alpha() {\n    let a = 2;\n    let b = 3;\n    let keep = 0;\n}\nfn beta() {}\n",
+        "Insert in alpha",
+        "2020-01-03T00:00:00Z",
     );
     repo.index();
     let report = json(
@@ -581,10 +595,12 @@ fn fate_symbol_tracks_local_edits_and_stops_on_whole_body_rewrite() {
     assert_eq!(report["symbol_selection"]["qualified_name"], "alpha");
     assert_eq!(report["symbol_selection"]["kind"], "function");
     assert_eq!(report["symbol_selection"]["start_line"], 1);
-    assert_eq!(report["symbol_selection"]["end_line"], 3);
+    assert_eq!(report["symbol_selection"]["end_line"], 4);
     let events = report["events"].as_array().unwrap();
-    assert_eq!(events.len(), 1, "{report}");
+    assert_eq!(events.len(), 2, "{report}");
     assert_eq!(events[0]["commit_id"], edit);
+    assert_eq!(events[1]["commit_id"], insertion);
+    assert_eq!(events[1]["relationship"], "modified");
     assert_eq!(events[0]["relationship"], "modified");
     assert_eq!(events[0]["before"]["start_line"], 1);
     assert_eq!(events[0]["after"]["start_line"], 1);
@@ -600,7 +616,7 @@ fn fate_symbol_tracks_local_edits_and_stops_on_whole_body_rewrite() {
     let rewrite = commit(
         &repo,
         "lib.rs",
-        "fn alpha() {\n    let b = 10;\n    let c = 20;\n    let d = 30;\n}\nfn beta() {}\n",
+        "fn alpha() {\n    let b = 10;\n}\nfn beta() {}\n",
         "Rewrite alpha body",
         "2020-01-02T00:00:00Z",
     );
@@ -744,4 +760,243 @@ fn fate_symbol_comment_only_survival_is_not_a_modification() {
     );
     assert_eq!(report["final_state"], "reached_endpoint", "{report}");
     assert_eq!(report["events"].as_array().unwrap().len(), 0, "{report}");
+}
+
+#[test]
+fn fate_symbol_stops_when_only_comments_and_delimiters_survive() {
+    let repo = TestRepo::new();
+    let start = commit(
+        &repo,
+        "lib.rs",
+        "fn tracked() {\n    let a = 1;\n}\n",
+        "Create",
+        "2020-01-01T00:00:00Z",
+    );
+    let rewrite = commit(
+        &repo,
+        "lib.rs",
+        "fn tracked() {\n    // replaced body\n}\n",
+        "Replace body with comment",
+        "2020-01-02T00:00:00Z",
+    );
+    repo.index();
+
+    let report = json(
+        &repo,
+        &[
+            "fate", "lib.rs", "--symbol", "tracked", "--at", &start, "--json",
+        ],
+    );
+    assert_eq!(report["final_state"], "unknown", "{report}");
+    assert_eq!(report["stopped_at"], rewrite);
+    assert_eq!(report["stop_reason"]["code"], "symbol_body_rewritten");
+}
+
+#[test]
+fn fate_symbol_stops_when_body_boundaries_cannot_map_uniquely() {
+    let repo = TestRepo::new();
+    let start = commit(
+        &repo,
+        "lib.rs",
+        "fn tracked() {\n    let a = 1;\n}\n",
+        "Create",
+        "2020-01-01T00:00:00Z",
+    );
+    let rewrite = commit(
+        &repo,
+        "lib.rs",
+        "fn tracked() {\n    let b = 2;\n    let c = 3;\n}\n",
+        "Expand body rewrite",
+        "2020-01-02T00:00:00Z",
+    );
+    repo.index();
+
+    let report = json(
+        &repo,
+        &[
+            "fate", "lib.rs", "--symbol", "tracked", "--at", &start, "--json",
+        ],
+    );
+    assert_eq!(report["final_state"], "unknown", "{report}");
+    assert_eq!(report["stopped_at"], rewrite);
+    assert_eq!(
+        report["stop_reason"]["code"],
+        "unreliable_boundary_correspondence"
+    );
+}
+
+#[test]
+fn fate_symbol_does_not_restart_after_declaration_reappears() {
+    let repo = TestRepo::new();
+    let start = commit(
+        &repo,
+        "lib.rs",
+        "fn tracked() {\n    let a = 1;\n}\n",
+        "Create",
+        "2020-01-01T00:00:00Z",
+    );
+    let replacement = commit(
+        &repo,
+        "lib.rs",
+        "fn renamed() {\n    let a = 1;\n}\n",
+        "Rename declaration",
+        "2020-01-02T00:00:00Z",
+    );
+    commit(
+        &repo,
+        "lib.rs",
+        "fn tracked() {\n    let a = 1;\n}\n",
+        "Reintroduce old declaration",
+        "2020-01-03T00:00:00Z",
+    );
+    repo.index();
+
+    let report = json(
+        &repo,
+        &[
+            "fate", "lib.rs", "--symbol", "tracked", "--at", &start, "--json",
+        ],
+    );
+    assert_eq!(report["final_state"], "unknown", "{report}");
+    assert_eq!(report["stopped_at"], replacement);
+    assert_eq!(report["stop_reason"]["code"], "symbol_declaration_replaced");
+    assert!(report["events"].as_array().unwrap().is_empty(), "{report}");
+}
+
+#[test]
+fn fate_symbol_renders_text_output() {
+    let repo = TestRepo::new();
+    let start = commit(
+        &repo,
+        "lib.rs",
+        "fn tracked() {\n    let a = 1;\n    let b = 2;\n}\n",
+        "Create",
+        "2020-01-01T00:00:00Z",
+    );
+    commit(
+        &repo,
+        "lib.rs",
+        "fn tracked() {\n    let a = 3;\n    let b = 2;\n}\n",
+        "Modify body",
+        "2020-01-02T00:00:00Z",
+    );
+    repo.index();
+
+    let output = repo.run(["fate", "lib.rs", "--symbol", "tracked", "--at", &start]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8_lossy(&output.stdout).to_ascii_lowercase();
+    assert!(text.contains("tracked"), "{text}");
+    assert!(text.contains("modified"), "{text}");
+}
+
+#[test]
+fn fate_symbol_records_signature_edits_with_stable_body() {
+    let repo = TestRepo::new();
+    let start = commit(
+        &repo,
+        "lib.rs",
+        "fn tracked(value: i32) {\n    let a = 1;\n}\n",
+        "Create",
+        "2020-01-01T00:00:00Z",
+    );
+    let edit = commit(
+        &repo,
+        "lib.rs",
+        "fn tracked(value: i64) {\n    let a = 1;\n}\n",
+        "Change parameter type",
+        "2020-01-02T00:00:00Z",
+    );
+    repo.index();
+
+    let report = json(
+        &repo,
+        &[
+            "fate", "lib.rs", "--symbol", "tracked", "--at", &start, "--json",
+        ],
+    );
+    assert_eq!(report["final_state"], "reached_endpoint", "{report}");
+    let events = report["events"].as_array().unwrap();
+    assert_eq!(events.len(), 1, "{report}");
+    assert_eq!(events[0]["commit_id"], edit);
+    assert_eq!(events[0]["relationship"], "modified");
+}
+
+#[test]
+fn fate_symbol_does_not_count_python_comments_as_body_correspondence() {
+    let repo = TestRepo::new();
+    let start = commit(
+        &repo,
+        "tracked.py",
+        "def tracked():\n    # note\n    value = 1\n",
+        "Create",
+        "2020-01-01T00:00:00Z",
+    );
+    let edit = commit(
+        &repo,
+        "tracked.py",
+        "def tracked():\n    # note\n    value = 2\n",
+        "Edit body, keep comment",
+        "2020-01-02T00:00:00Z",
+    );
+    repo.index();
+
+    let report = json(
+        &repo,
+        &[
+            "fate",
+            "tracked.py",
+            "--symbol",
+            "tracked",
+            "--at",
+            &start,
+            "--json",
+        ],
+    );
+    assert_eq!(report["final_state"], "unknown", "{report}");
+    assert_eq!(report["stopped_at"], edit);
+    assert_eq!(report["stop_reason"]["code"], "symbol_body_rewritten");
+    assert!(report["events"].as_array().unwrap().is_empty(), "{report}");
+}
+
+#[test]
+fn fate_symbol_records_python_triple_quoted_string_edits() {
+    let repo = TestRepo::new();
+    let start = commit(
+        &repo,
+        "tracked.py",
+        "def tracked():\n    text = \"\"\"\n    # old text\n    \"\"\"\n    value = 1\n",
+        "Create",
+        "2020-01-01T00:00:00Z",
+    );
+    let edit = commit(
+        &repo,
+        "tracked.py",
+        "def tracked():\n    text = \"\"\"\n    # new text\n    \"\"\"\n    value = 1\n",
+        "Edit triple-quoted string",
+        "2020-01-02T00:00:00Z",
+    );
+    repo.index();
+
+    let report = json(
+        &repo,
+        &[
+            "fate",
+            "tracked.py",
+            "--symbol",
+            "tracked",
+            "--at",
+            &start,
+            "--json",
+        ],
+    );
+    assert_eq!(report["final_state"], "reached_endpoint", "{report}");
+    let events = report["events"].as_array().unwrap();
+    assert_eq!(events.len(), 1, "{report}");
+    assert_eq!(events[0]["commit_id"], edit);
+    assert_eq!(events[0]["relationship"], "modified");
 }
