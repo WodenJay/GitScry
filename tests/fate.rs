@@ -1172,6 +1172,195 @@ fn fate_line_follows_strict_cross_file_move() {
 }
 
 #[test]
+fn fate_follows_cross_file_move_when_source_file_is_removed() {
+    let repo = TestRepo::new();
+    let tracked = "fn tracked(value: i32) -> i32 {\n    let base = value + 1;\n    let extra = 2;\n    base + extra\n}\n";
+    let filler = format!(
+        "fn old_helper() {{\n{} }}\n",
+        "    let item = 1;\n".repeat(80)
+    );
+    let initial = format!("{tracked}{filler}");
+    let start = commit(
+        &repo,
+        "src/lib.rs",
+        &initial,
+        "Create target and helper",
+        "2020-01-01T00:00:00Z",
+    );
+    fs::remove_file(repo.dir.path().join("src/lib.rs")).expect("remove source file");
+    let moved = commit(
+        &repo,
+        "src/tracked.rs",
+        tracked,
+        "Move target and remove source file",
+        "2020-01-02T00:00:00Z",
+    );
+    repo.index();
+
+    let line_report = json(
+        &repo,
+        &[
+            "fate",
+            "src/lib.rs",
+            "--line",
+            "2",
+            "--at",
+            &start,
+            "--json",
+        ],
+    );
+    assert_eq!(
+        line_report["final_state"], "reached_endpoint",
+        "{line_report}"
+    );
+    assert_eq!(
+        line_report["events"][0]["commit_id"], moved,
+        "{line_report}"
+    );
+    assert_eq!(
+        line_report["events"][0]["relationship"], "move",
+        "{line_report}"
+    );
+    assert_eq!(
+        line_report["last_location"]["path"], "src/tracked.rs",
+        "{line_report}"
+    );
+
+    let symbol_report = json(
+        &repo,
+        &[
+            "fate",
+            "src/lib.rs",
+            "--symbol",
+            "tracked",
+            "--at",
+            &start,
+            "--json",
+        ],
+    );
+    assert_eq!(
+        symbol_report["final_state"], "reached_endpoint",
+        "{symbol_report}"
+    );
+    assert_eq!(
+        symbol_report["events"][0]["commit_id"], moved,
+        "{symbol_report}"
+    );
+    assert_eq!(
+        symbol_report["events"][0]["relationship"], "move",
+        "{symbol_report}"
+    );
+    assert_eq!(
+        symbol_report["last_location"]["path"], "src/tracked.rs",
+        "{symbol_report}"
+    );
+}
+
+#[test]
+fn fate_does_not_follow_a_preexisting_line_match_in_a_changed_file() {
+    let repo = TestRepo::new();
+    fs::create_dir_all(repo.dir.path().join("src")).expect("create source directory");
+    let tracked = "fn tracked(value: i32) -> i32 {\n    let base = value + 1;\n    let extra = 2;\n    base + extra\n}\n";
+    let decoy = format!("{tracked}fn existing() {{}}\n");
+    fs::write(repo.dir.path().join("src/decoy.rs"), &decoy).expect("write preexisting duplicate");
+    let initial = format!("{tracked}fn remaining() {{}}\n");
+    let start = commit(
+        &repo,
+        "src/lib.rs",
+        &initial,
+        "Create duplicate line",
+        "2020-01-01T00:00:00Z",
+    );
+    fs::write(
+        repo.dir.path().join("src/decoy.rs"),
+        format!("{decoy}// unrelated edit\n"),
+    )
+    .expect("change duplicate's file without moving it");
+    commit(
+        &repo,
+        "src/lib.rs",
+        "fn remaining() {}\n",
+        "Delete selected line and edit duplicate file",
+        "2020-01-02T00:00:00Z",
+    );
+    repo.index();
+
+    let report = json(
+        &repo,
+        &[
+            "fate",
+            "src/lib.rs",
+            "--line",
+            "2",
+            "--at",
+            &start,
+            "--json",
+        ],
+    );
+    assert_eq!(report["final_state"], "deleted", "{report}");
+    assert_eq!(report["last_location"]["path"], "src/lib.rs", "{report}");
+    assert!(
+        report["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|event| event["relationship"] != "move")
+    );
+}
+
+#[test]
+fn fate_does_not_follow_a_preexisting_symbol_match_in_a_changed_file() {
+    let repo = TestRepo::new();
+    fs::create_dir_all(repo.dir.path().join("src")).expect("create source directory");
+    let tracked = "fn tracked(value: i32) -> i32 {\n    let base = value + 1;\n    let extra = 2;\n    base + extra\n}\n";
+    let decoy = format!("{tracked}fn existing() {{}}\n");
+    fs::write(repo.dir.path().join("src/decoy.rs"), &decoy).expect("write preexisting duplicate");
+    let initial = format!("{tracked}fn remaining() {{}}\n");
+    let start = commit(
+        &repo,
+        "src/lib.rs",
+        &initial,
+        "Create duplicate symbol",
+        "2020-01-01T00:00:00Z",
+    );
+    fs::write(
+        repo.dir.path().join("src/decoy.rs"),
+        format!("{decoy}// unrelated edit\n"),
+    )
+    .expect("change duplicate's file without moving it");
+    commit(
+        &repo,
+        "src/lib.rs",
+        "fn remaining() {}\n",
+        "Delete selected symbol and edit duplicate file",
+        "2020-01-02T00:00:00Z",
+    );
+    repo.index();
+
+    let report = json(
+        &repo,
+        &[
+            "fate",
+            "src/lib.rs",
+            "--symbol",
+            "tracked",
+            "--at",
+            &start,
+            "--json",
+        ],
+    );
+    assert_ne!(report["final_state"], "reached_endpoint", "{report}");
+    assert_eq!(report["last_location"]["path"], "src/lib.rs", "{report}");
+    assert!(
+        report["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|event| event["relationship"] != "move")
+    );
+}
+
+#[test]
 fn fate_does_not_choose_between_competing_line_moves() {
     let repo = TestRepo::new();
     let tracked = "fn tracked(value: i32) -> i32 {\n    let base = value + 1;\n    let extra = 2;\n    base + extra\n}\n";

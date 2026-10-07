@@ -14,7 +14,7 @@ use crate::git::Repository;
 use super::normalize_git_path_string;
 use crate::analysis::query::{Context, Options, Outcome, QueryReport, scope};
 use crate::analysis::{PatchExcerpt, SearchScopeInfo};
-use crate::git::SymbolSelection;
+use crate::git::{SymbolLocation, SymbolSelection};
 use crate::{app::AppError, cache::followups::ForwardCommit};
 
 const MAX_HUNKS: usize = 4_096;
@@ -292,6 +292,77 @@ fn execute_line(
             continue;
         };
         if change.status.starts_with('D') {
+            let old_content = repository.read_blob(&last_revision, &state.path)?;
+            let context = old_content
+                .as_deref()
+                .and_then(|content| line_move_context(content, state.line, &state.path));
+            if let Some(context) = context {
+                let candidates =
+                    find_line_move_candidates(session, repository, &node.oid, &changes, &context)?;
+                if candidates.added.len() == 1 && candidates.unverified.is_empty() {
+                    let (candidate_path, candidate_line) = candidates
+                        .added
+                        .into_iter()
+                        .next()
+                        .expect("one move candidate was counted");
+                    events.push(Event {
+                        commit_id: node.oid.clone(),
+                        subject: session.forward_subject(&node.oid)?,
+                        commit_time: node.commit_time,
+                        relationship: "move",
+                        before: state.clone(),
+                        before_span: None,
+                        after_span: None,
+                        after: Some(Location {
+                            path: candidate_path.clone(),
+                            line: candidate_line,
+                        }),
+                        parent_count: node.parents.len(),
+                        patch: event_patch(
+                            session,
+                            options.patch,
+                            &node.oid,
+                            change.ordinal,
+                            state.line,
+                        )?,
+                    });
+                    state.path = candidate_path;
+                    state.line = candidate_line;
+                    last_revision = node.oid.clone();
+                    continue;
+                }
+                if !candidates.added.is_empty() || !candidates.unverified.is_empty() {
+                    let unverified = !candidates.unverified.is_empty();
+                    let candidate_associations = candidates
+                        .added
+                        .into_iter()
+                        .chain(candidates.unverified)
+                        .map(|(path, line)| Association {
+                            location: Location { path, line },
+                            span: None,
+                        });
+                    (associations, associations_truncated) =
+                        bounded_associations(candidate_associations);
+
+                    stop = Some((
+                        node.oid.clone(),
+                        FinalState::Unknown,
+                        StopReason {
+                            code: if unverified {
+                                "move_candidate_unverified"
+                            } else {
+                                "ambiguous_move_candidates"
+                            },
+                            explanation: if unverified {
+                                "a strict-context continuation could not be verified from complete patch material"
+                            } else {
+                                "the unchanged line has multiple strict-context matches; its move cannot be established uniquely"
+                            },
+                        },
+                    ));
+                    break;
+                }
+            }
             events.push(Event {
                 commit_id: node.oid.clone(),
                 subject: session.forward_subject(&node.oid)?,
@@ -397,43 +468,14 @@ fn execute_line(
             let context = old_content
                 .as_deref()
                 .and_then(|content| line_move_context(content, state.line, &state.path));
-            let mut move_candidates = BTreeSet::new();
-            if let Some(context) = context {
-                for candidate_change in &changes {
-                    let Some(candidate_path) = candidate_change.new_path.as_ref() else {
-                        continue;
-                    };
-                    if candidate_change.status.starts_with('D')
-                        || candidate_change.status.starts_with('T')
-                    {
-                        continue;
-                    }
-                    let Some(candidate_content) =
-                        repository.read_blob(&node.oid, candidate_path)?
-                    else {
-                        continue;
-                    };
-                    let candidate_lines = source_line_bytes(&candidate_content);
-                    for candidate_index in 0..candidate_lines.len() {
-                        if line_context_matches(
-                            &candidate_content,
-                            &candidate_lines,
-                            candidate_index,
-                            &context,
-                            candidate_path,
-                        ) {
-                            let Ok(candidate_line) = i64::try_from(candidate_index + 1) else {
-                                continue;
-                            };
-                            move_candidates.insert((candidate_path.clone(), candidate_line));
-                            if move_candidates.len() > MAX_MOVE_ASSOCIATIONS + 1 {
-                                move_candidates.pop_last();
-                            }
-                        }
-                    }
-                }
-            }
-            if move_candidates.len() == 1 {
+            let candidates = if let Some(context) = context {
+                find_line_move_candidates(session, repository, &node.oid, &changes, &context)?
+            } else {
+                LineMoveCandidates::default()
+            };
+            let move_candidates = candidates.added;
+            let unverified_candidates = candidates.unverified;
+            if move_candidates.len() == 1 && unverified_candidates.is_empty() {
                 let (candidate_path, candidate_line) = move_candidates
                     .into_iter()
                     .next()
@@ -464,18 +506,30 @@ fn execute_line(
                 last_revision = node.oid.clone();
                 continue;
             }
-            if move_candidates.len() > 1 {
-                let candidates = move_candidates.into_iter().map(|(path, line)| Association {
-                    location: Location { path, line },
-                    span: None,
-                });
+            if move_candidates.len() > 1 || !unverified_candidates.is_empty() {
+                let unverified = !unverified_candidates.is_empty();
+                let candidates = move_candidates
+                    .into_iter()
+                    .chain(unverified_candidates)
+                    .map(|(path, line)| Association {
+                        location: Location { path, line },
+                        span: None,
+                    });
                 (associations, associations_truncated) = bounded_associations(candidates);
                 stop = Some((
                     node.oid.clone(),
                     FinalState::Unknown,
                     StopReason {
-                        code: "ambiguous_move_candidates",
-                        explanation: "the unchanged line has multiple strict-context matches; its move cannot be established uniquely",
+                        code: if unverified {
+                            "move_candidate_unverified"
+                        } else {
+                            "ambiguous_move_candidates"
+                        },
+                        explanation: if unverified {
+                            "a strict-context continuation could not be verified from complete patch material"
+                        } else {
+                            "the unchanged line has multiple strict-context matches; its move cannot be established uniquely"
+                        },
                     },
                 ));
                 break;
@@ -797,6 +851,171 @@ fn line_context_matches(
     )
 }
 
+#[derive(Default)]
+struct LineMoveCandidates {
+    added: BTreeSet<(Vec<u8>, i64)>,
+    unverified: BTreeSet<(Vec<u8>, i64)>,
+}
+
+fn find_line_move_candidates(
+    session: &QuerySession,
+    repository: &Repository,
+    oid: &str,
+    changes: &[crate::cache::PathChange],
+    context: &LineMoveContext,
+) -> Result<LineMoveCandidates, AppError> {
+    let mut candidates = LineMoveCandidates::default();
+    for change in changes {
+        let Some(path) = change.new_path.as_ref() else {
+            continue;
+        };
+        if change.status.starts_with('D') || change.status.starts_with('T') {
+            continue;
+        }
+        let Some(content) = repository.read_blob(oid, path)? else {
+            continue;
+        };
+        let lines = source_line_bytes(&content);
+        let mut matched_lines = BTreeSet::new();
+        for (index, _) in lines.iter().enumerate() {
+            if !line_context_matches(&content, &lines, index, context, path) {
+                continue;
+            }
+            let Ok(line) = i64::try_from(index + 1) else {
+                continue;
+            };
+            matched_lines.insert(line);
+        }
+        if matched_lines.is_empty() {
+            continue;
+        }
+        let history =
+            session.patch_history_for_change(oid, change.ordinal, MAX_HUNKS, MAX_HUNK_BYTES)?;
+        let added_lines = added_target_lines(
+            &history.hunks,
+            history.missing_objects,
+            history.truncated,
+            &matched_lines,
+        );
+        for line in matched_lines {
+            let destination = (path.clone(), line);
+            let candidates_for_status = match &added_lines {
+                Some(added_lines) if added_lines.contains(&line) => &mut candidates.added,
+                Some(_) => continue,
+                None => &mut candidates.unverified,
+            };
+            candidates_for_status.insert(destination);
+            if candidates_for_status.len() > MAX_MOVE_ASSOCIATIONS + 1 {
+                candidates_for_status.pop_last();
+            }
+        }
+    }
+    Ok(candidates)
+}
+
+struct SymbolMoveCandidate {
+    path: Vec<u8>,
+    symbol: SymbolLocation,
+    start: i64,
+    end: i64,
+}
+
+#[derive(Default)]
+struct SymbolMoveCandidates {
+    added: Vec<SymbolMoveCandidate>,
+    unverified: BTreeSet<Association>,
+}
+
+struct SymbolMoveSearch<'a> {
+    excluded_path: Option<&'a [u8]>,
+    symbol_name: &'a str,
+    strict_target: &'a [u8],
+    language: &'a str,
+}
+
+fn find_symbol_move_candidates(
+    session: &QuerySession,
+    repository: &Repository,
+    oid: &str,
+    changes: &[crate::cache::PathChange],
+    search: SymbolMoveSearch<'_>,
+) -> Result<SymbolMoveCandidates, AppError> {
+    let mut candidates = SymbolMoveCandidates::default();
+    for change in changes {
+        let Some(path) = change.new_path.as_ref() else {
+            continue;
+        };
+        if search.excluded_path == Some(path.as_slice())
+            || change.status.starts_with('D')
+            || change.status.starts_with('T')
+        {
+            continue;
+        }
+        let Ok(path_text) = std::str::from_utf8(path) else {
+            continue;
+        };
+        let Some(content) = repository.read_blob(oid, path)? else {
+            continue;
+        };
+        let Ok(symbol) = repository.locate_symbol(&content, search.symbol_name, path_text) else {
+            continue;
+        };
+        if symbol.selection.language != search.language {
+            continue;
+        }
+        let Ok(start) = i64::try_from(symbol.start_line) else {
+            continue;
+        };
+        let Ok(end) = i64::try_from(symbol.end_line) else {
+            continue;
+        };
+        let Some(candidate_bytes) = symbol_source_bytes(&content, (start, end)) else {
+            continue;
+        };
+        if !strict_source_equal(
+            search.strict_target,
+            &candidate_bytes,
+            Some(search.language),
+            true,
+        ) {
+            continue;
+        }
+        let association = Association {
+            location: Location {
+                path: path.clone(),
+                line: start,
+            },
+            span: Some((start, end)),
+        };
+        match span_addition_status(session, oid, change.ordinal, (start, end))? {
+            AddedMaterialStatus::Added => candidates.added.push(SymbolMoveCandidate {
+                path: path.clone(),
+                symbol,
+                start,
+                end,
+            }),
+            AddedMaterialStatus::Unavailable => {
+                candidates.unverified.insert(association);
+                if candidates.unverified.len() > MAX_MOVE_ASSOCIATIONS + 1 {
+                    candidates.unverified.pop_last();
+                }
+            }
+            AddedMaterialStatus::NotAdded => {}
+        }
+    }
+    candidates.added.sort_by(|left, right| {
+        left.path
+            .cmp(&right.path)
+            .then_with(|| left.start.cmp(&right.start))
+            .then_with(|| left.end.cmp(&right.end))
+    });
+    candidates.added.dedup_by(|left, right| {
+        left.path == right.path && left.start == right.start && left.end == right.end
+    });
+    candidates.added.truncate(MAX_MOVE_ASSOCIATIONS + 1);
+    Ok(candidates)
+}
+
 fn map_line_forward(hunks: &[PatchHistoryHunk], line: i64) -> Option<Forward> {
     let mut ordered: Vec<&PatchHistoryHunk> = hunks.iter().collect();
     ordered.sort_by_key(|hunk| hunk.old_start);
@@ -1013,6 +1232,89 @@ fn execute_symbol(
             continue;
         };
         if change.status.starts_with('D') {
+            let strict_target = repository
+                .read_blob(&last_revision, &state_path)?
+                .as_deref()
+                .and_then(|content| symbol_source_bytes(content, (state_start, state_end)));
+            if let Some(strict_target) = strict_target {
+                let symbol_name = qualified_name
+                    .rsplit("::")
+                    .next()
+                    .unwrap_or(&qualified_name);
+                let candidates = find_symbol_move_candidates(
+                    session,
+                    repository,
+                    &node.oid,
+                    &changes,
+                    SymbolMoveSearch {
+                        excluded_path: None,
+                        symbol_name,
+                        strict_target: &strict_target,
+                        language: &symbol_language,
+                    },
+                )?;
+                if candidates.added.len() == 1 && candidates.unverified.is_empty() {
+                    let candidate = candidates
+                        .added
+                        .into_iter()
+                        .next()
+                        .expect("one symbol move candidate was counted");
+                    push_symbol_event(
+                        &mut events,
+                        session,
+                        &node.oid,
+                        node.commit_time,
+                        "move",
+                        node.parents.len(),
+                        &state_path,
+                        state_start,
+                        state_end,
+                        Some(&candidate.path),
+                        candidate.start,
+                        candidate.end,
+                        options.patch,
+                        change.ordinal,
+                    )?;
+                    state_path = candidate.path;
+                    state_start = candidate.start;
+                    state_end = candidate.end;
+                    state_body_span = candidate.symbol.body_span;
+                    symbol_language = candidate.symbol.selection.language.clone();
+                    qualified_name = candidate.symbol.selection.qualified_name.clone();
+                    last_revision = node.oid.clone();
+                    continue;
+                }
+                if !candidates.added.is_empty() || !candidates.unverified.is_empty() {
+                    let unverified = !candidates.unverified.is_empty();
+                    let added_associations =
+                        candidates.added.into_iter().map(|candidate| Association {
+                            location: Location {
+                                path: candidate.path,
+                                line: candidate.start,
+                            },
+                            span: Some((candidate.start, candidate.end)),
+                        });
+                    (associations, associations_truncated) =
+                        bounded_associations(added_associations.chain(candidates.unverified));
+                    stop = Some((
+                        node.oid.clone(),
+                        FinalState::Unknown,
+                        StopReason {
+                            code: if unverified {
+                                "move_candidate_unverified"
+                            } else {
+                                "ambiguous_move_candidates"
+                            },
+                            explanation: if unverified {
+                                "a strict-source continuation could not be verified from complete patch material"
+                            } else {
+                                "the unchanged symbol has multiple strict-source matches; its move cannot be established uniquely"
+                            },
+                        },
+                    ));
+                    break;
+                }
+            }
             push_symbol_event(
                 &mut events,
                 session,
@@ -1095,135 +1397,98 @@ fn execute_symbol(
                     .read_blob(&last_revision, &state_path)?
                     .as_deref()
                     .and_then(|content| symbol_source_bytes(content, (state_start, state_end)));
-                let mut move_candidates = Vec::new();
-                let mut exact_candidates = 0usize;
-                if let Some(strict_target) = strict_target {
+                let candidates = if let Some(strict_target) = strict_target {
                     let symbol_name = qualified_name
                         .rsplit("::")
                         .next()
                         .unwrap_or(&qualified_name);
-                    for candidate_change in &changes {
-                        let Some(candidate_path) = candidate_change.new_path.as_ref() else {
-                            continue;
-                        };
-                        if candidate_path == &state_path
-                            || candidate_change.status.starts_with('D')
-                            || candidate_change.status.starts_with('T')
-                        {
-                            continue;
-                        }
-                        let Ok(candidate_path_text) = std::str::from_utf8(candidate_path) else {
-                            continue;
-                        };
-                        let Some(candidate_content) =
-                            repository.read_blob(&node.oid, candidate_path)?
-                        else {
-                            continue;
-                        };
-                        let Ok(candidate) = repository.locate_symbol(
-                            &candidate_content,
+                    find_symbol_move_candidates(
+                        session,
+                        repository,
+                        &node.oid,
+                        &changes,
+                        SymbolMoveSearch {
+                            excluded_path: Some(&state_path),
                             symbol_name,
-                            candidate_path_text,
-                        ) else {
-                            continue;
-                        };
-                        let Ok(candidate_start) = i64::try_from(candidate.start_line) else {
-                            continue;
-                        };
-                        let Ok(candidate_end) = i64::try_from(candidate.end_line) else {
-                            continue;
-                        };
-                        let Some(candidate_bytes) = symbol_source_bytes(
-                            &candidate_content,
-                            (candidate_start, candidate_end),
-                        ) else {
-                            continue;
-                        };
-                        if !strict_source_equal(
-                            &strict_target,
-                            &candidate_bytes,
-                            Some(symbol_language.as_str()),
-                            candidate.selection.language == symbol_language,
-                        ) {
-                            continue;
-                        }
-                        exact_candidates += 1;
-                        move_candidates.push((
-                            candidate_path.clone(),
-                            candidate,
-                            candidate_start,
-                            candidate_end,
-                        ));
-                        move_candidates.sort_by(|left, right| {
-                            left.0
-                                .cmp(&right.0)
-                                .then_with(|| left.2.cmp(&right.2))
-                                .then_with(|| left.3.cmp(&right.3))
+                            strict_target: &strict_target,
+                            language: &symbol_language,
+                        },
+                    )?
+                } else {
+                    SymbolMoveCandidates::default()
+                };
+                if candidates.added.len() == 1
+                    && candidates.unverified.is_empty()
+                    && span_was_deleted(
+                        session,
+                        &node.oid,
+                        change.ordinal,
+                        (state_start, state_end),
+                    ) == Some(true)
+                {
+                    let candidate = candidates
+                        .added
+                        .into_iter()
+                        .next()
+                        .expect("one symbol move candidate was counted");
+                    push_symbol_event(
+                        &mut events,
+                        session,
+                        &node.oid,
+                        node.commit_time,
+                        "move",
+                        node.parents.len(),
+                        &state_path,
+                        state_start,
+                        state_end,
+                        Some(&candidate.path),
+                        candidate.start,
+                        candidate.end,
+                        options.patch,
+                        change.ordinal,
+                    )?;
+                    state_path = candidate.path;
+                    state_start = candidate.start;
+                    state_end = candidate.end;
+                    state_body_span = candidate.symbol.body_span;
+                    symbol_language = candidate.symbol.selection.language.clone();
+                    qualified_name = candidate.symbol.selection.qualified_name.clone();
+                    last_revision = node.oid.clone();
+                    continue;
+                }
+                if (candidates.added.len() > 1 || !candidates.unverified.is_empty())
+                    && span_was_deleted(
+                        session,
+                        &node.oid,
+                        change.ordinal,
+                        (state_start, state_end),
+                    ) == Some(true)
+                {
+                    let unverified = !candidates.unverified.is_empty();
+                    let added_associations =
+                        candidates.added.into_iter().map(|candidate| Association {
+                            location: Location {
+                                path: candidate.path,
+                                line: candidate.start,
+                            },
+                            span: Some((candidate.start, candidate.end)),
                         });
-                        if move_candidates.len() > MAX_MOVE_ASSOCIATIONS + 1 {
-                            move_candidates.pop();
-                        }
-                    }
-                }
-                if exact_candidates == 1
-                    && span_was_deleted(
-                        session,
-                        &node.oid,
-                        change.ordinal,
-                        (state_start, state_end),
-                    ) == Some(true)
-                {
-                    if let Some((candidate_path, candidate, new_start, new_end)) =
-                        move_candidates.pop()
-                    {
-                        push_symbol_event(
-                            &mut events,
-                            session,
-                            &node.oid,
-                            node.commit_time,
-                            "move",
-                            node.parents.len(),
-                            &state_path,
-                            state_start,
-                            state_end,
-                            Some(&candidate_path),
-                            new_start,
-                            new_end,
-                            options.patch,
-                            change.ordinal,
-                        )?;
-                        state_path = candidate_path;
-                        state_start = new_start;
-                        state_end = new_end;
-                        state_body_span = candidate.body_span;
-                        symbol_language = candidate.selection.language.clone();
-                        qualified_name = candidate.selection.qualified_name.clone();
-                        last_revision = node.oid.clone();
-                        continue;
-                    }
-                }
-                if exact_candidates > 1
-                    && span_was_deleted(
-                        session,
-                        &node.oid,
-                        change.ordinal,
-                        (state_start, state_end),
-                    ) == Some(true)
-                {
-                    let candidates =
-                        move_candidates
-                            .into_iter()
-                            .map(|(path, _, start, end)| Association {
-                                location: Location { path, line: start },
-                                span: Some((start, end)),
-                            });
-                    (associations, associations_truncated) = bounded_associations(candidates);
+                    (associations, associations_truncated) =
+                        bounded_associations(added_associations.chain(candidates.unverified));
                     stop = Some((
                         node.oid.clone(),
                         FinalState::Unknown,
                         StopReason {
-                            code: "ambiguous_move_candidates",
-                            explanation: "the unchanged symbol has multiple strict-source matches; its move cannot be established uniquely",
+                            code: if unverified {
+                                "move_candidate_unverified"
+                            } else {
+                                "ambiguous_move_candidates"
+                            },
+                            explanation: if unverified {
+                                "a strict-source continuation could not be verified from complete patch material"
+                            } else {
+                                "the unchanged symbol has multiple strict-source matches; its move cannot be established uniquely"
+                            },
                         },
                     ));
                     break;
@@ -1294,112 +1559,109 @@ fn execute_symbol(
             && span_was_deleted(session, &node.oid, change.ordinal, (state_start, state_end))
                 == Some(true)
         {
-            let mut alternatives = BTreeSet::from([Association {
+            let primary = Association {
                 location: Location {
                     path: new_path.clone(),
                     line: new_start,
                 },
                 span: Some((new_start, new_end)),
-            }]);
-            if let Some(strict_target) = old_content_for_move
-                .as_deref()
-                .and_then(|content| symbol_source_bytes(content, (state_start, state_end)))
-            {
-                let symbol_name = qualified_name
-                    .rsplit("::")
-                    .next()
-                    .unwrap_or(&qualified_name);
-                for candidate_change in &changes {
-                    let Some(candidate_path) = candidate_change.new_path.as_ref() else {
-                        continue;
-                    };
-                    if candidate_path == &new_path
-                        || candidate_change.status.starts_with('D')
-                        || candidate_change.status.starts_with('T')
-                    {
-                        continue;
-                    }
-                    let Ok(candidate_path_text) = std::str::from_utf8(candidate_path) else {
-                        continue;
-                    };
-                    let Some(candidate_content) =
-                        repository.read_blob(&node.oid, candidate_path)?
-                    else {
-                        continue;
-                    };
-                    let Ok(candidate) = repository.locate_symbol(
-                        &candidate_content,
-                        symbol_name,
-                        candidate_path_text,
-                    ) else {
-                        continue;
-                    };
-                    let Ok(candidate_start) = i64::try_from(candidate.start_line) else {
-                        continue;
-                    };
-                    let Ok(candidate_end) = i64::try_from(candidate.end_line) else {
-                        continue;
-                    };
-                    let Some(candidate_bytes) =
-                        symbol_source_bytes(&candidate_content, (candidate_start, candidate_end))
-                    else {
-                        continue;
-                    };
-                    if strict_source_equal(
-                        &strict_target,
-                        &candidate_bytes,
-                        Some(symbol_language.as_str()),
-                        candidate.selection.language == symbol_language,
-                    ) {
-                        alternatives.insert(Association {
+            };
+            match span_addition_status(session, &node.oid, change.ordinal, (new_start, new_end))? {
+                AddedMaterialStatus::Added => {
+                    let strict_target = old_content_for_move
+                        .as_deref()
+                        .and_then(|content| symbol_source_bytes(content, (state_start, state_end)))
+                        .expect("complete target match has source material");
+                    let symbol_name = qualified_name
+                        .rsplit("::")
+                        .next()
+                        .unwrap_or(&qualified_name);
+                    let alternatives = find_symbol_move_candidates(
+                        session,
+                        repository,
+                        &node.oid,
+                        &changes,
+                        SymbolMoveSearch {
+                            excluded_path: Some(&new_path),
+                            symbol_name,
+                            strict_target: &strict_target,
+                            language: &symbol_language,
+                        },
+                    )?;
+                    let unverified = !alternatives.unverified.is_empty();
+                    let additional = alternatives
+                        .added
+                        .into_iter()
+                        .map(|candidate| Association {
                             location: Location {
-                                path: candidate_path.clone(),
-                                line: candidate_start,
+                                path: candidate.path,
+                                line: candidate.start,
                             },
-                            span: Some((candidate_start, candidate_end)),
-                        });
-                        if alternatives.len() > MAX_MOVE_ASSOCIATIONS + 1 {
-                            alternatives.pop_last();
-                        }
+                            span: Some((candidate.start, candidate.end)),
+                        })
+                        .chain(alternatives.unverified);
+                    let (candidate_associations, candidate_associations_truncated) =
+                        bounded_associations(std::iter::once(primary).chain(additional));
+                    if candidate_associations.len() > 1 {
+                        associations = candidate_associations;
+                        associations_truncated = candidate_associations_truncated;
+                        stop = Some((
+                            node.oid.clone(),
+                            FinalState::Unknown,
+                            StopReason {
+                                code: if unverified {
+                                    "move_candidate_unverified"
+                                } else {
+                                    "ambiguous_move_candidates"
+                                },
+                                explanation: if unverified {
+                                    "a strict-source continuation could not be verified from complete patch material"
+                                } else {
+                                    "the unchanged symbol has multiple strict-source matches; its move cannot be established uniquely"
+                                },
+                            },
+                        ));
+                        break;
                     }
+                    push_symbol_event(
+                        &mut events,
+                        session,
+                        &node.oid,
+                        node.commit_time,
+                        "move",
+                        node.parents.len(),
+                        &state_path,
+                        state_start,
+                        state_end,
+                        Some(&new_path),
+                        new_start,
+                        new_end,
+                        options.patch,
+                        change.ordinal,
+                    )?;
+                    state_path = new_path.clone();
+                    state_start = new_start;
+                    state_end = new_end;
+                    state_body_span = new_location.body_span;
+                    symbol_language = new_location.selection.language.clone();
+                    qualified_name = new_location.selection.qualified_name.clone();
+                    last_revision = node.oid.clone();
+                    continue;
                 }
+                AddedMaterialStatus::Unavailable => {
+                    (associations, associations_truncated) = bounded_associations([primary]);
+                    stop = Some((
+                        node.oid.clone(),
+                        FinalState::Unknown,
+                        StopReason {
+                            code: "move_candidate_unverified",
+                            explanation: "the strict-source continuation could not be verified from complete patch material",
+                        },
+                    ));
+                    break;
+                }
+                AddedMaterialStatus::NotAdded => {}
             }
-            if alternatives.len() > 1 {
-                (associations, associations_truncated) = bounded_associations(alternatives);
-                stop = Some((
-                    node.oid.clone(),
-                    FinalState::Unknown,
-                    StopReason {
-                        code: "ambiguous_move_candidates",
-                        explanation: "the unchanged symbol has multiple strict-source matches; its move cannot be established uniquely",
-                    },
-                ));
-                break;
-            }
-            push_symbol_event(
-                &mut events,
-                session,
-                &node.oid,
-                node.commit_time,
-                "move",
-                node.parents.len(),
-                &state_path,
-                state_start,
-                state_end,
-                Some(&new_path),
-                new_start,
-                new_end,
-                options.patch,
-                change.ordinal,
-            )?;
-            state_path = new_path.clone();
-            state_start = new_start;
-            state_end = new_end;
-            state_body_span = new_location.body_span;
-            symbol_language = new_location.selection.language.clone();
-            qualified_name = new_location.selection.qualified_name.clone();
-            last_revision = node.oid.clone();
-            continue;
         }
 
         if renamed {
@@ -1880,6 +2142,162 @@ fn span_was_deleted(
     Some(true)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AddedMaterialStatus {
+    Added,
+    NotAdded,
+    Unavailable,
+}
+
+fn span_addition_status(
+    session: &QuerySession,
+    oid: &str,
+    change_ordinal: i64,
+    span: (i64, i64),
+) -> Result<AddedMaterialStatus, AppError> {
+    if span.0 < 1 || span.0 > span.1 {
+        return Ok(AddedMaterialStatus::NotAdded);
+    }
+    let history =
+        session.patch_history_for_change(oid, change_ordinal, MAX_HUNKS, MAX_HUNK_BYTES)?;
+    if history.missing_objects
+        || history.truncated
+        || history.hunks.is_empty()
+        || history.hunks.iter().any(|hunk| hunk.text.is_none())
+    {
+        return Ok(AddedMaterialStatus::Unavailable);
+    }
+    let mut added = false;
+    for hunk in &history.hunks {
+        match hunk_adds_line_in_span(hunk, span) {
+            Some(true) => added = true,
+            Some(false) => {}
+            None => return Ok(AddedMaterialStatus::Unavailable),
+        }
+    }
+    Ok(if added {
+        AddedMaterialStatus::Added
+    } else {
+        AddedMaterialStatus::NotAdded
+    })
+}
+
+fn added_target_lines(
+    hunks: &[PatchHistoryHunk],
+    missing_objects: bool,
+    truncated: bool,
+    targets: &BTreeSet<i64>,
+) -> Option<BTreeSet<i64>> {
+    if missing_objects
+        || truncated
+        || hunks.is_empty()
+        || hunks.iter().any(|hunk| hunk.text.is_none())
+    {
+        return None;
+    }
+    let mut added = BTreeSet::new();
+    for hunk in hunks {
+        let text = hunk.text.as_deref()?;
+        let mut old_line = hunk_first_line(hunk.old_start, hunk.old_lines)?;
+        let mut new_line = hunk_first_line(hunk.new_start, hunk.new_lines)?;
+        let mut old_count = 0i64;
+        let mut new_count = 0i64;
+        let mut first_row = true;
+        for raw in text.split_inclusive(|byte| *byte == b'\n') {
+            let row = raw.strip_suffix(b"\n").unwrap_or(raw);
+            if first_row {
+                first_row = false;
+                if !row.starts_with(b"@@ ") {
+                    return None;
+                }
+                continue;
+            }
+            match row.first() {
+                Some(b' ') => {
+                    old_line = old_line.checked_add(1)?;
+                    new_line = new_line.checked_add(1)?;
+                    old_count += 1;
+                    new_count += 1;
+                }
+                Some(b'-') => {
+                    old_line = old_line.checked_add(1)?;
+                    old_count += 1;
+                }
+                Some(b'+') => {
+                    if targets.contains(&new_line) {
+                        added.insert(new_line);
+                    }
+                    new_line = new_line.checked_add(1)?;
+                    new_count += 1;
+                }
+                Some(b'\\') => {}
+                _ => return None,
+            }
+        }
+        if first_row || old_count != hunk.old_lines || new_count != hunk.new_lines {
+            return None;
+        }
+    }
+    Some(added)
+}
+
+fn hunk_adds_line_in_span(
+    hunk: &PatchHistoryHunk,
+    (span_start, span_end): (i64, i64),
+) -> Option<bool> {
+    let text = hunk.text.as_deref()?;
+    let mut old_line = hunk_first_line(hunk.old_start, hunk.old_lines)?;
+    let mut new_line = hunk_first_line(hunk.new_start, hunk.new_lines)?;
+    let mut old_count = 0i64;
+    let mut new_count = 0i64;
+    let mut first_row = true;
+    let mut found = false;
+    for raw in text.split_inclusive(|byte| *byte == b'\n') {
+        let row = raw.strip_suffix(b"\n").unwrap_or(raw);
+        if first_row {
+            first_row = false;
+            if !row.starts_with(b"@@ ") {
+                return None;
+            }
+            continue;
+        }
+        match row.first() {
+            Some(b' ') => {
+                old_line = old_line.checked_add(1)?;
+                new_line = new_line.checked_add(1)?;
+                old_count += 1;
+                new_count += 1;
+            }
+            Some(b'-') => {
+                old_line = old_line.checked_add(1)?;
+                old_count += 1;
+            }
+            Some(b'+') => {
+                found |= (span_start..=span_end).contains(&new_line);
+                new_line = new_line.checked_add(1)?;
+                new_count += 1;
+            }
+            Some(b'\\') => {}
+            _ => return None,
+        }
+    }
+    if first_row || old_count != hunk.old_lines || new_count != hunk.new_lines {
+        return None;
+    }
+    Some(found)
+}
+
+fn hunk_first_line(start: i64, count: i64) -> Option<i64> {
+    if start < 0 || count < 0 || (count > 0 && start == 0) {
+        return None;
+    }
+    if count == 0 {
+        start.checked_add(1)
+    } else {
+        Some(start)
+    }
+}
+
 fn strict_source_equal(
     left: &[u8],
     right: &[u8],
@@ -1927,11 +2345,11 @@ fn contains_multiline_literal(source: &[u8], language: &str) -> bool {
     match language {
         "rust" => contains_multiline_rust_raw_string(source),
         "python" => {
-            contains_multiline_delimited(source, &[b'\"', b'\"', b'\"'])
+            contains_multiline_delimited(source, b"\"\"\"")
                 || contains_multiline_delimited(source, b"'''")
         }
         "javascript" | "typescript" | "go" => contains_multiline_delimited(source, b"`"),
-        "java" | "kotlin" => contains_multiline_delimited(source, &[b'\"', b'\"', b'\"']),
+        "java" | "kotlin" => contains_multiline_delimited(source, b"\"\"\""),
         "cpp" => contains_multiline_cpp_raw_string(source),
         _ => true,
     }
@@ -2000,7 +2418,7 @@ fn contains_multiline_cpp_raw_string(source: &[u8]) -> bool {
     let mut search_from = 0;
     while let Some(relative_open) = source[search_from..]
         .windows(2)
-        .position(|window| window == [b'R', b'\"'])
+        .position(|window| window == *b"R\"")
     {
         let open = search_from + relative_open;
         let delimiter_start = open + 2;
