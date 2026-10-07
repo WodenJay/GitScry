@@ -533,3 +533,30 @@ fn ambient_diff_configuration_does_not_change_equivalence() {
         clean["targets"][0]["patch_identifier"]
     );
 }
+
+#[test]
+fn shallow_target_without_an_equivalent_is_indeterminate() {
+    let repo = TestRepo::new();
+    let base = commit(&repo, "a.txt", "base\n", "base");
+    git(repo.dir.path(), ["checkout", "-b", "source"]);
+    let source = commit(&repo, "b.txt", "feature\n", "add feature");
+    git(repo.dir.path(), ["checkout", "-b", "target", &base]);
+    commit(&repo, "c.txt", "target\n", "target change");
+    git(repo.dir.path(), ["checkout", "main"]);
+    repo.index();
+
+    // A shallow boundary makes the history incomplete with no positive match, so
+    // the target must not claim a completed not_found.
+    fs::write(repo.common_dir().join("shallow"), format!("{base}\n")).unwrap();
+
+    let value = json(repo.run(["propagation", &source, "--to", "target", "--json"]));
+    let target = &value["targets"][0];
+    assert_eq!(target["status"], "indeterminate");
+    assert!(
+        target["reason"]
+            .as_str()
+            .is_some_and(|reason| !reason.is_empty()),
+        "incomplete history needs a concrete reason"
+    );
+    assert_eq!(value["coverage_complete"], false);
+}
