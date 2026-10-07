@@ -15,6 +15,7 @@ pub(crate) mod fragment_search;
 pub(crate) mod historical_conflicts;
 pub(crate) mod hotspots;
 pub(in crate::analysis) mod hybrid;
+pub(crate) mod patch_search;
 pub(crate) mod patterns;
 pub(crate) mod propagation;
 pub(in crate::analysis) mod regression;

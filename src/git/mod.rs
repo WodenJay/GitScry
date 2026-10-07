@@ -60,6 +60,36 @@ pub(crate) struct Repository {
 }
 
 impl Repository {
+    pub(crate) fn complete_patch(&self, oid: &str) -> Result<history::PatchData, AppError> {
+        history::read_complete_patch(&self.git, oid)
+    }
+
+    pub(crate) fn patch_tree_objects(
+        &self,
+        oid: &str,
+        parent: Option<&str>,
+    ) -> Result<Vec<String>, AppError> {
+        let mut args = vec!["rev-parse".to_owned(), format!("{oid}^{{tree}}")];
+        args.extend(parent.map(|parent| format!("{parent}^{{tree}}")));
+        Ok(self.git.text(args)?.lines().map(str::to_owned).collect())
+    }
+
+    /// Only locally available branch refs; never contacts a remote.
+    pub(crate) fn patch_branch_tips(&self) -> Result<Vec<(String, String)>, AppError> {
+        let refs = self.git.text([
+            "for-each-ref",
+            "--format=%(refname) %(objectname)",
+            "refs/heads",
+            "refs/remotes",
+        ])?;
+        Ok(refs
+            .lines()
+            .filter_map(|line| {
+                line.split_once(' ')
+                    .map(|(name, oid)| (name.to_owned(), oid.to_owned()))
+            })
+            .collect())
+    }
     pub(crate) fn merge_conflict(&self) -> Result<MergeConflict, AppError> {
         conflicts::pin(self)
     }

@@ -18,6 +18,10 @@ pub(in crate::analysis) use context::Context;
 pub(crate) use scope::SearchScopeOptions;
 
 pub(crate) enum Request {
+    PatchSearch {
+        revision: String,
+        max_patch_checks: Option<usize>,
+    },
     FragmentSearch {
         input: std::path::PathBuf,
         path: Option<String>,
@@ -133,6 +137,7 @@ pub(crate) struct Options {
 }
 
 pub(crate) enum QueryReport {
+    PatchSearch(capabilities::patch_search::Report),
     FragmentSearch(capabilities::fragment_search::Report),
     Conflicts(capabilities::conflicts::Report),
     Followups(capabilities::followups::Report),
@@ -160,6 +165,7 @@ impl QueryReport {
     pub(crate) fn warnings(&self) -> &[String] {
         match self {
             Self::FragmentSearch(_) => &[],
+            Self::PatchSearch(report) => &report.warnings,
             Self::Conflicts(report) => &report.warnings,
             Self::Followups(report) => &report.warnings,
             Self::Patterns(_) => &[],
@@ -177,6 +183,7 @@ impl QueryReport {
     pub(crate) fn notices(&self) -> &[String] {
         match self {
             Self::FragmentSearch(_) => &[],
+            Self::PatchSearch(_) => &[],
             Self::Conflicts(_) => &[],
             Self::Followups(_) => &[],
             Self::Patterns(_) => &[],
@@ -203,6 +210,10 @@ pub(crate) fn execute(request: Request, options: Options) -> Result<Outcome, App
         return Err(AppError::input("limit must be greater than zero"));
     }
     match request {
+        Request::PatchSearch {
+            revision,
+            max_patch_checks,
+        } => capabilities::patch_search::execute(revision, max_patch_checks, options),
         Request::FragmentSearch {
             input,
             path,

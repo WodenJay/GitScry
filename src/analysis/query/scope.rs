@@ -32,6 +32,66 @@ pub(in crate::analysis) struct ResolvedSearchScope {
     pub(in crate::analysis) filter: SearchFilter,
     pub(in crate::analysis) report: SearchScopeInfo,
 }
+/// Patch queries intersect filters with the pinned, locally available branch union.
+pub(in crate::analysis) fn resolve_for_patch(
+    session: &QuerySession,
+    repository: &Repository,
+    options: SearchScopeOptions,
+    tips: &[(String, String)],
+) -> Result<ResolvedSearchScope, AppError> {
+    let (since, until) = time_bounds(&options)?;
+    let mut revisions = BTreeSet::new();
+    let mut coverage_complete = true;
+    for (_, tip) in tips {
+        let history = reachable_history(session, repository, tip)?;
+        coverage_complete &= history.coverage_complete;
+        revisions.extend(history.revisions);
+    }
+    let to_rev = if let Some(requested) = &options.to_rev {
+        let oid = repository.resolve_commit(requested)?;
+        let history = reachable_history(session, repository, &oid)?;
+        coverage_complete &= history.coverage_complete;
+        let upper: HashSet<_> = history.revisions.into_iter().collect();
+        revisions.retain(|oid| upper.contains(oid));
+        oid
+    } else {
+        "all-local-and-fetched-remote-branches".to_owned()
+    };
+    let from_rev = options
+        .from_rev
+        .as_deref()
+        .map(|rev| repository.resolve_commit(rev))
+        .transpose()?;
+    let excluded = from_rev
+        .as_deref()
+        .map(|rev| repository.reachable_commits(rev))
+        .transpose()?
+        .unwrap_or_default();
+    let revisions: Vec<_> = revisions.into_iter().collect();
+    session.set_scope_revisions(&revisions, &excluded, &[])?;
+    // An empty sentinel prevents the ordinary single-tip SQL shortcut from
+    // admitting an upper revision outside the branch union.
+    let filter = SearchFilter {
+        to_oid: String::new(),
+        from_oid: from_rev.clone(),
+        since: since.as_ref().map(|bound| bound.filter_second),
+        until: until.as_ref().map(|bound| bound.filter_second),
+        paths: Vec::new(),
+    };
+    Ok(ResolvedSearchScope {
+        filter,
+        report: SearchScopeInfo {
+            from_rev,
+            to_rev,
+            target_rev: None,
+            cache_tip: session.completed_tip()?,
+            since: since.map(|bound| bound.normalized),
+            until: until.map(|bound| bound.normalized),
+            paths: Vec::new(),
+            coverage_complete,
+        },
+    })
+}
 
 pub(in crate::analysis) struct ReachableHistory {
     pub(in crate::analysis) revisions: Vec<String>,

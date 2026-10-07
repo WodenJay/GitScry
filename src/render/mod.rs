@@ -17,6 +17,7 @@ mod output;
 mod prune;
 
 mod hotspots;
+mod patch_search;
 mod patterns;
 mod propagation;
 mod timeline;
@@ -34,6 +35,7 @@ fn format_report(
     github_links: Option<&crate::github::LinksReport>,
 ) -> String {
     match report {
+        QueryReport::PatchSearch(report) => patch_search::format_report(report),
         QueryReport::FragmentSearch(report) => fragment_search::format_report(report, github_links),
         QueryReport::Conflicts(report) => conflicts::format_report(report),
         QueryReport::Followups(report) => followups::format_report(report),
@@ -97,6 +99,9 @@ fn format_json_report(
     github_links: Option<&crate::github::LinksReport>,
 ) -> Result<String, serde_json::Error> {
     match report {
+        QueryReport::PatchSearch(report) => {
+            patch_search::format_json_report(report, additional_warnings)
+        }
         QueryReport::FragmentSearch(report) => {
             fragment_search::format_json_report(report, additional_warnings, github_links)
         }

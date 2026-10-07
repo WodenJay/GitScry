@@ -411,7 +411,7 @@ Examples:
             ArgGroup::new("search-mode")
                 .required(true)
                 .multiple(false)
-                .args(["query", "code", "code_regex", "code_file"]),
+                .args(["query", "code", "code_regex", "code_file", "patch_of"]),
         ),
         group(
             ArgGroup::new("code-mode")
@@ -419,7 +419,7 @@ Examples:
                 .args(["code", "code_regex", "code_file"]),
         ),
         about = "Search commit messages, paths, or changed code",
-        after_help = r#"Choose exactly one input: QUERY words, --code, --code-regex, or --code-file.
+        after_help = r#"Choose exactly one input: QUERY words, --code, --code-regex, --code-file, or --patch-of REVISION.
 Code modes search added/removed lines only, not unchanged context. --change and
 --path apply to code modes; --hybrid and --patch apply to QUERY mode only.
 
@@ -445,7 +445,22 @@ bounds intersect and apply before ranking; --from-rev must be an ancestor of
 --to-rev (HEAD by default). Dates use YYYY-MM-DD; timestamps require Z or an explicit
 UTC offset. Missing history is reported. --limit bounds output, not scan work.
 
+Patch mode uses a complete existing commit patch; --relation equivalent is the
+only supported relation and the default. It searches cached history reachable
+from all local and locally fetched remote branch tips, refreshing locally
+available history without fetching. --to-rev intersects that branch history;
+--from-rev excludes its ancestors, and time filters further narrow history.
+Filters never alter the query patch. Partial --path selection is rejected.
+Merges compare with their first parent; roots use their introduction patch.
+Changed bytes, whitespace, newline distinctions, paths, operations and modes
+must match; line numbers, unchanged context and file ordering are ignored.
+Binary, non-regular, missing or incomplete material is explicitly indeterminate.
+Empty patches and self-matches are excluded. Scope and completeness accompany
+JSON results. --limit bounds presentation only; there is no implicit scan cutoff.
+Use --max-patch-checks N for an explicit cutoff with disclosed unexamined coverage.
+
 Examples:
+  gitscry search --patch-of HEAD --relation equivalent --json
   gitscry search retry backoff --from-rev v1.0 --to-rev release
   gitscry search timeout --path packages/adapter-utils --limit 5
   gitscry search timeout --hybrid --path packages/a --path packages/b --limit 5
@@ -457,6 +472,15 @@ Examples:
         /// Query words matched against commit subjects, bodies, and touched paths.
         #[arg(num_args = 1..)]
         query: Option<Vec<String>>,
+        /// Compare an existing commit's complete patch against local branch history.
+        #[arg(long, value_name = "REVISION", conflicts_with_all = ["paths", "hybrid", "change", "github_links", "github_repo"])]
+        patch_of: Option<String>,
+        /// Patch relationship to find (default: equivalent).
+        #[arg(long, requires = "patch_of", value_parser = ["equivalent"], default_value_if("patch_of", clap::builder::ArgPredicate::IsPresent, "equivalent"))]
+        relation: Option<String>,
+        /// Stop patch inspection after this many commits; disclose unexamined coverage.
+        #[arg(long, requires = "patch_of", value_parser = parse_limit)]
+        max_patch_checks: Option<usize>,
         /// Add semantic search; first run gitscry index --semantic.
         #[arg(long, requires = "query", conflicts_with_all = ["code", "code_regex"])]
         hybrid: bool,

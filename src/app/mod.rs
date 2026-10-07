@@ -196,6 +196,8 @@ pub(crate) fn execute(
         ),
         Command::Search {
             query,
+            patch_of,
+            max_patch_checks,
             code,
             code_regex,
             code_file,
@@ -218,19 +220,23 @@ pub(crate) fn execute(
                 require_single_path(&paths, "code modes")?;
                 paths.first().cloned()
             };
-            let request = match (query, code, code_regex, code_file) {
-                (Some(words), None, None, None) => Request::Search { words, hybrid },
-                (None, Some(query), None, None) => Request::CodeSearch {
+            let request = match (query, code, code_regex, code_file, patch_of) {
+                (None, None, None, None, Some(revision)) => Request::PatchSearch {
+                    revision,
+                    max_patch_checks,
+                },
+                (Some(words), None, None, None, None) => Request::Search { words, hybrid },
+                (None, Some(query), None, None, None) => Request::CodeSearch {
                     query,
                     path: code_path,
                     direction,
                 },
-                (None, None, Some(pattern), None) => Request::CodeRegexSearch {
+                (None, None, Some(pattern), None, None) => Request::CodeRegexSearch {
                     pattern,
                     path: code_path,
                     direction,
                 },
-                (None, None, None, Some(input)) => Request::FragmentSearch {
+                (None, None, None, Some(input), None) => Request::FragmentSearch {
                     input,
                     path: code_path,
                     direction,
@@ -525,6 +531,9 @@ pub(crate) fn execute(
         },
     )?;
     let github_links = github_link_request.map(|explicit_repo| match &result.report {
+        query::QueryReport::PatchSearch(_) => {
+            unreachable!("patch search has no GitHub link option")
+        }
         query::QueryReport::Conflicts(_) => unreachable!("conflicts has no GitHub link option"),
         query::QueryReport::Context(_) | query::QueryReport::Followups(_) => {
             unreachable!("context has no GitHub link option")
