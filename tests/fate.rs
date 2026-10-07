@@ -551,3 +551,254 @@ fn fate_text_output_carries_summary() {
     assert!(text.contains("1 event(s) recorded"), "{text}");
     assert!(text.contains(&start), "{text}");
 }
+
+#[test]
+fn fate_patch_selects_target_relevant_hunks_amid_unrelated_edits() {
+    let repo = TestRepo::new();
+    let start = commit(
+        &repo,
+        "a.txt",
+        "alpha\nbeta\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\n",
+        "Add",
+        "2020-01-01T00:00:00Z",
+    );
+    // The rewrite commit rewrites the tracked line (line 2) and an unrelated
+    // distant line (line 12, beyond the 3-line git context window) plus a
+    // sibling file; only the hunk touching the tracked line may be attached.
+    commit(
+        &repo,
+        "other.txt",
+        "seed\n",
+        "Seed unrelated file",
+        "2020-01-01T00:00:01Z",
+    );
+    fs::write(
+        repo.dir.path().join("a.txt"),
+        "alpha\nBETA\nc\nd\ne\nf\ng\nh\ni\nj\nk\nUNRELATED\n",
+    )
+    .expect("rewrite tracked file");
+    fs::write(repo.dir.path().join("other.txt"), "noise\n").expect("edit unrelated file");
+    git(repo.dir.path(), ["add", "--all"]);
+    let rewrite_output = git_command(repo.dir.path())
+        .args(["commit", "-m", "Rewrite beta with distant noise"])
+        .env("GIT_AUTHOR_DATE", "2020-01-02T00:00:00Z")
+        .env("GIT_COMMITTER_DATE", "2020-01-02T00:00:00Z")
+        .output()
+        .expect("run git rewrite commit");
+    assert!(
+        rewrite_output.status.success(),
+        "git commit failed: {}",
+        String::from_utf8_lossy(&rewrite_output.stderr)
+    );
+    let rewrite = repo.head();
+    repo.index();
+
+    let report = json(
+        &repo,
+        &[
+            "fate", "a.txt", "--line", "2", "--at", &start, "--patch", "--json",
+        ],
+    );
+    assert_eq!(report["final_state"], "unknown");
+    let events = report["events"].as_array().unwrap();
+    assert_eq!(events.len(), 1);
+    let patch = &events[0]["patch"];
+    assert_eq!(patch["status"], "available");
+    assert_eq!(patch["commit_oid"], rewrite);
+    let hunks = patch["hunks"].as_array().unwrap();
+    assert_eq!(hunks.len(), 1, "{report}");
+    let text = hunks[0]["text"].as_str().unwrap();
+    assert!(text.contains("-beta"), "{text}");
+    assert!(text.contains("+BETA"), "{text}");
+    // Unrelated same-file (distant) and sibling-file edits stay out of the
+    // attached hunk text.
+    assert!(!text.contains("UNRELATED"), "{text}");
+    assert!(!text.contains("noise"), "{text}");
+}
+
+#[test]
+fn fate_patch_conclusions_match_without_patch() {
+    let repo = TestRepo::new();
+    let start = commit(
+        &repo,
+        "a.txt",
+        "alpha\nbeta\ngamma\n",
+        "Add",
+        "2020-01-01T00:00:00Z",
+    );
+    let removal = commit(
+        &repo,
+        "a.txt",
+        "alpha\n",
+        "Delete lines",
+        "2020-01-02T00:00:00Z",
+    );
+    repo.index();
+
+    let plain = json(
+        &repo,
+        &["fate", "a.txt", "--line", "2", "--at", &start, "--json"],
+    );
+    let patched = json(
+        &repo,
+        &[
+            "fate", "a.txt", "--line", "2", "--at", &start, "--patch", "--json",
+        ],
+    );
+    // Enabling patches must not change the tracing conclusion.
+    for field in [
+        "final_state",
+        "stopped_at",
+        "total_events",
+        "display_truncated",
+    ] {
+        assert_eq!(patched[field], plain[field], "{field}");
+    }
+    assert_eq!(patched["schema_version"], 2);
+    assert_eq!(plain["schema_version"], 1);
+    let patched_events = patched["events"].as_array().unwrap();
+    let plain_events = plain["events"].as_array().unwrap();
+    assert_eq!(patched_events.len(), plain_events.len());
+    for (patched_event, plain_event) in patched_events.iter().zip(plain_events.iter()) {
+        assert_eq!(patched_event["commit_id"], plain_event["commit_id"]);
+        assert_eq!(patched_event["relationship"], plain_event["relationship"]);
+        assert_eq!(patched_event["before"], plain_event["before"]);
+        assert_eq!(patched_event["after"], plain_event["after"]);
+    }
+    assert_eq!(patched["stopped_at"], removal);
+    assert_eq!(patched["final_state"], "deleted");
+    let patch = &patched_events[0]["patch"];
+    assert_eq!(patch["status"], "available");
+    assert!(
+        patch["hunks"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("-beta")
+    );
+}
+
+#[test]
+fn fate_patch_excerpts_are_bounded_and_disclose_truncation() {
+    let repo = TestRepo::new();
+    let start = commit(
+        &repo,
+        "a.txt",
+        "start\nbeta\nend\n",
+        "Add",
+        "2020-01-01T00:00:00Z",
+    );
+    // One commit rewrites the tracked line inside a hunk that maps fine
+    // (under the 16 KiB mapping budget) but exceeds the 8 KiB display
+    // excerpt budget; the excerpt must be clipped with truncation disclosed.
+    let mut contents = String::from("start\nBETA\nend\n");
+    for index in 0..300 {
+        contents.push_str(&format!("filler {index} to grow the display excerpt\n"));
+    }
+    let rewrite = commit(
+        &repo,
+        "a.txt",
+        &contents,
+        "Rewrite beta inside large hunk",
+        "2020-01-02T00:00:00Z",
+    );
+    repo.index();
+
+    let report = json(
+        &repo,
+        &[
+            "fate", "a.txt", "--line", "2", "--at", &start, "--patch", "--json",
+        ],
+    );
+    assert_eq!(report["final_state"], "unknown");
+    assert_eq!(report["stopped_at"], rewrite);
+    let events = report["events"].as_array().unwrap();
+    assert_eq!(events.len(), 1);
+    let patch = &events[0]["patch"];
+    assert_eq!(patch["status"], "available");
+    assert_eq!(patch["truncated"], true);
+    let text = patch["hunks"][0]["text"].as_str().unwrap();
+    assert!(text.contains("-beta"), "{text}");
+    assert!(text.len() <= 8192, "excerpt {} bytes", text.len());
+    let text_output = repo.run(["fate", "a.txt", "--line", "2", "--at", &start, "--patch"]);
+    let rendered = String::from_utf8_lossy(&text_output.stdout);
+    assert!(rendered.contains("-beta"), "{rendered}");
+    assert!(rendered.contains("truncated"), "{rendered}");
+}
+
+#[test]
+fn fate_patch_unavailable_material_stops_without_substitution() {
+    let repo = TestRepo::new();
+    let start = commit(
+        &repo,
+        "a.txt",
+        "start\nbeta\nend\n",
+        "Add",
+        "2020-01-01T00:00:00Z",
+    );
+    // The tracked line is rewritten inside a hunk exceeding the material scan
+    // budget (MAX_HUNK_BYTES = 16 KiB): mapping material is unavailable, so
+    // tracking must stop as unknown instead of guessing or substituting hunks.
+    let mut contents = String::from("start\nBETA\nend\n");
+    for index in 0..3000 {
+        contents.push_str(&format!(
+            "filler line {index} to exceed the mapping budget\n"
+        ));
+    }
+    let rewrite = commit(
+        &repo,
+        "a.txt",
+        &contents,
+        "Rewrite beta beyond material budget",
+        "2020-01-02T00:00:00Z",
+    );
+    repo.index();
+
+    let report = json(
+        &repo,
+        &[
+            "fate", "a.txt", "--line", "2", "--at", &start, "--patch", "--json",
+        ],
+    );
+    assert_eq!(report["final_state"], "unknown");
+    assert_eq!(report["stopped_at"], rewrite);
+    assert_eq!(report["stop_reason"]["code"], "missing_patch_material");
+}
+
+#[test]
+fn fate_patch_rename_event_discloses_missing_hunk_material() {
+    let repo = TestRepo::new();
+    let start = commit(
+        &repo,
+        "old.txt",
+        "alpha\nbeta\n",
+        "Add",
+        "2020-01-01T00:00:00Z",
+    );
+    rename(
+        &repo,
+        "old.txt",
+        "new.txt",
+        "Rename",
+        "2020-01-02T00:00:00Z",
+    );
+    repo.index();
+
+    let report = json(
+        &repo,
+        &[
+            "fate", "old.txt", "--line", "2", "--at", &start, "--patch", "--json",
+        ],
+    );
+    assert_eq!(report["final_state"], "reached_endpoint");
+    let events = report["events"].as_array().unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["relationship"], "rename");
+    // A pure rename has no text hunk; the excerpt must disclose that rather
+    // than substitute unrelated material.
+    let patch = &events[0]["patch"];
+    assert_eq!(patch["status"], "unavailable");
+    assert_eq!(patch["hunks"], serde_json::json!([]));
+    let text_output = repo.run(["fate", "old.txt", "--line", "2", "--at", &start, "--patch"]);
+    let rendered = String::from_utf8_lossy(&text_output.stdout);
+    assert!(rendered.contains("unavailable"), "{rendered}");
+}
