@@ -265,9 +265,9 @@ fn inspect_target(
     }
     if patches_unreadable {
         reasons.push(REASON_TARGET_PATCH_UNREADABLE.to_owned());
-        if patches_unrepresentable {
-            reasons.push(REASON_TARGET_PATCH_UNREPRESENTABLE.to_owned());
-        }
+    }
+    if patches_unrepresentable {
+        reasons.push(REASON_TARGET_PATCH_UNREPRESENTABLE.to_owned());
     }
     let complete = !history_incomplete && !patches_unreadable && !patches_unrepresentable;
 

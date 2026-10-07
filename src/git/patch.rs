@@ -117,28 +117,20 @@ fn lookup_identifier(
     if let Some(identifier) = by_commit.get(&spec.oid) {
         return Ok(PatchLookup::Identifier(identifier.clone()));
     }
-    let args = match &spec.first_parent {
-        Some(parent) => vec![
-            "diff-tree",
-            "--quiet",
-            "-r",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--ignore-submodules=none",
-            parent.as_str(),
-            spec.oid.as_str(),
-        ],
-        None => vec![
-            "diff-tree",
-            "--quiet",
-            "--root",
-            "-r",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--ignore-submodules=none",
-            spec.oid.as_str(),
-        ],
-    };
+    let mut args = vec!["diff-tree", "--quiet"];
+    if spec.first_parent.is_none() {
+        args.push("--root");
+    }
+    args.extend([
+        "-r",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--ignore-submodules=none",
+    ]);
+    if let Some(parent) = &spec.first_parent {
+        args.push(parent);
+    }
+    args.push(&spec.oid);
     Ok(if git.success(args)? {
         PatchLookup::NoPatch
     } else {
