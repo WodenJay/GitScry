@@ -626,6 +626,7 @@ fn mode_only_change_is_equivalent_when_replayed() {
     git(repo.dir.path(), ["checkout", "-b", "source"]);
     git(repo.dir.path(), ["update-index", "--chmod=+x", "mode.txt"]);
     git(repo.dir.path(), ["commit", "-m", "make file executable"]);
+    git(repo.dir.path(), ["reset", "--hard", "HEAD"]);
     let source = repo.head();
 
     git(repo.dir.path(), ["checkout", "-b", "target", &base]);
@@ -634,6 +635,7 @@ fn mode_only_change_is_equivalent_when_replayed() {
         repo.dir.path(),
         ["commit", "-m", "make file executable elsewhere"],
     );
+    git(repo.dir.path(), ["reset", "--hard", "HEAD"]);
     let replayed = repo.head();
     git(repo.dir.path(), ["checkout", "main"]);
     repo.index();
@@ -662,6 +664,7 @@ fn mode_only_changes_to_different_paths_are_not_equivalent() {
         ["update-index", "--chmod=+x", "source-mode.txt"],
     );
     git(repo.dir.path(), ["commit", "-m", "change source mode"]);
+    git(repo.dir.path(), ["reset", "--hard", "HEAD"]);
     let source = repo.head();
 
     git(repo.dir.path(), ["checkout", "-b", "target", &base]);
@@ -670,6 +673,7 @@ fn mode_only_changes_to_different_paths_are_not_equivalent() {
         ["update-index", "--chmod=+x", "target-mode.txt"],
     );
     git(repo.dir.path(), ["commit", "-m", "change other mode"]);
+    git(repo.dir.path(), ["reset", "--hard", "HEAD"]);
     git(repo.dir.path(), ["checkout", "main"]);
     repo.index();
 
