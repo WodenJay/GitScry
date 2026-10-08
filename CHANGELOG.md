@@ -1,3 +1,65 @@
+## [0.14.0] - 2026-10-08
+
+### 🚀 Features
+
+- *(context)* Prioritize tests tied to matched changed-code history
+- Aggregate followups diagnostics with --verbose override
+- Add propagation multi-target exact reachability
+- Bind reverts to explicit declarations only
+- Add repeatable --ref option to index command
+- *(search)* Add repeatable --path changed-path scope to QUERY and hybrid search
+- *(fate)* Add forward line fate tracking (WIP wiring)
+- *(search)* Find strict patch equivalents
+- *(search)* Merge strict patch equivalents
+- *(propagation)* Detect whole-commit patch equivalents
+- *(fate)* Follow historical symbol edits
+- *(fate)* Follow strict target moves
+- *(search)* Find inverse patch matches
+- *(examples)* Group patch-equivalent precedents
+- *(trace-fix)* Show equivalent fix versions
+- *(fate)* Track merge ancestry
+- *(patch-search)* Search current changes
+- *(followups)* Surface patch relationships
+- *(failures)* Add inverse patch leads
+- *(failures)* Merge inverse patch leads
+
+### 🐛 Bug Fixes
+
+- *(context)* Merge matched tests before followup passes, dedupe warning
+- Pluralize followups diagnostic summaries and index-based warning stripping
+- Keep propagation answers exact and degrade to indeterminate, not error
+- Revert declarations start sentences and share one target resolver
+- *(fate)* Continue tracking past 1:1 rewrites and raise Windows stack reserve
+- *(fate)* Honor line continuity rules
+- *(search)* Disclose patch operation provenance
+- *(search)* Verify cached patch availability
+- *(render)* Escape patch provenance safely
+- *(propagation)* Preserve patch matches with gaps
+- *(fate)* Require preserved symbol correspondence
+- *(propagation)* Classify special patch gaps
+- *(propagation)* Report patch gaps
+- *(fate)* Require added move candidates
+- *(fate)* Retain uncertain continuations
+- *(examples)* Use dual patch fingerprints
+
+### 🚜 Refactor
+
+- *(search)* Harden --path validation and clean up scope plumbing
+- *(git)* Name complete patch data
+- *(trace-fix)* Own version report
+- *(analysis)* Localize failure lead data
+
+### 📚 Documentation
+
+- Remove redundent content in README
+- Update index content in README
+- Log inverse patch dogfood result
+- Shrink DOGFOODING rule, remove cargo run manner
+- Remove non-actionable dogfood entry
+- Record followups dogfood gap
+- Log followups patch match dogfood
+- Drop invalid cargo-run dogfood logs
+- Record failure-query dogfooding
 ## [0.13.0] - 2026-10-06
 
 ### 🚀 Features
