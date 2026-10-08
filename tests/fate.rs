@@ -31,6 +31,7 @@ fn rename(repo: &TestRepo, old: &str, new: &str, subject: &str, date: &str) -> S
     let output = git_command(repo.dir.path())
         .args(["commit", "-m", subject])
         .env("GIT_AUTHOR_DATE", date)
+        .env("GIT_COMMITTER_DATE", date)
         .output()
         .expect("run git rename commit");
     assert!(
@@ -146,7 +147,7 @@ fn fate_equal_endpoints_reports_validated_location_without_events() {
         &["fate", "a.txt", "--line", "2", "--at", &start, "--json"],
     );
     assert_eq!(report["kind"], "fate");
-    assert_eq!(report["schema_version"], 1);
+    assert_eq!(report["schema_version"], 3);
     assert_eq!(report["start_revision"], start);
     assert_eq!(report["endpoint"], start);
     assert_eq!(report["final_state"], "reached_endpoint");
@@ -253,7 +254,7 @@ fn fate_stops_as_unknown_after_line_rewrite() {
     assert_eq!(report["last_location"]["line"], 2);
     assert_eq!(report["associations"][0]["path"], "a.txt");
     assert_eq!(report["associations"][0]["line"], 2);
-    assert_eq!(report["schema_version"], 2);
+    assert_eq!(report["schema_version"], 3);
     let text_output = repo.run(["fate", "a.txt", "--line", "2", "--at", &start, "--patch"]);
     assert_eq!(text_output.status.code(), Some(0));
     let text = String::from_utf8_lossy(&text_output.stdout);
@@ -524,6 +525,75 @@ fn fate_max_commits_bounds_inspection_and_reports_incomplete() {
             .iter()
             .any(|warning| warning.as_str().unwrap_or("").contains("max-commits")),
         "{report}"
+    );
+}
+
+#[test]
+fn fate_merge_inspection_respects_the_global_commit_budget() {
+    let repo = TestRepo::new();
+    let start = commit(
+        &repo,
+        "a.txt",
+        "before\ntracked\nafter\n",
+        "Add tracked line",
+        "2020-01-01T00:00:00Z",
+    );
+    git(repo.dir.path(), ["switch", "-c", "side"]);
+    commit(
+        &repo,
+        "a.txt",
+        "side\nbefore\ntracked\nafter\n",
+        "Shift tracked line",
+        "2020-01-02T00:00:00Z",
+    );
+    git(repo.dir.path(), ["switch", "-"]);
+    commit(
+        &repo,
+        "main.txt",
+        "main\n",
+        "Main change",
+        "2020-01-03T00:00:00Z",
+    );
+    let merge = git_command(repo.dir.path())
+        .args(["merge", "--no-ff", "--no-edit", "side"])
+        .env("GIT_AUTHOR_DATE", "2020-01-04T00:00:00Z")
+        .env("GIT_COMMITTER_DATE", "2020-01-04T00:00:00Z")
+        .output()
+        .expect("merge branches");
+    assert!(
+        merge.status.success(),
+        "{}",
+        String::from_utf8_lossy(&merge.stderr)
+    );
+    let endpoint = repo.head();
+    repo.index();
+
+    let report = json(
+        &repo,
+        &[
+            "fate",
+            "a.txt",
+            "--line",
+            "2",
+            "--at",
+            &start,
+            "--to-rev",
+            &endpoint,
+            "--max-commits",
+            "2",
+            "--json",
+        ],
+    );
+
+    assert_eq!(report["final_state"], "unknown");
+    assert_eq!(report["inspected_commits"], 2);
+    assert_eq!(report["stop_reason"]["code"], "max_commits_exhausted");
+    assert!(
+        report["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|event| event["commit_id"] != endpoint)
     );
 }
 
@@ -1900,8 +1970,8 @@ fn fate_patch_conclusions_match_without_patch() {
     ] {
         assert_eq!(patched[field], plain[field], "{field}");
     }
-    assert_eq!(patched["schema_version"], 2);
-    assert_eq!(plain["schema_version"], 1);
+    assert_eq!(patched["schema_version"], 3);
+    assert_eq!(plain["schema_version"], 3);
     let patched_events = patched["events"].as_array().unwrap();
     let plain_events = plain["events"].as_array().unwrap();
     assert_eq!(patched_events.len(), plain_events.len());
@@ -2047,4 +2117,932 @@ fn fate_patch_rename_event_discloses_missing_hunk_material() {
     let text_output = repo.run(["fate", "old.txt", "--line", "2", "--at", &start, "--patch"]);
     let rendered = String::from_utf8_lossy(&text_output.stdout);
     assert!(rendered.contains("unavailable"), "{rendered}");
+}
+
+#[test]
+fn fate_tracks_a_side_branch_anchor_through_the_merge_result() {
+    let repo = TestRepo::new();
+    commit(
+        &repo,
+        "a.txt",
+        "alpha\nbeta\n",
+        "Base",
+        "2020-01-01T00:00:00Z",
+    );
+    git(repo.dir.path(), ["switch", "-c", "side"]);
+    let start = commit(
+        &repo,
+        "a.txt",
+        "prefix\nalpha\nbeta\n",
+        "Add target on side branch",
+        "2020-01-02T00:00:00Z",
+    );
+
+    git(repo.dir.path(), ["switch", "-"]);
+    commit(
+        &repo,
+        "other.txt",
+        "unrelated\n",
+        "Main-line change",
+        "2020-01-03T00:00:00Z",
+    );
+    let merge = git_command(repo.dir.path())
+        .args(["merge", "--no-ff", "--no-edit", "side"])
+        .env("GIT_AUTHOR_DATE", "2020-01-04T00:00:00Z")
+        .env("GIT_COMMITTER_DATE", "2020-01-04T00:00:00Z")
+        .output()
+        .expect("run git merge");
+    assert!(
+        merge.status.success(),
+        "git merge failed: {}",
+        String::from_utf8_lossy(&merge.stderr)
+    );
+    let endpoint = repo.head();
+    repo.index();
+
+    let report = json(
+        &repo,
+        &[
+            "fate", "a.txt", "--line", "3", "--at", &start, "--to-rev", &endpoint, "--json",
+        ],
+    );
+
+    assert_eq!(report["endpoint"], endpoint);
+    assert_eq!(report["final_state"], "reached_endpoint");
+    assert_eq!(report["last_location"]["path"], "a.txt");
+    assert_eq!(report["last_location"]["line"], 3);
+    assert_eq!(report["stopped_at"], Value::Null);
+    let merge_event = report["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["commit_id"] == endpoint && event["relationship"] == "merge")
+        .expect("merge event");
+    assert_eq!(merge_event["predecessors"], serde_json::json!([start]));
+    assert_eq!(
+        merge_event["incoming"][0],
+        serde_json::json!({"path": "a.txt", "line": 3})
+    );
+}
+
+#[test]
+fn fate_tracks_a_strict_line_move_through_a_merge() {
+    let repo = TestRepo::new();
+    let start = commit(
+        &repo,
+        "a.txt",
+        "top\nalpha\nbeta\nbottom\n",
+        "Base",
+        "2020-01-01T00:00:00Z",
+    );
+    git(repo.dir.path(), ["switch", "-c", "side"]);
+    let side_move = rename(
+        &repo,
+        "a.txt",
+        "b.txt",
+        "Move tracked file",
+        "2020-01-02T00:00:00Z",
+    );
+    git(repo.dir.path(), ["switch", "-"]);
+    commit(
+        &repo,
+        "other.txt",
+        "unrelated\n",
+        "Main-line change",
+        "2020-01-03T00:00:00Z",
+    );
+    let merge = git_command(repo.dir.path())
+        .args(["merge", "--no-ff", "--no-edit", "side"])
+        .env("GIT_AUTHOR_DATE", "2020-01-04T00:00:00Z")
+        .env("GIT_COMMITTER_DATE", "2020-01-04T00:00:00Z")
+        .output()
+        .expect("merge line move");
+    assert!(
+        merge.status.success(),
+        "{}",
+        String::from_utf8_lossy(&merge.stderr)
+    );
+    let endpoint = repo.head();
+    repo.index();
+
+    let report = json(
+        &repo,
+        &[
+            "fate", "a.txt", "--line", "3", "--at", &start, "--to-rev", &endpoint, "--json",
+        ],
+    );
+
+    assert_eq!(report["final_state"], "reached_endpoint", "{report:#}");
+    assert_eq!(report["last_location"]["path"], "b.txt");
+    assert_eq!(report["last_location"]["line"], 3);
+    let merge_event = report["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["commit_id"] == endpoint)
+        .expect("merge event");
+    assert_eq!(merge_event["relationship"], "merge");
+    assert_eq!(
+        merge_event["predecessors"],
+        serde_json::json!([start, side_move])
+    );
+    assert_eq!(merge_event["incoming"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn fate_reconciles_each_parent_coordinate_against_the_merge_result() {
+    let repo = TestRepo::new();
+    let start = commit(
+        &repo,
+        "a.txt",
+        "top\nalpha\nbeta\nbottom\n",
+        "Base",
+        "2020-01-01T00:00:00Z",
+    );
+    git(repo.dir.path(), ["switch", "-c", "side"]);
+    commit(
+        &repo,
+        "a.txt",
+        "top\nside\nalpha\nbeta\nbottom\n",
+        "Insert before target",
+        "2020-01-02T00:00:00Z",
+    );
+    git(repo.dir.path(), ["switch", "-"]);
+    commit(
+        &repo,
+        "a.txt",
+        "top\nalpha\nbeta\nmain\nbottom\n",
+        "Insert after target",
+        "2020-01-03T00:00:00Z",
+    );
+    let merge = git_command(repo.dir.path())
+        .args(["merge", "--no-ff", "--no-edit", "side"])
+        .env("GIT_AUTHOR_DATE", "2020-01-04T00:00:00Z")
+        .env("GIT_COMMITTER_DATE", "2020-01-04T00:00:00Z")
+        .output()
+        .expect("merge branch edits");
+    assert!(
+        merge.status.success(),
+        "{}",
+        String::from_utf8_lossy(&merge.stderr)
+    );
+    let endpoint = repo.head();
+    repo.index();
+
+    let report = json(
+        &repo,
+        &[
+            "fate", "a.txt", "--line", "3", "--at", &start, "--to-rev", &endpoint, "--json",
+        ],
+    );
+
+    assert_eq!(report["final_state"], "reached_endpoint", "{report:#}");
+    assert_eq!(report["last_location"]["line"], 4);
+    let merge_event = report["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["commit_id"] == endpoint)
+        .expect("merge event");
+    let incoming = merge_event["incoming"].as_array().unwrap();
+    assert_eq!(incoming.len(), 2);
+    let mut incoming_lines: Vec<_> = incoming
+        .iter()
+        .map(|location| {
+            assert_eq!(location["path"], "a.txt");
+            location["line"].as_u64().expect("incoming line")
+        })
+        .collect();
+    incoming_lines.sort_unstable();
+    assert_eq!(incoming_lines, [3, 4]);
+}
+
+#[test]
+fn fate_merge_events_include_the_requested_first_parent_patch() {
+    let repo = TestRepo::new();
+    let start = commit(
+        &repo,
+        "a.txt",
+        "alpha\nbeta\n",
+        "Base",
+        "2020-01-01T00:00:00Z",
+    );
+    git(repo.dir.path(), ["switch", "-c", "changed"]);
+    commit(
+        &repo,
+        "a.txt",
+        "alpha\nbeta changed\n",
+        "Change target",
+        "2020-01-02T00:00:00Z",
+    );
+    git(repo.dir.path(), ["switch", "-"]);
+    commit(
+        &repo,
+        "other.txt",
+        "unrelated\n",
+        "Unrelated first-parent change",
+        "2020-01-03T00:00:00Z",
+    );
+    let merge = git_command(repo.dir.path())
+        .args(["merge", "--no-ff", "--no-edit", "changed"])
+        .env("GIT_AUTHOR_DATE", "2020-01-04T00:00:00Z")
+        .env("GIT_COMMITTER_DATE", "2020-01-04T00:00:00Z")
+        .output()
+        .expect("merge changed target");
+    assert!(
+        merge.status.success(),
+        "{}",
+        String::from_utf8_lossy(&merge.stderr)
+    );
+    let endpoint = repo.head();
+    repo.index();
+
+    let report = json(
+        &repo,
+        &[
+            "fate", "a.txt", "--line", "2", "--at", &start, "--to-rev", &endpoint, "--patch",
+            "--json",
+        ],
+    );
+    let event = report["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["commit_id"] == endpoint)
+        .expect("merge event");
+    assert_eq!(event["relationship"], "merge");
+    assert_eq!(event["patch"]["commit_oid"], endpoint);
+    assert_eq!(event["patch"]["status"], "available", "{report:#}");
+}
+
+#[test]
+fn fate_stops_when_relevant_merge_parents_continue_to_different_paths() {
+    let repo = TestRepo::new();
+    let start = commit(
+        &repo,
+        "a.txt",
+        "alpha\nbeta\n",
+        "Base",
+        "2020-01-01T00:00:00Z",
+    );
+    git(repo.dir.path(), ["switch", "-c", "side"]);
+    let side_rename = rename(
+        &repo,
+        "a.txt",
+        "side.txt",
+        "Side rename",
+        "2020-01-10T00:00:00Z",
+    );
+    git(repo.dir.path(), ["switch", "-"]);
+    let main_rename = rename(
+        &repo,
+        "a.txt",
+        "main.txt",
+        "Main rename",
+        "2020-01-02T00:00:00Z",
+    );
+    let merge = git_command(repo.dir.path())
+        .args(["merge", "--no-ff", "--no-edit", "side"])
+        .env("GIT_AUTHOR_DATE", "2020-01-03T00:00:00Z")
+        .env("GIT_COMMITTER_DATE", "2020-01-03T00:00:00Z")
+        .output()
+        .expect("run git merge");
+    assert!(
+        !merge.status.success(),
+        "rename/rename merge should require a resolution"
+    );
+    fs::write(repo.dir.path().join("main.txt"), "alpha\nbeta\n").expect("restore main target path");
+    fs::write(repo.dir.path().join("side.txt"), "alpha\nbeta\n").expect("restore side target path");
+    let endpoint = commit(
+        &repo,
+        "main.txt",
+        "alpha\nbeta\n",
+        "Resolve both paths",
+        "2020-01-04T00:00:00Z",
+    );
+    repo.index();
+
+    let report = json(
+        &repo,
+        &[
+            "fate", "a.txt", "--line", "2", "--at", &start, "--to-rev", &endpoint, "--json",
+        ],
+    );
+
+    assert_eq!(report["final_state"], "unknown");
+    assert_eq!(report["stop_reason"]["code"], "merge_lineage_ambiguous");
+    let merge_event = report["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["commit_id"] == endpoint)
+        .expect("merge event");
+    assert_eq!(merge_event["incoming"].as_array().unwrap().len(), 2);
+    assert_eq!(merge_event["result_state"], "unknown");
+    let text = repo.run([
+        "fate", "a.txt", "--line", "2", "--at", &start, "--to-rev", &endpoint,
+    ]);
+    assert!(text.status.success());
+    assert!(String::from_utf8_lossy(&text.stdout).contains("-> unknown"));
+    let events = report["events"].as_array().unwrap();
+    let side_position = events
+        .iter()
+        .position(|event| event["commit_id"] == side_rename)
+        .expect("side rename event");
+    let main_position = events
+        .iter()
+        .position(|event| event["commit_id"] == main_rename)
+        .expect("main rename event");
+    let merge_position = events
+        .iter()
+        .position(|event| event["commit_id"] == endpoint)
+        .expect("merge event");
+    assert!(side_position < merge_position);
+    assert!(main_position < merge_position);
+}
+
+#[test]
+fn fate_keeps_branch_deletion_when_another_parent_retains_the_target() {
+    let repo = TestRepo::new();
+    let start = commit(
+        &repo,
+        "a.txt",
+        "alpha\nbeta\n",
+        "Base",
+        "2020-01-01T00:00:00Z",
+    );
+    git(repo.dir.path(), ["switch", "-c", "side"]);
+    commit(
+        &repo,
+        "a.txt",
+        "alpha\nbeta\nside\n",
+        "Retain target",
+        "2020-01-02T00:00:00Z",
+    );
+    git(repo.dir.path(), ["switch", "-"]);
+    let deletion = delete(&repo, "a.txt", "Delete target", "2020-01-03T00:00:00Z");
+    let merge = git_command(repo.dir.path())
+        .args(["merge", "--no-ff", "--no-edit", "side"])
+        .env("GIT_AUTHOR_DATE", "2020-01-04T00:00:00Z")
+        .env("GIT_COMMITTER_DATE", "2020-01-04T00:00:00Z")
+        .output()
+        .expect("run git merge");
+    assert!(
+        !merge.status.success(),
+        "delete/modify merge should require a resolution"
+    );
+    let endpoint = commit(
+        &repo,
+        "a.txt",
+        "alpha\nbeta\nside\n",
+        "Resolve by retaining target",
+        "2020-01-05T00:00:00Z",
+    );
+    repo.index();
+
+    let report = json(
+        &repo,
+        &[
+            "fate", "a.txt", "--line", "2", "--at", &start, "--to-rev", &endpoint, "--json",
+        ],
+    );
+
+    assert_eq!(report["final_state"], "reached_endpoint");
+    assert_eq!(report["last_location"]["line"], 2);
+    let events = report["events"].as_array().unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|event| { event["commit_id"] == deletion && event["relationship"] == "removed" })
+    );
+    assert!(
+        events
+            .iter()
+            .any(|event| { event["commit_id"] == endpoint && event["relationship"] == "merge" })
+    );
+}
+
+#[test]
+fn fate_does_not_heal_unknown_branch_state_at_merge() {
+    let repo = TestRepo::new();
+    let start = commit(
+        &repo,
+        "a.txt",
+        "alpha\nbeta\n",
+        "Base",
+        "2020-01-01T00:00:00Z",
+    );
+    git(repo.dir.path(), ["switch", "-c", "side"]);
+    let rewrite = commit(
+        &repo,
+        "a.txt",
+        "alpha\nBETA\n",
+        "Rewrite target",
+        "2020-01-02T00:00:00Z",
+    );
+    git(repo.dir.path(), ["switch", "-"]);
+    commit(
+        &repo,
+        "other.txt",
+        "unrelated\n",
+        "Main change",
+        "2020-01-03T00:00:00Z",
+    );
+    let merge = git_command(repo.dir.path())
+        .args(["merge", "--no-ff", "--no-edit", "side"])
+        .env("GIT_AUTHOR_DATE", "2020-01-04T00:00:00Z")
+        .env("GIT_COMMITTER_DATE", "2020-01-04T00:00:00Z")
+        .output()
+        .expect("run git merge");
+    assert!(
+        merge.status.success(),
+        "git merge failed: {}",
+        String::from_utf8_lossy(&merge.stderr)
+    );
+    commit(
+        &repo,
+        "after.txt",
+        "after merge\n",
+        "After unknown merge",
+        "2020-01-05T00:00:00Z",
+    );
+    git(repo.dir.path(), ["switch", "-c", "rescue", &start]);
+    commit(
+        &repo,
+        "rescue.txt",
+        "rescue\n",
+        "Unchanged target branch",
+        "2020-01-06T00:00:00Z",
+    );
+    git(repo.dir.path(), ["switch", "-"]);
+    let second_merge = git_command(repo.dir.path())
+        .args(["merge", "--no-ff", "--no-edit", "rescue"])
+        .env("GIT_AUTHOR_DATE", "2020-01-07T00:00:00Z")
+        .env("GIT_COMMITTER_DATE", "2020-01-07T00:00:00Z")
+        .output()
+        .expect("run second git merge");
+    assert!(
+        second_merge.status.success(),
+        "second git merge failed: {}",
+        String::from_utf8_lossy(&second_merge.stderr)
+    );
+    let endpoint = repo.head();
+    repo.index();
+
+    let report = json(
+        &repo,
+        &[
+            "fate", "a.txt", "--line", "2", "--at", &start, "--to-rev", &endpoint, "--json",
+        ],
+    );
+
+    assert_eq!(report["final_state"], "unknown");
+    assert_eq!(report["stop_reason"]["code"], "line_rewritten");
+    assert_eq!(report["stopped_at"], rewrite);
+}
+
+#[test]
+fn fate_tracks_divergent_parent_coordinates_at_the_merge() {
+    let repo = TestRepo::new();
+    let start = commit(
+        &repo,
+        "a.txt",
+        "alpha\nbeta\ngamma\n",
+        "Base",
+        "2020-01-01T00:00:00Z",
+    );
+    git(repo.dir.path(), ["switch", "-c", "side"]);
+    commit(
+        &repo,
+        "a.txt",
+        "side\nalpha\nbeta\ngamma\n",
+        "Side insertion",
+        "2020-01-02T00:00:00Z",
+    );
+    git(repo.dir.path(), ["switch", "-"]);
+    commit(
+        &repo,
+        "a.txt",
+        "alpha\nbeta\ngamma\nmain-tail\n",
+        "Main insertion",
+        "2020-01-03T00:00:00Z",
+    );
+    let merge = git_command(repo.dir.path())
+        .args(["merge", "--no-ff", "--no-edit", "side"])
+        .env("GIT_AUTHOR_DATE", "2020-01-04T00:00:00Z")
+        .env("GIT_COMMITTER_DATE", "2020-01-04T00:00:00Z")
+        .output()
+        .expect("run git merge");
+    assert!(
+        merge.status.success(),
+        "git merge failed: {}",
+        String::from_utf8_lossy(&merge.stderr)
+    );
+    let endpoint = repo.head();
+    repo.index();
+
+    let report = json(
+        &repo,
+        &[
+            "fate", "a.txt", "--line", "2", "--at", &start, "--to-rev", &endpoint, "--json",
+        ],
+    );
+
+    assert_eq!(report["final_state"], "reached_endpoint");
+    assert_eq!(report["last_location"]["line"], 3);
+    let merge_event = report["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["commit_id"] == endpoint)
+        .expect("merge event");
+    assert_eq!(
+        merge_event["incoming"],
+        serde_json::json!([
+            {"path": "a.txt", "line": 2},
+            {"path": "a.txt", "line": 3}
+        ])
+    );
+    let output = repo.run([
+        "fate", "a.txt", "--line", "2", "--at", &start, "--to-rev", &endpoint,
+    ]);
+    assert_eq!(output.status.code(), Some(0));
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains("Predecessors:"), "{text}");
+    assert!(text.contains("Incoming locations:"), "{text}");
+}
+
+#[test]
+fn fate_display_truncation_preserves_edges_to_omitted_events() {
+    let repo = TestRepo::new();
+    let start = commit(
+        &repo,
+        "a.txt",
+        "alpha\nbeta\n",
+        "Base",
+        "2020-01-01T00:00:00Z",
+    );
+    let mut path = String::from("a.txt");
+    let mut first_move = None;
+    let mut second_move = None;
+    for index in 1..=21 {
+        let next = format!("tracked-{index:02}.txt");
+        let date = format!("2020-01-{:02}T00:00:00Z", index + 1);
+        let movement = rename(&repo, &path, &next, "Rename tracked file", &date);
+        match index {
+            1 => first_move = Some(movement),
+            2 => second_move = Some(movement),
+            _ => {}
+        }
+        path = next;
+    }
+    repo.index();
+
+    let report = json(
+        &repo,
+        &["fate", "a.txt", "--line", "2", "--at", &start, "--json"],
+    );
+
+    assert_eq!(report["final_state"], "reached_endpoint");
+    assert_eq!(report["total_events"], 21);
+    assert_eq!(report["display_truncated"], true);
+    let events = report["events"].as_array().unwrap();
+    assert_eq!(events.len(), 20);
+    assert_eq!(events[0]["commit_id"], second_move.unwrap());
+    assert_eq!(
+        events[0]["predecessors"],
+        serde_json::json!([first_move.unwrap()])
+    );
+}
+
+#[test]
+fn fate_tracks_symbol_correspondence_across_a_merge() {
+    let repo = TestRepo::new();
+    let start = commit(
+        &repo,
+        "lib.rs",
+        "fn tracked() {\n    let value = 1;\n    value\n}\n",
+        "Add tracked symbol",
+        "2020-01-01T00:00:00Z",
+    );
+    git(repo.dir.path(), ["switch", "-c", "side"]);
+    commit(
+        &repo,
+        "lib.rs",
+        "fn side() {}\n\nfn tracked() {\n    let value = 1;\n    value\n}\n",
+        "Add symbol before target",
+        "2020-01-02T00:00:00Z",
+    );
+    git(repo.dir.path(), ["switch", "-"]);
+    commit(
+        &repo,
+        "lib.rs",
+        "fn tracked() {\n    let value = 1;\n    value\n}\n\nfn main_side() {}\n",
+        "Add symbol after target",
+        "2020-01-03T00:00:00Z",
+    );
+    let merge = git_command(repo.dir.path())
+        .args(["merge", "--no-ff", "--no-edit", "side"])
+        .env("GIT_AUTHOR_DATE", "2020-01-04T00:00:00Z")
+        .env("GIT_COMMITTER_DATE", "2020-01-04T00:00:00Z")
+        .output()
+        .expect("run git merge");
+    assert!(
+        merge.status.success(),
+        "git merge failed: {}",
+        String::from_utf8_lossy(&merge.stderr)
+    );
+    let endpoint = repo.head();
+    repo.index();
+
+    let report = json(
+        &repo,
+        &[
+            "fate", "lib.rs", "--symbol", "tracked", "--at", &start, "--to-rev", &endpoint,
+            "--json",
+        ],
+    );
+
+    assert_eq!(report["final_state"], "reached_endpoint");
+    assert_eq!(report["last_location"]["line"], 3);
+    assert_eq!(report["last_location"]["start_line"], 3);
+    let merge_event = report["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["commit_id"] == endpoint)
+        .expect("merge event");
+    assert_eq!(merge_event["relationship"], "merge");
+    assert_eq!(merge_event["incoming"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn fate_rejects_ambiguous_strict_move_at_a_merge() {
+    let repo = TestRepo::new();
+    let mut source_lines = (0..20)
+        .map(|index| format!("before-{index}"))
+        .collect::<Vec<_>>();
+    let target_line = i64::try_from(source_lines.len() + 1).unwrap();
+    source_lines.push("let tracked = 1;".to_owned());
+    source_lines.extend((0..20).map(|index| format!("after-{index}")));
+    let target_index = usize::try_from(target_line - 1).unwrap();
+    let candidate = format!(
+        "{}\n",
+        source_lines[target_index - 5..target_index + 6].join("\n")
+    );
+    let source_without_target = source_lines
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| *index != target_index)
+        .map(|(_, line)| line.as_str())
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    let start = commit(
+        &repo,
+        "a.txt",
+        &format!("{}\n", source_lines.join("\n")),
+        "Add tracked line",
+        "2020-01-01T00:00:00Z",
+    );
+    git(repo.dir.path(), ["switch", "-c", "side"]);
+    fs::write(repo.dir.path().join("a.txt"), &source_without_target)
+        .expect("remove tracked line from source file");
+    fs::write(repo.dir.path().join("b.txt"), &candidate).expect("move target to side file");
+    git(repo.dir.path(), ["add", "--all"]);
+    let side_move = git_command(repo.dir.path())
+        .args(["commit", "-m", "Move target on side"])
+        .env("GIT_AUTHOR_DATE", "2020-01-02T00:00:00Z")
+        .env("GIT_COMMITTER_DATE", "2020-01-02T00:00:00Z")
+        .output()
+        .expect("commit side move");
+    assert!(
+        side_move.status.success(),
+        "{}",
+        String::from_utf8_lossy(&side_move.stderr)
+    );
+    git(repo.dir.path(), ["switch", "-"]);
+    commit(
+        &repo,
+        "other.txt",
+        "unrelated\n",
+        "Main change",
+        "2020-01-03T00:00:00Z",
+    );
+    let merge = git_command(repo.dir.path())
+        .args(["merge", "--no-ff", "--no-commit", "side"])
+        .env("GIT_AUTHOR_DATE", "2020-01-04T00:00:00Z")
+        .env("GIT_COMMITTER_DATE", "2020-01-04T00:00:00Z")
+        .output()
+        .expect("prepare merge");
+    assert!(
+        merge.status.success(),
+        "{}",
+        String::from_utf8_lossy(&merge.stderr)
+    );
+    fs::write(repo.dir.path().join("copy.txt"), &candidate).expect("add competing destination");
+    git(repo.dir.path(), ["add", "--all"]);
+    let merge_commit = git_command(repo.dir.path())
+        .args(["commit", "-m", "Add competing merge destination"])
+        .env("GIT_AUTHOR_DATE", "2020-01-04T00:00:01Z")
+        .env("GIT_COMMITTER_DATE", "2020-01-04T00:00:01Z")
+        .output()
+        .expect("commit merge result");
+    assert!(
+        merge_commit.status.success(),
+        "{}",
+        String::from_utf8_lossy(&merge_commit.stderr)
+    );
+    let endpoint = repo.head();
+    repo.index();
+
+    let report = json(
+        &repo,
+        &[
+            "fate",
+            "a.txt",
+            "--line",
+            &target_line.to_string(),
+            "--at",
+            &start,
+            "--to-rev",
+            &endpoint,
+            "--json",
+        ],
+    );
+
+    assert_eq!(report["final_state"], "unknown");
+    assert_eq!(report["stopped_at"], endpoint);
+    assert_eq!(report["stop_reason"]["code"], "ambiguous_merge_move");
+}
+
+#[test]
+fn fate_tracks_a_local_symbol_edit_across_a_merge() {
+    let repo = TestRepo::new();
+    let start = commit(
+        &repo,
+        "lib.rs",
+        "fn tracked() {\n    let value = 1;\n    value\n}\n",
+        "Add tracked symbol",
+        "2020-01-01T00:00:00Z",
+    );
+    git(repo.dir.path(), ["switch", "-c", "side"]);
+    let modification = commit(
+        &repo,
+        "lib.rs",
+        "fn tracked() {\n    let value = 2;\n    value\n}\n",
+        "Modify tracked symbol locally",
+        "2020-01-02T00:00:00Z",
+    );
+    git(repo.dir.path(), ["switch", "-"]);
+    commit(
+        &repo,
+        "other.txt",
+        "unrelated\n",
+        "Main change",
+        "2020-01-03T00:00:00Z",
+    );
+    let merge = git_command(repo.dir.path())
+        .args(["merge", "--no-ff", "--no-edit", "side"])
+        .env("GIT_AUTHOR_DATE", "2020-01-04T00:00:00Z")
+        .env("GIT_COMMITTER_DATE", "2020-01-04T00:00:00Z")
+        .output()
+        .expect("run Git merge");
+    assert!(
+        merge.status.success(),
+        "{}",
+        String::from_utf8_lossy(&merge.stderr)
+    );
+    let endpoint = repo.head();
+    repo.index();
+
+    let report = json(
+        &repo,
+        &[
+            "fate", "lib.rs", "--symbol", "tracked", "--at", &start, "--to-rev", &endpoint,
+            "--json",
+        ],
+    );
+
+    assert_eq!(report["final_state"], "reached_endpoint");
+    let events = report["events"].as_array().unwrap();
+    assert!(events.iter().any(|event| {
+        event["commit_id"] == modification && event["relationship"] == "modified"
+    }));
+    let merge_event = events
+        .iter()
+        .find(|event| event["commit_id"] == endpoint)
+        .expect("merge event");
+    assert_eq!(merge_event["relationship"], "merge");
+    assert_eq!(merge_event["result_state"], "active");
+    assert_eq!(merge_event["incoming"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn fate_tracks_a_strict_symbol_move_through_a_merge() {
+    let repo = TestRepo::new();
+    let source = "fn tracked() {\n    let value = 1;\n    value\n}\n";
+    let start = commit(
+        &repo,
+        "a.rs",
+        source,
+        "Add tracked symbol",
+        "2020-01-01T00:00:00Z",
+    );
+    git(repo.dir.path(), ["switch", "-c", "side"]);
+    fs::remove_file(repo.dir.path().join("a.rs")).expect("remove old symbol file");
+    fs::write(repo.dir.path().join("b.rs"), source).expect("move symbol to new file");
+    git(repo.dir.path(), ["add", "--all"]);
+    let side_move = git_command(repo.dir.path())
+        .args(["commit", "-m", "Move tracked symbol"])
+        .env("GIT_AUTHOR_DATE", "2020-01-02T00:00:00Z")
+        .env("GIT_COMMITTER_DATE", "2020-01-02T00:00:00Z")
+        .output()
+        .expect("commit symbol move");
+    assert!(
+        side_move.status.success(),
+        "{}",
+        String::from_utf8_lossy(&side_move.stderr)
+    );
+    git(repo.dir.path(), ["switch", "-"]);
+    commit(
+        &repo,
+        "other.txt",
+        "unrelated\n",
+        "Main change",
+        "2020-01-03T00:00:00Z",
+    );
+    let merge = git_command(repo.dir.path())
+        .args(["merge", "--no-ff", "--no-edit", "side"])
+        .env("GIT_AUTHOR_DATE", "2020-01-04T00:00:00Z")
+        .env("GIT_COMMITTER_DATE", "2020-01-04T00:00:00Z")
+        .output()
+        .expect("merge symbol move");
+    assert!(
+        merge.status.success(),
+        "{}",
+        String::from_utf8_lossy(&merge.stderr)
+    );
+    let endpoint = repo.head();
+    repo.index();
+
+    let report = json(
+        &repo,
+        &[
+            "fate", "a.rs", "--symbol", "tracked", "--at", &start, "--to-rev", &endpoint, "--json",
+        ],
+    );
+
+    assert_eq!(report["final_state"], "reached_endpoint", "{report:#}");
+    assert_eq!(report["last_location"]["path"], "b.rs");
+    let merge_event = report["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["commit_id"] == endpoint)
+        .expect("merge event");
+    assert_eq!(merge_event["relationship"], "merge");
+    assert_eq!(merge_event["after"]["path"], "b.rs");
+    assert_eq!(merge_event["incoming"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn fate_excludes_descendants_after_the_requested_endpoint() {
+    let repo = TestRepo::new();
+    let start = commit(
+        &repo,
+        "a.txt",
+        "tracked\n",
+        "Add tracked line",
+        "2020-01-01T00:00:00Z",
+    );
+    let endpoint = commit(
+        &repo,
+        "a.txt",
+        "rewritten\n",
+        "Rewrite tracked line",
+        "2020-01-02T00:00:00Z",
+    );
+    let descendant = commit(
+        &repo,
+        "unrelated.txt",
+        "unrelated\n",
+        "Unrelated descendant",
+        "2020-01-03T00:00:00Z",
+    );
+    repo.index();
+
+    let report = json(
+        &repo,
+        &[
+            "fate", "a.txt", "--line", "1", "--at", &start, "--to-rev", &endpoint, "--json",
+        ],
+    );
+
+    assert_eq!(report["final_state"], "unknown");
+    assert_eq!(report["total_events"], 1);
+    let events = report["events"].as_array().unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["commit_id"], endpoint);
+    assert_ne!(events[0]["commit_id"], descendant);
 }

@@ -148,6 +148,71 @@ pub(super) fn read_complete_patch(git: &Git, oid: &str) -> Result<PatchData, App
     read_patch_data(git, oid, true)
 }
 
+const MAX_FATE_RAW_DIFF_BYTES: usize = 16 * 1024 * 1024;
+const MAX_FATE_PATCH_BYTES: usize = 64 * 1024 * 1024;
+
+pub(super) fn read_fate_parent_diff(
+    git: &Git,
+    parent: &str,
+    revision: &str,
+) -> Option<(Vec<Change>, Vec<Hunk>)> {
+    let input = [format!("{revision} {parent}\n")];
+    let known = HashSet::from([revision]);
+    let raw = git
+        .limited_output_with_input(
+            [
+                "-c",
+                "diff.renameLimit=0",
+                "diff-tree",
+                "--stdin",
+                "-r",
+                "-M",
+                "--raw",
+                "-z",
+                "--full-index",
+                "--no-relative",
+                "--ignore-submodules=none",
+            ],
+            &input,
+            MAX_FATE_RAW_DIFF_BYTES,
+        )
+        .ok()??;
+    let changes = parse_changes(&raw, &known).ok()?;
+    let type_change_ordinals = collect_type_change_ordinals(changes.iter());
+    let patch = git
+        .limited_output_with_input(
+            [
+                "-c",
+                "diff.renameLimit=0",
+                "-c",
+                "diff.suppressBlankEmpty=false",
+                "-c",
+                "core.quotePath=true",
+                "diff-tree",
+                "--stdin",
+                "--root",
+                "-r",
+                "-M",
+                "-p",
+                "--full-index",
+                "--no-color",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--unified=0",
+                "--inter-hunk-context=0",
+                "--diff-algorithm=myers",
+                "--no-indent-heuristic",
+                "--no-relative",
+                "--ignore-submodules=none",
+            ],
+            &input,
+            MAX_FATE_PATCH_BYTES,
+        )
+        .ok()??;
+    let hunks = parse_hunks(&patch, &known, &type_change_ordinals).ok()?;
+    Some((changes, hunks))
+}
+
 fn read_patch_data(git: &Git, fix_oid: &str, complete: bool) -> Result<PatchData, AppError> {
     let commits = read_commits(git, &[fix_oid.to_owned()])?;
     let commit = commits

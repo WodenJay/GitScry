@@ -74,6 +74,16 @@ impl Repository {
         history::read_complete_patch(&self.git, oid)
     }
 
+    /// Compare a local parent tree with a commit result for conservative fate verification.
+    /// Missing or over-budget material returns `None`; this never fetches objects.
+    pub(crate) fn fate_parent_diff(
+        &self,
+        parent: &str,
+        revision: &str,
+    ) -> Option<(Vec<Change>, Vec<Hunk>)> {
+        history::read_fate_parent_diff(&self.git, parent, revision)
+    }
+
     pub(crate) fn patch_tree_objects(
         &self,
         oid: &str,

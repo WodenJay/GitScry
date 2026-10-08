@@ -63,9 +63,22 @@ impl Git {
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
     {
+        self.limited_output_with_input(args, &[], limit)
+    }
+
+    pub(super) fn limited_output_with_input<I, S>(
+        &self,
+        args: I,
+        input: &[String],
+        limit: usize,
+    ) -> Result<Option<Vec<u8>>, AppError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<OsStr>,
+    {
         let mut bytes = Vec::new();
         let mut exceeded = false;
-        let result = self.stream(args, &[], |chunk| {
+        let result = self.stream(args, input, |chunk| {
             if bytes.len().saturating_add(chunk.len()) > limit {
                 exceeded = true;
                 return Err(AppError::operational("content output limit reached"));

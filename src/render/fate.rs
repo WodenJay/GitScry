@@ -73,15 +73,36 @@ pub(super) fn format_report(report: &Report) -> String {
         lines.push(format!(
             "{}  {}  {}  {} -> {}",
             event.commit_id,
-            event.relationship,
+            event.kinds.join(", "),
             super::escape::path(&event.before.path),
             event.before.line,
             event
                 .after
                 .as_ref()
                 .map(|after| format!("{} line {}", super::escape::path(&after.path), after.line))
-                .unwrap_or_else(|| "deleted".to_owned()),
+                .unwrap_or_else(|| event.result_state.to_owned()),
         ));
+        if !event.predecessors.is_empty() {
+            lines.push(format!(
+                "    Predecessors: {}",
+                event.predecessors.join(", ")
+            ));
+        }
+        if event.incoming.len() > 1 {
+            let locations = event
+                .incoming
+                .iter()
+                .map(|location| {
+                    format!(
+                        "{} line {}",
+                        super::escape::path(&location.path),
+                        location.line
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            lines.push(format!("    Incoming locations: {locations}"));
+        }
         lines.push(format!("    {}", super::escape::subject(&event.subject)));
         super::material::render_patch(&mut lines, event.patch.as_ref(), "    ");
         lines.push(format!(
@@ -103,7 +124,7 @@ pub(super) fn format_json_report(
         .map(JsonEvent::from)
         .collect::<Vec<_>>();
     let output = JsonReport {
-        schema_version: if report.patch_mode { 2 } else { 1 },
+        schema_version: 3,
         kind: "fate",
         start_revision: &report.start_revision,
         endpoint: &report.endpoint,
@@ -229,6 +250,12 @@ struct JsonEvent<'a> {
     timestamp: i64,
     subject: &'a str,
     relationship: &'a str,
+    result_state: &'a str,
+    kinds: &'a [&'static str],
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    predecessors: Vec<&'a str>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    incoming: Vec<JsonLocation<'a>>,
     before: JsonLocation<'a>,
     #[serde(skip_serializing_if = "Option::is_none")]
     after: Option<JsonLocation<'a>>,
@@ -246,6 +273,14 @@ impl<'a> From<&'a Event> for JsonEvent<'a> {
             timestamp: event.commit_time,
             subject: &event.subject,
             relationship: event.relationship,
+            result_state: event.result_state,
+            kinds: event.kinds.as_slice(),
+            predecessors: event.predecessors.iter().map(String::as_str).collect(),
+            incoming: event
+                .incoming
+                .iter()
+                .map(|location| json_location(&location.path, Some(location.line), None, None))
+                .collect(),
             before: json_location(
                 &event.before.path,
                 Some(event.before.line),

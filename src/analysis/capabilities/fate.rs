@@ -17,6 +17,7 @@ use crate::analysis::{PatchExcerpt, SearchScopeInfo};
 use crate::git::{SymbolLocation, SymbolSelection};
 use crate::{app::AppError, cache::followups::ForwardCommit};
 
+mod graph;
 const MAX_HUNKS: usize = 4_096;
 const MAX_HUNK_BYTES: usize = 16 * 1024;
 const MAX_MOVE_ASSOCIATIONS: usize = 8;
@@ -75,6 +76,10 @@ pub(crate) struct Event {
     pub(crate) subject: String,
     pub(crate) commit_time: i64,
     pub(crate) relationship: &'static str,
+    pub(crate) result_state: &'static str,
+    pub(crate) kinds: Vec<&'static str>,
+    pub(crate) predecessors: Vec<String>,
+    pub(crate) incoming: Vec<Location>,
     pub(crate) before: Location,
     pub(crate) after: Option<Location>,
     /// Inclusive symbol span at `before`; `None` for line targets.
@@ -105,7 +110,6 @@ pub(crate) struct Report {
     pub(crate) traversal_truncated: bool,
     pub(crate) total_events: usize,
     pub(crate) display_truncated: bool,
-    pub(crate) patch_mode: bool,
     pub(crate) limit: usize,
     pub(crate) events: Vec<Event>,
     pub(crate) scope: Option<SearchScopeInfo>,
@@ -218,7 +222,6 @@ fn execute_line(
                 traversal_truncated: false,
                 total_events: 0,
                 display_truncated: false,
-                patch_mode: options.patch,
                 limit: options.limit,
                 events: Vec::new(),
                 scope: None,
@@ -230,6 +233,24 @@ fn execute_line(
     let graph = session.forward_graph(&traversal_endpoint)?;
     let tracked = descendants(&graph, &target.revision);
 
+    if graph
+        .iter()
+        .any(|node| tracked.contains(&node.oid) && node.parents.len() > 1)
+    {
+        return graph::execute(graph::GraphQuery {
+            session,
+            repository,
+            context,
+            target,
+            endpoint,
+            endpoint_frontier,
+            max_commits,
+            options,
+            warnings,
+            graph: &graph,
+            tracked: &tracked,
+        });
+    }
     let mut state = Location {
         path: target.path.clone(),
         line: i64::try_from(target.line)
@@ -310,6 +331,10 @@ fn execute_line(
                         subject: session.forward_subject(&node.oid)?,
                         commit_time: node.commit_time,
                         relationship: "move",
+                        result_state: "active",
+                        kinds: vec!["move"],
+                        predecessors: Vec::new(),
+                        incoming: vec![state.clone()],
                         before: state.clone(),
                         before_span: None,
                         after_span: None,
@@ -368,6 +393,10 @@ fn execute_line(
                 subject: session.forward_subject(&node.oid)?,
                 commit_time: node.commit_time,
                 relationship: "removed",
+                result_state: "deleted",
+                kinds: vec!["removed"],
+                predecessors: Vec::new(),
+                incoming: vec![state.clone()],
                 before: state.clone(),
                 before_span: None,
                 after_span: None,
@@ -417,6 +446,10 @@ fn execute_line(
                     subject: session.forward_subject(&node.oid)?,
                     commit_time: node.commit_time,
                     relationship: "rename",
+                    result_state: "active",
+                    kinds: vec!["rename"],
+                    predecessors: Vec::new(),
+                    incoming: vec![state.clone()],
                     before: state.clone(),
                     before_span: None,
                     after_span: None,
@@ -490,6 +523,10 @@ fn execute_line(
                     subject: session.forward_subject(&node.oid)?,
                     commit_time: node.commit_time,
                     relationship: "move",
+                    result_state: "active",
+                    kinds: vec!["move"],
+                    predecessors: Vec::new(),
+                    incoming: vec![state.clone()],
                     before: state.clone(),
                     before_span: None,
                     after_span: None,
@@ -549,6 +586,10 @@ fn execute_line(
                         subject: session.forward_subject(&node.oid)?,
                         commit_time: node.commit_time,
                         relationship: "rename",
+                        result_state: "active",
+                        kinds: vec!["rename"],
+                        predecessors: Vec::new(),
+                        incoming: vec![state.clone()],
                         before: state.clone(),
                         before_span: None,
                         after_span: None,
@@ -578,6 +619,10 @@ fn execute_line(
                     subject: session.forward_subject(&node.oid)?,
                     commit_time: node.commit_time,
                     relationship: "rewrite",
+                    result_state: "unknown",
+                    kinds: vec!["rewrite"],
+                    predecessors: Vec::new(),
+                    incoming: vec![state.clone()],
                     before: state.clone(),
                     before_span: None,
                     after_span: None,
@@ -609,6 +654,10 @@ fn execute_line(
                     subject: session.forward_subject(&node.oid)?,
                     commit_time: node.commit_time,
                     relationship: "removed",
+                    result_state: "deleted",
+                    kinds: vec!["removed"],
+                    predecessors: Vec::new(),
+                    incoming: vec![state.clone()],
                     before: state.clone(),
                     before_span: None,
                     after_span: None,
@@ -671,6 +720,8 @@ fn execute_line(
         None => (FinalState::ReachedEndpoint, None, None, Some(state)),
     };
 
+    link_event_predecessors(&mut events, &target.revision);
+
     let total_events = events.len();
     let display_truncated = total_events > options.limit;
     let displayed = events
@@ -702,7 +753,6 @@ fn execute_line(
             traversal_truncated,
             total_events,
             display_truncated,
-            patch_mode: options.patch,
             limit: options.limit,
             events: displayed,
             scope: None,
@@ -718,6 +768,20 @@ fn finished(session: &QuerySession, report: Report, warnings: Vec<String>) -> Ou
         progress: session.progress().to_vec(),
         warnings: all_warnings,
         report: QueryReport::Fate(report),
+    }
+}
+
+fn link_event_predecessors(events: &mut [Event], start_revision: &str) {
+    let mut previous_event_commit = start_revision.to_owned();
+    let mut current_event_commit = None::<String>;
+    let mut current_predecessors = Vec::new();
+    for event in events {
+        if current_event_commit.as_deref() != Some(event.commit_id.as_str()) {
+            current_event_commit = Some(event.commit_id.clone());
+            current_predecessors = vec![previous_event_commit.clone()];
+            previous_event_commit = event.commit_id.clone();
+        }
+        event.predecessors.clone_from(&current_predecessors);
     }
 }
 
@@ -916,6 +980,31 @@ fn find_line_move_candidates(
     changes: &[crate::cache::PathChange],
     context: &LineMoveContext,
 ) -> Result<LineMoveCandidates, AppError> {
+    find_line_move_candidates_with_added_lines(
+        repository,
+        oid,
+        changes,
+        context,
+        |ordinal, candidates| {
+            let history =
+                session.patch_history_for_change(oid, ordinal, MAX_HUNKS, MAX_HUNK_BYTES)?;
+            Ok(added_target_lines(
+                &history.hunks,
+                history.missing_objects,
+                history.truncated,
+                candidates,
+            ))
+        },
+    )
+}
+
+fn find_line_move_candidates_with_added_lines(
+    repository: &Repository,
+    oid: &str,
+    changes: &[crate::cache::PathChange],
+    context: &LineMoveContext,
+    mut added_lines_for: impl FnMut(i64, &BTreeSet<i64>) -> Result<Option<BTreeSet<i64>>, AppError>,
+) -> Result<LineMoveCandidates, AppError> {
     let mut candidates = LineMoveCandidates::default();
     for change in changes {
         let Some(path) = change.new_path.as_ref() else {
@@ -961,14 +1050,7 @@ fn find_line_move_candidates(
         if candidate_lines.is_empty() {
             continue;
         }
-        let history =
-            session.patch_history_for_change(oid, change.ordinal, MAX_HUNKS, MAX_HUNK_BYTES)?;
-        let added_lines = added_target_lines(
-            &history.hunks,
-            history.missing_objects,
-            history.truncated,
-            &candidate_lines,
-        );
+        let added_lines = added_lines_for(change.ordinal, &candidate_lines)?;
         for line in candidate_lines {
             let destination = (path.clone(), line);
             let strict_match = matched_lines.contains(&line);
@@ -1016,6 +1098,22 @@ fn find_symbol_move_candidates(
     changes: &[crate::cache::PathChange],
     search: SymbolMoveSearch<'_>,
 ) -> Result<SymbolMoveCandidates, AppError> {
+    find_symbol_move_candidates_with_addition_status(
+        repository,
+        oid,
+        changes,
+        search,
+        |ordinal, span| span_addition_status(session, oid, ordinal, span),
+    )
+}
+
+fn find_symbol_move_candidates_with_addition_status(
+    repository: &Repository,
+    oid: &str,
+    changes: &[crate::cache::PathChange],
+    search: SymbolMoveSearch<'_>,
+    mut addition_status_for: impl FnMut(i64, (i64, i64)) -> Result<AddedMaterialStatus, AppError>,
+) -> Result<SymbolMoveCandidates, AppError> {
     let mut candidates = SymbolMoveCandidates::default();
     for change in changes {
         let Some(path) = change.new_path.as_ref() else {
@@ -1061,7 +1159,7 @@ fn find_symbol_move_candidates(
             },
             span: Some((start, end)),
         };
-        match span_addition_status(session, oid, change.ordinal, (start, end))? {
+        match addition_status_for(change.ordinal, (start, end))? {
             AddedMaterialStatus::Added if strict_match => {
                 candidates.added.push(SymbolMoveCandidate {
                     path: path.clone(),
@@ -1097,7 +1195,7 @@ fn map_line_forward(hunks: &[PatchHistoryHunk], line: i64) -> Option<Forward> {
     ordered.sort_by_key(|hunk| hunk.old_start);
     let mut new_line = line;
     for hunk in ordered {
-        if line < hunk.old_start {
+        if line < hunk.old_start || (hunk.old_lines == 0 && line == hunk.old_start) {
             break;
         }
         if line >= hunk.old_start + hunk.old_lines {
@@ -1287,7 +1385,6 @@ fn execute_symbol(
                 traversal_truncated: false,
                 total_events: 0,
                 display_truncated: false,
-                patch_mode: options.patch,
                 limit: options.limit,
                 events: Vec::new(),
                 scope: None,
@@ -1299,6 +1396,24 @@ fn execute_symbol(
     let graph = session.forward_graph(&traversal_endpoint)?;
     let tracked = descendants(&graph, &target.revision);
 
+    if graph
+        .iter()
+        .any(|node| tracked.contains(&node.oid) && node.parents.len() > 1)
+    {
+        return graph::execute(graph::GraphQuery {
+            session,
+            repository,
+            context,
+            target,
+            endpoint,
+            endpoint_frontier,
+            max_commits,
+            options,
+            warnings,
+            graph: &graph,
+            tracked: &tracked,
+        });
+    }
     let mut state_path = target.path.clone();
     let mut state_start = i64::try_from(target.line)
         .map_err(|_| AppError::input("line does not fit the coordinate space"))?;
@@ -2008,6 +2123,8 @@ fn execute_symbol(
         ),
     };
 
+    link_event_predecessors(&mut events, &target.revision);
+
     let total_events = events.len();
     let display_truncated = total_events > options.limit;
     let displayed = events
@@ -2039,7 +2156,6 @@ fn execute_symbol(
             traversal_truncated,
             total_events,
             display_truncated,
-            patch_mode: options.patch,
             limit: options.limit,
             events: displayed,
             scope: None,
@@ -2116,6 +2232,17 @@ fn push_symbol_event(
         subject: session.forward_subject(oid)?,
         commit_time,
         relationship,
+        result_state: match relationship {
+            "removed" => "deleted",
+            "rewrite" => "unknown",
+            _ => "active",
+        },
+        kinds: vec![relationship],
+        predecessors: Vec::new(),
+        incoming: vec![Location {
+            path: before_path.to_vec(),
+            line: before_start,
+        }],
         before: Location {
             path: before_path.to_vec(),
             line: before_start,
@@ -2148,8 +2275,6 @@ fn spans_map_forward(
     old: SymbolSource<'_>,
     new: SymbolSource<'_>,
 ) -> Option<bool> {
-    let (old_start, old_end) = old.span;
-    let (new_start, new_end) = new.span;
     let history = session
         .patch_history_for_change(oid, change_ordinal, MAX_HUNKS, MAX_HUNK_BYTES)
         .ok()?;
@@ -2157,6 +2282,19 @@ fn spans_map_forward(
         || history.truncated
         || history.hunks.iter().any(|hunk| hunk.text.is_none())
     {
+        return None;
+    }
+    spans_map_forward_with_hunks(&history.hunks, old, new)
+}
+
+fn spans_map_forward_with_hunks(
+    hunks: &[PatchHistoryHunk],
+    old: SymbolSource<'_>,
+    new: SymbolSource<'_>,
+) -> Option<bool> {
+    let (old_start, old_end) = old.span;
+    let (new_start, new_end) = new.span;
+    if hunks.iter().any(|hunk| hunk.text.is_none()) {
         return None;
     }
     let old_body_lines = old
@@ -2167,7 +2305,7 @@ fn spans_map_forward(
         .and_then(|body| body_code_lines(new.content, body, new.language));
     let mut unchanged_body_code = false;
     for old_line in old_start..=old_end {
-        match map_line_forward(&history.hunks, old_line)? {
+        match map_line_forward(hunks, old_line)? {
             Forward::Kept { new_line } => {
                 if new_line < new_start || new_line > new_end {
                     return None;
@@ -2308,26 +2446,35 @@ fn span_addition_status(
     }
     let history =
         session.patch_history_for_change(oid, change_ordinal, MAX_HUNKS, MAX_HUNK_BYTES)?;
-    if history.missing_objects
-        || history.truncated
-        || history.hunks.is_empty()
-        || history.hunks.iter().any(|hunk| hunk.text.is_none())
-    {
+    if history.missing_objects || history.truncated {
         return Ok(AddedMaterialStatus::Unavailable);
     }
+    Ok(span_addition_status_from_hunks(&history.hunks, span))
+}
+
+fn span_addition_status_from_hunks(
+    hunks: &[PatchHistoryHunk],
+    span: (i64, i64),
+) -> AddedMaterialStatus {
+    if span.0 < 1 || span.0 > span.1 {
+        return AddedMaterialStatus::NotAdded;
+    }
+    if hunks.is_empty() || hunks.iter().any(|hunk| hunk.text.is_none()) {
+        return AddedMaterialStatus::Unavailable;
+    }
     let mut added = false;
-    for hunk in &history.hunks {
+    for hunk in hunks {
         match hunk_adds_line_in_span(hunk, span) {
             Some(true) => added = true,
             Some(false) => {}
-            None => return Ok(AddedMaterialStatus::Unavailable),
+            None => return AddedMaterialStatus::Unavailable,
         }
     }
-    Ok(if added {
+    if added {
         AddedMaterialStatus::Added
     } else {
         AddedMaterialStatus::NotAdded
-    })
+    }
 }
 
 fn added_target_lines(
