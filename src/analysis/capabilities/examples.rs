@@ -174,17 +174,17 @@ pub(crate) fn run(
                 .any(|object| missing_objects.contains(object))
             {
                 let reason = "cached patch source objects are unavailable".to_owned();
-                fingerprints.put(&commit.oid, "indeterminate", None, &[])?;
+                fingerprints.put(&commit.oid, "indeterminate", None, None, &[])?;
                 indeterminate.push(PatchIndeterminate {
                     commit_oid: commit.oid.clone(),
                     reason,
                 });
                 continue;
             }
-            if record.integrity == "empty" && record.fingerprint.is_some() {
+            if record.integrity == "empty" && record.forward_fingerprint.is_some() {
                 continue;
             }
-            cached_hash = record.fingerprint;
+            cached_hash = record.forward_fingerprint;
         }
 
         let (fingerprint, inspected) = match cached_hash {
@@ -294,6 +294,7 @@ fn inspect_and_cache(
     match patch_relationship::inspect(repository, oid) {
         Ok(patch) => {
             let fingerprint = patch.fingerprint();
+            let inverse_fingerprint = patch.inverse_fingerprint();
             fingerprints.put(
                 oid,
                 if patch.is_empty() {
@@ -302,12 +303,13 @@ fn inspect_and_cache(
                     "complete"
                 },
                 Some(&fingerprint),
+                Some(&inverse_fingerprint),
                 &patch.objects,
             )?;
             Ok(Ok(patch))
         }
         Err(reason) => {
-            fingerprints.put(oid, "indeterminate", None, &[])?;
+            fingerprints.put(oid, "indeterminate", None, None, &[])?;
             Ok(Err(reason))
         }
     }
