@@ -1446,7 +1446,6 @@ fn why_scope_intersects_target_and_filters_target_modifications() {
             "--json",
         ],
     );
-    assert_eq!(scoped["schema_version"], 5);
     assert_eq!(scoped["scope"]["to_rev"], later);
     assert_eq!(scoped["scope"]["target_rev"], initial);
     assert_eq!(scoped["scope"]["cache_tip"], later);
@@ -1653,8 +1652,6 @@ fn why_patch_excerpts_follow_line_and_symbol_anchors() {
             "--json",
         ],
     );
-    assert_eq!(plain["schema_version"], 5);
-    assert_eq!(patched["schema_version"], 5);
     assert!(plain.get("materials").is_none());
     assert_eq!(patched["matched_count"], plain["matched_count"]);
     let plain_modifications = plain["target_related_modifications"].as_array().unwrap();
@@ -1978,7 +1975,6 @@ fn why_separates_attribution_target_modifications_and_other_history() {
     repo.index();
 
     let report = json(&repo, &["why", "src/lib.rs", "--line", "2", "--json"]);
-    assert_eq!(report["schema_version"], 5);
     assert!(report.get("materials").is_none());
     assert_eq!(
         report["target_related_modifications"]

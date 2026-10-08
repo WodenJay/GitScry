@@ -115,7 +115,6 @@ fn followups_tracks_changed_regions_through_shifts_and_groups_them_first() {
     repo.index();
 
     let report = json(&repo, &["followups", &seed, "--json"]);
-    assert_eq!(report["schema_version"], 4);
     let entries = report["entries"].as_array().unwrap();
     assert_eq!(entries.len(), 3);
     assert_eq!(entries[0]["commit_id"], overlap);
@@ -536,7 +535,6 @@ fn followups_tracks_multiple_renames_and_keeps_path_context() {
             "--json",
         ],
     );
-    assert_eq!(old["schema_version"], 4);
     assert_eq!(old["entries"], new["entries"]);
     assert_eq!(old["entries"], both["entries"]);
     let entries = old["entries"].as_array().unwrap();

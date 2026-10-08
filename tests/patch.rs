@@ -75,11 +75,9 @@ fn patch_excerpts_are_opt_in_relevant_and_path_scoped() {
     repo.index();
 
     let plain = json(&repo, &["search", "retry", "--json"]);
-    assert_eq!(plain["schema_version"], 1);
     assert!(plain["materials"][0].get("patch").is_none());
 
     let search = json(&repo, &["search", "retry", "--patch", "--json"]);
-    assert_eq!(search["schema_version"], 2);
     assert_eq!(search["matched_count"], plain["matched_count"]);
     let material = &search["materials"][0];
     assert_eq!(material["subject"], "Improve retry backoff handling");
@@ -107,7 +105,6 @@ fn patch_excerpts_are_opt_in_relevant_and_path_scoped() {
             "--json",
         ],
     );
-    assert_eq!(examples["schema_version"], 2);
     assert_eq!(examples["materials"][0]["patch"]["status"], "available");
     let example_hunks = examples["materials"][0]["patch"]["hunks"]
         .as_array()
@@ -146,7 +143,6 @@ fn patch_excerpts_are_opt_in_relevant_and_path_scoped() {
         &repo,
         &["examples", "retry", "--path", "src/engine.rs", "--json"],
     );
-    assert_eq!(plain_examples["schema_version"], 1);
     assert!(plain_examples["materials"][0].get("patch").is_none());
     let plain_search_text = repo.run(["search", "retry"]);
     assert!(!String::from_utf8_lossy(&plain_search_text.stdout).contains("patch excerpt:"));
@@ -188,7 +184,6 @@ fn patch_reports_unavailable_and_no_relevant_hunks() {
     repo.index();
 
     let metadata = json(&repo, &["search", "metadataonly", "--patch", "--json"]);
-    assert_eq!(metadata["schema_version"], 2);
     assert_eq!(
         metadata["materials"][0]["patch"]["status"],
         "no_relevant_hunks"
@@ -215,7 +210,6 @@ fn patch_reports_unavailable_and_no_relevant_hunks() {
         &repo,
         &["search", "nothingmatches-this", "--patch", "--json"],
     );
-    assert_eq!(empty["schema_version"], 2);
     assert_eq!(empty["materials"], serde_json::json!([]));
 }
 

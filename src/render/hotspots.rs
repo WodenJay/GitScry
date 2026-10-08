@@ -115,7 +115,6 @@ pub(super) fn format_json_report(
         },
     });
     serde_json::to_string(&serde_json::json!({
-        "schema_version": 1,
         "kind": "hotspots",
         "scope": scope_json,
         "policy": {

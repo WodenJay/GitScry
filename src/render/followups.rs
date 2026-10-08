@@ -264,7 +264,6 @@ pub(super) fn format_json_report(
         })
         .collect::<Result<_, serde_json::Error>>()?;
     serde_json::to_string(&json!({
-        "schema_version": 4,
         "kind": "followups",
         "scope": {
             "seed": scope.seed, "endpoint": scope.endpoint, "cache_tip": scope.cache_tip,

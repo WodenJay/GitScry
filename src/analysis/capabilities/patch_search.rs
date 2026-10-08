@@ -13,7 +13,6 @@ use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 #[derive(Serialize)]
 pub(crate) struct Report {
-    pub(crate) schema_version: u8,
     pub(crate) kind: &'static str,
     pub(crate) query: PatchMaterial,
     pub(crate) matches: Vec<PatchMaterial>,
@@ -418,7 +417,6 @@ fn execute_input(
         candidates.len() - checked
     };
     let report = Report {
-        schema_version: 1,
         kind: "patch-search",
         query,
         returned_count: matches.len(),

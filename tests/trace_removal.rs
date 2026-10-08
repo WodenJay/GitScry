@@ -71,7 +71,6 @@ fn fragment_queries_return_span_events_and_default_patch_context() {
         String::from_utf8_lossy(&output.stderr)
     );
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(report["schema_version"], 2);
     assert_eq!(report["kind"], "trace-removal-fragments");
     assert_eq!(report["matched_count"], 1);
     assert_eq!(report["truncated"], false);
@@ -498,7 +497,6 @@ fn groups_deleted_lines_into_events_with_complete_historical_locators() {
     );
     repo.index();
     let report = query(&repo, &["--limit", "1"]);
-    assert_eq!(report["schema_version"], 1);
     assert_eq!(report["kind"], "trace-removal");
     assert_eq!(report["matched_count"], 2);
     assert_eq!(report["truncated"], true);

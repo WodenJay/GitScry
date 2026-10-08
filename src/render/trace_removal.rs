@@ -164,7 +164,6 @@ pub(super) fn format_json_report(
     warnings: &[String],
 ) -> Result<String, serde_json::Error> {
     let output = JsonReport {
-        schema_version: 1,
         kind: "trace-removal",
         query: JsonQuery {
             code: &report.query,
@@ -213,7 +212,6 @@ pub(super) fn format_json_report(
 
 #[derive(Serialize)]
 struct JsonReport<'a> {
-    schema_version: u8,
     kind: &'static str,
     query: JsonQuery<'a>,
     cache_tip: &'a str,
@@ -342,7 +340,6 @@ pub(super) fn format_fragment_json_report(
         })
         .collect::<Vec<_>>();
     let mut output = serde_json::json!({
-        "schema_version": 2,
         "kind": "trace-removal-fragments",
         "query": {
             "code_file": json::json_path(&report.query_file),

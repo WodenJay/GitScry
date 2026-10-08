@@ -147,7 +147,6 @@ fn fate_equal_endpoints_reports_validated_location_without_events() {
         &["fate", "a.txt", "--line", "2", "--at", &start, "--json"],
     );
     assert_eq!(report["kind"], "fate");
-    assert_eq!(report["schema_version"], 3);
     assert_eq!(report["start_revision"], start);
     assert_eq!(report["endpoint"], start);
     assert_eq!(report["final_state"], "reached_endpoint");
@@ -254,7 +253,6 @@ fn fate_stops_as_unknown_after_line_rewrite() {
     assert_eq!(report["last_location"]["line"], 2);
     assert_eq!(report["associations"][0]["path"], "a.txt");
     assert_eq!(report["associations"][0]["line"], 2);
-    assert_eq!(report["schema_version"], 3);
     let text_output = repo.run(["fate", "a.txt", "--line", "2", "--at", &start, "--patch"]);
     assert_eq!(text_output.status.code(), Some(0));
     let text = String::from_utf8_lossy(&text_output.stdout);
@@ -1970,8 +1968,6 @@ fn fate_patch_conclusions_match_without_patch() {
     ] {
         assert_eq!(patched[field], plain[field], "{field}");
     }
-    assert_eq!(patched["schema_version"], 3);
-    assert_eq!(plain["schema_version"], 3);
     let patched_events = patched["events"].as_array().unwrap();
     let plain_events = plain["events"].as_array().unwrap();
     assert_eq!(patched_events.len(), plain_events.len());

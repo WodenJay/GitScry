@@ -1996,7 +1996,6 @@ fn failures_reports_manual_inverse_as_a_separate_patch_lead() {
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
 
-    assert_eq!(report["schema_version"], 2);
     assert_eq!(report["matched_count"], 0);
     assert_eq!(report["materials"].as_array().unwrap().len(), 0);
     let inverse_leads = &report["inverse_leads"];

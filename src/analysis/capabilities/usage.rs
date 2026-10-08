@@ -154,7 +154,6 @@ struct DateRange {
 
 #[derive(Debug, Serialize)]
 pub(crate) struct Report {
-    pub(crate) schema_version: u8,
     pub(crate) kind: &'static str,
     pub(crate) timezone: &'static str,
     pub(crate) range: ReportRange,
@@ -294,7 +293,6 @@ fn build_report(
     }
 
     Ok(Report {
-        schema_version: 1,
         kind: "stats",
         timezone: "local",
         range: ReportRange {

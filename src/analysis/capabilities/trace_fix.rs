@@ -21,7 +21,6 @@ const MAX_TRACE_FIX_VERSION_TEXT_BYTES: usize = 2 * 1024;
 
 #[derive(Serialize)]
 pub(crate) struct TraceFixVersions {
-    pub(crate) schema_version: u8,
     pub(crate) kind: &'static str,
     pub(crate) query: TraceFixVersionMaterial,
     pub(crate) matches: Vec<TraceFixVersionMaterial>,
@@ -77,7 +76,6 @@ fn trace_fix_versions(report: PatchSearchReport) -> TraceFixVersions {
         })
         .collect();
     TraceFixVersions {
-        schema_version: report.schema_version,
         kind: "trace-fix-versions",
         query,
         matches,

@@ -28,7 +28,6 @@ const RELATED_HISTORY_LIMIT: usize = 3;
 
 #[derive(Serialize)]
 pub(crate) struct Report {
-    pub(crate) schema_version: u8,
     pub(crate) ours: String,
     pub(crate) theirs: String,
     pub(crate) merge_base: String,
@@ -969,7 +968,6 @@ pub(crate) fn execute(
         && !files_truncated
         && files.iter().all(|file| file.unsupported.is_none());
     let report = Report {
-        schema_version: 7,
         ours: target.ours,
         theirs: target.theirs,
         merge_base: target.base,

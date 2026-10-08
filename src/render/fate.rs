@@ -124,7 +124,6 @@ pub(super) fn format_json_report(
         .map(JsonEvent::from)
         .collect::<Vec<_>>();
     let output = JsonReport {
-        schema_version: 3,
         kind: "fate",
         start_revision: &report.start_revision,
         endpoint: &report.endpoint,
@@ -175,7 +174,6 @@ pub(super) fn format_json_report(
 
 #[derive(Serialize)]
 struct JsonReport<'a> {
-    schema_version: u8,
     kind: &'static str,
     start_revision: &'a str,
     endpoint: &'a str,

@@ -132,7 +132,6 @@ fn timeline_json_pages_topologically_and_follows_renames() {
     assert_eq!(last_page["entries"][1]["commit_id"], changed);
 
     let patched = json(&repo.run(["timeline", "src/new.rs", "--patch", "--json"]));
-    assert_eq!(patched["schema_version"], 2);
     assert_eq!(patched["total"], 4);
     assert_eq!(
         patched["entries"][0]["patch"]["hunks"][0]["new_path"],
@@ -283,7 +282,6 @@ fn recreated_path_starts_a_new_file_incarnation() {
     assert_ne!(report["entries"][0]["commit_id"], original_change);
     assert_ne!(report["entries"][0]["commit_id"], deleted);
     let patched = json(&repo.run(["timeline", "src/file.rs", "--patch", "--json"]));
-    assert_eq!(patched["schema_version"], 2);
     assert_eq!(patched["total"], 2);
     assert_eq!(patched["entries"][0]["commit_id"], recreated);
     assert_eq!(patched["entries"][1]["commit_id"], final_change);
@@ -348,7 +346,6 @@ fn timeline_includes_merged_branch_commits_and_marks_merge_comparison() {
     assert_eq!(report["entries"][2]["commit_id"], merge);
     assert_eq!(report["entries"][2]["parent_count"], 2);
     let patched = json(&repo.run(["timeline", "src/file.rs", "--patch", "--json"]));
-    assert_eq!(patched["schema_version"], 2);
     assert_eq!(patched["entries"][2]["commit_id"], merge);
     assert_eq!(patched["entries"][2]["diff_comparison"], "first_parent");
     assert_eq!(patched["entries"][2]["patch"]["status"], "available");
@@ -531,12 +528,10 @@ fn timeline_patch_is_opt_in_scoped_and_preserves_pagination() {
     repo.index();
 
     let plain = json(&repo.run(["timeline", "src/target.rs", "--json"]));
-    assert_eq!(plain["schema_version"], 1);
     assert_eq!(plain["total"], 2);
     assert!(plain["entries"][1].get("patch").is_none());
 
     let patched = json(&repo.run(["timeline", "src/target.rs", "--patch", "--json"]));
-    assert_eq!(patched["schema_version"], 2);
     assert_eq!(patched["total"], plain["total"]);
     assert_eq!(patched["offset"], plain["offset"]);
     assert_eq!(patched["start"], plain["start"]);
@@ -618,7 +613,6 @@ fn timeline_patch_is_opt_in_scoped_and_preserves_pagination() {
         "--patch",
         "--json",
     ]));
-    assert_eq!(empty_page["schema_version"], 2);
     assert_eq!(empty_page["total"], 2);
     assert_eq!(empty_page["start"], 0);
     assert_eq!(empty_page["end"], 0);
@@ -656,7 +650,6 @@ fn timeline_patch_reports_binary_text_as_unavailable() {
     repo.index();
 
     let report = json(&repo.run(["timeline", "src/data.bin", "--patch", "--json"]));
-    assert_eq!(report["schema_version"], 2);
     assert_eq!(report["total"], 2);
     for entry in report["entries"].as_array().unwrap() {
         assert_eq!(entry["patch"]["status"], "unavailable");

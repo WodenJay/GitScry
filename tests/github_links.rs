@@ -216,10 +216,6 @@ fn returned_commit_ids(report: &serde_json::Value) -> Vec<String> {
     commits
 }
 
-fn expected_query_schema_version(name: &str) -> u8 {
-    if name == "why" { 5 } else { 4 }
-}
-
 #[test]
 fn github_options_allow_a_search_with_no_matches() {
     let repo = support::TestRepo::new();
@@ -244,7 +240,6 @@ fn github_options_allow_a_search_with_no_matches() {
         String::from_utf8_lossy(&output.stderr)
     );
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(value["schema_version"], 4);
     assert_eq!(value["github_links"]["status"], "complete");
     assert_eq!(value["github_links"]["repository"], serde_json::Value::Null);
     assert_eq!(value["github_links"]["issue_status"], "not_queried");
@@ -343,11 +338,6 @@ fn remaining_queries_keep_git_output_with_explicit_link_options() {
         assert_eq!(enabled.status.code(), Some(0), "{name}");
         let mut value: serde_json::Value = serde_json::from_slice(&enabled.stdout).unwrap();
         assert_eq!(value["kind"], name, "{name}");
-        assert_eq!(
-            value["schema_version"],
-            expected_query_schema_version(name),
-            "{name}"
-        );
         assert_eq!(value["github_links"]["status"], "failed", "{name}");
 
         let expected = returned_commit_ids(&value);
@@ -361,7 +351,6 @@ fn remaining_queries_keep_git_output_with_explicit_link_options() {
         assert!(actual.iter().all(|sha| sha.len() == 40), "{name}");
 
         value.as_object_mut().unwrap().remove("github_links");
-        value["schema_version"] = baseline["schema_version"].clone();
         assert_eq!(value, baseline, "{name}: Git materials stay unchanged");
     }
 }
@@ -397,8 +386,6 @@ fn code_search_emits_deduplicated_link_status_without_changing_matches() {
     );
     let baseline: serde_json::Value = serde_json::from_slice(&baseline.stdout).unwrap();
     let enabled: serde_json::Value = serde_json::from_slice(&enabled.stdout).unwrap();
-    assert_eq!(baseline["schema_version"], 1);
-    assert_eq!(enabled["schema_version"], 4);
     assert_eq!(enabled["code_matches"], baseline["code_matches"]);
     assert_eq!(enabled["matched_count"], baseline["matched_count"]);
     assert_eq!(enabled["code_matches"].as_array().unwrap().len(), 3);
@@ -442,7 +429,6 @@ fn timeline_github_options_preserve_entries_and_only_the_explicit_repo_enables_f
     assert_eq!(enabled.status.code(), Some(0));
     let baseline: serde_json::Value = serde_json::from_slice(&baseline.stdout).unwrap();
     let enabled: serde_json::Value = serde_json::from_slice(&enabled.stdout).unwrap();
-    assert_eq!(enabled["schema_version"], 4);
     assert_eq!(enabled["entries"], baseline["entries"]);
     assert_eq!(enabled["github_links"]["status"], "failed");
     assert_eq!(
@@ -779,9 +765,7 @@ mod unix {
         assert_eq!(value["warnings"], baseline["warnings"]);
         assert_eq!(value["notices"], baseline["notices"]);
         assert_eq!(value["scope"], baseline["scope"]);
-        assert_eq!(baseline["schema_version"], 2);
         assert!(value["materials"][0]["patch"].is_object());
-        assert_eq!(value["schema_version"], 4);
         assert_eq!(links["repository"], "acme/widget");
         assert_eq!(links["status"], "complete");
         assert_eq!(links["issue_status"], "complete");
@@ -1392,7 +1376,6 @@ mod unix {
         assert!(!output.stdout.contains(&0x1b));
         let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         let links = &value["github_links"];
-        assert_eq!(value["schema_version"], 4);
         assert_eq!(links["issue_status"], "complete");
         assert_eq!(links["issues"].as_array().unwrap().len(), 3);
         assert_eq!(
@@ -1456,8 +1439,6 @@ mod unix {
             String::from_utf8_lossy(&output.stderr)
         );
         let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(baseline["schema_version"], 1);
-        assert_eq!(value["schema_version"], 4);
         assert_eq!(value["code_matches"], baseline["code_matches"]);
         assert_eq!(value["matched_count"], baseline["matched_count"]);
         assert_eq!(value["scope"], baseline["scope"]);
@@ -1509,7 +1490,6 @@ mod unix {
             String::from_utf8_lossy(&output.stderr)
         );
         let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(value["schema_version"], 6);
         assert_eq!(value["occurrences"], baseline["occurrences"]);
         assert_eq!(value["matched_count"], 2);
         assert_eq!(value["github_links"]["status"], "complete");
@@ -1574,8 +1554,6 @@ mod unix {
         let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
         assert_eq!(baseline["entries"].as_array().unwrap().len(), 1);
         assert_eq!(baseline["entries"][0]["commit_id"], second);
-        assert_eq!(value["schema_version"], 4);
-        assert_eq!(baseline["schema_version"], 2);
         assert_eq!(baseline["entries"][0]["patch"]["status"], "available");
         assert_eq!(value["entries"], baseline["entries"]);
         assert_eq!(value["total"], baseline["total"]);
@@ -1664,7 +1642,6 @@ mod unix {
 
         assert_eq!(output.status.code(), Some(0));
         let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(value["schema_version"], 4);
         assert!(value["entries"].as_array().unwrap().is_empty());
         assert_eq!(value["github_links"]["status"], "complete");
         assert!(
@@ -1680,10 +1657,7 @@ mod unix {
 #[cfg(unix)]
 mod remaining_query_links {
     use super::unix::{FakeGh, successful_response};
-    use super::{
-        LINKABLE_COMMANDS, expected_query_schema_version, indexed_material_repo,
-        returned_commit_ids,
-    };
+    use super::{LINKABLE_COMMANDS, indexed_material_repo, returned_commit_ids};
     #[test]
     fn queries_fetch_links_for_returned_commits_only() {
         let repo = indexed_material_repo();
@@ -1715,11 +1689,6 @@ mod remaining_query_links {
             assert_eq!(output.status.code(), Some(0), "{name}");
             let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
             assert_eq!(value["kind"], name, "{name}");
-            assert_eq!(
-                value["schema_version"],
-                expected_query_schema_version(name),
-                "{name}"
-            );
             assert!(
                 !returned_commit_ids(&value).is_empty(),
                 "{name}: expected returned commits"
@@ -1751,7 +1720,6 @@ mod remaining_query_links {
                 .as_object_mut()
                 .unwrap()
                 .remove("github_links");
-            without_links["schema_version"] = baseline["schema_version"].clone();
             assert_eq!(
                 without_links, baseline,
                 "{name}: Git materials stay unchanged"
@@ -1789,7 +1757,6 @@ mod remaining_query_links {
             );
 
             value.as_object_mut().unwrap().remove("github_links");
-            value["schema_version"] = baseline["schema_version"].clone();
             assert_eq!(
                 value, baseline,
                 "{name}: failed links must leave Git output unchanged"

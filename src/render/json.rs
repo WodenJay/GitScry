@@ -8,8 +8,6 @@ use crate::analysis::{
     Step, SymbolFact, SymbolSummary, WhyAttribution, WhyModification, WhySummary,
 };
 
-const SCHEMA_VERSION: u8 = 1;
-
 pub(crate) fn format_json_report(
     report: &Report,
     additional_warnings: &[String],
@@ -36,18 +34,6 @@ fn json_report<'a>(
 ) -> JsonReport<'a> {
     let warnings = additional_warnings.iter().chain(&report.warnings).collect();
     JsonReport {
-        schema_version: if report.kind == ReportKind::Why {
-            5
-        } else if github_links.is_some() {
-            4
-        } else if report.patch_mode
-            || report.kind == ReportKind::TraceFix
-            || report.kind == ReportKind::Failures
-        {
-            2
-        } else {
-            SCHEMA_VERSION
-        },
         kind: report_kind(report.kind),
         matched_count: report.matched_count,
         truncated: report.truncated,
@@ -110,7 +96,6 @@ struct JsonFailureReport<'a> {
 
 #[derive(Serialize)]
 struct JsonReport<'a> {
-    schema_version: u8,
     kind: &'static str,
     matched_count: usize,
     truncated: bool,

@@ -181,12 +181,6 @@ fn ordinary_commands_have_a_byte_exact_cli_contract() {
                     String::from_utf8_lossy(&output.stdout)
                 )
             });
-        let expected_schema = match name {
-            "why" => 5,
-            "trace-fix" | "failures" => 2,
-            _ => 1,
-        };
-        assert_eq!(value["schema_version"], expected_schema, "{name}");
         assert_eq!(value["kind"], expected_kind, "{name}");
         assert!(value["warnings"].is_array(), "{name}");
         assert!(value["notices"].is_array(), "{name}");

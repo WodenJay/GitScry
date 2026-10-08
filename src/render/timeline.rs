@@ -67,13 +67,6 @@ pub(super) fn format_json_report(
         .map(JsonEntry::from)
         .collect::<Vec<_>>();
     let output = JsonReport {
-        schema_version: if github_links.is_some() {
-            4
-        } else if report.patch_mode {
-            2
-        } else {
-            1
-        },
         kind: "timeline",
         target_revision: &report.target_revision,
         path: json::json_path(&report.path),
@@ -94,7 +87,6 @@ pub(super) fn format_json_report(
 
 #[derive(Serialize)]
 struct JsonReport<'a> {
-    schema_version: u8,
     kind: &'static str,
     target_revision: &'a str,
     path: JsonPath<'a>,

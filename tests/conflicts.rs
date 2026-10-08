@@ -1680,7 +1680,6 @@ fn reports_same_commit_callers_tests_and_bounded_matching_hunks() {
     );
     let materials = report["associated_materials"].as_array().unwrap();
     assert_eq!(materials.len(), 2);
-    assert_eq!(report["schema_version"], 7);
     assert_eq!(report["associated_materials_truncated"], false);
 
     let caller = materials

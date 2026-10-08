@@ -61,7 +61,6 @@ fn reports_contained_and_not_found_across_multiple_targets_in_requested_order() 
         "--json",
     ]));
 
-    assert_eq!(value["schema_version"], 2);
     assert_eq!(value["source"], side);
     assert_eq!(value["coverage_complete"], true);
     assert_eq!(value["warnings"].as_array().unwrap().len(), 0);

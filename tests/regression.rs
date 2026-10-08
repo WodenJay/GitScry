@@ -911,8 +911,6 @@ fn regression_patch_excerpts_prioritize_symptom_and_symbol_hunks() {
             "--json",
         ],
     );
-    assert_eq!(plain["schema_version"], 1);
-    assert_eq!(patched["schema_version"], 2);
     assert_eq!(patched["matched_count"], plain["matched_count"]);
     assert_eq!(
         patched["materials"].as_array().unwrap().len(),

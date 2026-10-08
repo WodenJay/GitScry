@@ -107,7 +107,7 @@ pub(super) fn format_json_report(
         "references_not_shown": pattern.references_not_shown,
     })).collect::<Vec<_>>();
     serde_json::to_string_pretty(&serde_json::json!({
-        "schema_version": 1, "kind": "patterns", "target_revision": report.target_revision,
+        "kind": "patterns", "target_revision": report.target_revision,
         "scope": report.scope.as_ref().map(json_scope), "eligible_seed_commits": report.eligible_seed_commits,
         "history_coverage": "eligible commits intersected with published cache",
         "excluded_merges": report.excluded_merges, "excluded_mass_changes": report.excluded_mass_changes,

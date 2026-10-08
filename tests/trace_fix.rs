@@ -292,7 +292,6 @@ fn trace_fix_patch_quotes_only_the_attributed_introducing_hunk() {
     let ordinary_json = repo.run(["trace-fix", &fix, "--path", "app.txt", "--json"]);
     assert_eq!(ordinary_json.status.code(), Some(0));
     let ordinary_json: serde_json::Value = serde_json::from_slice(&ordinary_json.stdout).unwrap();
-    assert_eq!(ordinary_json["schema_version"], 2);
     assert!(ordinary_json["materials"][0].get("patch").is_none());
 
     let text_patch = repo.run(["trace-fix", &fix, "--path", "app.txt", "--patch"]);
@@ -322,7 +321,6 @@ fn trace_fix_patch_quotes_only_the_attributed_introducing_hunk() {
         String::from_utf8_lossy(&json_patch.stderr)
     );
     let json_patch: serde_json::Value = serde_json::from_slice(&json_patch.stdout).unwrap();
-    assert_eq!(json_patch["schema_version"], 2);
     let material = &json_patch["materials"][0];
     let citations = material["citations"].as_array().unwrap();
     assert_eq!(citations[0]["oid"], introducing);
@@ -387,7 +385,6 @@ fn trace_fix_patch_uses_hunk_metadata_when_cached_text_is_missing() {
                 stdout.len()
             );
         });
-    assert_eq!(report["schema_version"], 2);
     let patch = &report["materials"][0]["patch"];
     assert_eq!(patch["status"], "available");
     assert_eq!(patch["hunks"].as_array().unwrap().len(), 1);
@@ -789,7 +786,6 @@ fn trace_fix_reports_equivalent_versions_in_independent_multibranch_scope() {
         String::from_utf8_lossy(&output.stderr)
     );
     let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(report["schema_version"], 2, "{report:#}");
     assert_eq!(report["matched_count"], 0);
     assert_eq!(report["materials"], serde_json::json!([]));
     assert_eq!(report["scope"]["from_rev"], introducing);

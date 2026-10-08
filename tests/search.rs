@@ -77,7 +77,6 @@ fn fragment_search_returns_complete_added_and_removed_spans() {
         String::from_utf8_lossy(&output.stderr)
     );
     let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(value["schema_version"], 6);
     assert_eq!(value["kind"], "code-fragment-search");
     assert_eq!(value["matched_count"], 2);
     assert_eq!(value["truncated"], false);

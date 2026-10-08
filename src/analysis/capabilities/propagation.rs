@@ -30,7 +30,6 @@ const MATCHING_METHOD_PATCH_ID: &str = "patch-id --verbatim";
 
 #[derive(Serialize)]
 pub(crate) struct Report {
-    pub(crate) schema_version: u8,
     pub(crate) source: String,
     pub(crate) targets: Vec<TargetResult>,
     pub(crate) coverage_complete: bool,
@@ -125,7 +124,6 @@ pub(crate) fn execute(source: &str, targets: &[String]) -> Result<Outcome, AppEr
         results.push(inspection.result);
     }
     let report = Report {
-        schema_version: 2,
         source: source.to_owned(),
         targets: results,
         coverage_complete,

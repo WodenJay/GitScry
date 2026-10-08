@@ -64,7 +64,7 @@ pub(super) fn format_json_report(
         }
     })).collect();
     serde_json::to_string(&serde_json::json!({
-        "schema_version": 6, "kind": "code-fragment-search",
+        "kind": "code-fragment-search",
         "scope": report.scope.as_ref().map(json::json_scope),
         "matched_count": report.matched_count, "truncated": report.truncated,
         "occurrences": occurrences, "warnings": warnings,
