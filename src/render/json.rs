@@ -2,9 +2,9 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::Serialize;
 
 use crate::analysis::{
-    Citation, CodeMatch, Confidence, Detail, Failure, Material, PatchEquivalence, PatchExcerpt,
-    PatchGrouping, PatchHunk, Relation, RelationSelector, Report, ReportKind, SearchScopeInfo,
-    Step, SymbolFact, SymbolSummary, WhyAttribution, WhyModification, WhySummary,
+    Citation, CodeMatch, Confidence, Detail, Failure, FailureLeads, Material, PatchEquivalence,
+    PatchExcerpt, PatchGrouping, PatchHunk, Relation, RelationSelector, Report, ReportKind,
+    SearchScopeInfo, Step, SymbolFact, SymbolSummary, WhyAttribution, WhyModification, WhySummary,
 };
 
 const SCHEMA_VERSION: u8 = 1;
@@ -20,7 +20,10 @@ pub(crate) fn format_json_report(
             5
         } else if github_links.is_some() {
             4
-        } else if report.patch_mode || report.kind == ReportKind::TraceFix {
+        } else if report.patch_mode
+            || report.kind == ReportKind::TraceFix
+            || report.kind == ReportKind::Failures
+        {
             2
         } else {
             SCHEMA_VERSION
@@ -29,6 +32,7 @@ pub(crate) fn format_json_report(
         matched_count: report.matched_count,
         truncated: report.truncated,
         patch_grouping: report.patch_grouping.as_ref(),
+        inverse_leads: report.inverse_leads.as_ref(),
         materials: (report.kind != ReportKind::Why)
             .then(|| report.materials.iter().map(json_material).collect()),
         target_related_modifications: report.why.as_ref().map(|why| {
@@ -86,6 +90,8 @@ struct JsonReport<'a> {
     truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     patch_grouping: Option<&'a PatchGrouping>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    inverse_leads: Option<&'a FailureLeads>,
     #[serde(skip_serializing_if = "Option::is_none")]
     materials: Option<Vec<JsonMaterial<'a>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -490,6 +496,8 @@ enum JsonDetail<'a> {
     Failure {
         reason: &'a Option<String>,
         retry: &'a Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        patch_equivalence: Option<&'a PatchEquivalence>,
     },
     Relation {
         co_change_count: usize,
@@ -612,7 +620,15 @@ fn json_detail(detail: &Detail) -> JsonDetail<'_> {
             steps: steps.iter().map(json_step).collect(),
             patch_equivalence: patch_equivalence.as_ref(),
         },
-        Detail::Failure(Failure { reason, retry }) => JsonDetail::Failure { reason, retry },
+        Detail::Failure(Failure {
+            reason,
+            retry,
+            patch_equivalence,
+        }) => JsonDetail::Failure {
+            reason,
+            retry,
+            patch_equivalence: patch_equivalence.as_ref(),
+        },
         Detail::Relation(Relation {
             co_change_count,
             proportion,

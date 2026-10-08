@@ -6,7 +6,8 @@ use crate::{
     git::{DeletedLine, TraceFixTarget},
 };
 
-use crate::analysis::capabilities::patch_search::{PatchMaterial, Report as PatchSearchReport};
+use crate::analysis::PatchMaterial;
+use crate::analysis::capabilities::patch_search::Report as PatchSearchReport;
 
 use super::super::provenance;
 use super::super::retrieval;

@@ -1,6 +1,7 @@
 use crate::analysis::{
-    Detail, Failure, Material, PatchExcerpt, PatchStatus, Relation, RelationSelector, Report,
-    ReportKind, SearchScopeInfo, Step, SymbolFact, SymbolSummary, WhyAttribution,
+    Detail, Failure, FailureLeads, InverseLead, Material, PatchEquivalence, PatchExcerpt,
+    PatchMaterial, PatchStatus, Relation, RelationSelector, Report, ReportKind, SearchScopeInfo,
+    Step, SymbolFact, SymbolSummary, WhyAttribution,
 };
 
 /// Printed when history does not state why an approach failed.
@@ -352,6 +353,9 @@ pub(crate) fn format_report(report: &Report) -> String {
             ));
         }
     }
+    if let Some(inverse_leads) = &report.inverse_leads {
+        render_failure_leads(&mut lines, inverse_leads);
+    }
     if let Some(selection) = &report.symbol_selection {
         lines.insert(0, format_symbol_selection(selection));
     }
@@ -649,6 +653,9 @@ fn render_detail(lines: &mut Vec<String>, detail: &Option<Detail>) {
             if let Some(retry) = failure.retry.as_deref() {
                 lines.push(format!("  retry: {retry}"));
             }
+            if let Some(group) = &failure.patch_equivalence {
+                render_patch_equivalence(lines, group, "  ");
+            }
         }
         Some(Detail::Relation(_)) => {}
         Some(Detail::TraceFix(trace)) => {
@@ -665,6 +672,130 @@ fn render_detail(lines: &mut Vec<String>, detail: &Option<Detail>) {
             }
         }
         None => {}
+    }
+}
+
+fn render_failure_leads(lines: &mut Vec<String>, report: &FailureLeads) {
+    lines.push(format!(
+        "Inverse patch leads ({} relationship{}):",
+        report.matched_count,
+        if report.matched_count == 1 { "" } else { "s" },
+    ));
+    lines.push(format!(
+        "  patch scan: {} of {} eligible commits checked; complete within cached scope: {}.",
+        report.checked_count,
+        report.eligible_count,
+        if report.complete { "yes" } else { "no" },
+    ));
+    for indeterminate in &report.indeterminate {
+        lines.push(format!(
+            "  indeterminate patch {}: {}",
+            short_oid(&indeterminate.commit_oid),
+            escape::subject(&indeterminate.reason),
+        ));
+    }
+    if report.leads.is_empty() {
+        lines.push("  No query-relevant inverse patch leads found.".to_owned());
+    }
+    for lead in &report.leads {
+        render_inverse_lead(lines, lead);
+    }
+    if report.returned_count < report.matched_count {
+        lines.push(format!(
+            "  Showing {} of {} inverse patch relationships; results truncated by --limit {}.",
+            report.returned_count, report.matched_count, report.limit,
+        ));
+    }
+}
+
+fn render_inverse_lead(lines: &mut Vec<String>, lead: &InverseLead) {
+    lines.push(format!(
+        "  Query patch {} — {}",
+        short_oid(&lead.query_material.commit_id),
+        escape::subject(&lead.query_material.subject),
+    ));
+    render_patch_provenance(lines, &lead.query_material);
+    render_patch_equivalence(
+        lines,
+        &lead.query_equivalence,
+        "    Query-side patch-equivalent versions",
+    );
+
+    lines.push(format!(
+        "  Inverse lead {} — {}",
+        short_oid(&lead.inverse_material.commit_id),
+        escape::subject(&lead.inverse_material.subject),
+    ));
+    lines.push(
+        "    complete-patch content relationship; not itself an explicit declaration of failure"
+            .to_owned(),
+    );
+    render_patch_provenance(lines, &lead.inverse_material);
+    render_patch_equivalence(
+        lines,
+        &lead.inverse_equivalence,
+        "    Inverse-side patch-equivalent versions",
+    );
+
+    if lead.explicit_reverts.is_empty() {
+        lines.push("    Explicit revert declarations connecting these versions: none.".to_owned());
+    } else {
+        for declaration in &lead.explicit_reverts {
+            lines.push(format!(
+                "    Explicit revert declaration: {} names target {}.",
+                short_oid(&declaration.revert_oid),
+                short_oid(&declaration.target_oid),
+            ));
+        }
+    }
+}
+
+fn render_patch_provenance(lines: &mut Vec<String>, material: &PatchMaterial) {
+    lines.push(format!(
+        "    complete patch; basis: {} (parent {})",
+        material.comparison_basis.unwrap_or("unknown"),
+        material.parent.as_deref().unwrap_or("root"),
+    ));
+    for path in &material.paths {
+        lines.push(format!("    path: {}", escape::path(path)));
+    }
+    for hunk in &material.patch {
+        lines.push(format!(
+            "    hunk {} in change {} (old {}+{}, new {}+{}):",
+            hunk.ordinal,
+            hunk.change_ordinal,
+            hunk.old_start,
+            hunk.old_lines,
+            hunk.new_start,
+            hunk.new_lines,
+        ));
+        for line in hunk
+            .text
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+        {
+            lines.push(format!("      {}", escape::code_line(line)));
+        }
+    }
+}
+
+fn render_patch_equivalence(lines: &mut Vec<String>, group: &PatchEquivalence, label: &str) {
+    lines.push(format!(
+        "{label}: {} members; complete within cached scope: {}.",
+        group.member_count,
+        if group.complete { "yes" } else { "no" },
+    ));
+    for member in &group.members {
+        let role = if member.oid == group.representative_oid {
+            "representative"
+        } else {
+            "equivalent member"
+        };
+        lines.push(format!(
+            "      {role}: {} {}",
+            short_oid(&member.oid),
+            escape::subject(&member.subject),
+        ));
     }
 }
 

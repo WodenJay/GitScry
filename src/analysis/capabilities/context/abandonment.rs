@@ -102,7 +102,11 @@ pub(super) fn compose(
                     .citations
                     .push(Citation::new(follow_oid, subject).noting("follow-up"));
             }
-            suggestion.abandonment = Some(Failure { reason, retry });
+            suggestion.abandonment = Some(Failure {
+                reason,
+                retry,
+                patch_equivalence: None,
+            });
         }
         suggestion.associated_current_paths.sort();
         // Tie time comes only from verified associations, never attached provenance.

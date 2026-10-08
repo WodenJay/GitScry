@@ -8,6 +8,7 @@ pub(in crate::analysis) mod code_search;
 pub(crate) mod conflicts;
 pub(crate) mod context;
 mod examples;
+mod failure_leads;
 mod failures;
 pub(crate) mod fate;
 pub(crate) mod followups;

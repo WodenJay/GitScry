@@ -21,6 +21,7 @@ pub(crate) struct Report {
     pub(crate) symbol_summary: Option<SymbolSummary>,
     pub(crate) symbol_selection: Option<Box<crate::git::SymbolSelection>>,
     pub(crate) relation_sources: Vec<super::capabilities::RelationSource>,
+    pub(crate) inverse_leads: Option<FailureLeads>,
 }
 pub(crate) enum RelationSelector {
     Line {
@@ -101,6 +102,102 @@ pub(crate) struct Material {
     pub(crate) citations: Vec<Citation>,
     pub(crate) detail: Option<Detail>,
     pub(crate) patch: Option<PatchExcerpt>,
+}
+
+#[derive(Clone, serde::Serialize)]
+pub(crate) struct PatchMaterial {
+    pub(crate) commit_id: String,
+    pub(crate) subject: String,
+    pub(crate) integrity: &'static str,
+    pub(crate) reason: Option<String>,
+    pub(crate) relation: Option<&'static str>,
+    pub(crate) normalization_version: i64,
+    pub(crate) comparison_basis: Option<&'static str>,
+    pub(crate) parent: Option<String>,
+    pub(crate) paths: Vec<Vec<u8>>,
+    pub(crate) patch: Vec<CompletePatchHunk>,
+    pub(crate) files: Vec<crate::analysis::patch_relationship::FilePatch>,
+}
+
+#[derive(Clone, serde::Serialize)]
+pub(crate) struct CompletePatchHunk {
+    pub(crate) change_ordinal: i64,
+    pub(crate) ordinal: i64,
+    pub(crate) old_start: i64,
+    pub(crate) old_lines: i64,
+    pub(crate) new_start: i64,
+    pub(crate) new_lines: i64,
+    pub(crate) text: Vec<u8>,
+}
+
+impl PatchMaterial {
+    pub(crate) fn from_complete(
+        commit_id: String,
+        message: &[u8],
+        patch: crate::analysis::patch_relationship::CompletePatch,
+        relation: Option<&'static str>,
+    ) -> Self {
+        Self {
+            commit_id,
+            subject: String::from_utf8_lossy(message)
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .to_owned(),
+            integrity: if patch.is_empty() {
+                "empty"
+            } else {
+                "complete"
+            },
+            reason: None,
+            relation,
+            normalization_version: crate::analysis::patch_relationship::NORMALIZATION_VERSION,
+            comparison_basis: Some(patch.comparison_basis),
+            parent: patch.parent,
+            paths: patch.paths,
+            files: patch.normalized,
+            patch: patch
+                .hunks
+                .into_iter()
+                .map(|hunk| CompletePatchHunk {
+                    change_ordinal: hunk.change_ordinal,
+                    ordinal: hunk.ordinal,
+                    old_start: hunk.old_start,
+                    old_lines: hunk.old_lines,
+                    new_start: hunk.new_start,
+                    new_lines: hunk.new_lines,
+                    text: hunk.text,
+                })
+                .collect(),
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+pub(crate) struct FailureLeads {
+    pub(crate) matched_count: usize,
+    pub(crate) returned_count: usize,
+    pub(crate) limit: usize,
+    pub(crate) eligible_count: usize,
+    pub(crate) checked_count: usize,
+    pub(crate) complete: bool,
+    pub(crate) indeterminate: Vec<PatchIndeterminate>,
+    pub(crate) leads: Vec<InverseLead>,
+}
+
+#[derive(serde::Serialize)]
+pub(crate) struct InverseLead {
+    pub(crate) query_material: PatchMaterial,
+    pub(crate) inverse_material: PatchMaterial,
+    pub(crate) query_equivalence: PatchEquivalence,
+    pub(crate) inverse_equivalence: PatchEquivalence,
+    pub(crate) explicit_reverts: Vec<ExplicitRevert>,
+}
+
+#[derive(serde::Serialize)]
+pub(crate) struct ExplicitRevert {
+    pub(crate) revert_oid: String,
+    pub(crate) target_oid: String,
 }
 
 /// Capability-specific material beyond the shared citation/basis shape.
@@ -192,6 +289,7 @@ pub(crate) struct Relation {
 pub(crate) struct Failure {
     pub(crate) reason: Option<String>,
     pub(crate) retry: Option<String>,
+    pub(crate) patch_equivalence: Option<PatchEquivalence>,
 }
 
 /// Strength of the supporting facts behind a piece of material.
@@ -247,6 +345,7 @@ pub(crate) fn report(
         materials,
         code_matches: Vec::new(),
         relation_sources: Vec::new(),
+        inverse_leads: None,
         matched_count,
         truncated: matched_count > limit,
         patch_grouping: None,
@@ -268,6 +367,7 @@ pub(crate) fn empty_report(kind: ReportKind) -> Report {
         materials: Vec::new(),
         code_matches: Vec::new(),
         relation_sources: Vec::new(),
+        inverse_leads: None,
         matched_count: 0,
         truncated: false,
         patch_grouping: None,

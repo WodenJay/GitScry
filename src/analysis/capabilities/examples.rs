@@ -91,7 +91,7 @@ pub(crate) fn run(
         };
         let candidate = &pool.candidates[index];
         candidate_oids.insert(candidate.oid.clone());
-        match inspect_and_cache(&repository, &fingerprints, &candidate.oid)? {
+        match patch_relationship::inspect_and_cache(&repository, &fingerprints, &candidate.oid)? {
             Ok(patch) if patch.is_empty() => empty_count += 1,
             Ok(patch) => {
                 let fingerprint = patch.fingerprint();
@@ -189,7 +189,11 @@ pub(crate) fn run(
 
         let (fingerprint, inspected) = match cached_hash {
             Some(fingerprint) => (fingerprint, None),
-            None => match inspect_and_cache(&repository, &fingerprints, &commit.oid)? {
+            None => match patch_relationship::inspect_and_cache(
+                &repository,
+                &fingerprints,
+                &commit.oid,
+            )? {
                 Ok(patch) if patch.is_empty() => continue,
                 Ok(patch) => (patch.fingerprint(), Some(patch)),
                 Err(reason) => {
@@ -207,7 +211,11 @@ pub(crate) fn run(
         // Fingerprints only narrow candidates; full normalized patches certify membership.
         let patch = match inspected {
             Some(patch) => patch,
-            None => match inspect_and_cache(&repository, &fingerprints, &commit.oid)? {
+            None => match patch_relationship::inspect_and_cache(
+                &repository,
+                &fingerprints,
+                &commit.oid,
+            )? {
                 Ok(patch) => patch,
                 Err(reason) => {
                     indeterminate.push(PatchIndeterminate {
@@ -284,35 +292,6 @@ pub(crate) fn run(
         indeterminate,
     });
     Ok(report)
-}
-
-fn inspect_and_cache(
-    repository: &Repository,
-    fingerprints: &PatchFingerprints,
-    oid: &str,
-) -> Result<Result<CompletePatch, String>, AppError> {
-    match patch_relationship::inspect(repository, oid) {
-        Ok(patch) => {
-            let fingerprint = patch.fingerprint();
-            let inverse_fingerprint = patch.inverse_fingerprint();
-            fingerprints.put(
-                oid,
-                if patch.is_empty() {
-                    "empty"
-                } else {
-                    "complete"
-                },
-                Some(&fingerprint),
-                Some(&inverse_fingerprint),
-                &patch.objects,
-            )?;
-            Ok(Ok(patch))
-        }
-        Err(reason) => {
-            fingerprints.put(oid, "indeterminate", None, None, &[])?;
-            Ok(Err(reason))
-        }
-    }
 }
 
 fn materialize(

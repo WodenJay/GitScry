@@ -1,7 +1,7 @@
 //! Existing-commit patch search; relationship certification stays shared.
 use crate::{
     analysis::{
-        patch_relationship::{self, CompletePatch},
+        PatchMaterial, patch_relationship,
         query::{Options, Outcome, PatchRelationSelection, QueryReport, scope},
     },
     app::AppError,
@@ -43,72 +43,6 @@ pub(crate) struct Indeterminate {
     pub(crate) commit_id: String,
     pub(crate) reason: String,
 }
-#[derive(Serialize)]
-pub(crate) struct PatchMaterial {
-    pub(crate) commit_id: String,
-    pub(crate) subject: String,
-    pub(crate) integrity: &'static str,
-    pub(crate) reason: Option<String>,
-    pub(crate) relation: Option<&'static str>,
-    pub(crate) normalization_version: i64,
-    pub(crate) comparison_basis: Option<&'static str>,
-    pub(crate) parent: Option<String>,
-    pub(crate) paths: Vec<Vec<u8>>,
-    pub(crate) patch: Vec<PatchHunk>,
-    pub(crate) files: Vec<patch_relationship::FilePatch>,
-}
-#[derive(Serialize)]
-pub(crate) struct PatchHunk {
-    pub(crate) change_ordinal: i64,
-    pub(crate) ordinal: i64,
-    pub(crate) old_start: i64,
-    pub(crate) old_lines: i64,
-    pub(crate) new_start: i64,
-    pub(crate) new_lines: i64,
-    pub(crate) text: Vec<u8>,
-}
-
-fn material(
-    oid: String,
-    message: &[u8],
-    patch: CompletePatch,
-    relation: Option<&'static str>,
-) -> PatchMaterial {
-    PatchMaterial {
-        commit_id: oid,
-        subject: String::from_utf8_lossy(message)
-            .lines()
-            .next()
-            .unwrap_or_default()
-            .to_owned(),
-        integrity: if patch.is_empty() {
-            "empty"
-        } else {
-            "complete"
-        },
-        reason: None,
-        relation,
-        normalization_version: patch_relationship::NORMALIZATION_VERSION,
-        comparison_basis: Some(patch.comparison_basis),
-        parent: patch.parent,
-        paths: patch.paths,
-        files: patch.normalized,
-        patch: patch
-            .hunks
-            .into_iter()
-            .map(|h| PatchHunk {
-                change_ordinal: h.change_ordinal,
-                ordinal: h.ordinal,
-                old_start: h.old_start,
-                old_lines: h.old_lines,
-                new_start: h.new_start,
-                new_lines: h.new_lines,
-                text: h.text,
-            })
-            .collect(),
-    }
-}
-
 pub(crate) fn execute(
     revision: String,
     cutoff: Option<usize>,
@@ -247,7 +181,7 @@ pub(crate) fn execute(
                         }
                     });
                     if let Some(relation) = relation {
-                        matches.push(material(
+                        matches.push(PatchMaterial::from_complete(
                             candidate.oid.clone(),
                             &candidate.message,
                             patch,
@@ -267,7 +201,7 @@ pub(crate) fn execute(
     }
     let query_message = session.commit_message(&query_oid)?.unwrap_or_default();
     let query = match query_patch {
-        Ok(patch) => material(query_oid.clone(), &query_message, patch, None),
+        Ok(patch) => PatchMaterial::from_complete(query_oid.clone(), &query_message, patch, None),
         Err(reason) => PatchMaterial {
             commit_id: query_oid,
             subject: String::from_utf8_lossy(&query_message)
