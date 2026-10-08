@@ -438,8 +438,9 @@ fn roots_empty_patches_merges_and_fetched_remote_tips_have_explicit_bases() {
     commit(&repo, "unrelated", b"extra\n", "Unique merge integration");
     assert_eq!(search(&repo, &query, &[])["matched_count"], 1);
     git(repo.dir.path(), ["checkout", "-b", "remote-only", &root]);
-    git(repo.dir.path(), ["cherry-pick", &query]);
+    git(repo.dir.path(), ["cherry-pick", "-x", &query]);
     let remote = repo.head();
+    assert_ne!(remote, query);
     git(
         repo.dir.path(),
         ["update-ref", "refs/remotes/origin/release", &remote],
@@ -479,10 +480,13 @@ fn matches_renames_and_modes_without_losing_operation_material() {
     git(repo.dir.path(), ["checkout", "main"]);
     git(repo.dir.path(), ["update-index", "--chmod=+x", "renamed"]);
     git(repo.dir.path(), ["commit", "-m", "Executable query"]);
+    // update-index changes only the index; synchronize Unix worktree permissions.
+    git(repo.dir.path(), ["reset", "--hard", "HEAD"]);
     let mode_query = repo.head();
     git(repo.dir.path(), ["checkout", "rename"]);
     git(repo.dir.path(), ["update-index", "--chmod=+x", "renamed"]);
     git(repo.dir.path(), ["commit", "-m", "Reapply mode"]);
+    git(repo.dir.path(), ["reset", "--hard", "HEAD"]);
     let value = search(&repo, &mode_query, &[]);
     assert_eq!(value["matched_count"], 1);
     assert_eq!(value["matches"][0]["files"][0]["new_mode"], "100755");
