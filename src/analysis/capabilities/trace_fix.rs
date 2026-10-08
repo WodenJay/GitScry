@@ -121,7 +121,9 @@ fn trace_fix_version_material(
         })
         .collect::<Vec<_>>();
     TraceFixVersionMaterial {
-        commit_id: material.commit_id,
+        commit_id: material
+            .commit_id
+            .expect("trace-fix query material is a historical commit"),
         subject: material.subject,
         integrity: material.integrity,
         reason: material.reason,

@@ -14,21 +14,32 @@ pub(super) fn format_json_report(
 pub(super) fn format_report(report: &Report) -> String {
     let mut output = format_patch_header(
         "Patch relationships",
-        &report.query.commit_id,
+        &query_label(&report.query),
         report.query.integrity,
         report.matched_count,
         report.returned_count,
         &report.scope,
     );
+    if let Some(source) = &report.query.source {
+        output.push_str(&format!(
+            "Current input: {}; base HEAD: {}.\n",
+            report.query.comparison_basis.unwrap_or("unknown"),
+            source.head.as_deref().unwrap_or("none (unborn repository)")
+        ));
+    }
     append_query_state(
         &mut output,
         report.query.integrity,
         report.query.reason.as_deref(),
+        report.query.source.is_some(),
     );
     for result in &report.matches {
         output.push_str(&format!(
             "\n{} — {}\n  {}; basis: {} ({})\n",
-            result.commit_id,
+            result
+                .commit_id
+                .as_deref()
+                .expect("historical patch result has a commit ID"),
             super::escape::subject(&result.subject),
             result.relation.unwrap_or("query"),
             result.comparison_basis.unwrap_or("unknown"),
@@ -56,6 +67,7 @@ pub(super) fn format_trace_fix_versions(report: &TraceFixVersions) -> String {
         &mut output,
         report.query.integrity,
         report.query.reason.as_deref(),
+        false,
     );
     for result in &report.matches {
         output.push_str(&format!(
@@ -100,6 +112,17 @@ pub(super) fn format_trace_fix_versions(report: &TraceFixVersions) -> String {
     output
 }
 
+fn query_label(query: &crate::analysis::capabilities::patch_search::PatchMaterial) -> String {
+    if let Some(commit_id) = query.commit_id.as_deref() {
+        return commit_id.to_owned();
+    }
+    match query.source.as_ref() {
+        Some(source) if source.staged => "staged current change".to_owned(),
+        Some(_) => "current working-tree change".to_owned(),
+        None => "unknown patch input".to_owned(),
+    }
+}
+
 fn format_patch_header(
     title: &str,
     query_commit_id: &str,
@@ -123,7 +146,12 @@ fn format_patch_header(
     )
 }
 
-fn append_query_state(output: &mut String, integrity: &str, reason: Option<&str>) {
+fn append_query_state(
+    output: &mut String,
+    integrity: &str,
+    reason: Option<&str>,
+    current_input: bool,
+) {
     if let Some(reason) = reason {
         output.push_str(&format!(
             "Query indeterminate: {}\n",
@@ -131,7 +159,13 @@ fn append_query_state(output: &mut String, integrity: &str, reason: Option<&str>
         ));
     }
     if integrity == "empty" {
-        output.push_str("No input patch: the selected commit has an empty patch.\n");
+        let message = if current_input {
+            "No input patch: the selected current change has no changes."
+        } else {
+            "No input patch: the selected commit has an empty patch."
+        };
+        output.push_str(message);
+        output.push('\n');
     }
 }
 

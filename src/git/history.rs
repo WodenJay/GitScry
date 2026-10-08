@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    ffi::OsString,
     fs,
     path::PathBuf,
 };
@@ -146,6 +147,88 @@ pub(super) fn read_trace_fix(git: &Git, fix_oid: &str) -> Result<PatchData, AppE
 
 pub(super) fn read_complete_patch(git: &Git, oid: &str) -> Result<PatchData, AppError> {
     read_patch_data(git, oid, true)
+}
+
+pub(super) fn read_current_patch(
+    git: &Git,
+    head: Option<&str>,
+    paths: &[Vec<u8>],
+) -> Result<(Vec<Change>, Vec<Hunk>), AppError> {
+    if paths.is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let pathspecs = paths.iter().map(|path| pathspec(path)).collect::<Vec<_>>();
+    let mut raw_args = [
+        "-c",
+        "diff.renameLimit=0",
+        "--literal-pathspecs",
+        "diff",
+        "--cached",
+        "-M",
+        "--raw",
+        "-z",
+        "--full-index",
+        "--abbrev=64",
+        "--no-relative",
+        "--ignore-submodules=none",
+        "--no-ext-diff",
+        "--no-textconv",
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect::<Vec<_>>();
+    raw_args.extend(head.map(OsString::from));
+    raw_args.push(OsString::from("--"));
+    raw_args.extend(pathspecs.iter().cloned());
+    let raw = git.output(raw_args, &[])?;
+    let known = HashSet::new();
+    let changes = parse_changes_with_default(&raw, &known, "current")?;
+    let type_change_ordinals = collect_type_change_ordinals(changes.iter());
+
+    let mut patch_args = [
+        "-c",
+        "diff.renameLimit=0",
+        "-c",
+        "diff.suppressBlankEmpty=false",
+        "-c",
+        "core.quotePath=true",
+        "--literal-pathspecs",
+        "diff",
+        "--cached",
+        "-M",
+        "-p",
+        "--full-index",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--unified=0",
+        "--inter-hunk-context=0",
+        "--diff-algorithm=myers",
+        "--no-indent-heuristic",
+        "--no-relative",
+        "--ignore-submodules=none",
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect::<Vec<_>>();
+    patch_args.extend(head.map(OsString::from));
+    patch_args.push(OsString::from("--"));
+    patch_args.extend(pathspecs);
+    let patch = git.output(patch_args, &[])?;
+    let hunks = parse_hunks_with_default(&patch, &known, &type_change_ordinals, "current")?;
+    Ok((changes, hunks))
+}
+
+fn pathspec(path: &[u8]) -> OsString {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        OsString::from_vec(path.to_vec())
+    }
+    #[cfg(not(unix))]
+    {
+        OsString::from(String::from_utf8_lossy(path).into_owned())
+    }
 }
 
 const MAX_FATE_RAW_DIFF_BYTES: usize = 16 * 1024 * 1024;
@@ -526,12 +609,20 @@ fn parse_commit(body: &[u8]) -> Result<(i64, &[u8], Vec<String>), AppError> {
 }
 
 fn parse_changes(bytes: &[u8], known: &HashSet<&str>) -> Result<Vec<Change>, AppError> {
+    parse_changes_with_default(bytes, known, "")
+}
+
+fn parse_changes_with_default(
+    bytes: &[u8],
+    known: &HashSet<&str>,
+    default_oid: &str,
+) -> Result<Vec<Change>, AppError> {
     let fields: Vec<&[u8]> = bytes
         .split(|byte| *byte == 0)
         .filter(|field| !field.is_empty())
         .collect();
     let mut index = 0;
-    let mut commit_oid = None;
+    let mut commit_oid = (!default_oid.is_empty()).then(|| default_oid.to_owned());
     let mut ordinal = 0;
     let mut changes = Vec::new();
     while index < fields.len() {
@@ -596,6 +687,15 @@ fn parse_hunks(
     known: &HashSet<&str>,
     type_change_ordinals: &HashMap<String, HashSet<i64>>,
 ) -> Result<Vec<Hunk>, AppError> {
+    parse_hunks_with_default(bytes, known, type_change_ordinals, "")
+}
+
+fn parse_hunks_with_default(
+    bytes: &[u8],
+    known: &HashSet<&str>,
+    type_change_ordinals: &HashMap<String, HashSet<i64>>,
+    default_oid: &str,
+) -> Result<Vec<Hunk>, AppError> {
     let known = known.iter().map(|oid| (*oid).to_owned()).collect();
     let mut hunks = Vec::new();
     let mut emit = |hunk| {
@@ -603,6 +703,7 @@ fn parse_hunks(
         Ok(())
     };
     let mut parser = PatchParser::new(&known, type_change_ordinals, &mut emit);
+    parser.commit_oid = (!default_oid.is_empty()).then(|| default_oid.to_owned());
     parser.feed(bytes)?;
     parser.finish()?;
     Ok(hunks)

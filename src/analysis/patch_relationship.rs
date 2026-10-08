@@ -1,5 +1,5 @@
 //! Strict complete-patch identity. Display excerpts never enter this module.
-use crate::git::{Change, Hunk, Repository};
+use crate::git::{Change, CurrentPatch, Hunk, Repository};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
@@ -155,31 +155,7 @@ pub(crate) fn inspect(repository: &Repository, oid: &str) -> Result<CompletePatc
         .map_err(|error| error.to_string())?;
     let changes = changes.ok_or("complete file operations unavailable")?;
     let hunks = hunks.ok_or("complete patch unavailable")?;
-    let mut files = Vec::new();
-    let mut paths = Vec::new();
-    for change in &changes {
-        let file = normalize_file(change, &hunks)?;
-        // Only patches whose file operations and content can be inverted are complete.
-        let _ = file.inverse()?;
-        paths.extend(
-            change
-                .old_path
-                .iter()
-                .chain(change.new_path.iter())
-                .cloned(),
-        );
-        files.push(file);
-    }
-    files.sort();
-    paths.sort();
-    paths.dedup();
-    if hunks.iter().any(|hunk| {
-        !changes
-            .iter()
-            .any(|change| change.ordinal == hunk.change_ordinal)
-    }) {
-        return Err("patch contains an unaccounted file operation".into());
-    }
+    let (files, paths) = normalize_changes(&changes, &hunks)?;
     let parent = commit.parents.first().cloned();
     let mut objects = vec![oid.to_owned()];
     objects.extend(parent.iter().cloned());
@@ -218,6 +194,56 @@ pub(crate) fn inspect(repository: &Repository, oid: &str) -> Result<CompletePatc
         paths,
         hunks,
     })
+}
+
+pub(crate) fn inspect_current(current: CurrentPatch) -> Result<CompletePatch, String> {
+    let (normalized, paths) = normalize_changes(&current.changes, &current.hunks)?;
+    let comparison_basis = match (current.staged, current.head.is_some()) {
+        (true, true) => "head_to_index",
+        (false, true) => "head_to_worktree",
+        (true, false) => "empty_tree_to_index",
+        (false, false) => "empty_tree_to_worktree",
+    };
+    Ok(CompletePatch {
+        normalized,
+        comparison_basis,
+        parent: current.head,
+        paths,
+        hunks: current.hunks,
+        objects: Vec::new(),
+    })
+}
+
+fn normalize_changes(
+    changes: &[Change],
+    hunks: &[Hunk],
+) -> Result<(Vec<FilePatch>, Vec<Vec<u8>>), String> {
+    let mut files = Vec::new();
+    let mut paths = Vec::new();
+    for change in changes {
+        let file = normalize_file(change, hunks)?;
+        // Only patches whose file operations and content can be inverted are complete.
+        let _ = file.inverse()?;
+        paths.extend(
+            change
+                .old_path
+                .iter()
+                .chain(change.new_path.iter())
+                .cloned(),
+        );
+        files.push(file);
+    }
+    files.sort();
+    paths.sort();
+    paths.dedup();
+    if hunks.iter().any(|hunk| {
+        !changes
+            .iter()
+            .any(|change| change.ordinal == hunk.change_ordinal)
+    }) {
+        return Err("patch contains an unaccounted file operation".into());
+    }
+    Ok((files, paths))
 }
 
 fn normalize_file(change: &Change, hunks: &[Hunk]) -> Result<FilePatch, String> {

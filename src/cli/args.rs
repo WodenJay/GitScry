@@ -411,7 +411,19 @@ Examples:
             ArgGroup::new("search-mode")
                 .required(true)
                 .multiple(false)
-                .args(["query", "code", "code_regex", "code_file", "patch_of"]),
+                .args([
+                    "query",
+                    "code",
+                    "code_regex",
+                    "code_file",
+                    "patch_of",
+                    "current_patch",
+                ]),
+        ),
+        group(
+            ArgGroup::new("patch-search-mode")
+                .args(["patch_of", "current_patch"])
+                .multiple(false),
         ),
         group(
             ArgGroup::new("code-mode")
@@ -419,9 +431,16 @@ Examples:
                 .args(["code", "code_regex", "code_file"]),
         ),
         about = "Search commit messages, paths, or changed code",
-        after_help = r#"Choose exactly one input: QUERY words, --code, --code-regex, --code-file, or --patch-of REVISION.
+        after_help = r#"Choose exactly one input: QUERY words, --code, --code-regex, --code-file, --patch-of REVISION, or --current-patch.
 Code modes search added/removed lines only, not unchanged context. --change and
 --path apply to code modes; --hybrid and --patch apply to QUERY mode only.
+
+--current-patch compares the net HEAD-to-working-tree change, including
+unignored untracked files. Add --staged to compare HEAD-to-index instead; this
+excludes unstaged edits and untracked files. Unresolved conflicts fail. Both
+modes use the current-change file selection, including additions, removals, and
+Git-detected renames. Historical revision/time filters narrow searched history,
+not the selected current patch.
 
 --path on QUERY mode restricts eligible commits to those whose recorded changed
 paths (old or new, including removals) match the given repository-relative file
@@ -445,14 +464,16 @@ bounds intersect and apply before ranking; --from-rev must be an ancestor of
 --to-rev (HEAD by default). Dates use YYYY-MM-DD; timestamps require Z or an explicit
 UTC offset. Missing history is reported. --limit bounds output, not scan work.
 
-Patch mode compares complete existing commit patches. Inverse matches must restore all query changes; partial reversals do not match. Results are grouped by relationship.
+Patch mode compares complete existing commit patches or the selected current change. Inverse matches must restore all query changes; partial reversals do not match. Results are grouped by relationship.
 It searches cached history reachable from all local and locally fetched remote branch tips, refreshing locally available history without fetching. --to-rev intersects that branch history; --from-rev excludes its ancestors, and time filters further narrow history. Filters never alter the query patch. Partial --path selection is rejected.
 Merges compare with their first parent; roots use their introduction patch. Changed bytes, whitespace, newline distinctions, paths, operations and modes must match; line numbers, unchanged context and file ordering are ignored. Binary, non-regular, missing or incomplete material is explicitly indeterminate.
-Empty patches and self-matches are excluded. Scope and completeness accompany JSON results. --limit bounds presentation only; there is no implicit scan cutoff. Use --max-patch-checks N for an explicit cutoff with disclosed unexamined coverage.
+Empty patches and historical self-matches are excluded. Scope and completeness accompany JSON results. --limit bounds presentation only; there is no implicit scan cutoff. Use --max-patch-checks N for an explicit cutoff with disclosed unexamined coverage.
 
 Examples:
   gitscry search --patch-of HEAD --json
   gitscry search --patch-of HEAD --relation inverse --json
+  gitscry search --current-patch --json
+  gitscry search --current-patch --staged --relation inverse --json
   gitscry search retry backoff --from-rev v1.0 --to-rev release
   gitscry search timeout --path packages/adapter-utils --limit 5
   gitscry search timeout --hybrid --path packages/a --path packages/b --limit 5
@@ -467,11 +488,17 @@ Examples:
         /// Compare an existing commit's complete patch against local branch history.
         #[arg(long, value_name = "REVISION", conflicts_with_all = ["paths", "hybrid", "change", "github_links", "github_repo"])]
         patch_of: Option<String>,
+        /// Compare the complete current change against local branch history.
+        #[arg(long, conflicts_with_all = ["paths", "hybrid", "change", "github_links", "github_repo", "patch"])]
+        current_patch: bool,
+        /// Compare HEAD with the index instead of the working tree; requires --current-patch.
+        #[arg(long, requires = "current_patch")]
+        staged: bool,
         /// Patch relationship to find (equivalent or inverse); omit to return both.
-        #[arg(long, requires = "patch_of", value_parser = ["equivalent", "inverse"])]
+        #[arg(long, requires = "patch-search-mode", value_parser = ["equivalent", "inverse"])]
         relation: Option<String>,
         /// Stop patch inspection after this many commits; disclose unexamined coverage.
-        #[arg(long, requires = "patch_of", value_parser = parse_limit)]
+        #[arg(long, requires = "patch-search-mode", value_parser = parse_limit)]
         max_patch_checks: Option<usize>,
         /// Add semantic search; first run gitscry index --semantic.
         #[arg(long, requires = "query", conflicts_with_all = ["code", "code_regex"])]

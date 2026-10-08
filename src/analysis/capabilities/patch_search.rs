@@ -1,4 +1,4 @@
-//! Existing-commit patch search; relationship certification stays shared.
+//! Complete-patch search; relationship certification stays shared.
 use crate::{
     analysis::{
         patch_relationship::{self, CompletePatch},
@@ -45,7 +45,9 @@ pub(crate) struct Indeterminate {
 }
 #[derive(Serialize)]
 pub(crate) struct PatchMaterial {
-    pub(crate) commit_id: String,
+    pub(crate) commit_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) source: Option<CurrentPatchSource>,
     pub(crate) subject: String,
     pub(crate) integrity: &'static str,
     pub(crate) reason: Option<String>,
@@ -57,6 +59,13 @@ pub(crate) struct PatchMaterial {
     pub(crate) patch: Vec<PatchHunk>,
     pub(crate) files: Vec<patch_relationship::FilePatch>,
 }
+#[derive(Serialize)]
+pub(crate) struct CurrentPatchSource {
+    pub(crate) kind: &'static str,
+    pub(crate) staged: bool,
+    pub(crate) head: Option<String>,
+}
+
 #[derive(Serialize)]
 pub(crate) struct PatchHunk {
     pub(crate) change_ordinal: i64,
@@ -75,7 +84,8 @@ fn material(
     relation: Option<&'static str>,
 ) -> PatchMaterial {
     PatchMaterial {
-        commit_id: oid,
+        commit_id: Some(oid),
+        source: None,
         subject: String::from_utf8_lossy(message)
             .lines()
             .next()
@@ -93,19 +103,62 @@ fn material(
         parent: patch.parent,
         paths: patch.paths,
         files: patch.normalized,
-        patch: patch
-            .hunks
-            .into_iter()
-            .map(|h| PatchHunk {
-                change_ordinal: h.change_ordinal,
-                ordinal: h.ordinal,
-                old_start: h.old_start,
-                old_lines: h.old_lines,
-                new_start: h.new_start,
-                new_lines: h.new_lines,
-                text: h.text,
-            })
-            .collect(),
+        patch: patch_hunks(patch.hunks),
+    }
+}
+
+fn patch_hunks(hunks: Vec<crate::git::Hunk>) -> Vec<PatchHunk> {
+    hunks
+        .into_iter()
+        .map(|h| PatchHunk {
+            change_ordinal: h.change_ordinal,
+            ordinal: h.ordinal,
+            old_start: h.old_start,
+            old_lines: h.old_lines,
+            new_start: h.new_start,
+            new_lines: h.new_lines,
+            text: h.text,
+        })
+        .collect()
+}
+
+fn current_material(
+    source: CurrentPatchSource,
+    patch: Result<CompletePatch, String>,
+) -> PatchMaterial {
+    match patch {
+        Ok(patch) => PatchMaterial {
+            commit_id: None,
+            source: Some(source),
+            subject: "Current change".to_owned(),
+            integrity: if patch.is_empty() {
+                "empty"
+            } else {
+                "complete"
+            },
+            reason: None,
+            relation: None,
+            normalization_version: patch_relationship::NORMALIZATION_VERSION,
+            comparison_basis: Some(patch.comparison_basis),
+            parent: patch.parent,
+            paths: patch.paths,
+            patch: patch_hunks(patch.hunks),
+            files: patch.normalized,
+        },
+        Err(reason) => PatchMaterial {
+            commit_id: None,
+            source: Some(source),
+            subject: "Current change".to_owned(),
+            integrity: "indeterminate",
+            reason: Some(reason),
+            relation: None,
+            normalization_version: patch_relationship::NORMALIZATION_VERSION,
+            comparison_basis: None,
+            parent: None,
+            paths: Vec::new(),
+            patch: Vec::new(),
+            files: Vec::new(),
+        },
     }
 }
 
@@ -115,12 +168,72 @@ pub(crate) fn execute(
     relation_selection: PatchRelationSelection,
     options: Options,
 ) -> Result<Outcome, AppError> {
+    execute_input(
+        PatchInput::Revision(revision),
+        cutoff,
+        relation_selection,
+        options,
+    )
+}
+
+pub(crate) fn execute_current(
+    staged: bool,
+    cutoff: Option<usize>,
+    relation_selection: PatchRelationSelection,
+    options: Options,
+) -> Result<Outcome, AppError> {
+    execute_input(
+        PatchInput::Current { staged },
+        cutoff,
+        relation_selection,
+        options,
+    )
+}
+
+enum PatchInput {
+    Revision(String),
+    Current { staged: bool },
+}
+
+fn execute_input(
+    input: PatchInput,
+    cutoff: Option<usize>,
+    relation_selection: PatchRelationSelection,
+    options: Options,
+) -> Result<Outcome, AppError> {
     let repository = Repository::discover()?;
-    let query_oid = repository.resolve_commit(&revision)?;
     let branch_tips = repository.patch_branch_tips()?;
+    let (query_oid, query_patch, current_source) = match input {
+        PatchInput::Revision(revision) => {
+            let oid = repository.resolve_commit(&revision)?;
+            (
+                Some(oid.clone()),
+                patch_relationship::inspect(&repository, &oid),
+                None,
+            )
+        }
+        PatchInput::Current { staged } => {
+            let current = repository.current_patch(staged)?;
+            let source = CurrentPatchSource {
+                kind: "current-change",
+                staged: current.staged,
+                head: current.head.clone(),
+            };
+            (
+                None,
+                patch_relationship::inspect_current(current),
+                Some(source),
+            )
+        }
+    };
     let mut refresh_tips: Vec<String> = branch_tips.iter().map(|(_, oid)| oid.clone()).collect();
-    // Keep the selected query distinct from historical filters.
-    refresh_tips.push(query_oid.clone());
+    // Keep a selected historical query distinct from historical filters.
+    refresh_tips.extend(query_oid.iter().cloned());
+    refresh_tips.extend(
+        current_source
+            .as_ref()
+            .and_then(|source| source.head.clone()),
+    );
     if let Some(revision) = &options.scope.to_rev {
         refresh_tips.push(repository.resolve_commit(revision)?);
     }
@@ -133,13 +246,12 @@ pub(crate) fn execute(
         .commits_scoped(&resolved.filter)?
         .into_iter()
         .rev()
-        .filter(|c| c.oid != query_oid)
+        .filter(|c| query_oid.as_ref().is_none_or(|oid| &c.oid != oid))
         .collect();
     let fingerprints = PatchFingerprints::open(
         &repository.common_dir,
         patch_relationship::NORMALIZATION_VERSION,
     )?;
-    let query_patch = patch_relationship::inspect(&repository, &query_oid);
     let query_hashes = query_patch
         .as_ref()
         .ok()
@@ -265,11 +377,19 @@ pub(crate) fn execute(
             }
         }
     }
-    let query_message = session.commit_message(&query_oid)?.unwrap_or_default();
-    let query = match query_patch {
-        Ok(patch) => material(query_oid.clone(), &query_message, patch, None),
-        Err(reason) => PatchMaterial {
-            commit_id: query_oid,
+    let query_is_empty = query_patch.as_ref().is_ok_and(CompletePatch::is_empty);
+    let query_is_complete = query_patch.is_ok();
+    let query_message = query_oid
+        .as_deref()
+        .map(|oid| session.commit_message(oid))
+        .transpose()?
+        .flatten()
+        .unwrap_or_default();
+    let query = match (query_oid, query_patch, current_source) {
+        (Some(oid), Ok(patch), _) => material(oid, &query_message, patch, None),
+        (Some(oid), Err(reason), _) => PatchMaterial {
+            commit_id: Some(oid),
+            source: None,
             subject: String::from_utf8_lossy(&query_message)
                 .lines()
                 .next()
@@ -285,12 +405,14 @@ pub(crate) fn execute(
             patch: Vec::new(),
             files: Vec::new(),
         },
+        (None, patch, Some(source)) => current_material(source, patch),
+        (None, _, None) => unreachable!("current patch source was not supplied"),
     };
     // Keep each relationship together while retaining its within-group history order.
     matches.sort_by_key(|material| material.relation != Some("equivalent"));
     let matched_count = matches.len();
     matches.truncate(options.limit);
-    let unexamined = if query.integrity == "empty" {
+    let unexamined = if query_is_empty {
         0
     } else {
         candidates.len() - checked
@@ -310,6 +432,7 @@ pub(crate) fn execute(
             since: resolved.report.since,
             until: resolved.report.until,
             coverage_complete: resolved.report.coverage_complete
+                && query_is_complete
                 && indeterminate.is_empty()
                 && unexamined == 0,
             eligible_count: candidates.len(),

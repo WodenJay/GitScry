@@ -1,7 +1,7 @@
 //! Read path/status signals without reading file contents or concatenating patches.
-use std::path::PathBuf;
+use std::{ffi::OsString, path::PathBuf};
 
-use super::Repository;
+use super::{Hunk, Repository, history::Change, process::Git};
 use crate::app::AppError;
 
 pub(crate) struct CurrentChange {
@@ -10,6 +10,20 @@ pub(crate) struct CurrentChange {
     pub(crate) changes: Vec<CurrentPath>,
     pub(crate) content: Vec<CurrentHunk>,
     pub(crate) content_omissions: Vec<ContentOmission>,
+}
+
+pub(crate) struct CurrentPatch {
+    pub(crate) staged: bool,
+    pub(crate) head: Option<String>,
+    pub(crate) changes: Vec<Change>,
+    pub(crate) hunks: Vec<Hunk>,
+}
+
+struct CurrentSelection {
+    head: Option<String>,
+    changes: Vec<CurrentPath>,
+    git: Git,
+    _temporary: Option<tempfile::TempDir>,
 }
 
 pub(crate) struct CurrentPath {
@@ -33,26 +47,64 @@ pub(crate) struct ContentOmission {
 }
 impl CurrentChange {
     pub(crate) fn paths(&self) -> Vec<Vec<u8>> {
-        let mut paths = self
-            .changes
-            .iter()
-            .flat_map(|change| change.old_path.iter().chain(&change.new_path).cloned())
-            .collect::<Vec<_>>();
-        paths.sort();
-        paths.dedup();
-        paths
+        selected_paths(&self.changes)
     }
 }
 
 impl Repository {
     pub(crate) fn current_change(&self, staged: bool) -> Result<CurrentChange, AppError> {
+        let selection = self.select_current_change(staged, false)?;
+        let (content, content_omissions) = super::current_content::read(
+            &selection.git,
+            &self.root,
+            &selection.changes,
+            staged,
+            selection.head.is_some(),
+        )?;
+        Ok(CurrentChange {
+            staged,
+            head: selection.head,
+            changes: selection.changes,
+            content,
+            content_omissions,
+        })
+    }
+
+    pub(crate) fn current_patch(&self, staged: bool) -> Result<CurrentPatch, AppError> {
+        let selection = self.select_current_change(staged, !staged)?;
+        let paths = selected_paths(&selection.changes);
+        if !staged && !paths.is_empty() {
+            let mut args = vec![
+                OsString::from("--literal-pathspecs"),
+                OsString::from("add"),
+                OsString::from("-A"),
+                OsString::from("--"),
+            ];
+            args.extend(paths.iter().map(|path| pathspec(path)));
+            selection.git.output(args, &[])?;
+        }
+        let (changes, hunks) =
+            super::history::read_current_patch(&selection.git, selection.head.as_deref(), &paths)?;
+        Ok(CurrentPatch {
+            staged,
+            head: selection.head,
+            changes,
+            hunks,
+        })
+    }
+
+    fn select_current_change(
+        &self,
+        staged: bool,
+        private_worktree_index: bool,
+    ) -> Result<CurrentSelection, AppError> {
         if !self
             .git
             .output(["ls-files", "--unmerged", "-z"], &[])?
             .is_empty()
         {
             return Err(AppError::input(
-                "unresolved conflicts; resolve the index before running context",
+                "unresolved conflicts; resolve the index before querying the current change",
             ));
         }
         let head = self
@@ -67,7 +119,7 @@ impl Repository {
         // Compare HEAD with the actual worktree even when a path was removed
         // from the real index. Merge HEAD into a private index copy to retain
         // sparse-checkout flags without modifying the caller's index.
-        let temporary = if !staged && head.is_some() {
+        let temporary = if !staged && (head.is_some() || private_worktree_index) {
             Some(tempfile::tempdir().map_err(|error| {
                 AppError::operational(format!("error: creating temporary change index: {error}"))
             })?)
@@ -83,7 +135,7 @@ impl Repository {
             );
             let git = self.git.with_index(index.clone());
             match std::fs::copy(source_index, &index) {
-                Ok(_) => {
+                Ok(_) if head.is_some() => {
                     git.output(
                         [
                             "-c",
@@ -96,9 +148,11 @@ impl Repository {
                         &[],
                     )?;
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound && head.is_some() => {
                     git.output(["-c", "core.splitIndex=false", "read-tree", "HEAD"], &[])?;
                 }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => {
                     return Err(AppError::operational(format!(
                         "error: copying temporary change index: {error}"
@@ -161,15 +215,34 @@ impl Repository {
                 .cmp(&b.new_path.as_ref().or(b.old_path.as_ref()))
                 .then_with(|| a.status.cmp(&b.status))
         });
-        let (content, content_omissions) =
-            super::current_content::read(&git, &self.root, &changes, staged, head.is_some())?;
-        Ok(CurrentChange {
-            staged,
+        Ok(CurrentSelection {
             head,
             changes,
-            content,
-            content_omissions,
+            git,
+            _temporary: temporary,
         })
+    }
+}
+
+fn selected_paths(changes: &[CurrentPath]) -> Vec<Vec<u8>> {
+    let mut paths = changes
+        .iter()
+        .flat_map(|change| change.old_path.iter().chain(&change.new_path).cloned())
+        .collect::<Vec<_>>();
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+fn pathspec(path: &[u8]) -> OsString {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        OsString::from_vec(path.to_vec())
+    }
+    #[cfg(not(unix))]
+    {
+        OsString::from(String::from_utf8_lossy(path).into_owned())
     }
 }
 

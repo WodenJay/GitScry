@@ -197,6 +197,8 @@ pub(crate) fn execute(
         Command::Search {
             query,
             patch_of,
+            current_patch,
+            staged,
             max_patch_checks,
             code,
             relation,
@@ -227,24 +229,29 @@ pub(crate) fn execute(
                 None => PatchRelationSelection::Both,
                 Some(_) => unreachable!("clap validates patch relation values"),
             };
-            let request = match (query, code, code_regex, code_file, patch_of) {
-                (None, None, None, None, Some(revision)) => Request::PatchSearch {
+            let request = match (query, code, code_regex, code_file, patch_of, current_patch) {
+                (None, None, None, None, Some(revision), false) => Request::PatchSearch {
                     revision,
                     max_patch_checks,
                     relation,
                 },
-                (Some(words), None, None, None, None) => Request::Search { words, hybrid },
-                (None, Some(query), None, None, None) => Request::CodeSearch {
+                (None, None, None, None, None, true) => Request::CurrentPatchSearch {
+                    staged,
+                    max_patch_checks,
+                    relation,
+                },
+                (Some(words), None, None, None, None, false) => Request::Search { words, hybrid },
+                (None, Some(query), None, None, None, false) => Request::CodeSearch {
                     query,
                     path: code_path,
                     direction,
                 },
-                (None, None, Some(pattern), None, None) => Request::CodeRegexSearch {
+                (None, None, Some(pattern), None, None, false) => Request::CodeRegexSearch {
                     pattern,
                     path: code_path,
                     direction,
                 },
-                (None, None, None, Some(input), None) => Request::FragmentSearch {
+                (None, None, None, Some(input), None, false) => Request::FragmentSearch {
                     input,
                     path: code_path,
                     direction,

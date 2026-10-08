@@ -40,6 +40,239 @@ fn search_with_relation(
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
+fn search_current(repo: &TestRepo, extra: &[&str]) -> Value {
+    let mut args = vec!["search", "--current-patch", "--json"];
+    args.extend_from_slice(extra);
+    let output = TestRepo::command_at(repo.dir.path(), repo.user_data_dir())
+        .args(args)
+        .env("GITSCRY_FULL_OUTPUT", "1")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).unwrap()
+}
+
+#[test]
+fn current_patch_search_uses_net_worktree_state_not_staged_then_unstaged_diff() {
+    let repo = TestRepo::new();
+    let base = commit(&repo, "file", b"old\n", "Base");
+    let query = commit(&repo, "file", b"wanted\n", "Historical patch");
+    repo.index();
+    git(repo.dir.path(), ["checkout", "-b", "current", &base]);
+    fs::write(repo.dir.path().join("file"), b"staged\n").unwrap();
+    git(repo.dir.path(), ["add", "file"]);
+    fs::write(repo.dir.path().join("file"), b"wanted\n").unwrap();
+
+    let report = search_current(&repo, &[]);
+    assert_eq!(report["query"]["source"]["kind"], "current-change");
+    assert_eq!(report["query"]["source"]["staged"], false);
+    assert_eq!(report["query"]["source"]["head"], base);
+    assert_eq!(report["query"]["comparison_basis"], "head_to_worktree");
+    assert!(report["query"]["commit_id"].is_null());
+    assert_eq!(report["query"]["integrity"], "complete");
+    assert_eq!(report["matched_count"], 1);
+    assert_eq!(report["matches"][0]["commit_id"], query);
+}
+
+#[test]
+fn current_patch_staged_mode_uses_index_only_and_reports_inverse_relationships() {
+    let repo = TestRepo::new();
+    let base = commit(&repo, "file", b"old\n", "Base");
+    let staged_query = commit(&repo, "file", b"staged\n", "Staged query");
+    repo.index();
+    git(repo.dir.path(), ["checkout", "-b", "worktree-query", &base]);
+    let worktree_query = commit(&repo, "file", b"worktree\n", "Worktree query");
+    repo.index();
+    git(repo.dir.path(), ["checkout", "-b", "current", &base]);
+    fs::write(repo.dir.path().join("file"), b"staged\n").unwrap();
+    git(repo.dir.path(), ["add", "file"]);
+    fs::write(repo.dir.path().join("file"), b"worktree\n").unwrap();
+    fs::write(repo.dir.path().join("untracked"), b"new\n").unwrap();
+
+    let staged = search_current(&repo, &["--staged"]);
+    assert_eq!(staged["query"]["source"]["staged"], true);
+    assert_eq!(staged["query"]["comparison_basis"], "head_to_index");
+    assert_eq!(staged["query"]["files"].as_array().unwrap().len(), 1);
+    assert_eq!(staged["matches"][0]["commit_id"], staged_query);
+    let staged_text = repo.run(["search", "--current-patch", "--staged"]);
+    assert!(staged_text.status.success());
+    let staged_text = String::from_utf8(staged_text.stdout).unwrap();
+    assert!(
+        staged_text.contains(&format!(
+            "Current input: head_to_index; base HEAD: {base}.\n"
+        )),
+        "{staged_text}"
+    );
+    fs::remove_file(repo.dir.path().join("untracked")).unwrap();
+
+    let worktree = search_current(&repo, &[]);
+    assert_eq!(worktree["query"]["source"]["staged"], false);
+    assert_eq!(worktree["query"]["comparison_basis"], "head_to_worktree");
+    assert_eq!(worktree["matches"][0]["commit_id"], worktree_query);
+    let text = repo.run(["search", "--current-patch"]);
+    assert!(text.status.success());
+    let text = String::from_utf8(text.stdout).unwrap();
+    assert!(
+        text.contains(&format!(
+            "Current input: head_to_worktree; base HEAD: {base}.\n"
+        )),
+        "{text}"
+    );
+    assert_eq!(git_stdout(repo.dir.path(), ["show", ":file"]), "staged");
+}
+
+#[test]
+fn current_patch_preserves_add_delete_rename_and_scopes_only_historical_candidates() {
+    let repo = TestRepo::new();
+    commit(&repo, "initial", b"base\n", "Initial");
+    fs::write(repo.dir.path().join("removed"), b"old\n").unwrap();
+    fs::write(repo.dir.path().join("old-name"), b"rename bytes\n").unwrap();
+    git(repo.dir.path(), ["add", "-A"]);
+    git(repo.dir.path(), ["commit", "-m", "Base operations"]);
+    let base = repo.head();
+    fs::write(repo.dir.path().join("added"), b"new\n").unwrap();
+    fs::remove_file(repo.dir.path().join("removed")).unwrap();
+    fs::rename(
+        repo.dir.path().join("old-name"),
+        repo.dir.path().join("new-name"),
+    )
+    .unwrap();
+    git(repo.dir.path(), ["add", "-A"]);
+    git(repo.dir.path(), ["commit", "-m", "Query operations"]);
+    let query = repo.head();
+    repo.index();
+    git(repo.dir.path(), ["checkout", "-b", "current", &base]);
+    fs::write(repo.dir.path().join("added"), b"new\n").unwrap();
+    fs::remove_file(repo.dir.path().join("removed")).unwrap();
+    fs::rename(
+        repo.dir.path().join("old-name"),
+        repo.dir.path().join("new-name"),
+    )
+    .unwrap();
+
+    let report = search_current(&repo, &[]);
+    assert_eq!(report["matches"][0]["commit_id"], query);
+    let mut operations = report["query"]["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|file| file["operation"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    operations.sort_unstable();
+    assert_eq!(operations, ["A", "D", "R"]);
+
+    let scope_args = ["--to-rev", base.as_str()];
+    let narrowed = search_current(&repo, &scope_args);
+    assert_eq!(narrowed["matched_count"], 0);
+    assert_eq!(narrowed["query"]["files"], report["query"]["files"]);
+}
+
+#[test]
+fn current_patch_rejects_conflicting_options() {
+    let repo = TestRepo::new();
+    commit(&repo, "file", b"base\n", "Base");
+    repo.index();
+    for args in [
+        vec!["search", "--current-patch", "--path", "file"],
+        vec!["search", "--current-patch", "--patch"],
+        vec!["search", "--current-patch", "--patch-of", "HEAD"],
+        vec!["search", "--staged"],
+    ] {
+        let output = TestRepo::command_at(repo.dir.path(), repo.user_data_dir())
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+    }
+}
+
+#[test]
+fn current_patch_rejects_unresolved_conflicts() {
+    let repo = TestRepo::new();
+    let base = commit(&repo, "file", b"base\n", "Base");
+    repo.index();
+    git(repo.dir.path(), ["checkout", "-b", "side", &base]);
+    commit(&repo, "file", b"side\n", "Side");
+    repo.index();
+    git(repo.dir.path(), ["checkout", "main"]);
+    commit(&repo, "file", b"main\n", "Main");
+    let merge = git_command(repo.dir.path())
+        .args(["merge", "side"])
+        .output()
+        .unwrap();
+    assert!(!merge.status.success());
+
+    let output = TestRepo::command_at(repo.dir.path(), repo.user_data_dir())
+        .args(["search", "--current-patch"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("unresolved conflicts; resolve the index")
+    );
+}
+
+#[test]
+fn current_patch_search_returns_inverse_relationships() {
+    let repo = TestRepo::new();
+    let base = commit(&repo, "file", b"old\n", "Base");
+    let forward = commit(&repo, "file", b"new\n", "Forward query");
+    repo.index();
+    git(repo.dir.path(), ["checkout", "-b", "current", &forward]);
+    fs::write(repo.dir.path().join("file"), b"old\n").unwrap();
+
+    let inverse = search_current(&repo, &["--relation", "inverse"]);
+    assert_eq!(inverse["matched_count"], 1);
+    assert_eq!(inverse["matches"][0]["commit_id"], forward);
+    assert_eq!(inverse["matches"][0]["relation"], "inverse");
+    assert_eq!(inverse["query"]["source"]["head"], forward);
+    assert_ne!(forward, base);
+}
+
+#[test]
+fn current_patch_reports_empty_and_incomplete_inputs_without_matches() {
+    let repo = TestRepo::new();
+    commit(&repo, "file", b"old\n", "Base");
+    repo.index();
+    let empty = search_current(&repo, &[]);
+    assert_eq!(empty["query"]["integrity"], "empty");
+    assert_eq!(empty["query"]["commit_id"], Value::Null);
+    assert_eq!(empty["matched_count"], 0);
+    assert_eq!(empty["scope"]["unexamined_count"], 0);
+
+    let output = TestRepo::command_at(repo.dir.path(), repo.user_data_dir())
+        .args(["search", "--current-patch"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .contains("No input patch: the selected current change has no changes.")
+    );
+
+    let base = repo.head();
+    let binary = commit(&repo, "file", b"\0binary\0", "Binary query");
+    repo.index();
+    git(repo.dir.path(), ["checkout", "-b", "incomplete", &base]);
+    fs::write(repo.dir.path().join("file"), b"\0binary\0").unwrap();
+    let incomplete = search_current(&repo, &[]);
+    assert_eq!(incomplete["query"]["integrity"], "indeterminate");
+    assert_eq!(incomplete["query"]["commit_id"], Value::Null);
+    assert!(
+        incomplete["query"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("binary or unavailable changed content")
+    );
+    assert_eq!(incomplete["matched_count"], 0);
+    assert_eq!(incomplete["scope"]["coverage_complete"], false);
+    assert_ne!(binary, base);
+}
+
 #[test]
 fn discovers_complete_equivalents_on_other_branches_without_self_matches() {
     let repo = TestRepo::new();
