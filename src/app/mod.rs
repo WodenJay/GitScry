@@ -556,6 +556,9 @@ pub(crate) fn execute(
             unreachable!("propagation has no GitHub link option")
         }
         query::QueryReport::Analysis(report) => github::fetch(report, explicit_repo.as_deref()),
+        query::QueryReport::Failures(report) => {
+            github::fetch(&report.report, explicit_repo.as_deref())
+        }
         query::QueryReport::FragmentSearch(report) => {
             github::fetch_fragments(report, explicit_repo.as_deref())
         }

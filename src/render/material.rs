@@ -1,7 +1,11 @@
+use crate::analysis::capabilities::{
+    FailureReport,
+    failure_leads::{FailureLeads, InverseLead},
+};
 use crate::analysis::{
-    Detail, Failure, FailureLeads, InverseLead, Material, PatchEquivalence, PatchExcerpt,
-    PatchMaterial, PatchStatus, Relation, RelationSelector, Report, ReportKind, SearchScopeInfo,
-    Step, SymbolFact, SymbolSummary, WhyAttribution,
+    Detail, Failure, Material, PatchEquivalence, PatchExcerpt, PatchMaterial, PatchStatus,
+    Relation, RelationSelector, Report, ReportKind, SearchScopeInfo, Step, SymbolFact,
+    SymbolSummary, WhyAttribution,
 };
 
 /// Printed when history does not state why an approach failed.
@@ -291,6 +295,14 @@ fn format_code_report(report: &Report) -> String {
 }
 
 pub(crate) fn format_report(report: &Report) -> String {
+    format_material_report(report, None)
+}
+
+pub(crate) fn format_failure_report(report: &FailureReport) -> String {
+    format_material_report(&report.report, Some(&report.inverse_leads))
+}
+
+fn format_material_report(report: &Report, failure_leads: Option<&FailureLeads>) -> String {
     let Some(kind) = GenericReportKind::from_report_kind(report.kind) else {
         return format_why_report(report);
     };
@@ -353,7 +365,7 @@ pub(crate) fn format_report(report: &Report) -> String {
             ));
         }
     }
-    if let Some(inverse_leads) = &report.inverse_leads {
+    if let Some(inverse_leads) = failure_leads {
         render_failure_leads(&mut lines, inverse_leads);
     }
     if let Some(selection) = &report.symbol_selection {

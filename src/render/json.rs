@@ -1,10 +1,11 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::Serialize;
 
+use crate::analysis::capabilities::{FailureReport, failure_leads::FailureLeads};
 use crate::analysis::{
-    Citation, CodeMatch, Confidence, Detail, Failure, FailureLeads, Material, PatchEquivalence,
-    PatchExcerpt, PatchGrouping, PatchHunk, Relation, RelationSelector, Report, ReportKind,
-    SearchScopeInfo, Step, SymbolFact, SymbolSummary, WhyAttribution, WhyModification, WhySummary,
+    Citation, CodeMatch, Confidence, Detail, Failure, Material, PatchEquivalence, PatchExcerpt,
+    PatchGrouping, PatchHunk, Relation, RelationSelector, Report, ReportKind, SearchScopeInfo,
+    Step, SymbolFact, SymbolSummary, WhyAttribution, WhyModification, WhySummary,
 };
 
 const SCHEMA_VERSION: u8 = 1;
@@ -14,8 +15,27 @@ pub(crate) fn format_json_report(
     additional_warnings: &[String],
     github_links: Option<&crate::github::LinksReport>,
 ) -> Result<String, serde_json::Error> {
+    serde_json::to_string(&json_report(report, additional_warnings, github_links))
+}
+
+pub(crate) fn format_failure_json_report(
+    report: &FailureReport,
+    additional_warnings: &[String],
+    github_links: Option<&crate::github::LinksReport>,
+) -> Result<String, serde_json::Error> {
+    serde_json::to_string(&JsonFailureReport {
+        report: json_report(&report.report, additional_warnings, github_links),
+        inverse_leads: &report.inverse_leads,
+    })
+}
+
+fn json_report<'a>(
+    report: &'a Report,
+    additional_warnings: &'a [String],
+    github_links: Option<&'a crate::github::LinksReport>,
+) -> JsonReport<'a> {
     let warnings = additional_warnings.iter().chain(&report.warnings).collect();
-    serde_json::to_string(&JsonReport {
+    JsonReport {
         schema_version: if report.kind == ReportKind::Why {
             5
         } else if github_links.is_some() {
@@ -32,7 +52,6 @@ pub(crate) fn format_json_report(
         matched_count: report.matched_count,
         truncated: report.truncated,
         patch_grouping: report.patch_grouping.as_ref(),
-        inverse_leads: report.inverse_leads.as_ref(),
         materials: (report.kind != ReportKind::Why)
             .then(|| report.materials.iter().map(json_material).collect()),
         target_related_modifications: report.why.as_ref().map(|why| {
@@ -79,7 +98,14 @@ pub(crate) fn format_json_report(
                 limitations: &target.limitations,
             }
         }),
-    })
+    }
+}
+
+#[derive(Serialize)]
+struct JsonFailureReport<'a> {
+    #[serde(flatten)]
+    report: JsonReport<'a>,
+    inverse_leads: &'a FailureLeads,
 }
 
 #[derive(Serialize)]
@@ -90,8 +116,6 @@ struct JsonReport<'a> {
     truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     patch_grouping: Option<&'a PatchGrouping>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    inverse_leads: Option<&'a FailureLeads>,
     #[serde(skip_serializing_if = "Option::is_none")]
     materials: Option<Vec<JsonMaterial<'a>>>,
     #[serde(skip_serializing_if = "Option::is_none")]

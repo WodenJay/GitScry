@@ -18,6 +18,11 @@ struct Entry {
     confidence: Confidence,
 }
 
+pub(crate) struct FailureReport {
+    pub(crate) report: Report,
+    pub(crate) inverse_leads: super::failure_leads::FailureLeads,
+}
+
 /// A candidate must share at least one intent term before its paths count as material.
 pub(super) const MIN_SHARED_TERMS: usize = 1;
 /// History recording the revert itself is the strongest failure material there is.
@@ -30,11 +35,12 @@ pub(crate) fn run(
     intent: &Intent,
     limit: usize,
     scope: Option<&SearchFilter>,
-) -> Result<Report, AppError> {
+) -> Result<FailureReport, AppError> {
     let Some(pool) = retrieval::pool(session, intent, limit, scope)? else {
-        let mut report = super::super::empty_report(ReportKind::Failures);
-        report.inverse_leads = Some(super::failure_leads::empty(limit));
-        return Ok(report);
+        return Ok(FailureReport {
+            report: super::super::empty_report(ReportKind::Failures),
+            inverse_leads: super::failure_leads::empty(limit),
+        });
     };
     let reverts = retrieval::reverts(session, scope)?;
     // Which commit history records as reverting each candidate. Computing this once keeps
@@ -166,7 +172,8 @@ pub(crate) fn run(
         failure.patch_equivalence = patch_scan.equivalences.remove(&citation.oid);
     }
 
-    let mut report = super::super::report(ReportKind::Failures, materials, matched_count, limit);
-    report.inverse_leads = Some(patch_scan.report);
-    Ok(report)
+    Ok(FailureReport {
+        report: super::super::report(ReportKind::Failures, materials, matched_count, limit),
+        inverse_leads: patch_scan.report,
+    })
 }

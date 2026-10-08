@@ -21,7 +21,6 @@ pub(crate) struct Report {
     pub(crate) symbol_summary: Option<SymbolSummary>,
     pub(crate) symbol_selection: Option<Box<crate::git::SymbolSelection>>,
     pub(crate) relation_sources: Vec<super::capabilities::RelationSource>,
-    pub(crate) inverse_leads: Option<FailureLeads>,
 }
 pub(crate) enum RelationSelector {
     Line {
@@ -173,33 +172,6 @@ impl PatchMaterial {
     }
 }
 
-#[derive(serde::Serialize)]
-pub(crate) struct FailureLeads {
-    pub(crate) matched_count: usize,
-    pub(crate) returned_count: usize,
-    pub(crate) limit: usize,
-    pub(crate) eligible_count: usize,
-    pub(crate) checked_count: usize,
-    pub(crate) complete: bool,
-    pub(crate) indeterminate: Vec<PatchIndeterminate>,
-    pub(crate) leads: Vec<InverseLead>,
-}
-
-#[derive(serde::Serialize)]
-pub(crate) struct InverseLead {
-    pub(crate) query_material: PatchMaterial,
-    pub(crate) inverse_material: PatchMaterial,
-    pub(crate) query_equivalence: PatchEquivalence,
-    pub(crate) inverse_equivalence: PatchEquivalence,
-    pub(crate) explicit_reverts: Vec<ExplicitRevert>,
-}
-
-#[derive(serde::Serialize)]
-pub(crate) struct ExplicitRevert {
-    pub(crate) revert_oid: String,
-    pub(crate) target_oid: String,
-}
-
 /// Capability-specific material beyond the shared citation/basis shape.
 #[derive(serde::Serialize)]
 pub(crate) struct PatchGrouping {
@@ -345,7 +317,6 @@ pub(crate) fn report(
         materials,
         code_matches: Vec::new(),
         relation_sources: Vec::new(),
-        inverse_leads: None,
         matched_count,
         truncated: matched_count > limit,
         patch_grouping: None,
@@ -367,7 +338,6 @@ pub(crate) fn empty_report(kind: ReportKind) -> Report {
         materials: Vec::new(),
         code_matches: Vec::new(),
         relation_sources: Vec::new(),
-        inverse_leads: None,
         matched_count: 0,
         truncated: false,
         patch_grouping: None,

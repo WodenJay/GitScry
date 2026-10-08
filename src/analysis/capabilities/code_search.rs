@@ -241,7 +241,6 @@ fn run_with_scope(
         materials: Vec::new(),
         code_matches: matches.into_iter().map(|ordered| ordered.matched).collect(),
         relation_sources: Vec::new(),
-        inverse_leads: None,
         matched_count,
         truncated: matched_count > limit,
         patch_grouping: None,

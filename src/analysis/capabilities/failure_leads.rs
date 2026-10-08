@@ -4,10 +4,7 @@ use std::collections::{HashMap, HashSet};
 use crate::{
     analysis::{
         capabilities::failures::MIN_SHARED_TERMS,
-        material::{
-            ExplicitRevert, FailureLeads, InverseLead, PatchEquivalence, PatchGroupMember,
-            PatchIndeterminate, PatchMaterial,
-        },
+        material::{PatchEquivalence, PatchGroupMember, PatchIndeterminate, PatchMaterial},
         patch_relationship::{self, CompletePatch},
         retrieval::{self, RevertIndex},
     },
@@ -15,6 +12,33 @@ use crate::{
     cache::{PatchFingerprints, QuerySession, SearchFilter},
     git::Repository,
 };
+
+#[derive(serde::Serialize)]
+pub(crate) struct FailureLeads {
+    pub(crate) matched_count: usize,
+    pub(crate) returned_count: usize,
+    pub(crate) limit: usize,
+    pub(crate) eligible_count: usize,
+    pub(crate) checked_count: usize,
+    pub(crate) complete: bool,
+    pub(crate) indeterminate: Vec<PatchIndeterminate>,
+    pub(crate) leads: Vec<InverseLead>,
+}
+
+#[derive(serde::Serialize)]
+pub(crate) struct InverseLead {
+    pub(crate) query_material: PatchMaterial,
+    pub(crate) inverse_material: PatchMaterial,
+    pub(crate) query_equivalence: PatchEquivalence,
+    pub(crate) inverse_equivalence: PatchEquivalence,
+    pub(crate) explicit_reverts: Vec<ExplicitRevert>,
+}
+
+#[derive(serde::Serialize)]
+pub(crate) struct ExplicitRevert {
+    pub(crate) revert_oid: String,
+    pub(crate) target_oid: String,
+}
 
 pub(super) struct Scan {
     pub(super) report: FailureLeads,
@@ -27,8 +51,7 @@ struct SourceGroup {
     representative_oid: String,
     representative_subject: String,
     candidate_order: usize,
-    members: Vec<PatchGroupMember>,
-    member_oids: HashSet<String>,
+    versions: PatchVersions,
 }
 
 struct InverseGroup {
@@ -37,9 +60,34 @@ struct InverseGroup {
     representative_oid: String,
     representative_message: Vec<u8>,
     first_history_order: usize,
-    members: Vec<PatchGroupMember>,
-    member_oids: HashSet<String>,
+    versions: PatchVersions,
     matching_sources: Vec<usize>,
+}
+
+struct PatchVersions {
+    members: Vec<PatchGroupMember>,
+    oids: HashSet<String>,
+}
+
+impl PatchVersions {
+    fn new(member: PatchGroupMember) -> Self {
+        let mut versions = Self {
+            members: Vec::new(),
+            oids: HashSet::new(),
+        };
+        versions.add(member);
+        versions
+    }
+
+    fn add(&mut self, member: PatchGroupMember) {
+        if self.oids.insert(member.oid.clone()) {
+            self.members.push(member);
+        }
+    }
+
+    fn contains(&self, oid: &str) -> bool {
+        self.oids.contains(oid)
+    }
 }
 
 struct LeadRef {
@@ -123,7 +171,7 @@ pub(super) fn run(
         };
         if let Some(index) = matching_group {
             let group = &mut sources[index];
-            add_member(&mut group.members, &mut group.member_oids, member);
+            group.versions.add(member);
             continue;
         }
 
@@ -139,8 +187,7 @@ pub(super) fn run(
             representative_oid: candidate.oid.clone(),
             representative_subject: candidate.subject.clone(),
             candidate_order,
-            members: vec![member],
-            member_oids: HashSet::from([candidate.oid.clone()]),
+            versions: PatchVersions::new(member),
         });
     }
 
@@ -267,18 +314,14 @@ pub(super) fn run(
                 .as_ref()
                 .is_some_and(|source_patch| source_patch.equivalent(&patch))
             {
-                add_member(
-                    &mut source.members,
-                    &mut source.member_oids,
-                    member_for(&member),
-                );
+                source.versions.add(member_for(&member));
             }
         }
 
         let matching_sources = inverse_sources
             .into_iter()
             .filter(|source_index| {
-                !sources[*source_index].member_oids.contains(&commit.oid)
+                !sources[*source_index].versions.contains(&commit.oid)
                     && sources[*source_index]
                         .patch
                         .as_ref()
@@ -303,7 +346,7 @@ pub(super) fn run(
             });
         if let Some(index) = existing_group {
             let group = &mut inverse_groups[index];
-            add_member(&mut group.members, &mut group.member_oids, member);
+            group.versions.add(member);
             for source_index in matching_sources {
                 if !group.matching_sources.contains(&source_index) {
                     group.matching_sources.push(source_index);
@@ -321,8 +364,7 @@ pub(super) fn run(
                 representative_oid: commit.oid.clone(),
                 representative_message: commit.message.clone(),
                 first_history_order: history_order,
-                members: vec![member],
-                member_oids: HashSet::from([commit.oid.clone()]),
+                versions: PatchVersions::new(member),
                 matching_sources,
             });
         }
@@ -331,18 +373,13 @@ pub(super) fn run(
     let complete = indeterminate.is_empty() && checked_count == eligible_count;
     let mut equivalences = HashMap::new();
     for source in &sources {
-        if source.members.len() < 2 {
+        if source.versions.members.len() < 2 {
             continue;
         }
-        for member in &source.members {
+        for member in &source.versions.members {
             equivalences.insert(
                 member.oid.clone(),
-                PatchEquivalence {
-                    representative_oid: member.oid.clone(),
-                    member_count: source.members.len(),
-                    members: clone_members(&source.members),
-                    complete,
-                },
+                patch_equivalence(&source.versions, &member.oid, complete),
             );
         }
     }
@@ -421,23 +458,26 @@ pub(super) fn run(
         let source = &sources[lead.source];
         let inverse = &inverse_groups[lead.inverse];
         let representative_source = source
+            .versions
             .members
             .first()
             .expect("query patch group has a member");
         let representative_inverse = inverse
+            .versions
             .members
             .first()
             .expect("inverse patch group has a member");
         let explicit_reverts = source
+            .versions
             .members
             .iter()
-            .chain(&inverse.members)
+            .chain(&inverse.versions.members)
             .filter_map(|member| {
                 let target_oid = reverts.target_of(&member.oid)?;
-                let connects_lead = (source.member_oids.contains(&member.oid)
-                    && inverse.member_oids.contains(target_oid))
-                    || (inverse.member_oids.contains(&member.oid)
-                        && source.member_oids.contains(target_oid));
+                let connects_lead = (source.versions.contains(&member.oid)
+                    && inverse.versions.contains(target_oid))
+                    || (inverse.versions.contains(&member.oid)
+                        && source.versions.contains(target_oid));
                 connects_lead.then(|| ExplicitRevert {
                     revert_oid: member.oid.clone(),
                     target_oid: target_oid.to_owned(),
@@ -447,18 +487,16 @@ pub(super) fn run(
         leads.push(InverseLead {
             query_material: source_materials[&lead.source].clone(),
             inverse_material: inverse_materials[&lead.inverse].clone(),
-            query_equivalence: PatchEquivalence {
-                representative_oid: representative_source.oid.clone(),
-                member_count: source.members.len(),
-                members: clone_members(&source.members),
+            query_equivalence: patch_equivalence(
+                &source.versions,
+                &representative_source.oid,
                 complete,
-            },
-            inverse_equivalence: PatchEquivalence {
-                representative_oid: representative_inverse.oid.clone(),
-                member_count: inverse.members.len(),
-                members: clone_members(&inverse.members),
+            ),
+            inverse_equivalence: patch_equivalence(
+                &inverse.versions,
+                &representative_inverse.oid,
                 complete,
-            },
+            ),
             explicit_reverts,
         });
     }
@@ -523,13 +561,16 @@ fn extend_unique(target: &mut Vec<usize>, values: &[usize]) {
     }
 }
 
-fn add_member(
-    members: &mut Vec<PatchGroupMember>,
-    oids: &mut HashSet<String>,
-    member: PatchGroupMember,
-) {
-    if oids.insert(member.oid.clone()) {
-        members.push(member);
+fn patch_equivalence(
+    versions: &PatchVersions,
+    representative_oid: &str,
+    complete: bool,
+) -> PatchEquivalence {
+    PatchEquivalence {
+        representative_oid: representative_oid.to_owned(),
+        member_count: versions.members.len(),
+        members: clone_members(&versions.members),
+        complete,
     }
 }
 

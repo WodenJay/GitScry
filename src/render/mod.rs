@@ -57,6 +57,14 @@ fn format_report(
             }
             output
         }
+        QueryReport::Failures(report) => {
+            let mut output = material::format_failure_report(report);
+            if let Some(github_links) = github_links {
+                output.push_str("\n\n");
+                output.push_str(&github_links::format(github_links));
+            }
+            output
+        }
         QueryReport::Timeline(report) => {
             let mut output = timeline::format_report(report);
             if let Some(github_links) = github_links {
@@ -129,6 +137,9 @@ fn format_json_report(
         }
         QueryReport::Analysis(report) => {
             json::format_json_report(report, additional_warnings, github_links)
+        }
+        QueryReport::Failures(report) => {
+            json::format_failure_json_report(report, additional_warnings, github_links)
         }
         QueryReport::Timeline(report) => {
             timeline::format_json_report(report, additional_warnings, github_links)

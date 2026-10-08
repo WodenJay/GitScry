@@ -163,6 +163,7 @@ pub(crate) enum QueryReport {
     Context(super::ContextReport),
     Patterns(capabilities::patterns::Report),
     Analysis(Report),
+    Failures(capabilities::FailureReport),
     Timeline(super::TimelineReport),
     TraceRemoval(super::TraceRemovalReport),
     TraceRemovalFragment(super::TraceRemovalFragmentReport),
@@ -190,6 +191,7 @@ impl QueryReport {
             Self::Patterns(_) => &[],
             Self::Context(report) => &report.warnings,
             Self::Analysis(report) => &report.warnings,
+            Self::Failures(report) => &report.report.warnings,
             Self::Timeline(_)
             | Self::Hotspots(_)
             | Self::TraceRemoval(_)
@@ -208,6 +210,7 @@ impl QueryReport {
             Self::Patterns(_) => &[],
             Self::Context(_) => &[],
             Self::Analysis(report) => &report.notices,
+            Self::Failures(report) => &report.report.notices,
             Self::Timeline(_)
             | Self::Hotspots(_)
             | Self::TraceRemoval(_)
@@ -303,9 +306,7 @@ pub(crate) fn execute(request: Request, options: Options) -> Result<Outcome, App
         Request::Examples { words, paths } => {
             run_text(words, paths, options, capabilities::examples)
         }
-        Request::Failures { words, paths } => {
-            run_text(words, paths, options, capabilities::failures)
-        }
+        Request::Failures { words, paths } => run_failures(words, paths, options),
         Request::Related(paths) => run_paths(paths, options, capabilities::related),
         Request::RelatedTarget { paths, anchor, at } => {
             capabilities::relations::execute_target(paths, anchor, at, options, false)
@@ -373,6 +374,27 @@ fn run_text(
         )?;
     }
     Ok(context.finish(QueryReport::Analysis(report)))
+}
+
+fn run_failures(
+    words: Vec<String>,
+    paths: Vec<String>,
+    options: Options,
+) -> Result<Outcome, AppError> {
+    let intent = Intent::parse(&words, &paths)?;
+    let context = Context::open(options.scope)?;
+    let mut report =
+        capabilities::failures(&context.session, &intent, options.limit, context.filter())?;
+    if options.patch {
+        patch::attach_patch_excerpts(
+            &context.session,
+            &intent,
+            &mut report.report,
+            !paths.is_empty(),
+            &paths,
+        )?;
+    }
+    Ok(context.finish(QueryReport::Failures(report)))
 }
 
 fn run_paths(
