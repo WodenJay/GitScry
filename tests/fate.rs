@@ -251,12 +251,73 @@ fn fate_stops_as_unknown_after_line_rewrite() {
     assert_eq!(events[0]["after"]["path"], "a.txt");
     assert_eq!(events[0]["after"]["line"], 2);
     assert_eq!(report["last_location"]["line"], 2);
+    assert_eq!(report["associations"][0]["path"], "a.txt");
+    assert_eq!(report["associations"][0]["line"], 2);
     assert_eq!(report["schema_version"], 2);
     let text_output = repo.run(["fate", "a.txt", "--line", "2", "--at", &start, "--patch"]);
     assert_eq!(text_output.status.code(), Some(0));
     let text = String::from_utf8_lossy(&text_output.stdout);
     assert!(text.contains("patch excerpt: available"), "{text}");
     assert!(text.contains("-beta"), "{text}");
+}
+
+#[test]
+fn fate_line_split_reports_rewrite_candidates() {
+    let repo = TestRepo::new();
+    let start = commit(
+        &repo,
+        "a.txt",
+        "before\nbeta\nafter\n",
+        "Create target",
+        "2020-01-01T00:00:00Z",
+    );
+    let split = commit(
+        &repo,
+        "a.txt",
+        "before\nbeta left\nbeta right\nafter\n",
+        "Split target line",
+        "2020-01-02T00:00:00Z",
+    );
+    repo.index();
+    let report = json(
+        &repo,
+        &["fate", "a.txt", "--line", "2", "--at", &start, "--json"],
+    );
+    assert_eq!(report["final_state"], "unknown", "{report}");
+    assert_eq!(report["stopped_at"], split);
+    assert_eq!(report["stop_reason"]["code"], "line_rewritten");
+    let associations = report["associations"].as_array().unwrap();
+    assert_eq!(associations.len(), 2);
+    assert_eq!(associations[0]["line"], 2);
+    assert_eq!(associations[1]["line"], 3);
+}
+
+#[test]
+fn fate_line_merge_reports_rewrite_candidate() {
+    let repo = TestRepo::new();
+    let start = commit(
+        &repo,
+        "a.txt",
+        "before\nbeta left\nbeta right\nafter\n",
+        "Create target lines",
+        "2020-01-01T00:00:00Z",
+    );
+    let merged = commit(
+        &repo,
+        "a.txt",
+        "before\nbeta merged\nafter\n",
+        "Merge target lines",
+        "2020-01-02T00:00:00Z",
+    );
+    repo.index();
+    let report = json(
+        &repo,
+        &["fate", "a.txt", "--line", "2", "--at", &start, "--json"],
+    );
+    assert_eq!(report["final_state"], "unknown", "{report}");
+    assert_eq!(report["stopped_at"], merged);
+    assert_eq!(report["stop_reason"]["code"], "line_rewritten");
+    assert_eq!(report["associations"][0]["line"], 2);
 }
 
 #[test]
@@ -631,6 +692,38 @@ fn fate_symbol_tracks_local_edits_and_stops_on_whole_body_rewrite() {
     assert_eq!(report["stopped_at"], rewrite);
     assert_eq!(report["stop_reason"]["code"], "symbol_body_rewritten");
     assert_eq!(report["last_location"]["path"], "lib.rs");
+    assert_eq!(report["associations"][0]["path"], "lib.rs");
+    assert_eq!(report["associations"][0]["line"], 1);
+}
+
+#[test]
+fn fate_symbol_split_reports_an_unverified_association() {
+    let repo = TestRepo::new();
+    let start = commit(
+        &repo,
+        "lib.rs",
+        "fn tracked(value: i32) -> i32 {\n    let result = value + 1;\n    result\n}\n",
+        "Create tracked function",
+        "2020-01-01T00:00:00Z",
+    );
+    let split = commit(
+        &repo,
+        "lib.rs",
+        "fn tracked(value: i32) -> i32 {\n    let base = value;\n    let result = base + 1;\n    result\n}\n",
+        "Split tracked expression",
+        "2020-01-02T00:00:00Z",
+    );
+    repo.index();
+    let report = json(
+        &repo,
+        &[
+            "fate", "lib.rs", "--symbol", "tracked", "--at", &start, "--json",
+        ],
+    );
+    assert_eq!(report["final_state"], "unknown", "{report}");
+    assert_eq!(report["stopped_at"], split);
+    assert_eq!(report["associations"][0]["path"], "lib.rs", "{report}");
+    assert_eq!(report["associations"][0]["line"], 1, "{report}");
 }
 
 #[test]
@@ -999,6 +1092,710 @@ fn fate_symbol_records_python_triple_quoted_string_edits() {
     assert_eq!(events.len(), 1, "{report}");
     assert_eq!(events[0]["commit_id"], edit);
     assert_eq!(events[0]["relationship"], "modified");
+}
+
+#[test]
+fn fate_symbol_follows_strict_cross_file_move_and_later_edits() {
+    let repo = TestRepo::new();
+    let original = "fn tracked(value: i32) -> i32 {\n    let base = value + 1;\n    let extra = 2;\n    base + extra\n}\n";
+    let edited = "fn tracked(value: i32) -> i32 {\n    let base = value + 2;\n    let extra = 2;\n    base + extra\n}\n";
+    let initial = format!("{original}fn remaining() {{}}\n");
+    let start = commit(
+        &repo,
+        "src/lib.rs",
+        &initial,
+        "Create tracked function",
+        "2020-01-01T00:00:00Z",
+    );
+    fs::write(repo.dir.path().join("src/lib.rs"), "fn remaining() {}\n")
+        .expect("retain the original file without the moved target");
+    let moved = commit(
+        &repo,
+        "src/tracked.rs",
+        original,
+        "Move tracked function",
+        "2020-01-02T00:00:00Z",
+    );
+    let edited_at = commit(
+        &repo,
+        "src/tracked.rs",
+        edited,
+        "Edit tracked function",
+        "2020-01-03T00:00:00Z",
+    );
+    repo.index();
+
+    let report = json(
+        &repo,
+        &[
+            "fate",
+            "src/lib.rs",
+            "--symbol",
+            "tracked",
+            "--at",
+            &start,
+            "--json",
+        ],
+    );
+    assert_eq!(report["final_state"], "reached_endpoint", "{report}");
+    let events = report["events"].as_array().unwrap();
+    assert_eq!(events.len(), 2, "{report}");
+    assert_eq!(events[0]["commit_id"], moved);
+    assert_eq!(events[0]["relationship"], "move");
+    assert_eq!(events[0]["before"]["path"], "src/lib.rs");
+    assert_eq!(events[0]["after"]["path"], "src/tracked.rs");
+    assert_eq!(events[1]["commit_id"], edited_at);
+    assert_eq!(events[1]["relationship"], "modified");
+    assert_eq!(events[1]["before"]["path"], "src/tracked.rs");
+    assert_eq!(report["last_location"]["path"], "src/tracked.rs");
+}
+
+#[test]
+fn fate_symbol_follows_same_file_move_and_later_edits() {
+    let repo = TestRepo::new();
+    let tracked = "fn tracked(value: i32) -> i32 {\n    let base = value + 1;\n    let extra = 2;\n    base + extra\n}\n";
+    let remaining = "fn remaining() -> i32 {\n    let a = 1;\n    let b = 2;\n    let c = 3;\n    let d = 4;\n    a + b + c + d\n}\n";
+    let original = format!("{tracked}{remaining}");
+    let moved_content = format!("{remaining}{tracked}");
+    let edited = moved_content.replace("value + 1", "value + 2");
+    let start = commit(
+        &repo,
+        "src/lib.rs",
+        &original,
+        "Create tracked function",
+        "2020-01-01T00:00:00Z",
+    );
+    let moved = commit(
+        &repo,
+        "src/lib.rs",
+        &moved_content,
+        "Move tracked function within file",
+        "2020-01-02T00:00:00Z",
+    );
+    let edited_at = commit(
+        &repo,
+        "src/lib.rs",
+        &edited,
+        "Edit tracked function",
+        "2020-01-03T00:00:00Z",
+    );
+    repo.index();
+
+    let report = json(
+        &repo,
+        &[
+            "fate",
+            "src/lib.rs",
+            "--symbol",
+            "tracked",
+            "--at",
+            &start,
+            "--json",
+        ],
+    );
+    assert_eq!(report["final_state"], "reached_endpoint", "{report}");
+    let events = report["events"].as_array().unwrap();
+    assert_eq!(events.len(), 2, "{report}");
+    assert_eq!(events[0]["commit_id"], moved);
+    assert_eq!(events[0]["relationship"], "move");
+    assert_eq!(events[0]["before"]["path"], "src/lib.rs");
+    assert_eq!(events[0]["after"]["path"], "src/lib.rs");
+    assert!(
+        events[0]["after"]["start_line"].as_i64().unwrap()
+            > events[0]["before"]["start_line"].as_i64().unwrap()
+    );
+    assert_eq!(events[1]["commit_id"], edited_at);
+    assert_eq!(events[1]["relationship"], "modified");
+}
+
+#[test]
+fn fate_line_follows_strict_cross_file_move() {
+    let repo = TestRepo::new();
+    let tracked = "fn tracked(value: i32) -> i32 {\n    let base = value + 1;\n    let extra = 2;\n    base + extra\n}\n";
+    let remaining = "fn remaining() {}\n";
+    let initial = format!("{tracked}{remaining}");
+    let start = commit(
+        &repo,
+        "src/lib.rs",
+        &initial,
+        "Create tracked line",
+        "2020-01-01T00:00:00Z",
+    );
+    fs::write(repo.dir.path().join("src/lib.rs"), remaining)
+        .expect("retain old file without tracked function");
+    let moved = commit(
+        &repo,
+        "src/tracked.rs",
+        tracked,
+        "Move tracked function",
+        "2020-01-02T00:00:00Z",
+    );
+    let edited = tracked.replace("let extra = 2", "let extra = 3");
+    commit(
+        &repo,
+        "src/tracked.rs",
+        &edited,
+        "Edit neighboring line",
+        "2020-01-03T00:00:00Z",
+    );
+    repo.index();
+
+    let report = json(
+        &repo,
+        &[
+            "fate",
+            "src/lib.rs",
+            "--line",
+            "2",
+            "--at",
+            &start,
+            "--json",
+        ],
+    );
+    assert_eq!(report["final_state"], "reached_endpoint", "{report}");
+    let events = report["events"].as_array().unwrap();
+    assert_eq!(events.len(), 1, "{report}");
+    assert_eq!(events[0]["commit_id"], moved);
+    assert_eq!(events[0]["relationship"], "move");
+    assert_eq!(events[0]["before"]["path"], "src/lib.rs");
+    assert_eq!(events[0]["before"]["line"], 2);
+    assert_eq!(events[0]["after"]["path"], "src/tracked.rs");
+    assert_eq!(events[0]["after"]["line"], 2);
+    assert_eq!(report["last_location"]["path"], "src/tracked.rs");
+}
+
+#[test]
+fn fate_follows_cross_file_move_when_source_file_is_removed() {
+    let repo = TestRepo::new();
+    let tracked = "fn tracked(value: i32) -> i32 {\n    let base = value + 1;\n    let extra = 2;\n    base + extra\n}\n";
+    let filler = format!(
+        "fn old_helper() {{\n{} }}\n",
+        "    let item = 1;\n".repeat(80)
+    );
+    let initial = format!("{tracked}{filler}");
+    let start = commit(
+        &repo,
+        "src/lib.rs",
+        &initial,
+        "Create target and helper",
+        "2020-01-01T00:00:00Z",
+    );
+    fs::remove_file(repo.dir.path().join("src/lib.rs")).expect("remove source file");
+    let moved = commit(
+        &repo,
+        "src/tracked.rs",
+        tracked,
+        "Move target and remove source file",
+        "2020-01-02T00:00:00Z",
+    );
+    repo.index();
+
+    let line_report = json(
+        &repo,
+        &[
+            "fate",
+            "src/lib.rs",
+            "--line",
+            "2",
+            "--at",
+            &start,
+            "--json",
+        ],
+    );
+    assert_eq!(
+        line_report["final_state"], "reached_endpoint",
+        "{line_report}"
+    );
+    assert_eq!(
+        line_report["events"][0]["commit_id"], moved,
+        "{line_report}"
+    );
+    assert_eq!(
+        line_report["events"][0]["relationship"], "move",
+        "{line_report}"
+    );
+    assert_eq!(
+        line_report["last_location"]["path"], "src/tracked.rs",
+        "{line_report}"
+    );
+
+    let symbol_report = json(
+        &repo,
+        &[
+            "fate",
+            "src/lib.rs",
+            "--symbol",
+            "tracked",
+            "--at",
+            &start,
+            "--json",
+        ],
+    );
+    assert_eq!(
+        symbol_report["final_state"], "reached_endpoint",
+        "{symbol_report}"
+    );
+    assert_eq!(
+        symbol_report["events"][0]["commit_id"], moved,
+        "{symbol_report}"
+    );
+    assert_eq!(
+        symbol_report["events"][0]["relationship"], "move",
+        "{symbol_report}"
+    );
+    assert_eq!(
+        symbol_report["last_location"]["path"], "src/tracked.rs",
+        "{symbol_report}"
+    );
+}
+
+#[test]
+fn fate_reports_unknown_cross_file_moves_that_rewrite_the_target() {
+    let repo = TestRepo::new();
+    let tracked = "fn tracked(value: i32) -> i32 {\n    let base = value + 1;\n    let extra = 2;\n    base + extra\n}\n";
+    let rewritten = tracked.replace("value + 1", "value + 2");
+    let filler = format!(
+        "fn old_helper() {{\n{} }}\n",
+        "    let item = 1;\n".repeat(80)
+    );
+    let initial = format!("{tracked}{filler}");
+    let start = commit(
+        &repo,
+        "src/lib.rs",
+        &initial,
+        "Create target and helper",
+        "2020-01-01T00:00:00Z",
+    );
+    fs::remove_file(repo.dir.path().join("src/lib.rs")).expect("remove source file");
+    commit(
+        &repo,
+        "src/tracked.rs",
+        &rewritten,
+        "Move and rewrite target",
+        "2020-01-02T00:00:00Z",
+    );
+    repo.index();
+
+    let line_report = json(
+        &repo,
+        &[
+            "fate",
+            "src/lib.rs",
+            "--line",
+            "2",
+            "--at",
+            &start,
+            "--json",
+        ],
+    );
+    assert_eq!(line_report["final_state"], "unknown", "{line_report}");
+    assert_eq!(
+        line_report["stop_reason"]["code"], "move_candidate_unverified",
+        "{line_report}"
+    );
+    assert_eq!(line_report["associations"][0]["path"], "src/tracked.rs");
+    assert_eq!(line_report["associations"][0]["line"], 2);
+
+    let symbol_report = json(
+        &repo,
+        &[
+            "fate",
+            "src/lib.rs",
+            "--symbol",
+            "tracked",
+            "--at",
+            &start,
+            "--json",
+        ],
+    );
+    assert_eq!(symbol_report["final_state"], "unknown", "{symbol_report}");
+    assert_eq!(
+        symbol_report["stop_reason"]["code"], "move_candidate_unverified",
+        "{symbol_report}"
+    );
+    assert_eq!(symbol_report["associations"][0]["path"], "src/tracked.rs");
+}
+
+#[test]
+fn fate_does_not_follow_a_preexisting_line_match_in_a_changed_file() {
+    let repo = TestRepo::new();
+    fs::create_dir_all(repo.dir.path().join("src")).expect("create source directory");
+    let tracked = "fn tracked(value: i32) -> i32 {\n    let base = value + 1;\n    let extra = 2;\n    base + extra\n}\n";
+    let decoy = format!("{tracked}fn existing() {{}}\n");
+    fs::write(repo.dir.path().join("src/decoy.rs"), &decoy).expect("write preexisting duplicate");
+    let initial = format!("{tracked}fn remaining() {{}}\n");
+    let start = commit(
+        &repo,
+        "src/lib.rs",
+        &initial,
+        "Create duplicate line",
+        "2020-01-01T00:00:00Z",
+    );
+    fs::write(
+        repo.dir.path().join("src/decoy.rs"),
+        format!("{decoy}// unrelated edit\n"),
+    )
+    .expect("change duplicate's file without moving it");
+    commit(
+        &repo,
+        "src/lib.rs",
+        "fn remaining() {}\n",
+        "Delete selected line and edit duplicate file",
+        "2020-01-02T00:00:00Z",
+    );
+    repo.index();
+
+    let report = json(
+        &repo,
+        &[
+            "fate",
+            "src/lib.rs",
+            "--line",
+            "2",
+            "--at",
+            &start,
+            "--json",
+        ],
+    );
+    assert_eq!(report["final_state"], "deleted", "{report}");
+    assert_eq!(report["last_location"]["path"], "src/lib.rs", "{report}");
+    assert!(
+        report["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|event| event["relationship"] != "move")
+    );
+}
+
+#[test]
+fn fate_does_not_follow_a_preexisting_symbol_match_in_a_changed_file() {
+    let repo = TestRepo::new();
+    fs::create_dir_all(repo.dir.path().join("src")).expect("create source directory");
+    let tracked = "fn tracked(value: i32) -> i32 {\n    let base = value + 1;\n    let extra = 2;\n    base + extra\n}\n";
+    let decoy = format!("{tracked}fn existing() {{}}\n");
+    fs::write(repo.dir.path().join("src/decoy.rs"), &decoy).expect("write preexisting duplicate");
+    let initial = format!("{tracked}fn remaining() {{}}\n");
+    let start = commit(
+        &repo,
+        "src/lib.rs",
+        &initial,
+        "Create duplicate symbol",
+        "2020-01-01T00:00:00Z",
+    );
+    fs::write(
+        repo.dir.path().join("src/decoy.rs"),
+        format!("{decoy}// unrelated edit\n"),
+    )
+    .expect("change duplicate's file without moving it");
+    commit(
+        &repo,
+        "src/lib.rs",
+        "fn remaining() {}\n",
+        "Delete selected symbol and edit duplicate file",
+        "2020-01-02T00:00:00Z",
+    );
+    repo.index();
+
+    let report = json(
+        &repo,
+        &[
+            "fate",
+            "src/lib.rs",
+            "--symbol",
+            "tracked",
+            "--at",
+            &start,
+            "--json",
+        ],
+    );
+    assert_ne!(report["final_state"], "reached_endpoint", "{report}");
+    assert_eq!(report["last_location"]["path"], "src/lib.rs", "{report}");
+    assert!(
+        report["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|event| event["relationship"] != "move")
+    );
+}
+
+#[test]
+fn fate_does_not_choose_between_competing_line_moves() {
+    let repo = TestRepo::new();
+    let tracked = "fn tracked(value: i32) -> i32 {\n    let base = value + 1;\n    let extra = 2;\n    base + extra\n}\n";
+    let initial = format!("{tracked}fn remaining() {{}}\n");
+    let start = commit(
+        &repo,
+        "src/lib.rs",
+        &initial,
+        "Create tracked line",
+        "2020-01-01T00:00:00Z",
+    );
+    fs::write(repo.dir.path().join("src/lib.rs"), "fn remaining() {}\n")
+        .expect("retain the old file without the target");
+    for index in 0..10 {
+        let candidate_path = repo.dir.path().join(format!("src/candidate-{index:02}.rs"));
+        fs::write(candidate_path, tracked).expect("write strict move candidate");
+    }
+    git(repo.dir.path(), ["add", "--all"]);
+    let output = git_command(repo.dir.path())
+        .args(["commit", "-m", "Move tracked line to competing files"])
+        .env("GIT_AUTHOR_DATE", "2020-01-02T00:00:00Z")
+        .env("GIT_COMMITTER_DATE", "2020-01-02T00:00:00Z")
+        .output()
+        .expect("run competing move commit");
+    assert!(
+        output.status.success(),
+        "git commit failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    repo.index();
+
+    let report = json(
+        &repo,
+        &[
+            "fate",
+            "src/lib.rs",
+            "--line",
+            "2",
+            "--at",
+            &start,
+            "--json",
+        ],
+    );
+    assert_eq!(report["final_state"], "unknown", "{report}");
+    assert_eq!(
+        report["stop_reason"]["code"], "ambiguous_move_candidates",
+        "{report}"
+    );
+    let candidates = report["associations"].as_array().unwrap();
+    assert_eq!(candidates.len(), 8, "{report}");
+    assert_eq!(
+        report["associations_truncated"].as_bool(),
+        Some(true),
+        "{report}"
+    );
+    assert_eq!(candidates[0]["path"], "src/candidate-00.rs", "{report}");
+    assert_eq!(candidates[7]["path"], "src/candidate-07.rs", "{report}");
+}
+
+#[test]
+fn fate_does_not_choose_between_competing_symbol_moves() {
+    let repo = TestRepo::new();
+    let tracked = "fn tracked(value: i32) -> i32 {\n    let base = value + 1;\n    let extra = 2;\n    base + extra\n}\n";
+    let initial = format!("{tracked}fn remaining() {{}}\n");
+    let start = commit(
+        &repo,
+        "src/lib.rs",
+        &initial,
+        "Create tracked function",
+        "2020-01-01T00:00:00Z",
+    );
+    fs::write(repo.dir.path().join("src/lib.rs"), "fn remaining() {}\n")
+        .expect("remove tracked function from its original file");
+    fs::write(repo.dir.path().join("src/first.rs"), tracked)
+        .expect("write first strict move candidate");
+    fs::write(repo.dir.path().join("src/second.rs"), tracked)
+        .expect("write second strict move candidate");
+    git(repo.dir.path(), ["add", "--all"]);
+    let output = git_command(repo.dir.path())
+        .args(["commit", "-m", "Copy tracked function to competing files"])
+        .env("GIT_AUTHOR_DATE", "2020-01-03T00:00:00Z")
+        .env("GIT_COMMITTER_DATE", "2020-01-03T00:00:00Z")
+        .output()
+        .expect("run competing symbol move commit");
+    assert!(
+        output.status.success(),
+        "git commit failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    repo.index();
+
+    let report = json(
+        &repo,
+        &[
+            "fate",
+            "src/lib.rs",
+            "--symbol",
+            "tracked",
+            "--at",
+            &start,
+            "--json",
+        ],
+    );
+    assert_eq!(report["final_state"], "unknown", "{report}");
+    assert_eq!(
+        report["stop_reason"]["code"], "ambiguous_move_candidates",
+        "{report}"
+    );
+    assert_eq!(report["last_location"]["path"], "src/lib.rs", "{report}");
+    assert!(report["events"].as_array().unwrap().is_empty(), "{report}");
+    let candidates = report["associations"].as_array().unwrap();
+    assert_eq!(candidates.len(), 2, "{report}");
+    assert!(
+        candidates
+            .iter()
+            .any(|candidate| candidate["path"] == "src/first.rs")
+    );
+    assert!(
+        candidates
+            .iter()
+            .any(|candidate| candidate["path"] == "src/second.rs")
+    );
+}
+#[test]
+fn fate_line_follows_strict_same_file_move() {
+    let repo = TestRepo::new();
+    let tracked = "fn tracked(value: i32) -> i32 {\n    let base = value + 1;\n    let extra = 2;\n    base + extra\n}\n";
+    let remaining = "fn remaining() -> i32 {\n    let a = 1;\n    let b = 2;\n    let c = 3;\n    let d = 4;\n    a + b + c + d\n}\n";
+    let original = format!("{tracked}{remaining}");
+    let moved_content = format!("{remaining}{tracked}");
+    let edited = moved_content.replace("let extra = 2", "let extra = 3");
+    let start = commit(
+        &repo,
+        "src/lib.rs",
+        &original,
+        "Create tracked line",
+        "2020-01-01T00:00:00Z",
+    );
+    let moved = commit(
+        &repo,
+        "src/lib.rs",
+        &moved_content,
+        "Move tracked function within file",
+        "2020-01-02T00:00:00Z",
+    );
+    commit(
+        &repo,
+        "src/lib.rs",
+        &edited,
+        "Edit neighboring line",
+        "2020-01-03T00:00:00Z",
+    );
+    repo.index();
+
+    let report = json(
+        &repo,
+        &[
+            "fate",
+            "src/lib.rs",
+            "--line",
+            "2",
+            "--at",
+            &start,
+            "--json",
+        ],
+    );
+    assert_eq!(report["final_state"], "reached_endpoint", "{report}");
+    let events = report["events"].as_array().unwrap();
+    assert_eq!(events.len(), 1, "{report}");
+    assert_eq!(events[0]["commit_id"], moved);
+    assert_eq!(events[0]["relationship"], "move");
+    assert_eq!(events[0]["before"]["path"], "src/lib.rs");
+    assert_eq!(events[0]["after"]["path"], "src/lib.rs");
+    assert!(
+        events[0]["after"]["line"].as_i64().unwrap()
+            > events[0]["before"]["line"].as_i64().unwrap()
+    );
+}
+
+#[test]
+fn fate_symbol_follows_indented_cross_file_move() {
+    let repo = TestRepo::new();
+    let original = "fn tracked(value: i32) -> i32 {\n    let base = value + 1;\n    let extra = 2;\n    base + extra\n}\n";
+    let initial = format!("{original}fn remaining() {{}}\n");
+    let indented = original
+        .lines()
+        .map(|line| format!("    {line}\r\n"))
+        .collect::<String>();
+    let later = format!("// moved again\r\n{indented}");
+    let start = commit(
+        &repo,
+        "src/lib.rs",
+        &initial,
+        "Create tracked function",
+        "2020-01-01T00:00:00Z",
+    );
+    fs::write(repo.dir.path().join("src/lib.rs"), "fn remaining() {}\n")
+        .expect("retain the original file without the target");
+    let moved = commit(
+        &repo,
+        "src/tracked.rs",
+        &indented,
+        "Move and indent tracked function",
+        "2020-01-02T00:00:00Z",
+    );
+    let shifted = commit(
+        &repo,
+        "src/tracked.rs",
+        &later,
+        "Add comment before moved function",
+        "2020-01-03T00:00:00Z",
+    );
+    repo.index();
+
+    let report = json(
+        &repo,
+        &[
+            "fate",
+            "src/lib.rs",
+            "--symbol",
+            "tracked",
+            "--at",
+            &start,
+            "--json",
+        ],
+    );
+    assert_eq!(report["final_state"], "reached_endpoint", "{report}");
+    let events = report["events"].as_array().unwrap();
+    assert_eq!(events.len(), 2, "{report}");
+    assert_eq!(events[0]["commit_id"], moved);
+    assert_eq!(events[0]["relationship"], "move");
+    assert_eq!(events[0]["after"]["path"], "src/tracked.rs");
+    assert_eq!(events[1]["commit_id"], shifted);
+    assert_eq!(events[1]["relationship"], "shifted");
+}
+
+#[test]
+fn fate_does_not_follow_move_that_changes_multiline_literal() {
+    let repo = TestRepo::new();
+    let original =
+        "fn tracked() -> &'static str {\n    r#\"first\n    literal content\n    last\"#\n}\n";
+    let changed = original.replace("literal content", "different content");
+    let initial = format!("{original}fn remaining() {{}}\n");
+    let start = commit(
+        &repo,
+        "src/lib.rs",
+        &initial,
+        "Create tracked function",
+        "2020-01-01T00:00:00Z",
+    );
+    fs::write(repo.dir.path().join("src/lib.rs"), "fn remaining() {}\n")
+        .expect("retain the original file without the target");
+    commit(
+        &repo,
+        "src/tracked.rs",
+        &changed,
+        "Move and change literal content",
+        "2020-01-02T00:00:00Z",
+    );
+    repo.index();
+
+    let report = json(
+        &repo,
+        &[
+            "fate",
+            "src/lib.rs",
+            "--symbol",
+            "tracked",
+            "--at",
+            &start,
+            "--json",
+        ],
+    );
+    assert_eq!(report["final_state"], "unknown", "{report}");
+    assert!(report["events"].as_array().unwrap().is_empty(), "{report}");
 }
 
 #[test]

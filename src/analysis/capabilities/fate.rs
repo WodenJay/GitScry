@@ -6,7 +6,7 @@
 //! rewritten line is one bounded replacement event and then tracking stops.
 //! Unsupported or missing correspondence stops explicitly as unknown.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 use crate::cache::{PatchHistoryHunk, QuerySession};
 use crate::git::Repository;
@@ -14,11 +14,27 @@ use crate::git::Repository;
 use super::normalize_git_path_string;
 use crate::analysis::query::{Context, Options, Outcome, QueryReport, scope};
 use crate::analysis::{PatchExcerpt, SearchScopeInfo};
-use crate::git::SymbolSelection;
+use crate::git::{SymbolLocation, SymbolSelection};
 use crate::{app::AppError, cache::followups::ForwardCommit};
 
 const MAX_HUNKS: usize = 4_096;
 const MAX_HUNK_BYTES: usize = 16 * 1024;
+const MAX_MOVE_ASSOCIATIONS: usize = 8;
+
+fn bounded_associations(
+    associations: impl IntoIterator<Item = Association>,
+) -> (Vec<Association>, bool) {
+    let mut bounded = BTreeSet::new();
+    let mut truncated = false;
+    for association in associations {
+        bounded.insert(association);
+        if bounded.len() > MAX_MOVE_ASSOCIATIONS {
+            bounded.pop_last();
+            truncated = true;
+        }
+    }
+    (bounded.into_iter().collect(), truncated)
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FinalState {
@@ -42,10 +58,16 @@ pub(crate) struct StopReason {
     pub(crate) explanation: &'static str,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct Location {
     pub(crate) path: Vec<u8>,
     pub(crate) line: i64,
+}
+
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct Association {
+    pub(crate) location: Location,
+    pub(crate) span: Option<(i64, i64)>,
 }
 
 pub(crate) struct Event {
@@ -73,6 +95,8 @@ pub(crate) struct Report {
     pub(crate) final_state: FinalState,
     pub(crate) stopped_at: Option<String>,
     pub(crate) stop_reason: Option<StopReason>,
+    pub(crate) associations: Vec<Association>,
+    pub(crate) associations_truncated: bool,
     pub(crate) last_location: Option<Location>,
     /// Inclusive line span at `last_location` when the target is a symbol.
     pub(crate) last_span: Option<(i64, i64)>,
@@ -182,6 +206,8 @@ fn execute_line(
                 final_state: FinalState::ReachedEndpoint,
                 stopped_at: None,
                 stop_reason: None,
+                associations: Vec::new(),
+                associations_truncated: false,
                 last_location: Some(Location {
                     path: target.path,
                     line: i64::from(u32::try_from(target.line).unwrap_or(0)),
@@ -211,6 +237,8 @@ fn execute_line(
     };
     let mut last_revision = target.revision.clone();
     let mut events: Vec<Event> = Vec::new();
+    let mut associations = Vec::new();
+    let mut associations_truncated = false;
     let mut inspected = 0usize;
     let ceiling = max_commits.unwrap_or(usize::MAX);
     let mut traversal_truncated = false;
@@ -264,6 +292,77 @@ fn execute_line(
             continue;
         };
         if change.status.starts_with('D') {
+            let old_content = repository.read_blob(&last_revision, &state.path)?;
+            let context = old_content
+                .as_deref()
+                .and_then(|content| line_move_context(content, state.line, &state.path));
+            if let Some(context) = context {
+                let candidates =
+                    find_line_move_candidates(session, repository, &node.oid, &changes, &context)?;
+                if candidates.added.len() == 1 && candidates.unverified.is_empty() {
+                    let (candidate_path, candidate_line) = candidates
+                        .added
+                        .into_iter()
+                        .next()
+                        .expect("one move candidate was counted");
+                    events.push(Event {
+                        commit_id: node.oid.clone(),
+                        subject: session.forward_subject(&node.oid)?,
+                        commit_time: node.commit_time,
+                        relationship: "move",
+                        before: state.clone(),
+                        before_span: None,
+                        after_span: None,
+                        after: Some(Location {
+                            path: candidate_path.clone(),
+                            line: candidate_line,
+                        }),
+                        parent_count: node.parents.len(),
+                        patch: event_patch(
+                            session,
+                            options.patch,
+                            &node.oid,
+                            change.ordinal,
+                            state.line,
+                        )?,
+                    });
+                    state.path = candidate_path;
+                    state.line = candidate_line;
+                    last_revision = node.oid.clone();
+                    continue;
+                }
+                if !candidates.added.is_empty() || !candidates.unverified.is_empty() {
+                    let unverified = !candidates.unverified.is_empty();
+                    let candidate_associations = candidates
+                        .added
+                        .into_iter()
+                        .chain(candidates.unverified)
+                        .map(|(path, line)| Association {
+                            location: Location { path, line },
+                            span: None,
+                        });
+                    (associations, associations_truncated) =
+                        bounded_associations(candidate_associations);
+
+                    stop = Some((
+                        node.oid.clone(),
+                        FinalState::Unknown,
+                        StopReason {
+                            code: if unverified {
+                                "move_candidate_unverified"
+                            } else {
+                                "ambiguous_move_candidates"
+                            },
+                            explanation: if unverified {
+                                "a strict-context continuation could not be verified from complete patch material"
+                            } else {
+                                "the unchanged line has multiple strict-context matches; its move cannot be established uniquely"
+                            },
+                        },
+                    ));
+                    break;
+                }
+            }
             events.push(Event {
                 commit_id: node.oid.clone(),
                 subject: session.forward_subject(&node.oid)?,
@@ -360,7 +459,89 @@ fn execute_line(
             ));
             break;
         }
-        match map_line_forward(&history.hunks, state.line) {
+        let line_mapping = map_line_forward(&history.hunks, state.line);
+        if matches!(
+            &line_mapping,
+            Some(Forward::Deleted | Forward::Rewritten { .. })
+        ) {
+            let old_content = repository.read_blob(&last_revision, &state.path)?;
+            let context = old_content
+                .as_deref()
+                .and_then(|content| line_move_context(content, state.line, &state.path));
+            let candidates = if let Some(context) = context {
+                find_line_move_candidates(session, repository, &node.oid, &changes, &context)?
+            } else {
+                LineMoveCandidates::default()
+            };
+            let move_candidates = candidates.added;
+            let same_file_rewrite = matches!(&line_mapping, Some(Forward::Rewritten { .. }));
+            let unverified_candidates = candidates
+                .unverified
+                .into_iter()
+                .filter(|(path, _)| !same_file_rewrite || path.as_slice() != state.path)
+                .collect::<BTreeSet<_>>();
+            if move_candidates.len() == 1 && unverified_candidates.is_empty() {
+                let (candidate_path, candidate_line) = move_candidates
+                    .into_iter()
+                    .next()
+                    .expect("one move candidate was counted");
+                events.push(Event {
+                    commit_id: node.oid.clone(),
+                    subject: session.forward_subject(&node.oid)?,
+                    commit_time: node.commit_time,
+                    relationship: "move",
+                    before: state.clone(),
+                    before_span: None,
+                    after_span: None,
+                    after: Some(Location {
+                        path: candidate_path.clone(),
+                        line: candidate_line,
+                    }),
+                    parent_count: node.parents.len(),
+                    patch: event_patch(
+                        session,
+                        options.patch,
+                        &node.oid,
+                        change.ordinal,
+                        state.line,
+                    )?,
+                });
+                state.path = candidate_path;
+                state.line = candidate_line;
+                last_revision = node.oid.clone();
+                continue;
+            }
+            if move_candidates.len() > 1 || !unverified_candidates.is_empty() {
+                let unverified = !unverified_candidates.is_empty();
+                let candidates = move_candidates
+                    .into_iter()
+                    .chain(unverified_candidates)
+                    .map(|(path, line)| Association {
+                        location: Location { path, line },
+                        span: None,
+                    });
+                (associations, associations_truncated) = bounded_associations(candidates);
+                stop = Some((
+                    node.oid.clone(),
+                    FinalState::Unknown,
+                    StopReason {
+                        code: if unverified {
+                            "move_candidate_unverified"
+                        } else {
+                            "ambiguous_move_candidates"
+                        },
+                        explanation: if unverified {
+                            "a strict-context continuation could not be verified from complete patch material"
+                        } else {
+                            "the unchanged line has multiple strict-context matches; its move cannot be established uniquely"
+                        },
+                    },
+                ));
+                break;
+            }
+        }
+
+        match line_mapping {
             Some(Forward::Kept { new_line }) => {
                 if renamed {
                     events.push(Event {
@@ -389,6 +570,9 @@ fn execute_line(
                 state.line = new_line;
             }
             Some(Forward::Rewritten { replacement }) => {
+                let candidates = rewritten_line_associations(&history.hunks, state.line, &new_path);
+                (associations, associations_truncated) =
+                    bounded_associations(associations.into_iter().chain(candidates));
                 events.push(Event {
                     commit_id: node.oid.clone(),
                     subject: session.forward_subject(&node.oid)?,
@@ -509,6 +693,8 @@ fn execute_line(
             final_state,
             stopped_at,
             stop_reason,
+            associations,
+            associations_truncated,
             last_location,
             last_span: None,
             inspected_commits: inspected,
@@ -574,6 +760,338 @@ fn descendants(graph: &[ForwardCommit], seed: &str) -> HashSet<String> {
 
 /// Map a tracked old-file line forward through one change's cached hunks.
 /// Returns `None` when the cached hunk ranges cannot be mapped reliably.
+const MOVE_CONTEXT_RADIUS: usize = 3;
+const MIN_MOVE_CONTEXT_LINES: usize = 3;
+
+struct LineMoveContext {
+    lines: Vec<Vec<u8>>,
+    target_offset: usize,
+    source: Vec<u8>,
+    language: Option<&'static str>,
+    can_normalize_indentation: bool,
+}
+
+fn source_line_bytes(content: &[u8]) -> Vec<Vec<u8>> {
+    if content.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = content
+        .split(|byte| *byte == b'\n')
+        .map(<[u8]>::to_vec)
+        .collect::<Vec<_>>();
+    if content.ends_with(b"\n") {
+        lines.pop();
+    }
+    lines
+}
+
+fn join_source_lines<'a>(lines: impl IntoIterator<Item = &'a [u8]>) -> Vec<u8> {
+    let mut source = Vec::new();
+    for (index, line) in lines.into_iter().enumerate() {
+        if index > 0 {
+            source.push(b'\n');
+        }
+        source.extend_from_slice(line);
+    }
+    source
+}
+
+fn line_move_context(content: &[u8], line: i64, path: &[u8]) -> Option<LineMoveContext> {
+    let lines = source_line_bytes(content);
+    let target_index = usize::try_from(line.checked_sub(1)?).ok()?;
+    let target = lines.get(target_index)?;
+    if target.iter().all(u8::is_ascii_whitespace) {
+        return None;
+    }
+    let start = target_index.saturating_sub(MOVE_CONTEXT_RADIUS);
+    let end = target_index
+        .saturating_add(MOVE_CONTEXT_RADIUS + 1)
+        .min(lines.len());
+    let context_lines = lines[start..end].to_vec();
+    if context_lines
+        .iter()
+        .filter(|line| !line.iter().all(u8::is_ascii_whitespace))
+        .count()
+        < MIN_MOVE_CONTEXT_LINES
+    {
+        return None;
+    }
+    let language = source_language_for_path(path);
+    Some(LineMoveContext {
+        source: join_source_lines(context_lines.iter().map(|line| line.as_slice())),
+        lines: context_lines,
+        target_offset: target_index - start,
+        language,
+        can_normalize_indentation: language.is_some_and(|language| {
+            supports_indentation_normalization(language)
+                && !contains_multiline_literal(content, language)
+        }),
+    })
+}
+
+fn line_context_matches(
+    lines: &[Vec<u8>],
+    target_index: usize,
+    context: &LineMoveContext,
+    can_normalize_indentation: bool,
+) -> bool {
+    let Some(start) = target_index.checked_sub(context.target_offset) else {
+        return false;
+    };
+    let Some(end) = start.checked_add(context.lines.len()) else {
+        return false;
+    };
+    let Some(candidate_lines) = lines.get(start..end) else {
+        return false;
+    };
+    strict_source_equal(
+        &context.source,
+        &join_source_lines(candidate_lines.iter().map(|line| line.as_slice())),
+        context.language,
+        can_normalize_indentation,
+    )
+}
+
+fn line_context_neighbors_match(
+    lines: &[Vec<u8>],
+    target_index: usize,
+    context: &LineMoveContext,
+    can_normalize_indentation: bool,
+) -> bool {
+    if !can_normalize_indentation {
+        return false;
+    }
+    let Some(start) = target_index.checked_sub(context.target_offset) else {
+        return false;
+    };
+    let Some(end) = start.checked_add(context.lines.len()) else {
+        return false;
+    };
+    let Some(candidate_lines) = lines.get(start..end) else {
+        return false;
+    };
+    let old_neighbor_count = context
+        .lines
+        .iter()
+        .enumerate()
+        .filter(|(index, line)| {
+            *index != context.target_offset && !line.iter().all(u8::is_ascii_whitespace)
+        })
+        .count();
+    if old_neighbor_count < MIN_MOVE_CONTEXT_LINES {
+        return false;
+    }
+
+    strict_source_equal(
+        &join_source_lines(
+            context
+                .lines
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| *index != context.target_offset)
+                .map(|(_, line)| line.as_slice()),
+        ),
+        &join_source_lines(
+            candidate_lines
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| *index != context.target_offset)
+                .map(|(_, line)| line.as_slice()),
+        ),
+        context.language,
+        true,
+    )
+}
+
+#[derive(Default)]
+struct LineMoveCandidates {
+    added: BTreeSet<(Vec<u8>, i64)>,
+    unverified: BTreeSet<(Vec<u8>, i64)>,
+}
+
+fn find_line_move_candidates(
+    session: &QuerySession,
+    repository: &Repository,
+    oid: &str,
+    changes: &[crate::cache::PathChange],
+    context: &LineMoveContext,
+) -> Result<LineMoveCandidates, AppError> {
+    let mut candidates = LineMoveCandidates::default();
+    for change in changes {
+        let Some(path) = change.new_path.as_ref() else {
+            continue;
+        };
+        if change.status.starts_with('D') || change.status.starts_with('T') {
+            continue;
+        }
+        let Some(content) = repository.read_blob(oid, path)? else {
+            continue;
+        };
+        let lines = source_line_bytes(&content);
+        let candidate_language = source_language_for_path(path);
+        let can_normalize_indentation = context.can_normalize_indentation
+            && candidate_language == context.language
+            && candidate_language
+                .is_some_and(|language| !contains_multiline_literal(&content, language));
+        let mut matched_lines = BTreeSet::new();
+        let mut contextual_lines = BTreeSet::new();
+        for (index, _) in lines.iter().enumerate() {
+            let is_match =
+                if line_context_matches(&lines, index, context, can_normalize_indentation) {
+                    &mut matched_lines
+                } else if line_context_neighbors_match(
+                    &lines,
+                    index,
+                    context,
+                    can_normalize_indentation,
+                ) {
+                    &mut contextual_lines
+                } else {
+                    continue;
+                };
+            let Ok(line) = i64::try_from(index + 1) else {
+                continue;
+            };
+            is_match.insert(line);
+        }
+        let candidate_lines = matched_lines
+            .union(&contextual_lines)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        if candidate_lines.is_empty() {
+            continue;
+        }
+        let history =
+            session.patch_history_for_change(oid, change.ordinal, MAX_HUNKS, MAX_HUNK_BYTES)?;
+        let added_lines = added_target_lines(
+            &history.hunks,
+            history.missing_objects,
+            history.truncated,
+            &candidate_lines,
+        );
+        for line in candidate_lines {
+            let destination = (path.clone(), line);
+            let strict_match = matched_lines.contains(&line);
+            let candidates_for_status = match (&added_lines, strict_match) {
+                (Some(added_lines), true) if added_lines.contains(&line) => &mut candidates.added,
+                (Some(added_lines), false) if added_lines.contains(&line) => {
+                    &mut candidates.unverified
+                }
+                (Some(_), _) => continue,
+                (None, _) => &mut candidates.unverified,
+            };
+            candidates_for_status.insert(destination);
+            if candidates_for_status.len() > MAX_MOVE_ASSOCIATIONS + 1 {
+                candidates_for_status.pop_last();
+            }
+        }
+    }
+    Ok(candidates)
+}
+
+struct SymbolMoveCandidate {
+    path: Vec<u8>,
+    symbol: SymbolLocation,
+    start: i64,
+    end: i64,
+}
+
+#[derive(Default)]
+struct SymbolMoveCandidates {
+    added: Vec<SymbolMoveCandidate>,
+    unverified: BTreeSet<Association>,
+}
+
+struct SymbolMoveSearch<'a> {
+    excluded_path: Option<&'a [u8]>,
+    symbol_name: &'a str,
+    strict_target: &'a [u8],
+    language: &'a str,
+}
+
+fn find_symbol_move_candidates(
+    session: &QuerySession,
+    repository: &Repository,
+    oid: &str,
+    changes: &[crate::cache::PathChange],
+    search: SymbolMoveSearch<'_>,
+) -> Result<SymbolMoveCandidates, AppError> {
+    let mut candidates = SymbolMoveCandidates::default();
+    for change in changes {
+        let Some(path) = change.new_path.as_ref() else {
+            continue;
+        };
+        if search.excluded_path == Some(path.as_slice())
+            || change.status.starts_with('D')
+            || change.status.starts_with('T')
+        {
+            continue;
+        }
+        let Ok(path_text) = std::str::from_utf8(path) else {
+            continue;
+        };
+        let Some(content) = repository.read_blob(oid, path)? else {
+            continue;
+        };
+        let Ok(symbol) = repository.locate_symbol(&content, search.symbol_name, path_text) else {
+            continue;
+        };
+        if symbol.selection.language != search.language {
+            continue;
+        }
+        let Ok(start) = i64::try_from(symbol.start_line) else {
+            continue;
+        };
+        let Ok(end) = i64::try_from(symbol.end_line) else {
+            continue;
+        };
+        let Some(candidate_bytes) = symbol_source_bytes(&content, (start, end)) else {
+            continue;
+        };
+        let strict_match = strict_source_equal(
+            search.strict_target,
+            &candidate_bytes,
+            Some(search.language),
+            true,
+        );
+        let association = Association {
+            location: Location {
+                path: path.clone(),
+                line: start,
+            },
+            span: Some((start, end)),
+        };
+        match span_addition_status(session, oid, change.ordinal, (start, end))? {
+            AddedMaterialStatus::Added if strict_match => {
+                candidates.added.push(SymbolMoveCandidate {
+                    path: path.clone(),
+                    symbol,
+                    start,
+                    end,
+                });
+            }
+            AddedMaterialStatus::Added | AddedMaterialStatus::Unavailable => {
+                candidates.unverified.insert(association);
+                if candidates.unverified.len() > MAX_MOVE_ASSOCIATIONS + 1 {
+                    candidates.unverified.pop_last();
+                }
+            }
+            AddedMaterialStatus::NotAdded => {}
+        }
+    }
+    candidates.added.sort_by(|left, right| {
+        left.path
+            .cmp(&right.path)
+            .then_with(|| left.start.cmp(&right.start))
+            .then_with(|| left.end.cmp(&right.end))
+    });
+    candidates.added.dedup_by(|left, right| {
+        left.path == right.path && left.start == right.start && left.end == right.end
+    });
+    candidates.added.truncate(MAX_MOVE_ASSOCIATIONS + 1);
+    Ok(candidates)
+}
+
 fn map_line_forward(hunks: &[PatchHistoryHunk], line: i64) -> Option<Forward> {
     let mut ordered: Vec<&PatchHistoryHunk> = hunks.iter().collect();
     ordered.sort_by_key(|hunk| hunk.old_start);
@@ -646,6 +1164,60 @@ fn map_line_forward(hunks: &[PatchHistoryHunk], line: i64) -> Option<Forward> {
     Some(Forward::Kept { new_line })
 }
 
+fn rewritten_line_associations(
+    hunks: &[PatchHistoryHunk],
+    target_line: i64,
+    path: &[u8],
+) -> Vec<Association> {
+    let Some(hunk) = hunks.iter().find(|hunk| {
+        target_line >= hunk.old_start && target_line < hunk.old_start + hunk.old_lines
+    }) else {
+        return Vec::new();
+    };
+    let Some(text) = hunk.text.as_ref() else {
+        return Vec::new();
+    };
+    let mut old_line = hunk.old_start;
+    let mut new_line = hunk.new_start;
+    let mut target_deleted = false;
+    let mut added_lines = Vec::new();
+    for diff_line in text.split_inclusive(|byte| *byte == b'\n') {
+        match diff_line.first() {
+            Some(b'-') => {
+                target_deleted |= old_line == target_line;
+                old_line += 1;
+            }
+            Some(b'+') => {
+                added_lines.push(new_line);
+                new_line += 1;
+            }
+            Some(b' ') => {
+                if target_deleted {
+                    break;
+                }
+                added_lines.clear();
+                old_line += 1;
+                new_line += 1;
+            }
+            Some(b'@' | b'\\') => {}
+            _ => return Vec::new(),
+        }
+    }
+    if !target_deleted {
+        return Vec::new();
+    }
+    added_lines
+        .into_iter()
+        .map(|line| Association {
+            location: Location {
+                path: path.to_vec(),
+                line,
+            },
+            span: None,
+        })
+        .collect()
+}
+
 /// Track a historical symbol declaration forward through linear history.
 ///
 /// The declaration is resolved at the starting revision; every forward commit
@@ -682,7 +1254,7 @@ fn execute_symbol(
         .symbol_selection
         .clone()
         .expect("symbol target has a selection");
-    let qualified_name = selection.qualified_name.clone();
+    let mut qualified_name = selection.qualified_name.clone();
     let mut symbol_language = selection.language.clone();
 
     if target.revision == endpoint {
@@ -697,6 +1269,8 @@ fn execute_symbol(
                 final_state: FinalState::ReachedEndpoint,
                 stopped_at: None,
                 stop_reason: None,
+                associations: Vec::new(),
+                associations_truncated: false,
                 last_location: Some(Location {
                     path: target.path,
                     line: i64::try_from(target.line)
@@ -733,6 +1307,8 @@ fn execute_symbol(
     let mut state_body_span = target.symbol_body_span;
     let mut last_revision = target.revision.clone();
     let mut events: Vec<Event> = Vec::new();
+    let mut associations = Vec::new();
+    let mut associations_truncated = false;
     let mut inspected = 0usize;
     let ceiling = max_commits.unwrap_or(usize::MAX);
     let mut traversal_truncated = false;
@@ -786,6 +1362,89 @@ fn execute_symbol(
             continue;
         };
         if change.status.starts_with('D') {
+            let strict_target = repository
+                .read_blob(&last_revision, &state_path)?
+                .as_deref()
+                .and_then(|content| symbol_source_bytes(content, (state_start, state_end)));
+            if let Some(strict_target) = strict_target {
+                let symbol_name = qualified_name
+                    .rsplit("::")
+                    .next()
+                    .unwrap_or(&qualified_name);
+                let candidates = find_symbol_move_candidates(
+                    session,
+                    repository,
+                    &node.oid,
+                    &changes,
+                    SymbolMoveSearch {
+                        excluded_path: None,
+                        symbol_name,
+                        strict_target: &strict_target,
+                        language: &symbol_language,
+                    },
+                )?;
+                if candidates.added.len() == 1 && candidates.unverified.is_empty() {
+                    let candidate = candidates
+                        .added
+                        .into_iter()
+                        .next()
+                        .expect("one symbol move candidate was counted");
+                    push_symbol_event(
+                        &mut events,
+                        session,
+                        &node.oid,
+                        node.commit_time,
+                        "move",
+                        node.parents.len(),
+                        &state_path,
+                        state_start,
+                        state_end,
+                        Some(&candidate.path),
+                        candidate.start,
+                        candidate.end,
+                        options.patch,
+                        change.ordinal,
+                    )?;
+                    state_path = candidate.path;
+                    state_start = candidate.start;
+                    state_end = candidate.end;
+                    state_body_span = candidate.symbol.body_span;
+                    symbol_language = candidate.symbol.selection.language.clone();
+                    qualified_name = candidate.symbol.selection.qualified_name.clone();
+                    last_revision = node.oid.clone();
+                    continue;
+                }
+                if !candidates.added.is_empty() || !candidates.unverified.is_empty() {
+                    let unverified = !candidates.unverified.is_empty();
+                    let added_associations =
+                        candidates.added.into_iter().map(|candidate| Association {
+                            location: Location {
+                                path: candidate.path,
+                                line: candidate.start,
+                            },
+                            span: Some((candidate.start, candidate.end)),
+                        });
+                    (associations, associations_truncated) =
+                        bounded_associations(added_associations.chain(candidates.unverified));
+                    stop = Some((
+                        node.oid.clone(),
+                        FinalState::Unknown,
+                        StopReason {
+                            code: if unverified {
+                                "move_candidate_unverified"
+                            } else {
+                                "ambiguous_move_candidates"
+                            },
+                            explanation: if unverified {
+                                "a strict-source continuation could not be verified from complete patch material"
+                            } else {
+                                "the unchanged symbol has multiple strict-source matches; its move cannot be established uniquely"
+                            },
+                        },
+                    ));
+                    break;
+                }
+            }
             push_symbol_event(
                 &mut events,
                 session,
@@ -864,6 +1523,106 @@ fn execute_symbol(
         ) {
             Ok(location) => location,
             Err(_) => {
+                let strict_target = repository
+                    .read_blob(&last_revision, &state_path)?
+                    .as_deref()
+                    .and_then(|content| symbol_source_bytes(content, (state_start, state_end)));
+                let candidates = if let Some(strict_target) = strict_target {
+                    let symbol_name = qualified_name
+                        .rsplit("::")
+                        .next()
+                        .unwrap_or(&qualified_name);
+                    find_symbol_move_candidates(
+                        session,
+                        repository,
+                        &node.oid,
+                        &changes,
+                        SymbolMoveSearch {
+                            excluded_path: Some(&state_path),
+                            symbol_name,
+                            strict_target: &strict_target,
+                            language: &symbol_language,
+                        },
+                    )?
+                } else {
+                    SymbolMoveCandidates::default()
+                };
+                if candidates.added.len() == 1
+                    && candidates.unverified.is_empty()
+                    && span_was_deleted(
+                        session,
+                        &node.oid,
+                        change.ordinal,
+                        (state_start, state_end),
+                    ) == Some(true)
+                {
+                    let candidate = candidates
+                        .added
+                        .into_iter()
+                        .next()
+                        .expect("one symbol move candidate was counted");
+                    push_symbol_event(
+                        &mut events,
+                        session,
+                        &node.oid,
+                        node.commit_time,
+                        "move",
+                        node.parents.len(),
+                        &state_path,
+                        state_start,
+                        state_end,
+                        Some(&candidate.path),
+                        candidate.start,
+                        candidate.end,
+                        options.patch,
+                        change.ordinal,
+                    )?;
+                    state_path = candidate.path;
+                    state_start = candidate.start;
+                    state_end = candidate.end;
+                    state_body_span = candidate.symbol.body_span;
+                    symbol_language = candidate.symbol.selection.language.clone();
+                    qualified_name = candidate.symbol.selection.qualified_name.clone();
+                    last_revision = node.oid.clone();
+                    continue;
+                }
+                if (candidates.added.len() > 1 || !candidates.unverified.is_empty())
+                    && span_was_deleted(
+                        session,
+                        &node.oid,
+                        change.ordinal,
+                        (state_start, state_end),
+                    ) == Some(true)
+                {
+                    let unverified = !candidates.unverified.is_empty();
+                    let added_associations =
+                        candidates.added.into_iter().map(|candidate| Association {
+                            location: Location {
+                                path: candidate.path,
+                                line: candidate.start,
+                            },
+                            span: Some((candidate.start, candidate.end)),
+                        });
+                    (associations, associations_truncated) =
+                        bounded_associations(added_associations.chain(candidates.unverified));
+                    stop = Some((
+                        node.oid.clone(),
+                        FinalState::Unknown,
+                        StopReason {
+                            code: if unverified {
+                                "move_candidate_unverified"
+                            } else {
+                                "ambiguous_move_candidates"
+                            },
+                            explanation: if unverified {
+                                "a strict-source continuation could not be verified from complete patch material"
+                            } else {
+                                "the unchanged symbol has multiple strict-source matches; its move cannot be established uniquely"
+                            },
+                        },
+                    ));
+                    break;
+                }
                 // The declaration no longer resolves uniquely in the new version:
                 // replacement, rename, or removal of the declaration.
                 if renamed {
@@ -912,6 +1671,129 @@ fn execute_symbol(
         let new_end = i64::try_from(new_location.end_line)
             .map_err(|_| AppError::input("line does not fit the coordinate space"))?;
 
+        let old_content_for_move = repository.read_blob(&last_revision, &state_path)?;
+        let complete_target_matches = old_content_for_move
+            .as_deref()
+            .and_then(|old_content| {
+                let old_source = symbol_source_bytes(old_content, (state_start, state_end))?;
+                let new_source = symbol_source_bytes(&new_content, (new_start, new_end))?;
+                Some(strict_source_equal(
+                    &old_source,
+                    &new_source,
+                    Some(symbol_language.as_str()),
+                    new_location.selection.language == symbol_language,
+                ))
+            })
+            .unwrap_or(false);
+        if complete_target_matches
+            && span_was_deleted(session, &node.oid, change.ordinal, (state_start, state_end))
+                == Some(true)
+        {
+            let primary = Association {
+                location: Location {
+                    path: new_path.clone(),
+                    line: new_start,
+                },
+                span: Some((new_start, new_end)),
+            };
+            match span_addition_status(session, &node.oid, change.ordinal, (new_start, new_end))? {
+                AddedMaterialStatus::Added => {
+                    let strict_target = old_content_for_move
+                        .as_deref()
+                        .and_then(|content| symbol_source_bytes(content, (state_start, state_end)))
+                        .expect("complete target match has source material");
+                    let symbol_name = qualified_name
+                        .rsplit("::")
+                        .next()
+                        .unwrap_or(&qualified_name);
+                    let alternatives = find_symbol_move_candidates(
+                        session,
+                        repository,
+                        &node.oid,
+                        &changes,
+                        SymbolMoveSearch {
+                            excluded_path: Some(&new_path),
+                            symbol_name,
+                            strict_target: &strict_target,
+                            language: &symbol_language,
+                        },
+                    )?;
+                    let unverified = !alternatives.unverified.is_empty();
+                    let additional = alternatives
+                        .added
+                        .into_iter()
+                        .map(|candidate| Association {
+                            location: Location {
+                                path: candidate.path,
+                                line: candidate.start,
+                            },
+                            span: Some((candidate.start, candidate.end)),
+                        })
+                        .chain(alternatives.unverified);
+                    let (candidate_associations, candidate_associations_truncated) =
+                        bounded_associations(std::iter::once(primary).chain(additional));
+                    if candidate_associations.len() > 1 {
+                        associations = candidate_associations;
+                        associations_truncated = candidate_associations_truncated;
+                        stop = Some((
+                            node.oid.clone(),
+                            FinalState::Unknown,
+                            StopReason {
+                                code: if unverified {
+                                    "move_candidate_unverified"
+                                } else {
+                                    "ambiguous_move_candidates"
+                                },
+                                explanation: if unverified {
+                                    "a strict-source continuation could not be verified from complete patch material"
+                                } else {
+                                    "the unchanged symbol has multiple strict-source matches; its move cannot be established uniquely"
+                                },
+                            },
+                        ));
+                        break;
+                    }
+                    push_symbol_event(
+                        &mut events,
+                        session,
+                        &node.oid,
+                        node.commit_time,
+                        "move",
+                        node.parents.len(),
+                        &state_path,
+                        state_start,
+                        state_end,
+                        Some(&new_path),
+                        new_start,
+                        new_end,
+                        options.patch,
+                        change.ordinal,
+                    )?;
+                    state_path = new_path.clone();
+                    state_start = new_start;
+                    state_end = new_end;
+                    state_body_span = new_location.body_span;
+                    symbol_language = new_location.selection.language.clone();
+                    qualified_name = new_location.selection.qualified_name.clone();
+                    last_revision = node.oid.clone();
+                    continue;
+                }
+                AddedMaterialStatus::Unavailable => {
+                    (associations, associations_truncated) = bounded_associations([primary]);
+                    stop = Some((
+                        node.oid.clone(),
+                        FinalState::Unknown,
+                        StopReason {
+                            code: "move_candidate_unverified",
+                            explanation: "the strict-source continuation could not be verified from complete patch material",
+                        },
+                    ));
+                    break;
+                }
+                AddedMaterialStatus::NotAdded => {}
+            }
+        }
+
         if renamed {
             push_symbol_event(
                 &mut events,
@@ -934,7 +1816,7 @@ fn execute_symbol(
         // Name resolution chooses the candidate; diff correspondence must still
         // map every declaration line and preserve actual body code.
         let new_body_span = new_location.body_span;
-        let Some(old_content) = repository.read_blob(&last_revision, &state_path)? else {
+        let Some(old_content) = old_content_for_move else {
             stop = Some((
                 node.oid.clone(),
                 FinalState::Unknown,
@@ -989,6 +1871,15 @@ fn execute_symbol(
         let symbol_modified = old_symbol_identity != new_symbol_identity;
         let unchanged_body = old_identity == new_identity;
         let Some(unchanged_correspondence) = correspondence else {
+            let candidate = Association {
+                location: Location {
+                    path: new_path.clone(),
+                    line: new_start,
+                },
+                span: Some((new_start, new_end)),
+            };
+            (associations, associations_truncated) =
+                bounded_associations(associations.into_iter().chain([candidate]));
             stop = Some((
                 node.oid.clone(),
                 FinalState::Unknown,
@@ -1011,6 +1902,15 @@ fn execute_symbol(
                     explanation: "the declaration body was rewritten; unchanged body code no longer establishes continuity",
                 }
             };
+            let candidate = Association {
+                location: Location {
+                    path: new_path.clone(),
+                    line: new_start,
+                },
+                span: Some((new_start, new_end)),
+            };
+            (associations, associations_truncated) =
+                bounded_associations(associations.into_iter().chain([candidate]));
             stop = Some((node.oid.clone(), FinalState::Unknown, reason));
             break;
         }
@@ -1130,6 +2030,8 @@ fn execute_symbol(
             final_state,
             stopped_at,
             stop_reason,
+            associations,
+            associations_truncated,
             last_location,
             last_span,
             inspected_commits: inspected,
@@ -1354,6 +2256,421 @@ fn code_identity(
             identity.push(b'\n');
             identity
         })
+}
+
+fn span_was_deleted(
+    session: &crate::cache::QuerySession,
+    oid: &str,
+    change_ordinal: i64,
+    span: (i64, i64),
+) -> Option<bool> {
+    if span.0 > span.1 {
+        return Some(false);
+    }
+    let history = session
+        .patch_history_for_change(oid, change_ordinal, MAX_HUNKS, MAX_HUNK_BYTES)
+        .ok()?;
+    if history.missing_objects
+        || history.truncated
+        || history.hunks.iter().any(|hunk| hunk.text.is_none())
+    {
+        return None;
+    }
+    for line in span.0..=span.1 {
+        match map_line_forward(&history.hunks, line)? {
+            Forward::Deleted | Forward::Rewritten { replacement: None } => {}
+            Forward::Kept { .. }
+            | Forward::Rewritten {
+                replacement: Some(_),
+            } => {
+                return Some(false);
+            }
+        }
+    }
+    Some(true)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AddedMaterialStatus {
+    Added,
+    NotAdded,
+    Unavailable,
+}
+
+fn span_addition_status(
+    session: &QuerySession,
+    oid: &str,
+    change_ordinal: i64,
+    span: (i64, i64),
+) -> Result<AddedMaterialStatus, AppError> {
+    if span.0 < 1 || span.0 > span.1 {
+        return Ok(AddedMaterialStatus::NotAdded);
+    }
+    let history =
+        session.patch_history_for_change(oid, change_ordinal, MAX_HUNKS, MAX_HUNK_BYTES)?;
+    if history.missing_objects
+        || history.truncated
+        || history.hunks.is_empty()
+        || history.hunks.iter().any(|hunk| hunk.text.is_none())
+    {
+        return Ok(AddedMaterialStatus::Unavailable);
+    }
+    let mut added = false;
+    for hunk in &history.hunks {
+        match hunk_adds_line_in_span(hunk, span) {
+            Some(true) => added = true,
+            Some(false) => {}
+            None => return Ok(AddedMaterialStatus::Unavailable),
+        }
+    }
+    Ok(if added {
+        AddedMaterialStatus::Added
+    } else {
+        AddedMaterialStatus::NotAdded
+    })
+}
+
+fn added_target_lines(
+    hunks: &[PatchHistoryHunk],
+    missing_objects: bool,
+    truncated: bool,
+    targets: &BTreeSet<i64>,
+) -> Option<BTreeSet<i64>> {
+    if missing_objects
+        || truncated
+        || hunks.is_empty()
+        || hunks.iter().any(|hunk| hunk.text.is_none())
+    {
+        return None;
+    }
+    let mut added = BTreeSet::new();
+    for hunk in hunks {
+        let text = hunk.text.as_deref()?;
+        let mut old_line = hunk_first_line(hunk.old_start, hunk.old_lines)?;
+        let mut new_line = hunk_first_line(hunk.new_start, hunk.new_lines)?;
+        let mut old_count = 0i64;
+        let mut new_count = 0i64;
+        let mut first_row = true;
+        for raw in text.split_inclusive(|byte| *byte == b'\n') {
+            let row = raw.strip_suffix(b"\n").unwrap_or(raw);
+            if first_row {
+                first_row = false;
+                if !row.starts_with(b"@@ ") {
+                    return None;
+                }
+                continue;
+            }
+            match row.first() {
+                Some(b' ') => {
+                    old_line = old_line.checked_add(1)?;
+                    new_line = new_line.checked_add(1)?;
+                    old_count += 1;
+                    new_count += 1;
+                }
+                Some(b'-') => {
+                    old_line = old_line.checked_add(1)?;
+                    old_count += 1;
+                }
+                Some(b'+') => {
+                    if targets.contains(&new_line) {
+                        added.insert(new_line);
+                    }
+                    new_line = new_line.checked_add(1)?;
+                    new_count += 1;
+                }
+                Some(b'\\') => {}
+                _ => return None,
+            }
+        }
+        if first_row || old_count != hunk.old_lines || new_count != hunk.new_lines {
+            return None;
+        }
+    }
+    Some(added)
+}
+
+fn hunk_adds_line_in_span(
+    hunk: &PatchHistoryHunk,
+    (span_start, span_end): (i64, i64),
+) -> Option<bool> {
+    let text = hunk.text.as_deref()?;
+    let mut old_line = hunk_first_line(hunk.old_start, hunk.old_lines)?;
+    let mut new_line = hunk_first_line(hunk.new_start, hunk.new_lines)?;
+    let mut old_count = 0i64;
+    let mut new_count = 0i64;
+    let mut first_row = true;
+    let mut found = false;
+    for raw in text.split_inclusive(|byte| *byte == b'\n') {
+        let row = raw.strip_suffix(b"\n").unwrap_or(raw);
+        if first_row {
+            first_row = false;
+            if !row.starts_with(b"@@ ") {
+                return None;
+            }
+            continue;
+        }
+        match row.first() {
+            Some(b' ') => {
+                old_line = old_line.checked_add(1)?;
+                new_line = new_line.checked_add(1)?;
+                old_count += 1;
+                new_count += 1;
+            }
+            Some(b'-') => {
+                old_line = old_line.checked_add(1)?;
+                old_count += 1;
+            }
+            Some(b'+') => {
+                found |= (span_start..=span_end).contains(&new_line);
+                new_line = new_line.checked_add(1)?;
+                new_count += 1;
+            }
+            Some(b'\\') => {}
+            _ => return None,
+        }
+    }
+    if first_row || old_count != hunk.old_lines || new_count != hunk.new_lines {
+        return None;
+    }
+    Some(found)
+}
+
+fn hunk_first_line(start: i64, count: i64) -> Option<i64> {
+    if start < 0 || count < 0 || (count > 0 && start == 0) {
+        return None;
+    }
+    if count == 0 {
+        start.checked_add(1)
+    } else {
+        Some(start)
+    }
+}
+
+fn strict_source_equal(
+    left: &[u8],
+    right: &[u8],
+    language: Option<&str>,
+    allow_indentation_normalization: bool,
+) -> bool {
+    if left == right {
+        return true;
+    }
+    let Some(language) = language.filter(|_| allow_indentation_normalization) else {
+        return false;
+    };
+    let Some(left) = normalize_source_for_move(left, language) else {
+        return false;
+    };
+    let Some(right) = normalize_source_for_move(right, language) else {
+        return false;
+    };
+    left == right
+}
+
+fn source_language_for_path(path: &[u8]) -> Option<&'static str> {
+    let extension = std::str::from_utf8(path.rsplit(|byte| *byte == b'.').next()?).ok()?;
+    match extension.to_ascii_lowercase().as_str() {
+        "rs" => Some("rust"),
+        "py" | "pyw" => Some("python"),
+        "js" | "jsx" | "mjs" | "cjs" => Some("javascript"),
+        "ts" | "tsx" | "mts" | "cts" => Some("typescript"),
+        "go" => Some("go"),
+        "java" => Some("java"),
+        "kt" | "kts" => Some("kotlin"),
+        "cc" | "cpp" | "cxx" | "hpp" | "hxx" => Some("cpp"),
+        _ => None,
+    }
+}
+
+fn supports_indentation_normalization(language: &str) -> bool {
+    matches!(
+        language,
+        "rust" | "python" | "javascript" | "typescript" | "go" | "java" | "kotlin" | "cpp"
+    )
+}
+
+fn contains_multiline_literal(source: &[u8], language: &str) -> bool {
+    match language {
+        "rust" => contains_multiline_rust_raw_string(source),
+        "python" => {
+            contains_multiline_delimited(source, b"\"\"\"")
+                || contains_multiline_delimited(source, b"'''")
+        }
+        "javascript" | "typescript" | "go" => contains_multiline_delimited(source, b"`"),
+        "java" | "kotlin" => contains_multiline_delimited(source, b"\"\"\""),
+        "cpp" => contains_multiline_cpp_raw_string(source),
+        _ => true,
+    }
+}
+
+fn contains_multiline_delimited(source: &[u8], delimiter: &[u8]) -> bool {
+    let mut search_from = 0;
+    while search_from + delimiter.len() <= source.len() {
+        let Some(relative_open) = source[search_from..]
+            .windows(delimiter.len())
+            .position(|window| window == delimiter)
+        else {
+            return false;
+        };
+        let open = search_from + relative_open;
+        let body_start = open + delimiter.len();
+        let mut cursor = body_start;
+        while cursor + delimiter.len() <= source.len() {
+            if source[cursor] == b'\\' {
+                cursor = cursor.saturating_add(2);
+                continue;
+            }
+            if source[cursor..].starts_with(delimiter) {
+                if source[body_start..cursor].contains(&b'\n') {
+                    return true;
+                }
+                search_from = cursor + delimiter.len();
+                break;
+            }
+            cursor += 1;
+        }
+        if cursor + delimiter.len() > source.len() {
+            return source[body_start..].contains(&b'\n');
+        }
+    }
+    false
+}
+
+fn contains_multiline_rust_raw_string(source: &[u8]) -> bool {
+    for open in 0..source.len() {
+        if source[open] != b'r' {
+            continue;
+        }
+        let mut quote = open + 1;
+        while source.get(quote) == Some(&b'#') {
+            quote += 1;
+        }
+        if source.get(quote) != Some(&b'\"') {
+            continue;
+        }
+        let body_start = quote + 1;
+        let mut closing = vec![b'\"'];
+        closing.extend(std::iter::repeat_n(b'#', quote - open - 1));
+        if let Some(relative_close) = source[body_start..]
+            .windows(closing.len())
+            .position(|window| window == closing)
+            && source[body_start..body_start + relative_close].contains(&b'\n')
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn contains_multiline_cpp_raw_string(source: &[u8]) -> bool {
+    let mut search_from = 0;
+    while let Some(relative_open) = source[search_from..]
+        .windows(2)
+        .position(|window| window == *b"R\"")
+    {
+        let open = search_from + relative_open;
+        let delimiter_start = open + 2;
+        let Some(relative_paren) = source[delimiter_start..]
+            .iter()
+            .position(|byte| *byte == b'(')
+        else {
+            return false;
+        };
+        let paren = delimiter_start + relative_paren;
+        let delimiter = &source[delimiter_start..paren];
+        if delimiter.len() > 16 {
+            search_from = paren + 1;
+            continue;
+        }
+        let body_start = paren + 1;
+        let mut closing = vec![b')'];
+        closing.extend_from_slice(delimiter);
+        closing.push(b'\"');
+        if let Some(relative_close) = source[body_start..]
+            .windows(closing.len())
+            .position(|window| window == closing)
+        {
+            if source[body_start..body_start + relative_close].contains(&b'\n') {
+                return true;
+            }
+            search_from = body_start + relative_close + closing.len();
+        } else {
+            return source[body_start..].contains(&b'\n');
+        }
+    }
+    false
+}
+
+fn normalize_source_for_move(source: &[u8], language: &str) -> Option<Vec<u8>> {
+    if !supports_indentation_normalization(language) || contains_multiline_literal(source, language)
+    {
+        return None;
+    }
+    let chunks = source
+        .split_inclusive(|byte| *byte == b'\n')
+        .collect::<Vec<_>>();
+    let mut lines = Vec::with_capacity(chunks.len());
+    let mut newline_terminated = Vec::with_capacity(chunks.len());
+    for chunk in chunks {
+        let has_newline = chunk.ends_with(b"\n");
+        let mut line = if has_newline {
+            &chunk[..chunk.len() - 1]
+        } else {
+            chunk
+        };
+        if has_newline {
+            line = line.strip_suffix(b"\r").unwrap_or(line);
+        }
+        lines.push(line.to_vec());
+        newline_terminated.push(has_newline);
+    }
+    let mut common_indent: Option<Vec<u8>> = None;
+    for line in &lines {
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        let indent = line
+            .iter()
+            .take_while(|byte| matches!(byte, b' ' | 9))
+            .copied()
+            .collect::<Vec<_>>();
+        if let Some(common) = common_indent.as_mut() {
+            let shared = common
+                .iter()
+                .zip(&indent)
+                .take_while(|(left, right)| left == right)
+                .count();
+            common.truncate(shared);
+        } else {
+            common_indent = Some(indent);
+        }
+    }
+    let common_indent = common_indent.unwrap_or_default();
+    let mut normalized = Vec::new();
+    for (line, has_newline) in lines.into_iter().zip(newline_terminated) {
+        let start = if line.iter().all(u8::is_ascii_whitespace) {
+            line.iter()
+                .take_while(|byte| matches!(byte, b' ' | 9))
+                .count()
+        } else {
+            common_indent.len()
+        };
+        normalized.extend_from_slice(&line[start..]);
+        if has_newline {
+            normalized.push(b'\n');
+        }
+    }
+    Some(normalized)
+}
+
+fn symbol_source_bytes(content: &[u8], span: (i64, i64)) -> Option<Vec<u8>> {
+    let start = usize::try_from(span.0.checked_sub(1)?).ok()?;
+    let end = usize::try_from(span.1).ok()?;
+    let lines = content
+        .split_inclusive(|byte| *byte == b'\n')
+        .collect::<Vec<_>>();
+    let source = lines.get(start..end)?.concat();
+    (!source.is_empty()).then_some(source)
 }
 
 fn normalized_code_lines(content: &[u8], language: &str) -> Vec<Vec<u8>> {
