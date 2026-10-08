@@ -292,7 +292,7 @@ fn trace_fix_patch_quotes_only_the_attributed_introducing_hunk() {
     let ordinary_json = repo.run(["trace-fix", &fix, "--path", "app.txt", "--json"]);
     assert_eq!(ordinary_json.status.code(), Some(0));
     let ordinary_json: serde_json::Value = serde_json::from_slice(&ordinary_json.stdout).unwrap();
-    assert_eq!(ordinary_json["schema_version"], 1);
+    assert_eq!(ordinary_json["schema_version"], 2);
     assert!(ordinary_json["materials"][0].get("patch").is_none());
 
     let text_patch = repo.run(["trace-fix", &fix, "--path", "app.txt", "--patch"]);
@@ -378,15 +378,27 @@ fn trace_fix_patch_uses_hunk_metadata_when_cached_text_is_missing() {
         "trace-fix --patch --json: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let tail = stdout.chars().rev().take(1000).collect::<String>();
+            panic!(
+                "invalid JSON ({error}), stdout length {}: tail reversed {tail:?}",
+                stdout.len()
+            );
+        });
     assert_eq!(report["schema_version"], 2);
     let patch = &report["materials"][0]["patch"];
     assert_eq!(patch["status"], "available");
     assert_eq!(patch["hunks"].as_array().unwrap().len(), 1);
     assert!(patch["hunks"][0]["text"].is_null());
     assert_eq!(patch["hunks"][0]["truncated"], true);
+    let versions = &report["fix_versions"];
+    assert_eq!(versions["query"]["hunk_count"], 1);
+    assert_eq!(versions["query"]["hunks"].as_array().unwrap().len(), 1);
+    assert_eq!(versions["query"]["hunks"][0]["text_truncated"], true);
+    assert!(output.stdout.len() < 32_768);
 }
-
 #[test]
 fn trace_fix_keeps_failure_context_on_the_blamed_path() {
     let repo = TestRepo::new();
@@ -594,11 +606,31 @@ fn trace_fix_degrades_when_the_fix_parent_commit_is_missing() {
     repo.remove_commit(&missing_parent);
 
     let output = repo.run(["trace-fix", &fix, "--path", "app.txt"]);
-    assert_eq!(output.status.code(), Some(0));
     assert_eq!(
-        String::from_utf8_lossy(&output.stdout).trim(),
-        "No introducing change could be traced.",
+        output.status.code(),
+        Some(0),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
     );
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .starts_with("No introducing change could be traced.")
+    );
+    let json_output = repo.run(["trace-fix", &fix, "--path", "app.txt", "--json"]);
+    assert_eq!(
+        json_output.status.code(),
+        Some(0),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&json_output.stdout),
+        String::from_utf8_lossy(&json_output.stderr),
+    );
+    let report: serde_json::Value = serde_json::from_slice(&json_output.stdout).unwrap();
+    assert_eq!(
+        report["fix_versions"]["query"]["integrity"],
+        "indeterminate"
+    );
+    assert_eq!(report["fix_versions"]["scope"]["coverage_complete"], false);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("fix parent is missing locally"));
     assert!(stderr.contains("changed-path metadata is unavailable"));
@@ -633,10 +665,9 @@ fn trace_fix_reports_shallow_parent_degradation() {
 
     let output = TestRepo::run_at(&clone, ["trace-fix", "HEAD", "--path", "app.txt"]);
     assert_eq!(output.status.code(), Some(0));
-    assert_eq!(
-        String::from_utf8_lossy(&output.stdout).trim(),
-        "No introducing change could be traced.",
-    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.starts_with("No introducing change could be traced."));
+    assert!(stdout.contains("coverage complete: false"));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("fix parent is missing locally"));
 }
@@ -652,9 +683,9 @@ fn trace_fix_reports_missing_blob_degradation() {
 
     let output = repo.run(["trace-fix", "HEAD", "--path", "app.txt"]);
     assert_eq!(output.status.code(), Some(0));
-    assert_eq!(
-        String::from_utf8_lossy(&output.stdout).trim(),
-        "No introducing change could be traced.",
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .starts_with("No introducing change could be traced.")
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("missing locally"));
@@ -670,11 +701,188 @@ fn trace_fix_degrades_pure_additions_without_fabricating_lineage() {
 
     let output = repo.run(["trace-fix", "HEAD", "--path", "app.txt"]);
     assert_eq!(output.status.code(), Some(0));
-    assert_eq!(
-        String::from_utf8_lossy(&output.stdout).trim(),
-        "No introducing change could be traced."
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .starts_with("No introducing change could be traced.")
     );
     assert!(String::from_utf8_lossy(&output.stderr).contains("no deleted lines"));
+}
+
+#[test]
+fn trace_fix_reports_equivalent_versions_in_independent_multibranch_scope() {
+    let repo = TestRepo::new();
+    repo.commit("app.txt", b"safe\n", "Initial app", None);
+    repo.commit("app.txt", b"buggy\n", "Introduce timeout bug", None);
+    let introducing = repo.head();
+    repo.commit("app.txt", b"fixed\n", "Fix timeout bug", None);
+    let fix = repo.head();
+
+    git(
+        repo.dir.path(),
+        ["switch", "-c", "cherry-pick", introducing.as_str()],
+    );
+    repo.commit(
+        "notes.txt",
+        b"branch context\n",
+        "Add cherry-pick context",
+        None,
+    );
+    git(repo.dir.path(), ["cherry-pick", fix.as_str()]);
+    let cherry_pick = repo.head();
+
+    git(
+        repo.dir.path(),
+        ["switch", "-c", "manual-reapplication", introducing.as_str()],
+    );
+    repo.commit("app.txt", b"context\nbuggy\n", "Add branch context", None);
+    repo.commit("app.txt", b"context\nfixed\n", "Reapply timeout fix", None);
+    let manual = repo.head();
+    git(repo.dir.path(), ["switch", "-c", "inverse", fix.as_str()]);
+    repo.commit("app.txt", b"buggy\n", "Revert timeout fix", None);
+    let inverse = repo.head();
+
+    git(
+        repo.dir.path(),
+        ["switch", "-c", "partial", introducing.as_str()],
+    );
+    repo.commit(
+        "app.txt",
+        b"partially-fixed\n",
+        "Partially fix timeout bug",
+        None,
+    );
+    let partial = repo.head();
+
+    git(
+        repo.dir.path(),
+        ["switch", "-c", "unrelated", introducing.as_str()],
+    );
+    std::fs::write(repo.dir.path().join("notes.txt"), b"unrelated\n").unwrap();
+    git(repo.dir.path(), ["add", "--all"]);
+    git(repo.dir.path(), ["commit", "-m", "Add unrelated notes"]);
+    let unrelated = repo.head();
+    git(
+        repo.dir.path(),
+        [
+            "update-ref",
+            "refs/remotes/origin/release",
+            cherry_pick.as_str(),
+        ],
+    );
+    git(repo.dir.path(), ["switch", "main"]);
+    git(repo.dir.path(), ["branch", "-D", "cherry-pick"]);
+    repo.index();
+
+    let output = repo.run([
+        "trace-fix",
+        fix.as_str(),
+        "--path",
+        "app.txt",
+        "--from-rev",
+        introducing.as_str(),
+        "--json",
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["schema_version"], 2, "{report:#}");
+    assert_eq!(report["matched_count"], 0);
+    assert_eq!(report["materials"], serde_json::json!([]));
+    assert_eq!(report["scope"]["from_rev"], introducing);
+    assert_eq!(report["scope"]["to_rev"], fix);
+
+    let versions = &report["fix_versions"];
+    assert_eq!(versions["query"]["commit_id"], fix);
+    assert_eq!(versions["query"]["parent"], introducing);
+    assert_eq!(versions["query"]["comparison_basis"], "first_parent");
+    assert_eq!(versions["query"]["normalization_version"], 3);
+    assert_eq!(
+        versions["query"]["paths"],
+        serde_json::json!([b"app.txt".to_vec()])
+    );
+    assert!(versions["query"]["hunk_count"].as_u64().unwrap() > 0);
+    assert!(!versions["query"]["hunks"].as_array().unwrap().is_empty());
+    assert_eq!(versions["matched_count"], 2, "{versions:#}");
+    assert_eq!(versions["returned_count"], 2);
+    assert_eq!(versions["scope"]["from_rev"], serde_json::Value::Null);
+    assert_eq!(
+        versions["scope"]["to_rev"],
+        "all-local-and-fetched-remote-branches"
+    );
+    assert_eq!(versions["scope"]["coverage_complete"], true);
+    assert!(versions["scope"]["eligible_count"].as_u64().unwrap() > 0);
+    assert_eq!(versions["scope"]["unexamined_count"], 0);
+    assert_eq!(versions["scope"]["indeterminate"], serde_json::json!([]));
+
+    let matches = versions["matches"].as_array().unwrap();
+    assert_eq!(matches.len(), 2);
+    for version in matches {
+        assert_eq!(version["relation"], "equivalent");
+        assert_eq!(version["comparison_basis"], "first_parent");
+        assert_eq!(version["normalization_version"], 3);
+        assert_eq!(version["paths"], serde_json::json!([b"app.txt".to_vec()]));
+        assert!(version["hunk_count"].as_u64().unwrap() > 0);
+        assert!(!version["hunks"].as_array().unwrap().is_empty());
+        assert!(
+            version["hunks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|hunk| { hunk["text"].as_str().unwrap().contains("+fixed") })
+        );
+    }
+    assert!(
+        matches
+            .iter()
+            .any(|version| version["commit_id"] == cherry_pick)
+    );
+    assert!(matches.iter().any(|version| version["commit_id"] == manual));
+    assert!(
+        matches
+            .iter()
+            .all(|version| version["commit_id"] != inverse)
+    );
+    assert!(
+        matches
+            .iter()
+            .all(|version| version["commit_id"] != partial)
+    );
+    assert!(
+        matches
+            .iter()
+            .all(|version| version["commit_id"] != unrelated)
+    );
+    assert!(
+        versions["scope"]["branch_tips"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tip| tip[1] == cherry_pick)
+    );
+    let text_output = repo.run([
+        "trace-fix",
+        fix.as_str(),
+        "--path",
+        "app.txt",
+        "--from-rev",
+        introducing.as_str(),
+    ]);
+    assert_eq!(
+        text_output.status.code(),
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&text_output.stderr)
+    );
+    let text = String::from_utf8_lossy(&text_output.stdout);
+    assert!(text.contains("Patch equivalents for"));
+    assert!(text.contains(cherry_pick.as_str()));
+    assert!(text.contains(manual.as_str()));
+    assert!(text.contains("basis: first_parent"));
+    assert!(text.contains("+fixed"));
 }
 
 #[test]

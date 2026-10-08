@@ -28,7 +28,7 @@ stdout=Scope: commits reachable from 4ca5b496b63464a21d3c49b7575782477c90709d; i
 stderr=Regression suspects are historical candidates; they do not replace executable git bisect.\n
 [trace-fix]
 status=Some(0)
-stdout=Fix lineage (1 match):\n- 3642a5c1bf39 Revert \"Retire legacy provider safely\"\n  trace: introducing change at fix 4ca5b496b63464a21d3c49b7575782477c90709d\n  parent: 3642a5c1bf39bfafe27816cc419328e33efbeb3b\n  deleted line: 2\n  path: src/lib.rs\n  confidence: high\n  basis: fix-parent deleted-line blame identifies this introducing change, fix commit message records observed failure context\n  commit: 4ca5b496b634 Fix provider regression after revert (observed failure and fix)\n
+stdout=Fix lineage (1 match):\n- 3642a5c1bf39 Revert \"Retire legacy provider safely\"\n  trace: introducing change at fix 4ca5b496b63464a21d3c49b7575782477c90709d\n  parent: 3642a5c1bf39bfafe27816cc419328e33efbeb3b\n  deleted line: 2\n  path: src/lib.rs\n  confidence: high\n  basis: fix-parent deleted-line blame identifies this introducing change, fix commit message records observed failure context\n  commit: 4ca5b496b634 Fix provider regression after revert (observed failure and fix)\n\nEquivalent-version scope: all local and fetched remote branch tips, independent of trace-fix historical scope and filters.\nPatch equivalents for 4ca5b496b63464a21d3c49b7575782477c90709d (complete)\n0 matches; 0 returned.\nScope: 1 local/fetched branch tips; 3 checked; 0 indeterminate; 0 unexamined; coverage complete: true.\n\nComplete-patch content equality does not establish semantic equivalence or propagation direction.\n
 stderr=Remote context unavailable from local history.\n
 [timeline]
 status=Some(0)

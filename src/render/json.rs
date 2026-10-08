@@ -20,7 +20,7 @@ pub(crate) fn format_json_report(
             5
         } else if github_links.is_some() {
             4
-        } else if report.patch_mode {
+        } else if report.patch_mode || report.kind == ReportKind::TraceFix {
             2
         } else {
             SCHEMA_VERSION
@@ -37,6 +37,7 @@ pub(crate) fn format_json_report(
                 .map(json_why_modification)
                 .collect()
         }),
+        fix_versions: report.fix_versions.as_deref(),
         why: report.why.as_ref().map(|why| json_why(why)),
         code_matches: (report.kind == ReportKind::CodeSearch)
             .then(|| report.code_matches.iter().map(json_code_match).collect()),
@@ -87,6 +88,8 @@ struct JsonReport<'a> {
     patch_grouping: Option<&'a PatchGrouping>,
     #[serde(skip_serializing_if = "Option::is_none")]
     materials: Option<Vec<JsonMaterial<'a>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fix_versions: Option<&'a crate::analysis::capabilities::trace_fix::TraceFixVersions>,
     #[serde(skip_serializing_if = "Option::is_none")]
     target_related_modifications: Option<Vec<JsonWhyModification<'a>>>,
     #[serde(skip_serializing_if = "Option::is_none")]

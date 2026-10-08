@@ -23,6 +23,7 @@ pub(crate) struct Report {
     pub(crate) scope: Scope,
     pub(crate) warnings: Vec<String>,
 }
+
 #[derive(Serialize)]
 pub(crate) struct Scope {
     pub(crate) branch_tips: Vec<(String, String)>,
@@ -58,13 +59,13 @@ pub(crate) struct PatchMaterial {
 }
 #[derive(Serialize)]
 pub(crate) struct PatchHunk {
-    change_ordinal: i64,
-    ordinal: i64,
-    old_start: i64,
-    old_lines: i64,
-    new_start: i64,
-    new_lines: i64,
-    text: Vec<u8>,
+    pub(crate) change_ordinal: i64,
+    pub(crate) ordinal: i64,
+    pub(crate) old_start: i64,
+    pub(crate) old_lines: i64,
+    pub(crate) new_start: i64,
+    pub(crate) new_lines: i64,
+    pub(crate) text: Vec<u8>,
 }
 
 fn material(
