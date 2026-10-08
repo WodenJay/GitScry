@@ -52,3 +52,11 @@ Record a case only when it did not—for example, its output was not useful, it 
 - **Goal:** Exercise the new default equivalent/inverse patch search against repository history for a real-world inverse candidate.
 - **Actual:** The command scanned 637 eligible commits, returned `matched_count=0`, `unexamined_count=0`, and `coverage_complete=false` with 5 indeterminate commits (`binary or unavailable changed content`). It yielded no relationship candidate to validate inverse classification.
 - **Expected:** A local equivalent or inverse patch candidate that would demonstrate classification against repository history.
+
+### 2026-10-08 Current patch search found no local relationship
+
+- **Command:** `cargo run --quiet --jobs 1 -- search --current-patch --json --limit 3`
+- **Context:** Development build at HEAD `ab605a0` on `agent/issue-268-current-patch-search`; installed GitScry is 0.13.0.
+- **Goal:** Compare the in-progress current patch against repository history while implementing issue #268.
+- **Actual:** The query was complete (`head_to_worktree`, no commit ID), but returned `matched_count=0`; 651 candidates were checked, 5 were indeterminate (`binary or unavailable changed content`), and coverage was incomplete. The JSON was 1,011,082 bytes and yielded no relationship candidate or historical guidance.
+- **Expected:** A relevant local equivalent or inverse patch, or history that informs the implementation.

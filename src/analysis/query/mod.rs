@@ -40,6 +40,11 @@ pub(crate) enum Request {
         relation: PatchRelationSelection,
         max_patch_checks: Option<usize>,
     },
+    CurrentPatchSearch {
+        staged: bool,
+        relation: PatchRelationSelection,
+        max_patch_checks: Option<usize>,
+    },
     FragmentSearch {
         input: std::path::PathBuf,
         path: Option<String>,
@@ -234,6 +239,13 @@ pub(crate) fn execute(request: Request, options: Options) -> Result<Outcome, App
             relation,
             max_patch_checks,
         } => capabilities::patch_search::execute(revision, max_patch_checks, relation, options),
+        Request::CurrentPatchSearch {
+            staged,
+            relation,
+            max_patch_checks,
+        } => {
+            capabilities::patch_search::execute_current(staged, max_patch_checks, relation, options)
+        }
         Request::FragmentSearch {
             input,
             path,

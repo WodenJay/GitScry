@@ -3,7 +3,7 @@ pub(crate) use conflicts::{ConflictFile, MergeConflict};
 mod current;
 mod current_content;
 pub(crate) use current::CurrentHunk;
-pub(crate) use current::{CurrentChange, current_regular_file};
+pub(crate) use current::{CurrentChange, CurrentPatch, current_regular_file};
 mod history;
 mod merge_tree;
 pub(crate) use merge_tree::{MergeTree, Replay, StageEntry, TreeEntry};
