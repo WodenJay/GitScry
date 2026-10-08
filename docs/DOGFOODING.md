@@ -21,6 +21,14 @@ Record a case only when it did not—for example, its output was not useful, it 
 
 ## Entries
 
+### 2026-10-08 Followups query found no patch leads
+
+- **Command:** `cargo run --quiet --jobs 1 -- followups 372bf26 --to-rev HEAD --days 500 --limit 5 --json`
+- **Context:** Development build at HEAD `ab605a00f477f99a0cd33f73c182e7bba82ab7ca` on `issue-270-patch-relationships`.
+- **Goal:** Inspect eligible descendants of the prior followups/revert work for useful patch-relationship precedents.
+- **Actual:** The endpoint-reachable query inspected 40 commits and returned `matched_in_inspected_scope=0`; no equivalent or inverse relationship lead was surfaced. It reported ambiguous merge file correspondence, including for `src/analysis/capabilities/followups/mod.rs`.
+- **Expected:** Traceable equivalent or inverse patch leads from eligible descendant history, or a controlled history fixture if none exists locally.
+
 ### 2026-10-06 Hotspot query timed out during dogfooding
 
 - **Command:** `cargo run --quiet --jobs 1 -- hotspots --limit 5 --json`
