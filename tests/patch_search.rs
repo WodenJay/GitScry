@@ -2,7 +2,7 @@ mod support;
 
 use serde_json::Value;
 use std::fs;
-use support::{TestRepo, git};
+use support::{TestRepo, git, git_command, git_stdout};
 
 fn commit(repo: &TestRepo, path: &str, content: &[u8], message: &str) -> String {
     fs::write(repo.dir.path().join(path), content).unwrap();
@@ -12,14 +12,20 @@ fn commit(repo: &TestRepo, path: &str, content: &[u8], message: &str) -> String 
 }
 
 fn search(repo: &TestRepo, revision: &str, extra: &[&str]) -> Value {
-    let mut args = vec![
-        "search",
-        "--patch-of",
-        revision,
-        "--relation",
-        "equivalent",
-        "--json",
-    ];
+    search_with_relation(repo, revision, Some("equivalent"), extra)
+}
+
+fn search_with_relation(
+    repo: &TestRepo,
+    revision: &str,
+    relation: Option<&str>,
+    extra: &[&str],
+) -> Value {
+    let mut args = vec!["search", "--patch-of", revision];
+    if let Some(relation) = relation {
+        args.extend(["--relation", relation]);
+    }
+    args.push("--json");
     args.extend_from_slice(extra);
     let output = TestRepo::command_at(repo.dir.path(), repo.user_data_dir())
         .args(args)
@@ -140,7 +146,7 @@ fn result_limits_only_bound_presentation_and_cutoffs_disclose_gaps() {
 }
 
 #[test]
-fn patch_input_rejects_partial_paths_other_modes_and_future_relations() {
+fn patch_input_rejects_partial_paths_other_modes_and_unsupported_relations() {
     let repo = TestRepo::new();
     for extra in [
         vec!["words"],
@@ -150,7 +156,7 @@ fn patch_input_rejects_partial_paths_other_modes_and_future_relations() {
         vec!["--path", "file"],
         vec!["--hybrid"],
         vec!["--github-links"],
-        vec!["--relation", "inverse"],
+        vec!["--relation", "unknown"],
     ] {
         let mut args = vec!["search", "--patch-of", "HEAD"];
         args.extend(extra);
@@ -380,4 +386,241 @@ fn full_patch_beyond_display_limits_is_compared_and_shallow_scope_is_disclosed()
     let value = search(&repo, &query, &[]);
     assert_eq!(value["scope"]["coverage_complete"], false);
     assert_eq!(value["matches"][0]["commit_id"], equivalent);
+}
+
+#[test]
+fn finds_reverts_manual_inverse_patches_and_reintroductions_separately() {
+    let repo = TestRepo::new();
+    let old = b"prefix\nold one\nold two\nsuffix\n";
+    let new = b"prefix\nnew one\nnew two\nsuffix\n";
+    commit(&repo, "file", old, "Base");
+    let query = commit(&repo, "file", new, "Forward patch");
+    let query_time = git_stdout(repo.dir.path(), ["show", "-s", "--format=%ct", &query])
+        .parse::<i64>()
+        .unwrap();
+    repo.index();
+
+    git(repo.dir.path(), ["revert", "--no-edit", &query]);
+    let reverted = repo.head();
+    git(repo.dir.path(), ["revert", "--no-edit", &reverted]);
+    let reintroduced = repo.head();
+
+    git(repo.dir.path(), ["checkout", "--orphan", "independent"]);
+    git(repo.dir.path(), ["rm", "-rf", "."]);
+    fs::write(repo.dir.path().join("file"), new).unwrap();
+    git(repo.dir.path(), ["add", "file"]);
+    git(repo.dir.path(), ["commit", "-m", "Independent baseline"]);
+    fs::write(repo.dir.path().join("file"), old).unwrap();
+    git(repo.dir.path(), ["add", "file"]);
+    let output = git_command(repo.dir.path())
+        .env("GIT_AUTHOR_DATE", "2000-01-01T00:00:00Z")
+        .env("GIT_COMMITTER_DATE", "2000-01-01T00:00:00Z")
+        .args(["commit", "-m", "Restore earlier content"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let manual_inverse = repo.head();
+    let inverse_time = git_stdout(
+        repo.dir.path(),
+        ["show", "-s", "--format=%ct", &manual_inverse],
+    )
+    .parse::<i64>()
+    .unwrap();
+    assert!(inverse_time < query_time);
+    git(repo.dir.path(), ["checkout", "main"]);
+
+    let all = search_with_relation(&repo, &query, None, &[]);
+    assert_eq!(all["matched_count"], 3);
+    assert_eq!(all["scope"]["coverage_complete"], true);
+    let matches = all["matches"].as_array().unwrap();
+    for (relation, oid) in [
+        ("inverse", &reverted),
+        ("inverse", &manual_inverse),
+        ("equivalent", &reintroduced),
+    ] {
+        let material = matches
+            .iter()
+            .find(|material| material["commit_id"] == *oid)
+            .unwrap();
+        assert_eq!(material["relation"], relation);
+        assert_eq!(material["comparison_basis"], "first_parent");
+        assert_eq!(
+            material["files"][0]["old_path"],
+            material["files"][0]["new_path"]
+        );
+    }
+
+    let inverse = search_with_relation(&repo, &query, Some("inverse"), &[]);
+    assert_eq!(inverse["matched_count"], 2);
+    assert!(
+        inverse["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|material| {
+                material["relation"] == "inverse" && material["commit_id"] != reintroduced
+            })
+    );
+    let text = repo.run(["search", "--patch-of", &query]);
+    assert!(text.status.success());
+    let text = String::from_utf8(text.stdout).unwrap();
+    assert!(
+        text.contains("equivalent") && text.contains("inverse"),
+        "{text}"
+    );
+}
+
+#[test]
+fn rejects_partial_and_superficially_similar_inverse_patches() {
+    let repo = TestRepo::new();
+    let base = commit(&repo, "file", b"old one\nold two\n", "Base");
+    let query = commit(&repo, "file", b"new one\nnew two\n", "Forward patch");
+    repo.index();
+
+    git(repo.dir.path(), ["checkout", "-b", "partial", &query]);
+    commit(&repo, "file", b"old one\nnew two\n", "Partial reversal");
+    git(repo.dir.path(), ["checkout", "-b", "similar", &query]);
+    commit(&repo, "file", b"newer one\nnew two\n", "Similar text");
+    git(repo.dir.path(), ["checkout", "main"]);
+    let inverse = search_with_relation(&repo, &query, Some("inverse"), &[]);
+    assert_eq!(inverse["matched_count"], 0);
+    assert_eq!(inverse["scope"]["coverage_complete"], true);
+    assert_eq!(base, repo.head_oid("HEAD~1"));
+}
+
+#[test]
+fn missing_inverse_patch_objects_are_reported_as_indeterminate() {
+    let repo = TestRepo::new();
+    let old = b"old\n";
+    let new = b"new\n";
+    commit(&repo, "file", old, "Base");
+    let query = commit(&repo, "file", new, "Forward patch");
+    repo.index();
+
+    git(repo.dir.path(), ["checkout", "--orphan", "independent"]);
+    git(repo.dir.path(), ["rm", "-rf", "."]);
+    fs::write(repo.dir.path().join("file"), new).unwrap();
+    fs::write(repo.dir.path().join("context"), b"branch-only context\n").unwrap();
+    git(repo.dir.path(), ["add", "."]);
+    git(repo.dir.path(), ["commit", "-m", "Independent baseline"]);
+    fs::write(repo.dir.path().join("file"), old).unwrap();
+    git(repo.dir.path(), ["add", "file"]);
+    git(repo.dir.path(), ["commit", "-m", "Manual inverse"]);
+    let inverse_oid = repo.head();
+    git(repo.dir.path(), ["checkout", "main"]);
+
+    let complete = search_with_relation(&repo, &query, Some("inverse"), &[]);
+    assert_eq!(complete["matched_count"], 1);
+    assert_eq!(complete["matches"][0]["commit_id"], inverse_oid);
+
+    let tree = repo.head_oid(&format!("{inverse_oid}^{{tree}}"));
+    let object_path = repo
+        .common_dir()
+        .join("objects")
+        .join(&tree[..2])
+        .join(&tree[2..]);
+    let saved = fs::read(&object_path).unwrap();
+    fs::remove_file(&object_path).unwrap();
+    let incomplete = search_with_relation(&repo, &query, Some("inverse"), &[]);
+    assert_eq!(incomplete["matched_count"], 0);
+    assert_eq!(incomplete["scope"]["coverage_complete"], false);
+    assert!(
+        incomplete["scope"]["indeterminate"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|gap| gap["commit_id"] == inverse_oid)
+    );
+    fs::write(object_path, saved).unwrap();
+    assert_eq!(
+        search_with_relation(&repo, &query, Some("inverse"), &[]),
+        complete
+    );
+}
+
+#[test]
+fn finds_complete_inverse_across_file_operations_and_no_newline_edits() {
+    let repo = TestRepo::new();
+    let old_rename = b"first\nsecond\nthird\nfourth\nfifth\n";
+    let new_rename = b"first\nsecond changed\nthird\nfourth\nfifth\n";
+
+    fs::write(repo.dir.path().join("old-name"), old_rename).unwrap();
+    fs::write(repo.dir.path().join("executable"), b"mode\n").unwrap();
+    fs::write(repo.dir.path().join("deleted"), b"deleted content\n").unwrap();
+    fs::write(repo.dir.path().join("no-newline"), b"old without newline").unwrap();
+    git(repo.dir.path(), ["add", "."]);
+    git(repo.dir.path(), ["commit", "-m", "Base"]);
+
+    git(repo.dir.path(), ["mv", "old-name", "new-name"]);
+    fs::write(repo.dir.path().join("new-name"), new_rename).unwrap();
+    git(repo.dir.path(), ["add", "new-name"]);
+    git(repo.dir.path(), ["rm", "deleted"]);
+    fs::write(repo.dir.path().join("added"), b"added content\n").unwrap();
+    git(repo.dir.path(), ["add", "added"]);
+    fs::write(repo.dir.path().join("no-newline"), b"new without newline").unwrap();
+    git(repo.dir.path(), ["add", "no-newline"]);
+    git(
+        repo.dir.path(),
+        ["update-index", "--chmod=+x", "executable"],
+    );
+    git(repo.dir.path(), ["commit", "-m", "Forward patch"]);
+    let query = repo.head();
+    repo.index();
+
+    git(repo.dir.path(), ["checkout", "--orphan", "independent"]);
+    git(repo.dir.path(), ["rm", "-rf", "."]);
+    fs::write(repo.dir.path().join("new-name"), new_rename).unwrap();
+    fs::write(repo.dir.path().join("executable"), b"mode\n").unwrap();
+    fs::write(repo.dir.path().join("added"), b"added content\n").unwrap();
+    fs::write(repo.dir.path().join("no-newline"), b"new without newline").unwrap();
+    git(repo.dir.path(), ["add", "."]);
+    git(
+        repo.dir.path(),
+        ["update-index", "--chmod=+x", "executable"],
+    );
+    git(repo.dir.path(), ["commit", "-m", "Independent baseline"]);
+
+    git(repo.dir.path(), ["mv", "new-name", "old-name"]);
+    fs::write(repo.dir.path().join("old-name"), old_rename).unwrap();
+    git(repo.dir.path(), ["add", "old-name"]);
+    git(repo.dir.path(), ["rm", "added"]);
+    fs::write(repo.dir.path().join("deleted"), b"deleted content\n").unwrap();
+    git(repo.dir.path(), ["add", "deleted"]);
+    fs::write(repo.dir.path().join("no-newline"), b"old without newline").unwrap();
+    git(repo.dir.path(), ["add", "no-newline"]);
+    git(
+        repo.dir.path(),
+        ["update-index", "--chmod=-x", "executable"],
+    );
+    git(repo.dir.path(), ["commit", "-m", "Manual inverse"]);
+    let inverse = repo.head();
+    git(repo.dir.path(), ["checkout", "main"]);
+
+    let result = search_with_relation(&repo, &query, Some("inverse"), &[]);
+    assert_eq!(result["matched_count"], 1);
+    let material = &result["matches"][0];
+    assert_eq!(material["commit_id"], inverse);
+    assert_eq!(material["relation"], "inverse");
+    assert_eq!(result["scope"]["coverage_complete"], true);
+
+    let files = material["files"].as_array().unwrap();
+    let operations: Vec<_> = files
+        .iter()
+        .map(|file| file["operation"].as_str().unwrap())
+        .collect();
+    for operation in ["A", "D", "M", "R"] {
+        assert!(
+            operations.contains(&operation),
+            "missing {operation}: {operations:?}"
+        );
+    }
+    assert!(
+        files
+            .iter()
+            .any(|file| { file["old_mode"] == "100755" && file["new_mode"] == "100644" })
+    );
 }

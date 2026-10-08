@@ -12,7 +12,7 @@ pub(super) fn format_json_report(
 
 pub(super) fn format_report(report: &Report) -> String {
     let mut output = format!(
-        "Patch equivalents for {} ({})\n{} matches; {} returned.\nScope: {} local/fetched branch tips; {} checked; {} indeterminate; {} unexamined; coverage complete: {}.\n",
+        "Patch relationships for {} ({})\n{} matches; {} returned.\nScope: {} local/fetched branch tips; {} checked; {} indeterminate; {} unexamined; coverage complete: {}.\n",
         report.query.commit_id,
         report.query.integrity,
         report.matched_count,
@@ -34,9 +34,10 @@ pub(super) fn format_report(report: &Report) -> String {
     }
     for result in &report.matches {
         output.push_str(&format!(
-            "\n{} — {}\n  equivalent; basis: {} ({})\n",
+            "\n{} — {}\n  {}; basis: {} ({})\n",
             result.commit_id,
             super::escape::subject(&result.subject),
+            result.relation.unwrap_or("query"),
             result.comparison_basis.unwrap_or("unknown"),
             result.parent.as_deref().unwrap_or("root")
         ));

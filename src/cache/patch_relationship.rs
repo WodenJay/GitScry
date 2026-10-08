@@ -13,7 +13,8 @@ pub(crate) struct PatchFingerprints {
 
 pub(crate) struct PatchFingerprint {
     pub(crate) integrity: String,
-    pub(crate) fingerprint: Option<Vec<u8>>,
+    pub(crate) forward_fingerprint: Option<Vec<u8>>,
+    pub(crate) inverse_fingerprint: Option<Vec<u8>>,
     pub(crate) objects: String,
 }
 
@@ -40,7 +41,11 @@ impl PatchFingerprints {
                 ))
                 .map_err(cache_error)?;
         }
-        connection.execute_batch("CREATE TABLE IF NOT EXISTS fingerprints (oid TEXT PRIMARY KEY, integrity TEXT NOT NULL, fingerprint BLOB, objects TEXT NOT NULL)").map_err(cache_error)?;
+        connection
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS fingerprints (oid TEXT PRIMARY KEY, integrity TEXT NOT NULL, forward_fingerprint BLOB, inverse_fingerprint BLOB, objects TEXT NOT NULL)",
+            )
+            .map_err(cache_error)?;
         Ok(Self {
             connection,
             _lock: lock,
@@ -50,13 +55,14 @@ impl PatchFingerprints {
     pub(crate) fn get(&self, oid: &str) -> Result<Option<PatchFingerprint>, AppError> {
         self.connection
             .query_row(
-                "SELECT integrity, fingerprint, objects FROM fingerprints WHERE oid=?1",
+                "SELECT integrity, forward_fingerprint, inverse_fingerprint, objects FROM fingerprints WHERE oid=?1",
                 [oid],
                 |row| {
                     Ok(PatchFingerprint {
                         integrity: row.get(0)?,
-                        fingerprint: row.get(1)?,
-                        objects: row.get(2)?,
+                        forward_fingerprint: row.get(1)?,
+                        inverse_fingerprint: row.get(2)?,
+                        objects: row.get(3)?,
                     })
                 },
             )
@@ -68,10 +74,22 @@ impl PatchFingerprints {
         &self,
         oid: &str,
         integrity: &str,
-        fingerprint: Option<&[u8]>,
+        forward_fingerprint: Option<&[u8]>,
+        inverse_fingerprint: Option<&[u8]>,
         objects: &[String],
     ) -> Result<(), AppError> {
-        self.connection.execute("INSERT OR REPLACE INTO fingerprints (oid, integrity, fingerprint, objects) VALUES (?1, ?2, ?3, ?4)", params![oid, integrity, fingerprint, objects.join("\n")]).map_err(cache_error)?;
+        self.connection
+            .execute(
+                "INSERT OR REPLACE INTO fingerprints (oid, integrity, forward_fingerprint, inverse_fingerprint, objects) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    oid,
+                    integrity,
+                    forward_fingerprint,
+                    inverse_fingerprint,
+                    objects.join("\n")
+                ],
+            )
+            .map_err(cache_error)?;
         Ok(())
     }
 }

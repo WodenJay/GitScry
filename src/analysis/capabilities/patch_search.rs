@@ -2,7 +2,7 @@
 use crate::{
     analysis::{
         patch_relationship::{self, CompletePatch},
-        query::{Options, Outcome, QueryReport, scope},
+        query::{Options, Outcome, PatchRelationSelection, QueryReport, scope},
     },
     app::AppError,
     cache::{self, PatchFingerprints},
@@ -111,6 +111,7 @@ fn material(
 pub(crate) fn execute(
     revision: String,
     cutoff: Option<usize>,
+    relation_selection: PatchRelationSelection,
     options: Options,
 ) -> Result<Outcome, AppError> {
     let repository = Repository::discover()?;
@@ -138,15 +139,15 @@ pub(crate) fn execute(
         patch_relationship::NORMALIZATION_VERSION,
     )?;
     let query_patch = patch_relationship::inspect(&repository, &query_oid);
-    let query_hash = query_patch
+    let query_hashes = query_patch
         .as_ref()
         .ok()
         .filter(|patch| !patch.is_empty())
-        .map(CompletePatch::fingerprint);
+        .map(|patch| (patch.fingerprint(), patch.inverse_fingerprint()));
     let mut matches = Vec::new();
     let mut indeterminate = Vec::new();
     let mut checked = 0;
-    if let Some(query_hash) = &query_hash {
+    if let Some((query_forward, query_inverse)) = &query_hashes {
         // Cached normalization is reusable only while its source objects remain
         // locally available. Batch existence checks without re-reading every patch.
         let mut stored = HashMap::new();
@@ -171,7 +172,7 @@ pub(crate) fn execute(
                 .as_ref()
                 .is_some_and(|record| record.objects.lines().any(|oid| missing.contains(oid)))
             {
-                fingerprints.put(&candidate.oid, "indeterminate", None, &[])?;
+                fingerprints.put(&candidate.oid, "indeterminate", None, None, &[])?;
                 indeterminate.push(Indeterminate {
                     commit_id: candidate.oid.clone(),
                     reason: "cached patch source objects are unavailable".into(),
@@ -179,14 +180,18 @@ pub(crate) fn execute(
                 continue;
             }
             let mut inspected = None;
-            let hash = if let Some(stored) =
-                stored.filter(|stored| matches!(stored.integrity.as_str(), "complete" | "empty"))
-            {
-                stored.fingerprint
+            let cached_hashes = stored
+                .filter(|record| matches!(record.integrity.as_str(), "complete" | "empty"))
+                .and_then(|record| {
+                    Some((record.forward_fingerprint?, record.inverse_fingerprint?))
+                });
+            let hashes = if let Some(hashes) = cached_hashes {
+                Some(hashes)
             } else {
                 match patch_relationship::inspect(&repository, &candidate.oid) {
                     Ok(patch) => {
-                        let hash = patch.fingerprint();
+                        let forward = patch.fingerprint();
+                        let inverse = patch.inverse_fingerprint();
                         fingerprints.put(
                             &candidate.oid,
                             if patch.is_empty() {
@@ -194,14 +199,15 @@ pub(crate) fn execute(
                             } else {
                                 "complete"
                             },
-                            Some(&hash),
+                            Some(&forward),
+                            Some(&inverse),
                             &patch.objects,
                         )?;
                         inspected = Some(patch);
-                        Some(hash)
+                        Some((forward, inverse))
                     }
                     Err(reason) => {
-                        fingerprints.put(&candidate.oid, "indeterminate", None, &[])?;
+                        fingerprints.put(&candidate.oid, "indeterminate", None, None, &[])?;
                         indeterminate.push(Indeterminate {
                             commit_id: candidate.oid.clone(),
                             reason,
@@ -210,7 +216,15 @@ pub(crate) fn execute(
                     }
                 }
             };
-            if hash.as_ref() != Some(query_hash) {
+            let Some((candidate_forward, candidate_inverse)) = hashes else {
+                continue;
+            };
+            let equivalent_fingerprint_match = relation_selection.includes_equivalent()
+                && candidate_forward.as_slice() == query_forward.as_slice();
+            let inverse_fingerprint_match = relation_selection.includes_inverse()
+                && (candidate_forward.as_slice() == query_inverse.as_slice()
+                    || candidate_inverse.as_slice() == query_forward.as_slice());
+            if !equivalent_fingerprint_match && !inverse_fingerprint_match {
                 continue;
             }
             // Every hash candidate is certified with full material, including on
@@ -219,21 +233,29 @@ pub(crate) fn execute(
                 .map(Ok)
                 .unwrap_or_else(|| patch_relationship::inspect(&repository, &candidate.oid));
             match patch {
-                Ok(patch)
-                    if query_patch
-                        .as_ref()
-                        .is_ok_and(|query| query.equivalent(&patch)) =>
-                {
-                    matches.push(material(
-                        candidate.oid.clone(),
-                        &candidate.message,
-                        patch,
-                        Some("equivalent"),
-                    ));
+                Ok(patch) => {
+                    let relation = query_patch.as_ref().ok().and_then(|query| {
+                        if relation_selection.includes_equivalent() && query.equivalent(&patch) {
+                            Some("equivalent")
+                        } else if relation_selection.includes_inverse()
+                            && query.inverse_equivalent(&patch)
+                        {
+                            Some("inverse")
+                        } else {
+                            None
+                        }
+                    });
+                    if let Some(relation) = relation {
+                        matches.push(material(
+                            candidate.oid.clone(),
+                            &candidate.message,
+                            patch,
+                            Some(relation),
+                        ));
+                    }
                 }
-                Ok(_) => {}
                 Err(reason) => {
-                    fingerprints.put(&candidate.oid, "indeterminate", None, &[])?;
+                    fingerprints.put(&candidate.oid, "indeterminate", None, None, &[])?;
                     indeterminate.push(Indeterminate {
                         commit_id: candidate.oid.clone(),
                         reason,
@@ -263,6 +285,8 @@ pub(crate) fn execute(
             files: Vec::new(),
         },
     };
+    // Keep each relationship together while retaining its within-group history order.
+    matches.sort_by_key(|material| material.relation != Some("equivalent"));
     let matched_count = matches.len();
     matches.truncate(options.limit);
     let unexamined = if query.integrity == "empty" {

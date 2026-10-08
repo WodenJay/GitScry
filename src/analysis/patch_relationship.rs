@@ -3,7 +3,7 @@ use crate::git::{Change, Hunk, Repository};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-pub(crate) const NORMALIZATION_VERSION: i64 = 2;
+pub(crate) const NORMALIZATION_VERSION: i64 = 3;
 
 #[derive(Serialize, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct FilePatch {
@@ -13,6 +13,29 @@ pub(crate) struct FilePatch {
     old_mode: String,
     new_mode: String,
     edits: Vec<Vec<u8>>,
+}
+
+impl FilePatch {
+    fn inverse(&self) -> Result<Self, String> {
+        let operation = match self.operation {
+            'A' => 'D',
+            'D' => 'A',
+            'M' | 'R' => self.operation,
+            _ => return Err("unsupported file operation".into()),
+        };
+        Ok(Self {
+            old_path: self.new_path.clone(),
+            new_path: self.old_path.clone(),
+            operation,
+            old_mode: self.new_mode.clone(),
+            new_mode: self.old_mode.clone(),
+            edits: self
+                .edits
+                .iter()
+                .map(|edit| inverse_edit(edit))
+                .collect::<Result<_, _>>()?,
+        })
+    }
 }
 
 pub(crate) struct CompletePatch {
@@ -28,13 +51,102 @@ impl CompletePatch {
     pub(crate) fn is_empty(&self) -> bool {
         self.normalized.is_empty()
     }
+
     pub(crate) fn fingerprint(&self) -> Vec<u8> {
-        Sha256::digest(serde_json::to_vec(&self.normalized).expect("byte patch serialization"))
-            .to_vec()
+        fingerprint(&self.normalized)
     }
+
+    pub(crate) fn inverse_fingerprint(&self) -> Vec<u8> {
+        fingerprint(
+            &self
+                .inverse_normalized()
+                .expect("complete patch can be inverted"),
+        )
+    }
+
     pub(crate) fn equivalent(&self, other: &Self) -> bool {
         !self.is_empty() && self.normalized == other.normalized
     }
+
+    pub(crate) fn inverse_equivalent(&self, other: &Self) -> bool {
+        !self.is_empty()
+            && self
+                .inverse_normalized()
+                .is_ok_and(|inverse| inverse == other.normalized)
+    }
+
+    fn inverse_normalized(&self) -> Result<Vec<FilePatch>, String> {
+        let mut inverse = self
+            .normalized
+            .iter()
+            .map(FilePatch::inverse)
+            .collect::<Result<Vec<_>, _>>()?;
+        inverse.sort();
+        Ok(inverse)
+    }
+}
+
+fn fingerprint(files: &[FilePatch]) -> Vec<u8> {
+    Sha256::digest(serde_json::to_vec(files).expect("byte patch serialization")).to_vec()
+}
+
+fn inverse_edit(edit: &[u8]) -> Result<Vec<u8>, String> {
+    let mut blocks = Vec::<(Vec<Vec<u8>>, Vec<Vec<u8>>)>::new();
+    let mut side = None;
+    for line in edit.split_inclusive(|byte| *byte == b'\n') {
+        match line.first() {
+            Some(b'-') => {
+                if side == Some(true) || blocks.is_empty() {
+                    blocks.push((Vec::new(), Vec::new()));
+                }
+                blocks
+                    .last_mut()
+                    .expect("created edit block")
+                    .0
+                    .push(line.to_vec());
+                side = Some(false);
+            }
+            Some(b'+') => {
+                if blocks.is_empty() {
+                    blocks.push((Vec::new(), Vec::new()));
+                }
+                blocks
+                    .last_mut()
+                    .expect("created edit block")
+                    .1
+                    .push(line.to_vec());
+                side = Some(true);
+            }
+            Some(b'\\') => {
+                if line != b"\\ No newline at end of file\n" {
+                    return Err("unsupported patch line marker".into());
+                }
+                let block = blocks.last_mut().ok_or("orphaned no-newline marker")?;
+                let changed_line = match side {
+                    Some(false) => block.0.last_mut(),
+                    Some(true) => block.1.last_mut(),
+                    None => None,
+                }
+                .ok_or("orphaned no-newline marker")?;
+                changed_line.extend_from_slice(line);
+            }
+            _ => return Err("unsupported complete edit line".into()),
+        }
+    }
+    let mut inverse = Vec::new();
+    for (removed, added) in blocks {
+        for line in added.into_iter().chain(removed) {
+            let mut reversed = Vec::with_capacity(line.len());
+            reversed.push(match line.first() {
+                Some(b'-') => b'+',
+                Some(b'+') => b'-',
+                _ => return Err("unsupported complete edit line".into()),
+            });
+            reversed.extend_from_slice(&line[1..]);
+            inverse.extend_from_slice(&reversed);
+        }
+    }
+    Ok(inverse)
 }
 
 pub(crate) fn inspect(repository: &Repository, oid: &str) -> Result<CompletePatch, String> {
@@ -47,6 +159,8 @@ pub(crate) fn inspect(repository: &Repository, oid: &str) -> Result<CompletePatc
     let mut paths = Vec::new();
     for change in &changes {
         let file = normalize_file(change, &hunks)?;
+        // Only patches whose file operations and content can be inverted are complete.
+        let _ = file.inverse()?;
         paths.extend(
             change
                 .old_path
