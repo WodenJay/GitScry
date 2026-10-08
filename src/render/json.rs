@@ -2,9 +2,9 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde::Serialize;
 
 use crate::analysis::{
-    Citation, CodeMatch, Confidence, Detail, Failure, Material, PatchExcerpt, PatchHunk, Relation,
-    RelationSelector, Report, ReportKind, SearchScopeInfo, Step, SymbolFact, SymbolSummary,
-    WhyAttribution, WhyModification, WhySummary,
+    Citation, CodeMatch, Confidence, Detail, Failure, Material, PatchEquivalence, PatchExcerpt,
+    PatchGrouping, PatchHunk, Relation, RelationSelector, Report, ReportKind, SearchScopeInfo,
+    Step, SymbolFact, SymbolSummary, WhyAttribution, WhyModification, WhySummary,
 };
 
 const SCHEMA_VERSION: u8 = 1;
@@ -28,6 +28,7 @@ pub(crate) fn format_json_report(
         kind: report_kind(report.kind),
         matched_count: report.matched_count,
         truncated: report.truncated,
+        patch_grouping: report.patch_grouping.as_ref(),
         materials: (report.kind != ReportKind::Why)
             .then(|| report.materials.iter().map(json_material).collect()),
         target_related_modifications: report.why.as_ref().map(|why| {
@@ -82,6 +83,8 @@ struct JsonReport<'a> {
     kind: &'static str,
     matched_count: usize,
     truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    patch_grouping: Option<&'a PatchGrouping>,
     #[serde(skip_serializing_if = "Option::is_none")]
     materials: Option<Vec<JsonMaterial<'a>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -478,6 +481,8 @@ pub(super) fn json_follow_on(evidence: &crate::analysis::PathObservation) -> Jso
 enum JsonDetail<'a> {
     Steps {
         steps: Vec<JsonStep<'a>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        patch_equivalence: Option<&'a PatchEquivalence>,
     },
     Failure {
         reason: &'a Option<String>,
@@ -597,8 +602,12 @@ pub(super) fn json_path(path: &[u8]) -> JsonPath<'_> {
 
 fn json_detail(detail: &Detail) -> JsonDetail<'_> {
     match detail {
-        Detail::Steps(steps) => JsonDetail::Steps {
+        Detail::Steps {
+            steps,
+            patch_equivalence,
+        } => JsonDetail::Steps {
             steps: steps.iter().map(json_step).collect(),
+            patch_equivalence: patch_equivalence.as_ref(),
         },
         Detail::Failure(Failure { reason, retry }) => JsonDetail::Failure { reason, retry },
         Detail::Relation(Relation {
