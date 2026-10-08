@@ -20,7 +20,10 @@ where
     T: Into<OsString> + Clone,
 {
     match Cli::try_parse_from(arguments) {
-        Ok(cli) => Ok(Parsed::Command(Box::new(cli.command))),
+        Ok(cli) => {
+            validate_trace(&cli.command)?;
+            Ok(Parsed::Command(Box::new(cli.command)))
+        }
         Err(error)
             if matches!(
                 error.kind(),
@@ -31,4 +34,18 @@ where
         }
         Err(error) => Err(AppError::input(error.to_string())),
     }
+}
+
+fn validate_trace(command: &args::Command) -> Result<(), AppError> {
+    if matches!(
+        command,
+        args::Command::Search {
+            trace: true,
+            change: Some(args::CodeChange::Added),
+            ..
+        }
+    ) {
+        return Err(AppError::input("--trace requires --change removed"));
+    }
+    Ok(())
 }

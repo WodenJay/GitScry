@@ -204,6 +204,7 @@ pub(crate) fn execute(
             relation,
             code_regex,
             code_file,
+            trace,
             hybrid,
             change,
             paths,
@@ -229,55 +230,56 @@ pub(crate) fn execute(
                 None => PatchRelationSelection::Both,
                 Some(_) => unreachable!("clap validates patch relation values"),
             };
-            let request = match (query, code, code_regex, code_file, patch_of, current_patch) {
-                (None, None, None, None, Some(revision), false) => Request::PatchSearch {
-                    revision,
-                    max_patch_checks,
-                    relation,
-                },
-                (None, None, None, None, None, true) => Request::CurrentPatchSearch {
-                    staged,
-                    max_patch_checks,
-                    relation,
-                },
-                (Some(words), None, None, None, None, false) => Request::Search { words, hybrid },
-                (None, Some(query), None, None, None, false) => Request::CodeSearch {
-                    query,
-                    path: code_path,
-                    direction,
-                },
-                (None, None, Some(pattern), None, None, false) => Request::CodeRegexSearch {
-                    pattern,
-                    path: code_path,
-                    direction,
-                },
-                (None, None, None, Some(input), None, false) => Request::FragmentSearch {
-                    input,
-                    path: code_path,
-                    direction,
-                },
-                _ => unreachable!("clap enforces exactly one search mode"),
+            let request = if trace {
+                match (code, code_file) {
+                    (Some(query), None) => Request::TraceRemoval {
+                        query,
+                        path: code_path,
+                    },
+                    (None, Some(input)) => Request::TraceRemovalFragment {
+                        input,
+                        path: code_path,
+                    },
+                    _ => unreachable!("clap validates trace inputs"),
+                }
+            } else {
+                match (query, code, code_regex, code_file, patch_of, current_patch) {
+                    (None, None, None, None, Some(revision), false) => Request::PatchSearch {
+                        revision,
+                        max_patch_checks,
+                        relation,
+                    },
+                    (None, None, None, None, None, true) => Request::CurrentPatchSearch {
+                        staged,
+                        max_patch_checks,
+                        relation,
+                    },
+                    (Some(words), None, None, None, None, false) => {
+                        Request::Search { words, hybrid }
+                    }
+                    (None, Some(query), None, None, None, false) => Request::CodeSearch {
+                        query,
+                        path: code_path,
+                        direction,
+                    },
+                    (None, None, Some(pattern), None, None, false) => Request::CodeRegexSearch {
+                        pattern,
+                        path: code_path,
+                        direction,
+                    },
+                    (None, None, None, Some(input), None, false) => Request::FragmentSearch {
+                        input,
+                        path: code_path,
+                        direction,
+                    },
+                    _ => unreachable!("clap enforces exactly one search mode"),
+                }
             };
             let mut options = SearchScopeOptions::from(scope);
             if is_query_mode {
                 options.paths = paths;
             }
             (request, limit, patch, options)
-        }
-        Command::TraceRemoval {
-            code,
-            code_file,
-            path,
-            limit,
-            scope,
-            ..
-        } => {
-            let request = match (code, code_file) {
-                (Some(query), None) => Request::TraceRemoval { query, path },
-                (None, Some(input)) => Request::TraceRemovalFragment { input, path },
-                _ => unreachable!("clap enforces exactly one trace-removal mode"),
-            };
-            (request, limit, false, scope.into())
         }
         Command::Examples {
             query: words,

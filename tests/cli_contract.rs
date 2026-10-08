@@ -331,7 +331,6 @@ fn json_flag_is_available_only_for_query_commands() {
         "regression",
         "trace-fix",
         "timeline",
-        "trace-removal",
     ] {
         let help = repo.run([name, "--help"]);
         assert_eq!(help.status.code(), Some(0), "{name}");
@@ -376,6 +375,7 @@ fn json_flag_is_available_only_for_query_commands() {
         "--code-regex <PATTERN>",
         "--code <TEXT>",
         "--change <CHANGE>",
+        "--trace",
         "--path <PATH>",
         "--github-links",
         "--github-repo <OWNER/REPO>",

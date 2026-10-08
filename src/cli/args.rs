@@ -291,49 +291,6 @@ Examples:
     Update,
 
     #[command(
-        group(
-            ArgGroup::new("trace-removal-mode")
-                .required(true)
-                .multiple(false)
-                .args(["code", "code_file"]),
-        ),
-        about = "Find commits that deleted matching code",
-        after_help = r#"Choose exactly one input: --code or --code-file. Only removed lines are searched.
-Fragment matching treats LF and CRLF equally; all other bytes are literal.
-
-Run `gitscry index` first. Queries refresh locally available HEAD history; index
-another branch before querying an uncached revision from it. Revision and time
-bounds intersect; --from-rev must be an ancestor of --to-rev (HEAD by default).
-Dates use YYYY-MM-DD; timestamps require Z or an explicit UTC offset.
-
-Results group matches by removal commit and historical path, newest first.
-Merge diffs compare with the first parent. Missing history is reported.
-
-Examples:
-  gitscry trace-removal --code 'legacy()'
-  gitscry trace-removal --code 'old.key = ' --path config.rs --to-rev v1.0 --json
-  gitscry trace-removal --code-file removed-block.txt --limit 5"#
-    )]
-    TraceRemoval {
-        /// Non-empty, single-line, case-sensitive literal substring in deleted lines.
-        #[arg(long, value_name = "TEXT", value_parser = parse_code_query)]
-        code: Option<String>,
-        /// Exact whole-line fragment from a file; - reads stdin through EOF.
-        #[arg(long, value_name = "PATH")]
-        code_file: Option<std::path::PathBuf>,
-        /// Exact historical old path; does not follow aliases.
-        #[arg(long, value_name = "PATH")]
-        path: Option<String>,
-        #[command(flatten)]
-        scope: HistoricalScopeArgs,
-        /// Maximum deletion events, not matching lines.
-        #[arg(long, default_value = "10", value_parser = parse_limit)]
-        limit: usize,
-        /// Output JSON instead of text.
-        #[arg(long)]
-        json: bool,
-    },
-    #[command(
         about = "Build or refresh the repository history cache",
         after_help = r#"Adds locally available history reachable from HEAD, or from explicit
 revisions with --ref (repeatable). Each --ref value must resolve to one commit:
@@ -430,6 +387,11 @@ Examples:
                 .multiple(false)
                 .args(["code", "code_regex", "code_file"]),
         ),
+        group(
+            ArgGroup::new("trace-removal-mode")
+                .multiple(false)
+                .args(["code", "code_file"]),
+        ),
         about = "Search commit messages, paths, or changed code",
         after_help = r#"Choose exactly one input: QUERY words, --code, --code-regex, --code-file, --patch-of REVISION, or --current-patch.
 Code modes search added/removed lines only, not unchanged context. --change and
@@ -458,6 +420,10 @@ Patterns must be nonempty, single-line, and at most 16,384 UTF-8 bytes.
 File fragments match whole consecutive lines in one hunk and one change direction.
 LF and CRLF are equivalent; other bytes are literal. Matched content is included.
 
+Use --trace with --change removed and exactly one of --code or --code-file to
+reconstruct deletion events. Trace mode rejects regex, keyword, patch, and GitHub
+queries. Its --limit counts events; all matching positions within each event remain.
+
 Run `gitscry index` first. Queries refresh locally available HEAD history; index
 another branch before querying an uncached revision from it. Revision and time
 bounds intersect and apply before ranking; --from-rev must be an ancestor of
@@ -479,7 +445,9 @@ Examples:
   gitscry search timeout --hybrid --path packages/a --path packages/b --limit 5
   gitscry search --code 'unwrap()?' --since 2025-01-01 --limit 5
   gitscry search --code-regex 'Old[A-Z][A-Za-z0-9_]*' --change removed --path src/lib.rs
-  gitscry search --code-file change.txt --github-links --json"#
+  gitscry search --code-file change.txt --github-links --json
+  gitscry search --code 'legacy()' --change removed --trace
+  gitscry search --code-file removed-block.txt --change removed --trace --limit 5"#
     )]
     Search {
         /// Query words matched against commit subjects, bodies, and touched paths.
@@ -512,6 +480,21 @@ Examples:
         /// Exact whole-line fragment from a file; - reads stdin through EOF.
         #[arg(long, value_name = "PATH")]
         code_file: Option<std::path::PathBuf>,
+        /// Reconstruct deletion events; requires --change removed and --code or --code-file.
+        #[arg(
+            long,
+            requires_all = ["change", "trace-removal-mode"],
+            conflicts_with_all = [
+                "query",
+                "code_regex",
+                "patch",
+                "patch_of",
+                "current_patch",
+                "github_links",
+                "github_repo"
+            ]
+        )]
+        trace: bool,
         /// Restrict code matches to added or removed lines.
         #[arg(long, value_enum, requires = "code-mode", conflicts_with = "query")]
         change: Option<CodeChange>,
@@ -1047,7 +1030,6 @@ impl Command {
             | Self::Why { json, .. }
             | Self::TraceFix { json, .. }
             | Self::Followups { json, .. }
-            | Self::TraceRemoval { json, .. }
             | Self::Hotspots { json, .. }
             | Self::Timeline { json, .. }
             | Self::Propagation { json, .. }
@@ -1077,7 +1059,6 @@ impl Command {
             Self::Context { .. } => Some("context"),
             Self::Conflicts { .. } => Some("conflicts"),
             Self::Update => Some("update"),
-            Self::TraceRemoval { .. } => Some("trace-removal"),
             Self::Index { .. } => Some("index"),
             Self::Clear { .. } => Some("clear"),
             Self::Prune { .. } => Some("prune"),

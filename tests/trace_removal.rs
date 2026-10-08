@@ -25,7 +25,9 @@ fn commit(repo: &TestRepo, files: &[(&str, &str)], message: &str, date: &str) ->
 }
 
 fn query(repo: &TestRepo, args: &[&str]) -> Value {
-    let mut command = vec!["trace-removal", "--code", "old()", "--json"];
+    let mut command = vec![
+        "search", "--change", "removed", "--trace", "--code", "old()", "--json",
+    ];
     command.extend_from_slice(args);
     let output = repo.run(command);
     assert!(
@@ -54,7 +56,15 @@ fn fragment_queries_return_span_events_and_default_patch_context() {
     repo.index();
     fs::write(repo.dir.path().join("fragment"), b"alpha();\n\nomega();\n").unwrap();
 
-    let output = repo.run(["trace-removal", "--code-file", "fragment", "--json"]);
+    let output = repo.run([
+        "search",
+        "--change",
+        "removed",
+        "--trace",
+        "--code-file",
+        "fragment",
+        "--json",
+    ]);
     assert!(
         output.status.success(),
         "{}",
@@ -84,7 +94,14 @@ fn fragment_queries_return_span_events_and_default_patch_context() {
     assert!(patch.contains(" before\n"));
     assert!(patch.contains(" after\n"));
 
-    let human = repo.run(["trace-removal", "--code-file", "fragment"]);
+    let human = repo.run([
+        "search",
+        "--change",
+        "removed",
+        "--trace",
+        "--code-file",
+        "fragment",
+    ]);
     assert!(human.status.success());
     let human = String::from_utf8(human.stdout).unwrap();
     assert!(human.contains("alpha();"));
@@ -122,7 +139,10 @@ fn fragment_queries_apply_committer_time_scope_before_event_limits() {
     fs::write(repo.dir.path().join("fragment"), b"old()\n").unwrap();
 
     let recent = repo.run([
-        "trace-removal",
+        "search",
+        "--change",
+        "removed",
+        "--trace",
         "--code-file",
         "fragment",
         "--since",
@@ -139,7 +159,10 @@ fn fragment_queries_apply_committer_time_scope_before_event_limits() {
     assert_eq!(recent["events"][0]["commit_id"], second);
 
     let earlier = repo.run([
-        "trace-removal",
+        "search",
+        "--change",
+        "removed",
+        "--trace",
         "--code-file",
         "fragment",
         "--until",
@@ -170,7 +193,15 @@ fn fragment_queries_refresh_history_reachable_from_the_pinned_head() {
         "2000-01-02T00:00:00Z",
     );
 
-    let output = repo.run(["trace-removal", "--code-file", "fragment", "--json"]);
+    let output = repo.run([
+        "search",
+        "--change",
+        "removed",
+        "--trace",
+        "--code-file",
+        "fragment",
+        "--json",
+    ]);
     assert!(output.status.success());
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(report["matched_count"], 1);
@@ -198,7 +229,15 @@ fn fragment_locator_ignores_inserted_rows_before_deleted_lines() {
     repo.index();
     fs::write(repo.dir.path().join("fragment"), b"first()\nsecond()\n").unwrap();
 
-    let output = repo.run(["trace-removal", "--code-file", "fragment", "--json"]);
+    let output = repo.run([
+        "search",
+        "--change",
+        "removed",
+        "--trace",
+        "--code-file",
+        "fragment",
+        "--json",
+    ]);
     assert!(output.status.success());
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
     let event = &report["events"][0];
@@ -238,7 +277,15 @@ fn fragment_matches_do_not_join_across_unchanged_rows_or_hunks() {
     repo.index();
     fs::write(repo.dir.path().join("fragment"), b"first();\nlast();\n").unwrap();
 
-    let output = repo.run(["trace-removal", "--code-file", "fragment", "--json"]);
+    let output = repo.run([
+        "search",
+        "--change",
+        "removed",
+        "--trace",
+        "--code-file",
+        "fragment",
+        "--json",
+    ]);
     assert!(output.status.success());
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(report["matched_count"], 0);
@@ -266,7 +313,10 @@ fn fragment_limits_count_events_while_preserving_overlapping_occurrences_and_sco
     fs::write(repo.dir.path().join("fragment"), b"x\nx\n").unwrap();
 
     let limited = repo.run([
-        "trace-removal",
+        "search",
+        "--change",
+        "removed",
+        "--trace",
         "--code-file",
         "fragment",
         "--limit",
@@ -291,7 +341,10 @@ fn fragment_limits_count_events_while_preserving_overlapping_occurrences_and_sco
     }
 
     let path_filtered = repo.run([
-        "trace-removal",
+        "search",
+        "--change",
+        "removed",
+        "--trace",
         "--code-file",
         "fragment",
         "--path",
@@ -311,7 +364,10 @@ fn fragment_limits_count_events_while_preserving_overlapping_occurrences_and_sco
     );
 
     let scoped = repo.run([
-        "trace-removal",
+        "search",
+        "--change",
+        "removed",
+        "--trace",
         "--code-file",
         "fragment",
         "--to-rev",
@@ -344,7 +400,15 @@ fn fragment_stdin_preserves_non_utf8_bytes_crlf_and_missing_final_newline() {
     repo.index();
 
     let mut child = TestRepo::command_at(repo.dir.path(), repo.user_data_dir())
-        .args(["trace-removal", "--code-file", "-", "--json"])
+        .args([
+            "search",
+            "--code-file",
+            "-",
+            "--json",
+            "--change",
+            "removed",
+            "--trace",
+        ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -391,7 +455,15 @@ fn fragment_occurrence_survives_surrounding_excerpt_budget() {
 
     let output = TestRepo::command_at(repo.dir.path(), repo.user_data_dir())
         .env("GITSCRY_FULL_OUTPUT", "1")
-        .args(["trace-removal", "--code-file", "fragment", "--json"])
+        .args([
+            "search",
+            "--code-file",
+            "fragment",
+            "--json",
+            "--change",
+            "removed",
+            "--trace",
+        ])
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -447,7 +519,9 @@ fn groups_deleted_lines_into_events_with_complete_historical_locators() {
             {"line_number": 1, "line": "old() old()"}, {"line_number": 3, "line": "old()"}
         ])
     );
-    let human = repo.run(["trace-removal", "--code", "old()", "--limit", "1"]);
+    let human = repo.run([
+        "search", "--code", "old()", "--limit", "1", "--change", "removed", "--trace",
+    ]);
     assert!(human.status.success());
     let human = String::from_utf8(human.stdout).unwrap();
     assert!(human.contains(&removal));
@@ -515,29 +589,56 @@ fn rejects_invalid_queries_and_execution_errors_but_empty_results_succeed() {
     let repo = TestRepo::new();
     for args in [
         vec!["trace-removal"],
-        vec!["trace-removal", "--code", ""],
-        vec!["trace-removal", "--code", "a\nb"],
-        vec!["trace-removal", "--code", "a\rb"],
-        vec!["trace-removal", "--code", "a", "--limit", "0"],
-        vec!["trace-removal", "--code", "a", "--code-file", "fragment"],
+        vec!["search", "--code", "", "--change", "removed", "--trace"],
+        vec!["search", "--code", "a\nb", "--change", "removed", "--trace"],
+        vec!["search", "--code", "a\rb", "--change", "removed", "--trace"],
+        vec![
+            "search", "--code", "a", "--limit", "0", "--change", "removed", "--trace",
+        ],
+        vec![
+            "search",
+            "--code",
+            "a",
+            "--code-file",
+            "fragment",
+            "--change",
+            "removed",
+            "--trace",
+        ],
     ] {
         assert_eq!(repo.run(args).status.code(), Some(2));
     }
     fs::write(repo.dir.path().join("empty-fragment"), b"").unwrap();
     assert!(
         !repo
-            .run(["trace-removal", "--code-file", "empty-fragment"])
+            .run([
+                "search",
+                "--code-file",
+                "empty-fragment",
+                "--change",
+                "removed",
+                "--trace",
+            ])
             .status
             .success()
     );
     assert!(
         !repo
-            .run(["trace-removal", "--code-file", "missing-fragment"])
+            .run([
+                "search",
+                "--code-file",
+                "missing-fragment",
+                "--change",
+                "removed",
+                "--trace",
+            ])
             .status
             .success()
     );
     assert_eq!(
-        repo.run(["trace-removal", "--code", "a"]).status.code(),
+        repo.run(["search", "--code", "a", "--change", "removed", "--trace",])
+            .status
+            .code(),
         Some(1)
     );
     commit(
@@ -548,18 +649,24 @@ fn rejects_invalid_queries_and_execution_errors_but_empty_results_succeed() {
     );
     repo.index();
     assert_eq!(query(&repo, &[])["events"], serde_json::json!([]));
-    let empty = repo.run(["trace-removal", "--code", "old()"]);
+    let empty = repo.run([
+        "search", "--code", "old()", "--change", "removed", "--trace",
+    ]);
     assert!(empty.status.success());
     assert!(String::from_utf8_lossy(&empty.stdout).contains("No matching deletion events"));
     assert_eq!(
-        repo.run(["trace-removal", "--code", "a", "--to-rev", "missing"])
-            .status
-            .code(),
+        repo.run([
+            "search", "--code", "a", "--to-rev", "missing", "--change", "removed", "--trace",
+        ])
+        .status
+        .code(),
         Some(2)
     );
     fs::write(repo.cache_dir().join("cache.sqlite"), b"damaged").unwrap();
     assert_eq!(
-        repo.run(["trace-removal", "--code", "a"]).status.code(),
+        repo.run(["search", "--code", "a", "--change", "removed", "--trace",])
+            .status
+            .code(),
         Some(1)
     );
 }
@@ -595,10 +702,20 @@ fn literal_matching_excludes_context_additions_and_case_variants_across_hunks() 
             {"line_number": 1, "line": "old()"}, {"line_number": 30, "line": "old() old()"}
         ])
     );
-    let literal = repo.run(["trace-removal", "--code", "old() old()", "--json"]);
+    let literal = repo.run([
+        "search",
+        "--code",
+        "old() old()",
+        "--change",
+        "removed",
+        "--trace",
+        "--json",
+    ]);
     let literal: Value = serde_json::from_slice(&literal.stdout).unwrap();
     assert_eq!(literal["events"][0]["matches"].as_array().unwrap().len(), 1);
-    let absent = repo.run(["trace-removal", "--code", "old.*", "--json"]);
+    let absent = repo.run([
+        "search", "--code", "old.*", "--change", "removed", "--trace", "--json",
+    ]);
     assert!(absent.status.success());
     assert_eq!(
         serde_json::from_slice::<Value>(&absent.stdout).unwrap()["matched_count"],
@@ -849,7 +966,12 @@ fn shallow_coverage_stays_visible_with_usable_parent_locators() {
         .unwrap();
     assert!(cloned.status.success());
     assert!(TestRepo::run_at(&clone, ["index"]).status.success());
-    let output = TestRepo::run_at(&clone, ["trace-removal", "--code", "old()", "--json"]);
+    let output = TestRepo::run_at(
+        &clone,
+        [
+            "search", "--code", "old()", "--change", "removed", "--trace", "--json",
+        ],
+    );
     assert!(output.status.success());
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(report["matched_count"], 1);
@@ -864,7 +986,15 @@ fn shallow_coverage_stays_visible_with_usable_parent_locators() {
     fs::write(clone.join("fragment"), b"old()\n").unwrap();
     let fragment = TestRepo::run_at(
         &clone,
-        ["trace-removal", "--code-file", "fragment", "--json"],
+        [
+            "search",
+            "--code-file",
+            "fragment",
+            "--change",
+            "removed",
+            "--trace",
+            "--json",
+        ],
     );
     assert!(fragment.status.success());
     let fragment: Value = serde_json::from_slice(&fragment.stdout).unwrap();
@@ -878,7 +1008,12 @@ fn shallow_coverage_stays_visible_with_usable_parent_locators() {
             .iter()
             .any(|warning| { warning.as_str().unwrap().contains("shallow") })
     );
-    let human = TestRepo::run_at(&clone, ["trace-removal", "--code", "old()"]);
+    let human = TestRepo::run_at(
+        &clone,
+        [
+            "search", "--code", "old()", "--change", "removed", "--trace",
+        ],
+    );
     assert!(human.status.success());
     assert!(String::from_utf8_lossy(&human.stderr).contains("shallow"));
 }
@@ -886,10 +1021,12 @@ fn shallow_coverage_stays_visible_with_usable_parent_locators() {
 #[test]
 fn command_help_and_json_contract_are_explicit_and_extensible() {
     let repo = TestRepo::new();
-    let help = repo.run(["trace-removal", "--help"]);
+    let help = repo.run(["search", "--help"]);
     assert!(help.status.success());
     let text = String::from_utf8(help.stdout).unwrap();
     for option in [
+        "--trace",
+        "--change",
         "--code",
         "--code-file",
         "--path",
@@ -902,8 +1039,14 @@ fn command_help_and_json_contract_are_explicit_and_extensible() {
     ] {
         assert!(text.contains(option), "{option}");
     }
+    assert!(text.contains("--limit counts events"));
     assert!(text.contains("[default: 10]"));
-    assert!(String::from_utf8_lossy(&repo.run(["--help"]).stdout).contains("trace-removal"));
+    let root_help = String::from_utf8_lossy(&repo.run(["--help"]).stdout).into_owned();
+    assert!(!root_help.contains("trace-removal"));
+    assert_eq!(
+        repo.run(["trace-removal", "--code", "old()"]).status.code(),
+        Some(2)
+    );
     commit(
         &repo,
         &[("a.rs", "old()\n")],
@@ -967,7 +1110,11 @@ fn returns_bounded_patch_fragments_around_matching_deleted_lines() {
     assert!(!first.contains("+added_0000_padding_value"));
     assert!(hunks[1]["text"].as_str().unwrap().contains("-old()"));
 
-    let human = repo.run(["trace-removal", "--code", "old()"]).stdout;
+    let human = repo
+        .run([
+            "search", "--code", "old()", "--change", "removed", "--trace",
+        ])
+        .stdout;
     let human = String::from_utf8(human).unwrap();
     assert!(human.contains("patch excerpt: available"));
     assert!(human.contains("+added_0599_padding_value"));
@@ -1056,7 +1203,11 @@ fn keeps_event_matches_when_cached_patch_text_exceeds_the_budget() {
     assert_eq!(event["old_path"], "a.rs");
     assert_eq!(event["patch"]["status"], "unavailable");
     assert_eq!(event["patch"]["truncated"], true);
-    let human = repo.run(["trace-removal", "--code", "old()"]).stdout;
+    let human = repo
+        .run([
+            "search", "--code", "old()", "--change", "removed", "--trace",
+        ])
+        .stdout;
     let human = String::from_utf8(human).unwrap();
     assert!(human.contains("Text hunk unavailable."));
     assert!(human.contains("patch excerpt truncated by safety limits."));
@@ -1181,7 +1332,9 @@ fn same_commit_navigation_is_per_event_and_lists_detected_changes() {
     assert_eq!(report["truncated"], false);
     assert!(!report["notices"].as_array().unwrap().is_empty());
 
-    let human = repo.run(["trace-removal", "--code", "old()"]);
+    let human = repo.run([
+        "search", "--code", "old()", "--change", "removed", "--trace",
+    ]);
     assert!(human.status.success());
 }
 
@@ -1207,7 +1360,9 @@ fn same_commit_navigation_distinguishes_empty_and_truncated_summaries() {
         serde_json::json!([])
     );
 
-    let human = empty_repo.run(["trace-removal", "--code", "old()"]);
+    let human = empty_repo.run([
+        "search", "--code", "old()", "--change", "removed", "--trace",
+    ]);
     assert!(human.status.success());
     let text = String::from_utf8_lossy(&human.stdout);
     assert!(text.contains("Same-commit file navigation: complete"));
@@ -1248,7 +1403,9 @@ fn same_commit_navigation_distinguishes_empty_and_truncated_summaries() {
     assert_eq!(summary["files"][0]["new_path"], "other-00.txt");
     assert_eq!(summary["files"][11]["new_path"], "other-11.txt");
     assert_eq!(report["truncated"], false);
-    let human = repo.run(["trace-removal", "--code", "old()"]);
+    let human = repo.run([
+        "search", "--code", "old()", "--change", "removed", "--trace",
+    ]);
     assert!(human.status.success());
     assert!(
         String::from_utf8_lossy(&human.stdout).contains("Same-commit file navigation: truncated")
@@ -1301,10 +1458,134 @@ fn supplemental_lookup_failure_preserves_the_event_and_reports_unavailable() {
     assert_eq!(event["same_commit_files"]["files"], serde_json::json!([]));
     assert_eq!(report["truncated"], false);
 
-    let human = repo.run(["trace-removal", "--code", "old()"]);
+    let human = repo.run([
+        "search", "--code", "old()", "--change", "removed", "--trace",
+    ]);
     assert!(human.status.success());
     let text = String::from_utf8_lossy(&human.stdout);
     assert!(text.contains(&removal));
     assert!(text.contains(&format!("Preceding file locator: {root}:gone.rs")));
     assert!(text.contains("Same-commit file navigation: unavailable"));
+}
+
+#[test]
+fn search_trace_rejects_unsupported_inputs_and_options_during_validation() {
+    let repo = TestRepo::new();
+    let invalid = [
+        (
+            "missing direction",
+            &["search", "--code", "old()", "--trace"][..],
+        ),
+        (
+            "added direction",
+            &["search", "--code", "old()", "--change", "added", "--trace"],
+        ),
+        (
+            "regex input",
+            &[
+                "search",
+                "--code-regex",
+                "old\\(\\)",
+                "--change",
+                "removed",
+                "--trace",
+            ],
+        ),
+        (
+            "keyword input",
+            &["search", "old", "--change", "removed", "--trace"],
+        ),
+        (
+            "patch input",
+            &[
+                "search", "--code", "old()", "--change", "removed", "--trace", "--patch",
+            ],
+        ),
+        (
+            "historical patch",
+            &["search", "--patch-of", "HEAD", "--trace"],
+        ),
+        ("current patch", &["search", "--current-patch", "--trace"]),
+        (
+            "GitHub links",
+            &[
+                "search",
+                "--code",
+                "old()",
+                "--change",
+                "removed",
+                "--trace",
+                "--github-links",
+            ],
+        ),
+        (
+            "GitHub repository",
+            &[
+                "search",
+                "--code",
+                "old()",
+                "--change",
+                "removed",
+                "--trace",
+                "--github-repo",
+                "owner/repo",
+            ],
+        ),
+    ];
+
+    for (mode, args) in invalid {
+        let output = repo.run(args);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{mode} was accepted");
+        if mode == "added direction" {
+            assert!(
+                stderr.contains("--trace requires --change removed"),
+                "added direction had no clear validation error: {stderr}"
+            );
+        } else {
+            assert!(
+                stderr.contains("Usage: gitscry search"),
+                "{mode} was not rejected during argument validation: {stderr}"
+            );
+        }
+    }
+}
+
+#[test]
+fn search_trace_routes_removed_literal_to_deletion_events() {
+    let repo = TestRepo::new();
+    commit(
+        &repo,
+        &[("a.rs", "old()\n")],
+        "Introduce old code",
+        "2000-01-01T00:00:00Z",
+    );
+    let removal = commit(
+        &repo,
+        &[("a.rs", "new()\n")],
+        "Remove old code",
+        "2000-01-02T00:00:00Z",
+    );
+    repo.index();
+
+    let ordinary = repo.run(["search", "--code", "old()", "--change", "removed", "--json"]);
+    assert!(ordinary.status.success());
+    let ordinary: Value = serde_json::from_slice(&ordinary.stdout).unwrap();
+    assert_eq!(ordinary["kind"], "code-search");
+    assert_eq!(ordinary["matched_count"], 1);
+    assert_eq!(ordinary["code_matches"][0]["direction"], "removed");
+    assert_eq!(ordinary["code_matches"][0]["line"], "old()");
+
+    let output = repo.run([
+        "search", "--code", "old()", "--change", "removed", "--trace", "--json",
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["kind"], "trace-removal");
+    assert_eq!(report["matched_count"], 1);
+    assert_eq!(report["events"][0]["commit_id"], removal);
 }
