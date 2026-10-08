@@ -24,8 +24,8 @@ pub(crate) use capabilities::why::{
 };
 pub(crate) use material::{
     Citation, CodeDirection, CodeMatch, Confidence, Detail, Failure, Material, PatchEquivalence,
-    PatchGroupMember, PatchGrouping, PatchIndeterminate, Relation, RelationSelector, Report,
-    ReportKind, SearchScopeInfo, Step, empty_report, report,
+    PatchGroupMember, PatchGrouping, PatchIndeterminate, PatchMaterial, Relation, RelationSelector,
+    Report, ReportKind, SearchScopeInfo, Step, empty_report, report,
 };
 pub(crate) use patch::{PatchExcerpt, PatchHunk, PatchStatus};
 use retrieval::Intent;

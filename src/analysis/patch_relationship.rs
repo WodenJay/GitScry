@@ -1,11 +1,15 @@
 //! Strict complete-patch identity. Display excerpts never enter this module.
-use crate::git::{Change, CurrentPatch, Hunk, Repository};
+use crate::{
+    app::AppError,
+    cache::PatchFingerprints,
+    git::{Change, CurrentPatch, Hunk, Repository},
+};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 pub(crate) const NORMALIZATION_VERSION: i64 = 3;
 
-#[derive(Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct FilePatch {
     old_path: Option<Vec<u8>>,
     new_path: Option<Vec<u8>>,
@@ -244,6 +248,35 @@ fn normalize_changes(
         return Err("patch contains an unaccounted file operation".into());
     }
     Ok((files, paths))
+}
+
+pub(crate) fn inspect_and_cache(
+    repository: &Repository,
+    fingerprints: &PatchFingerprints,
+    oid: &str,
+) -> Result<Result<CompletePatch, String>, AppError> {
+    match inspect(repository, oid) {
+        Ok(patch) => {
+            let fingerprint = patch.fingerprint();
+            let inverse_fingerprint = patch.inverse_fingerprint();
+            fingerprints.put(
+                oid,
+                if patch.is_empty() {
+                    "empty"
+                } else {
+                    "complete"
+                },
+                Some(&fingerprint),
+                Some(&inverse_fingerprint),
+                &patch.objects,
+            )?;
+            Ok(Ok(patch))
+        }
+        Err(reason) => {
+            fingerprints.put(oid, "indeterminate", None, None, &[])?;
+            Ok(Err(reason))
+        }
+    }
 }
 
 fn normalize_file(change: &Change, hunks: &[Hunk]) -> Result<FilePatch, String> {

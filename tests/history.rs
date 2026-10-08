@@ -800,9 +800,14 @@ fn examples_and_failures_report_their_fixed_empty_results() {
     assert_eq!(examples.status.code(), Some(0));
     assert!(stdout(&examples).ends_with("No historical examples found.\n"));
 
-    let failures = repo.run(["failures", "term-that-does-not-exist"]);
+    let failures = repo.run(["failures", "term-that-does-not-exist", "--json"]);
     assert_eq!(failures.status.code(), Some(0));
-    assert!(stdout(&failures).ends_with("No failed approaches found.\n"));
+    let report: serde_json::Value = serde_json::from_slice(&failures.stdout).unwrap();
+    assert_eq!(report["matched_count"], 0);
+    assert_eq!(report["materials"], serde_json::json!([]));
+    assert_eq!(report["inverse_leads"]["matched_count"], 0);
+    assert_eq!(report["inverse_leads"]["returned_count"], 0);
+    assert_eq!(report["inverse_leads"]["leads"], serde_json::json!([]));
 }
 
 #[test]
@@ -1950,4 +1955,215 @@ fn examples_scans_past_duplicate_candidates_before_applying_limit() {
             .iter()
             .any(|material| { material["detail"]["patch_equivalence"]["member_count"] == 41 })
     );
+}
+
+#[test]
+fn failures_reports_manual_inverse_as_a_separate_patch_lead() {
+    let repo = TestRepo::new();
+    repo.commit_at(
+        "src/core.rs",
+        b"enabled = false\ncolor = blue\n",
+        "Seed core state",
+        "2020-01-01T00:00:00+0000",
+    );
+    let introduced = repo.commit_at(
+        "src/core.rs",
+        b"enabled = true\ncolor = blue\n",
+        "Enable Nimbus cache",
+        "2020-01-02T00:00:00+0000",
+    );
+    let manual_inverse = repo.commit_at(
+        "src/core.rs",
+        b"enabled = false\ncolor = blue\n",
+        "Nimbus cache manual adjustment",
+        "2020-01-03T00:00:00+0000",
+    );
+    let unrelated_same_path = repo.commit_at(
+        "src/core.rs",
+        b"enabled = false\ncolor = red\n",
+        "Manual color adjustment",
+        "2020-01-04T00:00:00+0000",
+    );
+    let binary = repo.commit_at(
+        "src/blob.bin",
+        b"\0opaque contents\n",
+        "Store opaque blob",
+        "2020-01-05T00:00:00+0000",
+    );
+    repo.index();
+
+    let output = repo.run(["failures", "nimbus", "--limit", "3", "--json"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+
+    assert_eq!(report["schema_version"], 2);
+    assert_eq!(report["matched_count"], 0);
+    assert_eq!(report["materials"].as_array().unwrap().len(), 0);
+    let inverse_leads = &report["inverse_leads"];
+    assert_eq!(inverse_leads["matched_count"], 1);
+    assert_eq!(inverse_leads["returned_count"], 1);
+    assert_eq!(inverse_leads["limit"], 3);
+    assert_eq!(inverse_leads["complete"], false);
+    assert!(
+        inverse_leads["indeterminate"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["commit_oid"] == binary)
+    );
+    let leads = inverse_leads["leads"].as_array().unwrap();
+    assert_eq!(leads.len(), 1);
+    let query_oid = leads[0]["query_material"]["commit_id"].as_str().unwrap();
+    let inverse_oid = leads[0]["inverse_material"]["commit_id"].as_str().unwrap();
+    assert!(
+        (query_oid == introduced && inverse_oid == manual_inverse)
+            || (query_oid == manual_inverse && inverse_oid == introduced)
+    );
+    assert_eq!(leads[0]["inverse_material"]["relation"], "inverse");
+    assert_eq!(
+        leads[0]["inverse_material"]["paths"][0],
+        serde_json::json!(b"src/core.rs".to_vec())
+    );
+    assert_eq!(leads[0]["explicit_reverts"], serde_json::json!([]));
+    assert_ne!(
+        leads[0]["inverse_material"]["commit_id"],
+        unrelated_same_path
+    );
+
+    let text = repo.run(["failures", "nimbus", "--limit", "3"]);
+    assert_eq!(text.status.code(), Some(0), "{}", stderr(&text));
+    let text = stdout(&text);
+    assert!(text.contains(&introduced[..12]));
+    assert!(text.contains(&manual_inverse[..12]));
+    assert!(text.contains("path: src/core.rs"));
+    assert!(text.contains("enabled = true"));
+    assert!(text.contains("enabled = false"));
+
+    let scoped = repo.run([
+        "failures",
+        "nimbus",
+        "--to-rev",
+        introduced.as_str(),
+        "--json",
+    ]);
+    assert_eq!(scoped.status.code(), Some(0), "{}", stderr(&scoped));
+    let scoped: serde_json::Value = serde_json::from_slice(&scoped.stdout).unwrap();
+    assert_eq!(scoped["inverse_leads"]["matched_count"], 0);
+    assert_eq!(scoped["inverse_leads"]["complete"], true);
+}
+
+#[test]
+fn failures_keep_revert_rationale_bound_to_exact_patch_version() {
+    let repo = TestRepo::new();
+    repo.commit_at(
+        "src/core.rs",
+        b"enabled = false\ncolor = blue\n",
+        "Seed core state",
+        "2020-01-01T00:00:00+0000",
+    );
+    let abandoned = repo.commit_at(
+        "src/core.rs",
+        b"enabled = true\ncolor = blue\n",
+        "Enable Nimbus cache",
+        "2020-01-02T00:00:00+0000",
+    );
+    let same_path_change = repo.commit_at(
+        "src/core.rs",
+        b"enabled = true\ncolor = green\n",
+        "Try Nimbus color experiment",
+        "2020-01-03T00:00:00+0000",
+    );
+    let same_path_revert = repo.commit_at(
+        "src/core.rs",
+        b"enabled = true\ncolor = blue\n",
+        &format!(
+            "Undo the green palette\n\nThis reverts commit {same_path_change}.\n\n\
+             The green palette broke contrast for color-blind readers.\n\n\
+             Re-land criteria: use the accessible neutral palette.\n"
+        ),
+        "2020-01-04T00:00:00+0000",
+    );
+    let revert = repo.commit_at(
+        "src/core.rs",
+        b"enabled = false\ncolor = blue\n",
+        &format!(
+            "Undo the rollout\n\nThis reverts commit {abandoned}.\n\n\
+             The startup cost slowed initialization for every command.\n\n\
+             Re-land criteria: gate it to targeted callers.\n"
+        ),
+        "2020-01-05T00:00:00+0000",
+    );
+    let reintroduced = repo.commit_at(
+        "src/core.rs",
+        b"enabled = true\ncolor = blue\n",
+        "Enable Nimbus cache again",
+        "2020-01-06T00:00:00+0000",
+    );
+    repo.index();
+
+    let output = repo.run(["failures", "nimbus", "--limit", "3", "--json"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["matched_count"], 2);
+    let materials = report["materials"].as_array().unwrap();
+    assert_eq!(materials.len(), 2);
+    assert!(
+        !materials
+            .iter()
+            .any(|failure| failure["citations"][0]["oid"] == reintroduced)
+    );
+
+    let failure_for_abandoned = materials
+        .iter()
+        .find(|failure| failure["citations"][0]["oid"] == abandoned)
+        .unwrap();
+    assert_eq!(
+        failure_for_abandoned["detail"]["reason"],
+        "The startup cost slowed initialization for every command"
+    );
+    assert_eq!(
+        failure_for_abandoned["detail"]["retry"],
+        "gate it to targeted callers"
+    );
+    let equivalent = &failure_for_abandoned["detail"]["patch_equivalence"];
+    assert_eq!(equivalent["complete"], true);
+    assert_eq!(equivalent["member_count"], 2);
+    let members = equivalent["members"].as_array().unwrap();
+    assert!(members.iter().any(|member| member["oid"] == abandoned));
+    assert!(members.iter().any(|member| member["oid"] == reintroduced));
+    assert!(
+        !members
+            .iter()
+            .any(|member| member["oid"] == same_path_change)
+    );
+
+    let failure_for_same_path = materials
+        .iter()
+        .find(|failure| failure["citations"][0]["oid"] == same_path_change)
+        .unwrap();
+    assert_eq!(
+        failure_for_same_path["detail"]["reason"],
+        "The green palette broke contrast for color-blind readers"
+    );
+    assert_eq!(
+        failure_for_same_path["detail"]["retry"],
+        "use the accessible neutral palette"
+    );
+
+    let inverse_leads = &report["inverse_leads"];
+    assert_eq!(inverse_leads["matched_count"], 2);
+    let leads = inverse_leads["leads"].as_array().unwrap();
+    let declarations = leads
+        .iter()
+        .flat_map(|lead| lead["explicit_reverts"].as_array().unwrap())
+        .map(|declaration| {
+            (
+                declaration["revert_oid"].as_str().unwrap(),
+                declaration["target_oid"].as_str().unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(declarations.len(), 2);
+    assert!(declarations.contains(&(revert.as_str(), abandoned.as_str())));
+    assert!(declarations.contains(&(same_path_revert.as_str(), same_path_change.as_str())));
 }

@@ -183,7 +183,7 @@ fn ordinary_commands_have_a_byte_exact_cli_contract() {
             });
         let expected_schema = match name {
             "why" => 5,
-            "trace-fix" => 2,
+            "trace-fix" | "failures" => 2,
             _ => 1,
         };
         assert_eq!(value["schema_version"], expected_schema, "{name}");

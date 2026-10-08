@@ -8,6 +8,7 @@ pub(in crate::analysis) mod code_search;
 pub(crate) mod conflicts;
 pub(crate) mod context;
 mod examples;
+pub(crate) mod failure_leads;
 mod failures;
 pub(crate) mod fate;
 pub(crate) mod followups;
@@ -28,7 +29,7 @@ pub(crate) mod usage;
 pub(in crate::analysis) mod why;
 
 pub(crate) use examples::run as examples;
-pub(crate) use failures::run as failures;
+pub(crate) use failures::{FailureReport, run as failures};
 pub(crate) use relations::{ModuleCoChange, RelationSource};
 pub(crate) use relations::{related, tests};
 

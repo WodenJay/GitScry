@@ -174,6 +174,7 @@ impl Context {
             QueryReport::Patterns(report) => report.scope = scope,
             QueryReport::Context(report) => report.scope = scope,
             QueryReport::Analysis(report) => report.scope = scope,
+            QueryReport::Failures(report) => report.report.scope = scope,
             QueryReport::FragmentSearch(report) => report.scope = scope,
             QueryReport::Timeline(report) => report.scope = scope,
             QueryReport::TraceRemoval(report) => report.scope = scope,

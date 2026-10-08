@@ -41,3 +41,19 @@ Record a case only when it did not—for example, its output was not useful, it 
 - **Goal:** Find relevant failure-count history and reproduce issue #242 using GitScry on this repository.
 - **Actual:** Both queries returned `matched_count=0` with no materials; this repository offered no relevant history or candidates, so dogfooding did not identify prior implementation guidance or reproduce the issue. A controlled test-repository CLI fixture was needed.
 - **Expected:** Failure history or matching candidates that expose the mismatch between retrieval candidates and eligible failed approaches.
+
+### 2026-05-04 Inverse patch query found no local examples
+
+- **Command:** `cargo run --quiet --jobs 1 -- search --patch-of HEAD --json --limit 3`
+- **Context:** Development build at HEAD `91db6f55a7ef55b9bfe163e1ce533e549ef912a5` on `agent/issue-267-inverse-patches`; installed GitScry is 0.13.0.
+- **Goal:** Exercise the new default equivalent/inverse patch search against repository history for a real-world inverse candidate.
+- **Actual:** The command scanned 637 eligible commits, returned `matched_count=0`, `unexamined_count=0`, and `coverage_complete=false` with 5 indeterminate commits (`binary or unavailable changed content`). It yielded no relationship candidate to validate inverse classification.
+- **Expected:** A local equivalent or inverse patch candidate that would demonstrate classification against repository history.
+
+### 2026-10-08 Failure search found no inverse leads
+
+- **Command:** `cargo run --quiet --jobs 1 -- failures inverse patch leads --limit 5 --json`
+- **Context:** Development build at HEAD `a433ce9` on `agent/issue-271-inverse-patch-leads`.
+- **Goal:** Find local history examples for the #271 inverse-lead output while developing it.
+- **Actual:** `matched_count=0`; the scan checked all 634 eligible commits but found no leads. Five binary or unavailable-content commits made inverse matching `complete=false`; scope cache coverage was complete. The result offered no local example to validate the output.
+- **Expected:** A failure record or inverse-patch lead in repository history; controlled Git fixtures remain necessary.

@@ -18,8 +18,13 @@ struct Entry {
     confidence: Confidence,
 }
 
+pub(crate) struct FailureReport {
+    pub(crate) report: Report,
+    pub(crate) inverse_leads: super::failure_leads::FailureLeads,
+}
+
 /// A candidate must share at least one intent term before its paths count as material.
-const MIN_SHARED_TERMS: usize = 1;
+pub(super) const MIN_SHARED_TERMS: usize = 1;
 /// History recording the revert itself is the strongest failure material there is.
 const REVERT_WEIGHT: f64 = 6.0;
 /// A later correction of the abandoned paths explains how the approach moved on.
@@ -30,9 +35,12 @@ pub(crate) fn run(
     intent: &Intent,
     limit: usize,
     scope: Option<&SearchFilter>,
-) -> Result<Report, AppError> {
+) -> Result<FailureReport, AppError> {
     let Some(pool) = retrieval::pool(session, intent, limit, scope)? else {
-        return Ok(super::super::empty_report(ReportKind::Failures));
+        return Ok(FailureReport {
+            report: super::super::empty_report(ReportKind::Failures),
+            inverse_leads: super::failure_leads::empty(limit),
+        });
     };
     let reverts = retrieval::reverts(session, scope)?;
     // Which commit history records as reverting each candidate. Computing this once keeps
@@ -145,6 +153,7 @@ pub(crate) fn run(
                 detail: Some(Detail::Failure(Failure {
                     reason: entry.reason,
                     retry: entry.retry,
+                    patch_equivalence: None,
                 })),
                 patch: None,
             }
@@ -152,10 +161,19 @@ pub(crate) fn run(
         .collect::<Vec<_>>();
     retrieval::assign_citations(&mut materials);
 
-    Ok(super::super::report(
-        ReportKind::Failures,
-        materials,
-        matched_count,
-        limit,
-    ))
+    let mut patch_scan = super::failure_leads::run(session, intent, limit, scope, &reverts)?;
+    for material in &mut materials {
+        let Some(Detail::Failure(failure)) = material.detail.as_mut() else {
+            continue;
+        };
+        let Some(citation) = material.citations.first() else {
+            continue;
+        };
+        failure.patch_equivalence = patch_scan.equivalences.remove(&citation.oid);
+    }
+
+    Ok(FailureReport {
+        report: super::super::report(ReportKind::Failures, materials, matched_count, limit),
+        inverse_leads: patch_scan.report,
+    })
 }
