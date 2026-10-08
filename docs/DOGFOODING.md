@@ -1,9 +1,6 @@
 # GitScry Dogfooding
 
-Whenever GitScry is used, briefly assess whether it meaningfully helped with the intended task.
-
-- Functionality **already available** in the installed GitScry version -> use `gitscry`
-- Functionality **currently under development** -> use `cargo run`, because the feature is not in installed `gitscry` yet.
+Whenever GitScry is used, briefly assess whether it meaningfully helped with the intended task. Only use the functionality which is **already available** in `gitscry`, meaning that use `gitscry` instead of `cargo run`
 
 Record a case only when it did not—for example, its output was not useful, it failed to provide needed information, or its behavior materially differed from what was reasonably expected. Do not record merely imperfect uses or create entries just for the sake of dogfooding.
 
