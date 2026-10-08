@@ -1,4 +1,5 @@
 //! Bounded same-file material. Identity is branch-local and never resumes after ending.
+mod patches;
 mod regions;
 
 use crate::analysis::provenance::explicit_revert_declarations;
@@ -276,6 +277,7 @@ pub(crate) struct Report {
     pub(crate) traversal_truncated: bool,
     pub(crate) display_truncated: bool,
     pub(crate) matched_in_inspected_scope: usize,
+    pub(crate) patch_matching: patches::MatchingReport,
     pub(crate) entries: Vec<Entry>,
     pub(crate) warnings: Vec<String>,
     pub(crate) diagnostics: Vec<Diagnostic>,
@@ -302,6 +304,7 @@ pub(crate) struct Entry {
     pub(crate) change_types: Vec<String>,
     pub(crate) file_associations: Vec<FileAssociation>,
     pub(crate) revert_reference: Option<String>,
+    pub(crate) patch_relationships: Vec<patches::Relationship>,
     pub(crate) same_file_association: bool,
     pub(crate) region_associations: Vec<RegionAssociation>,
     pub(crate) region_tracking_downgrades: Vec<RegionDowngrade>,
@@ -447,6 +450,18 @@ pub(in crate::analysis) fn run(
                 .into(),
         );
     }
+    let candidates: Vec<_> = graph
+        .iter()
+        .filter(|node| descendants.contains(&node.oid))
+        .collect();
+    let eligible_count = candidates
+        .iter()
+        .filter(|node| node.commit_time <= time_ceiling)
+        .count();
+    let cache_candidates =
+        eligible_candidates_within_inspection_budget(&candidates, max_commits, time_ceiling);
+    let mut patch_matcher =
+        patches::Matcher::new(&repository, &seed, &cache_candidates, eligible_count)?;
     let mut report = Report {
         verbose,
         scope: Scope {
@@ -467,15 +482,12 @@ pub(in crate::analysis) fn run(
         traversal_truncated: false,
         display_truncated: false,
         matched_in_inspected_scope: 0,
+        patch_matching: patch_matcher.report(coverage_complete),
         entries: Vec::new(),
         warnings,
         diagnostics: Vec::new(),
     };
     let mut states: HashMap<String, Incarnations> = HashMap::from([(seed.clone(), initial)]);
-    let candidates: Vec<_> = graph
-        .iter()
-        .filter(|node| descendants.contains(&node.oid))
-        .collect();
     let all_cached_oids = if candidates
         .iter()
         .any(|node| node.commit_time <= time_ceiling)
@@ -487,6 +499,7 @@ pub(in crate::analysis) fn run(
     let mut explicit_reference_entries = Vec::new();
     let mut region_overlap_entries = Vec::new();
     let mut same_file_entries = Vec::new();
+    let mut patch_relationship_entries = Vec::new();
     for (index, node) in candidates.iter().enumerate() {
         let eligible = node.commit_time <= time_ceiling;
         if (eligible && report.inspected_count == max_commits)
@@ -526,6 +539,11 @@ pub(in crate::analysis) fn run(
             })
         } else {
             false
+        };
+        let patch_relationship = if eligible {
+            patch_matcher.check(&node.oid)?
+        } else {
+            None
         };
         let mut state = node
             .parents
@@ -698,7 +716,7 @@ pub(in crate::analysis) fn run(
         states.insert(node.oid.clone(), state);
         let has_same_file_association = !associated.is_empty();
         let has_region_overlap = !region_associations.is_empty();
-        if has_revert_reference || has_same_file_association {
+        if has_revert_reference || has_same_file_association || patch_relationship.is_some() {
             let mut file_associations = associated;
             file_associations.sort();
             file_associations.dedup();
@@ -730,6 +748,7 @@ pub(in crate::analysis) fn run(
                 change_types,
                 file_associations,
                 revert_reference: has_revert_reference.then(|| seed.clone()),
+                patch_relationships: patch_relationship.into_iter().collect(),
                 same_file_association: has_same_file_association,
                 region_associations,
                 region_tracking_downgrades,
@@ -740,23 +759,37 @@ pub(in crate::analysis) fn run(
                 explicit_reference_entries.push(entry);
             } else if has_region_overlap {
                 region_overlap_entries.push(entry);
-            } else {
+            } else if has_same_file_association {
                 same_file_entries.push(entry);
+            } else {
+                patch_relationship_entries.push(entry);
             }
         }
     }
-    report.matched_in_inspected_scope =
-        explicit_reference_entries.len() + region_overlap_entries.len() + same_file_entries.len();
+    report.patch_matching = patch_matcher.report(coverage_complete);
+    report.matched_in_inspected_scope = explicit_reference_entries.len()
+        + region_overlap_entries.len()
+        + same_file_entries.len()
+        + patch_relationship_entries.len();
     report.display_truncated = report.matched_in_inspected_scope > options.limit;
     for mut entry in explicit_reference_entries
         .into_iter()
         .chain(region_overlap_entries)
         .chain(same_file_entries)
+        .chain(patch_relationship_entries)
         .take(options.limit)
     {
         if options.patch {
             let include_commit_patch = entry.revert_reference.is_some();
-            let paths = entry.paths.clone();
+            let mut paths = entry.paths.clone();
+            paths.extend(
+                entry
+                    .patch_relationships
+                    .iter()
+                    .flat_map(|relationship| relationship.paths.iter().cloned()),
+            );
+            paths.sort();
+            paths.dedup();
             entry.patch = Some(crate::analysis::patch::selected_patch_excerpt(
                 &session,
                 &entry.commit_id,
@@ -832,4 +865,82 @@ fn validate_path(path: &str) -> Result<(), AppError> {
         ));
     }
     Ok(())
+}
+
+fn eligible_candidates_within_inspection_budget(
+    candidates: &[&ForwardCommit],
+    max_commits: usize,
+    time_ceiling: i64,
+) -> Vec<String> {
+    let (mut eligible_count, mut lineage_count) = (0, 0);
+    let mut inspected = Vec::new();
+    for node in candidates {
+        let eligible = node.commit_time <= time_ceiling;
+        if (eligible && eligible_count == max_commits)
+            || (!eligible && lineage_count == max_commits)
+        {
+            break;
+        }
+        if eligible {
+            eligible_count += 1;
+            inspected.push(node.oid.clone());
+        } else {
+            lineage_count += 1;
+        }
+    }
+    inspected
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ForwardCommit, eligible_candidates_within_inspection_budget};
+
+    fn commit(oid: &str, commit_time: i64) -> ForwardCommit {
+        ForwardCommit {
+            oid: oid.to_owned(),
+            commit_time,
+            parents: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn patch_candidates_stop_at_eligible_and_lineage_budgets() {
+        let late_one = commit("late-one", 101);
+        let late_two = commit("late-two", 102);
+        let late_three = commit("late-three", 103);
+        let eligible_before_lineage_limit = commit("eligible-before-limit", 10);
+        let eligible_after_lineage_limit = commit("eligible-after-limit", 20);
+        assert_eq!(
+            eligible_candidates_within_inspection_budget(
+                &[
+                    &late_one,
+                    &late_two,
+                    &eligible_before_lineage_limit,
+                    &late_three,
+                    &eligible_after_lineage_limit,
+                ],
+                2,
+                100,
+            ),
+            vec!["eligible-before-limit"]
+        );
+
+        let eligible_one = commit("eligible-one", 10);
+        let eligible_two = commit("eligible-two", 20);
+        let eligible_three = commit("eligible-three", 30);
+        assert_eq!(
+            eligible_candidates_within_inspection_budget(
+                &[
+                    &late_one,
+                    &eligible_one,
+                    &late_two,
+                    &eligible_two,
+                    &eligible_three
+                ],
+                2,
+                100,
+            ),
+            vec!["eligible-one", "eligible-two"]
+        );
+    }
 }

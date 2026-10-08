@@ -37,6 +37,29 @@ pub(super) fn format_report(report: &Report) -> String {
             report.display_truncated
         ),
     ];
+    let matching = &report.patch_matching;
+    let seed_patch = &matching.seed_patch;
+    lines.push(format!(
+        "Patch matching: seed integrity {}; normalization v{}; comparison basis {}; paths {}; {} of {} eligible descendants checked; {} unexamined; coverage complete: {}. Complete-patch comparison is independent of --path.",
+        seed_patch.integrity,
+        seed_patch.normalization_version,
+        seed_patch.comparison_basis.unwrap_or("unavailable"),
+        if seed_patch.paths.is_empty() {
+            "<none>".into()
+        } else {
+            seed_patch.paths.iter().map(|path| escape::path(path)).collect::<Vec<_>>().join(", ")
+        },
+        matching.checked_count,
+        matching.eligible_count,
+        matching.unexamined_count,
+        matching.coverage_complete
+    ));
+    for gap in &matching.indeterminate {
+        lines.push(format!(
+            "Patch matching indeterminate for {}: {}.",
+            gap.commit_id, gap.reason
+        ));
+    }
     if report.entries.is_empty() {
         lines.push(
             "No associated follow-up material in the inspected scope; this is not a stability conclusion."
@@ -51,9 +74,14 @@ pub(super) fn format_report(report: &Report) -> String {
             escape::subject(&entry.subject)
         ));
         let association_bases = association_bases(entry).collect::<Vec<_>>();
+        let association_bases = if association_bases.is_empty() {
+            "none".to_owned()
+        } else {
+            association_bases.join(", ")
+        };
         lines.push(format!(
             "    association bases: {}; elapsed {} seconds; {}",
-            association_bases.join(", "),
+            association_bases,
             entry.elapsed_seconds,
             entry
                 .file_associations
@@ -117,6 +145,22 @@ pub(super) fn format_report(report: &Report) -> String {
                 downgrade.reason.code()
             ));
         }
+        for relationship in &entry.patch_relationships {
+            let seed_parent = relationship.seed_parent.as_deref().unwrap_or("<none>");
+            let parent = relationship.parent.as_deref().unwrap_or("<none>");
+            lines.push(format!(
+                "    Patch relationship: {} (seed {}: {} parent {}; candidate {}: {} parent {}; normalization v{}; paths: {}).",
+                relationship.relation,
+                report.scope.seed,
+                relationship.seed_comparison_basis,
+                seed_parent,
+                entry.commit_id,
+                relationship.comparison_basis,
+                parent,
+                matching.seed_patch.normalization_version,
+                relationship.paths.iter().map(|path| escape::path(path)).collect::<Vec<_>>().join(", ")
+            ));
+        }
         if let Some(reference) = &entry.revert_reference {
             lines.push(format!(
                 "    Revert reference: commit-level declaration targeting {reference}; not path-specific and not proof of path reversal."
@@ -139,6 +183,7 @@ fn association_bases(entry: &Entry) -> impl Iterator<Item = &'static str> {
             .map(|_| "explicit_revert_reference"),
         (!entry.region_associations.is_empty()).then_some("region_overlap"),
         entry.same_file_association.then_some("same_file"),
+        (!entry.patch_relationships.is_empty()).then_some("patch_relationship"),
     ]
     .into_iter()
     .flatten()
@@ -154,10 +199,7 @@ pub(super) fn format_json_report(
         .iter()
         .map(|entry| {
             let association_bases = association_bases(entry).collect::<Vec<_>>();
-            let basis = association_bases
-                .first()
-                .copied()
-                .expect("follow-up entries always have an association basis");
+            let basis = association_bases.first().copied();
             let mut material = json!({
                 "commit_id": entry.commit_id,
                 "subject": entry.subject,
@@ -165,6 +207,17 @@ pub(super) fn format_json_report(
                 "elapsed_seconds": entry.elapsed_seconds,
                 "basis": basis,
                 "association_bases": association_bases,
+                "patch_relationships": entry.patch_relationships.iter().map(|relationship| json!({
+                    "relation": relationship.relation,
+                    "seed_commit_id": &scope.seed,
+                    "commit_id": &entry.commit_id,
+                    "normalization_version": report.patch_matching.seed_patch.normalization_version,
+                    "seed_comparison_basis": relationship.seed_comparison_basis,
+                    "seed_parent": relationship.seed_parent,
+                    "comparison_basis": relationship.comparison_basis,
+                    "parent": relationship.parent,
+                    "paths": relationship.paths.iter().map(|path| json_path(path)).collect::<Vec<_>>(),
+                })).collect::<Vec<_>>(),
                 "paths": entry.paths.iter().map(|p| json_path(p)).collect::<Vec<_>>(),
                 "change_types": entry.change_types,
                 "file_associations": entry.file_associations.iter().map(|association| json!({
@@ -211,17 +264,39 @@ pub(super) fn format_json_report(
         })
         .collect::<Result<_, serde_json::Error>>()?;
     serde_json::to_string(&json!({
-        "schema_version": 3,
+        "schema_version": 4,
         "kind": "followups",
         "scope": {
             "seed": scope.seed, "endpoint": scope.endpoint, "cache_tip": scope.cache_tip,
             "seed_time": scope.seed_time, "time_ceiling": scope.time_ceiling,
             "days": scope.days, "max_commits": scope.max_commits, "limit": scope.limit,
             "selected_paths": scope.selected_paths.iter().map(|p| json_path(p)).collect::<Vec<_>>(),
-            "order": "explicit_revert_reference_then_region_overlap_then_same_file_then_forward_topological",
+            "order": "explicit_revert_reference_then_region_overlap_then_same_file_then_patch_relationship_then_forward_topological",
             "coverage": "endpoint_reachable_published_cache",
-            "association": "explicit_revert_reference_or_region_overlap_or_same_file",
+            "association": "explicit_revert_reference_or_region_overlap_or_same_file_or_patch_relationship",
         },
+        "patch_matching": {
+            "comparison": "complete_seed_and_candidate_commit_patches",
+            "path_filter": "does_not_limit_patch_identity",
+            "seed_patch": {
+                "commit_id": scope.seed,
+                "integrity": report.patch_matching.seed_patch.integrity,
+                "reason": report.patch_matching.seed_patch.reason,
+                "normalization_version": report.patch_matching.seed_patch.normalization_version,
+                "comparison_basis": report.patch_matching.seed_patch.comparison_basis,
+                "parent": report.patch_matching.seed_patch.parent,
+                "paths": report.patch_matching.seed_patch.paths.iter().map(|path| json_path(path)).collect::<Vec<_>>(),
+            },
+            "eligible_count": report.patch_matching.eligible_count,
+            "checked_count": report.patch_matching.checked_count,
+            "unexamined_count": report.patch_matching.unexamined_count,
+            "coverage_complete": report.patch_matching.coverage_complete,
+            "indeterminate": report.patch_matching.indeterminate.iter().map(|item| json!({
+                "commit_id": item.commit_id,
+                "reason": item.reason,
+            })).collect::<Vec<_>>(),
+        },
+
         "inspected_count": report.inspected_count,
         "lineage_inspected_count": report.lineage_inspected_count,
         "inspected_first": report.inspected_first,
