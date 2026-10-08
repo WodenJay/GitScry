@@ -1,6 +1,5 @@
 fn main() {
-    // Keep the debug build viable: clap's derived parser for this many subcommands
-    // overflows the default 1 MiB main-thread stack before reaching `run`.
+    // Clap's derived parser needs more stack in debug builds, so run it on a worker.
     let code = std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)
         .spawn(gitscry::run)
