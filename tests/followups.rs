@@ -115,7 +115,7 @@ fn followups_tracks_changed_regions_through_shifts_and_groups_them_first() {
     repo.index();
 
     let report = json(&repo, &["followups", &seed, "--json"]);
-    assert_eq!(report["schema_version"], 3);
+    assert_eq!(report["schema_version"], 4);
     let entries = report["entries"].as_array().unwrap();
     assert_eq!(entries.len(), 3);
     assert_eq!(entries[0]["commit_id"], overlap);
@@ -536,7 +536,7 @@ fn followups_tracks_multiple_renames_and_keeps_path_context() {
             "--json",
         ],
     );
-    assert_eq!(old["schema_version"], 3);
+    assert_eq!(old["schema_version"], 4);
     assert_eq!(old["entries"], new["entries"]);
     assert_eq!(old["entries"], both["entries"]);
     let entries = old["entries"].as_array().unwrap();
@@ -981,7 +981,7 @@ fn followups_prioritizes_explicit_revert_references_and_keeps_bases_separate() {
     assert_eq!(report["display_truncated"], true);
     assert_eq!(
         report["scope"]["order"],
-        "explicit_revert_reference_then_region_overlap_then_same_file_then_forward_topological"
+        "explicit_revert_reference_then_region_overlap_then_same_file_then_patch_relationship_then_forward_topological"
     );
     let entries = report["entries"].as_array().unwrap();
     assert_eq!(entries.len(), 3);
@@ -1421,4 +1421,328 @@ fn followups_distinguishes_file_and_region_merge_correspondence_categories() {
     let verbose_stderr = String::from_utf8(verbose.stderr).unwrap();
     assert!(verbose_stderr.contains("ambiguous merge file correspondence; file tracking stopped"));
     assert!(!verbose_stderr.contains("Use --verbose"));
+}
+
+#[test]
+fn followups_discovers_patch_only_relationships_within_descendant_window() {
+    let repo = TestRepo::new();
+    let base = commit(&repo, "a", "seed\n", "Base", "2020-01-01T00:00:00Z");
+
+    git(repo.dir.path(), ["checkout", "-b", "parallel", &base]);
+    fs::remove_file(repo.dir.path().join("a")).unwrap();
+    let parallel = commit_all(&repo, "Parallel deletion", "2020-01-02T00:00:00Z");
+
+    git(repo.dir.path(), ["checkout", "main"]);
+    fs::remove_file(repo.dir.path().join("a")).unwrap();
+    let seed = commit_all(&repo, "Seed deletion", "2020-01-03T00:00:00Z");
+    let merge = git_command(repo.dir.path())
+        .args([
+            "merge",
+            "--no-ff",
+            "parallel",
+            "-m",
+            "Merge parallel deletion",
+        ])
+        .env("GIT_AUTHOR_DATE", "2020-01-03T01:00:00Z")
+        .env("GIT_COMMITTER_DATE", "2020-01-03T01:00:00Z")
+        .output()
+        .unwrap();
+    assert!(
+        merge.status.success(),
+        "{}",
+        String::from_utf8_lossy(&merge.stderr)
+    );
+    let inverse = commit(&repo, "a", "seed\n", "Recreate", "2020-01-04T00:00:00Z");
+    fs::remove_file(repo.dir.path().join("a")).unwrap();
+    let equivalent = commit_all(&repo, "Delete again", "2020-01-05T00:00:00Z");
+    let outside = commit(
+        &repo,
+        "a",
+        "seed\n",
+        "Outside window",
+        "2020-01-10T00:00:00Z",
+    );
+    repo.index();
+
+    let report = json(
+        &repo,
+        &[
+            "followups",
+            &seed,
+            "--days",
+            "2",
+            "--max-commits",
+            "20",
+            "--json",
+        ],
+    );
+    assert_eq!(
+        report["scope"]["association"],
+        "explicit_revert_reference_or_region_overlap_or_same_file_or_patch_relationship"
+    );
+    assert_eq!(
+        report["patch_matching"]["seed_patch"]["integrity"],
+        "complete"
+    );
+    assert_eq!(report["patch_matching"]["coverage_complete"], true);
+    assert_eq!(report["patch_matching"]["checked_count"], 3);
+    assert_eq!(report["patch_matching"]["unexamined_count"], 0);
+    let entries = report["entries"].as_array().unwrap();
+    for (commit_id, relation) in [(&inverse, "inverse"), (&equivalent, "equivalent")] {
+        let entry = entries
+            .iter()
+            .find(|entry| entry["commit_id"] == commit_id.as_str())
+            .unwrap();
+        assert_eq!(entry["basis"], "patch_relationship");
+        assert_eq!(
+            entry["association_bases"],
+            serde_json::json!(["patch_relationship"])
+        );
+        let relationship = &entry["patch_relationships"][0];
+        assert_eq!(relationship["relation"], relation);
+        assert_eq!(relationship["seed_commit_id"], seed);
+        assert_eq!(relationship["commit_id"], commit_id.as_str());
+        assert_eq!(relationship["seed_comparison_basis"], "first_parent");
+        assert_eq!(relationship["comparison_basis"], "first_parent");
+        assert_eq!(relationship["normalization_version"], 3);
+        assert_eq!(relationship["paths"], serde_json::json!(["a"]));
+    }
+    assert!(
+        entries
+            .iter()
+            .all(|entry| { entry["commit_id"] != parallel && entry["commit_id"] != outside })
+    );
+
+    let patched = json(
+        &repo,
+        &[
+            "followups",
+            &seed,
+            "--days",
+            "2",
+            "--max-commits",
+            "20",
+            "--patch",
+            "--json",
+        ],
+    );
+    let inverse_entry = patched["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["commit_id"] == inverse.as_str())
+        .unwrap();
+    assert_eq!(inverse_entry["patch"]["status"], "available");
+
+    let text = repo.run(["followups", &seed, "--days", "2", "--max-commits", "20"]);
+    assert!(text.status.success());
+    let text = String::from_utf8(text.stdout).unwrap();
+    assert!(text.contains(&format!("Patch relationship: inverse (seed {seed}")));
+    assert!(text.contains(&format!("Patch relationship: equivalent (seed {seed}")));
+}
+
+#[test]
+fn followups_keeps_declared_reverts_and_patch_inverse_as_distinct_bases() {
+    let repo = TestRepo::new();
+    commit(&repo, "a", "old\n", "Base", "2020-01-01T00:00:00Z");
+    let seed = commit(&repo, "a", "new\n", "Seed", "2020-01-02T00:00:00Z");
+    let declared_inverse = commit(
+        &repo,
+        "a",
+        "old\n",
+        &format!("Revert seed\n\nThis reverts commit {seed}."),
+        "2020-01-03T00:00:00Z",
+    );
+    let equivalent = commit(&repo, "a", "new\n", "Reapply", "2020-01-04T00:00:00Z");
+    repo.index();
+
+    let report = json(
+        &repo,
+        &["followups", &seed, "--path", "a", "--days", "2", "--json"],
+    );
+    let entries = report["entries"].as_array().unwrap();
+    let inverse_entry = entries
+        .iter()
+        .find(|entry| entry["commit_id"] == declared_inverse.as_str())
+        .unwrap();
+    assert_eq!(inverse_entry["basis"], "explicit_revert_reference");
+    assert!(
+        inverse_entry["association_bases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|basis| basis == "explicit_revert_reference")
+    );
+    assert!(
+        inverse_entry["association_bases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|basis| basis == "patch_relationship")
+    );
+    assert_eq!(inverse_entry["revert_reference"]["target_commit_id"], seed);
+    assert_eq!(
+        inverse_entry["patch_relationships"][0]["relation"],
+        "inverse"
+    );
+    let equivalent_entry = entries
+        .iter()
+        .find(|entry| entry["commit_id"] == equivalent.as_str())
+        .unwrap();
+    assert_eq!(
+        equivalent_entry["patch_relationships"][0]["relation"],
+        "equivalent"
+    );
+
+    let text = repo.run(["followups", &seed, "--path", "a", "--days", "2"]);
+    assert!(text.status.success());
+    let text = String::from_utf8(text.stdout).unwrap();
+    assert!(text.contains(&format!("Patch relationship: inverse (seed {seed}")));
+    assert!(text.contains(&declared_inverse));
+    assert!(text.contains("normalization v3"));
+}
+
+#[test]
+fn followups_discloses_incomplete_seed_patch_without_losing_same_file_matches() {
+    let repo = TestRepo::new();
+    commit(&repo, "a", "base\n", "Base", "2020-01-01T00:00:00Z");
+    let seed = commit(
+        &repo,
+        "a",
+        "binary\0seed\n",
+        "Binary seed",
+        "2020-01-02T00:00:00Z",
+    );
+    let followup = commit(
+        &repo,
+        "a",
+        "text again\n",
+        "Followup",
+        "2020-01-03T00:00:00Z",
+    );
+    repo.index();
+
+    let report = json(&repo, &["followups", &seed, "--days", "2", "--json"]);
+    assert_eq!(
+        report["patch_matching"]["seed_patch"]["integrity"],
+        "indeterminate"
+    );
+    assert_eq!(report["patch_matching"]["coverage_complete"], false);
+    assert_eq!(report["patch_matching"]["checked_count"], 0);
+    assert_eq!(report["patch_matching"]["unexamined_count"], 1);
+    assert!(
+        report["patch_matching"]["seed_patch"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("binary or unavailable changed content")
+    );
+    let entry = report["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["commit_id"] == followup.as_str())
+        .unwrap();
+    assert_eq!(entry["basis"], "same_file");
+    assert_eq!(entry["patch_relationships"], serde_json::json!([]));
+}
+
+#[test]
+fn followups_marks_missing_cached_patch_objects_indeterminate_but_keeps_associations() {
+    let repo = TestRepo::new();
+    commit(&repo, "a", "old\n", "Base", "2020-01-01T00:00:00Z");
+    let seed = commit(&repo, "a", "new\n", "Seed", "2020-01-02T00:00:00Z");
+    let followup = commit(&repo, "a", "later\n", "Followup", "2020-01-03T00:00:00Z");
+    repo.index();
+
+    let first = json(&repo, &["followups", &seed, "--days", "2", "--json"]);
+    assert_eq!(first["patch_matching"]["coverage_complete"], true);
+    let blob = repo.head_oid("HEAD:a");
+    let object_path = repo
+        .common_dir()
+        .join("objects")
+        .join(&blob[..2])
+        .join(&blob[2..]);
+    fs::remove_file(object_path).unwrap();
+
+    let report = json(&repo, &["followups", &seed, "--days", "2", "--json"]);
+    assert_eq!(report["patch_matching"]["coverage_complete"], false);
+    assert_eq!(
+        report["patch_matching"]["indeterminate"][0]["commit_id"],
+        followup
+    );
+    assert_eq!(
+        report["patch_matching"]["indeterminate"][0]["reason"],
+        "cached patch source objects are unavailable"
+    );
+    let entry = report["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["commit_id"] == followup.as_str())
+        .unwrap();
+    assert_eq!(entry["basis"], "region_overlap");
+    assert!(
+        entry["association_bases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|basis| basis == "same_file")
+    );
+    assert_eq!(entry["patch_relationships"], serde_json::json!([]));
+}
+
+#[test]
+fn followups_path_filter_does_not_match_partial_seed_patches() {
+    let repo = TestRepo::new();
+    commit(&repo, "a", "old-a\n", "Base a", "2020-01-01T00:00:00Z");
+    commit(&repo, "b", "old-b\n", "Base b", "2020-01-01T01:00:00Z");
+    fs::write(repo.dir.path().join("a"), "new-a\n").unwrap();
+    fs::write(repo.dir.path().join("b"), "new-b\n").unwrap();
+    let seed = commit_all(&repo, "Two-file seed", "2020-01-02T00:00:00Z");
+
+    fs::write(repo.dir.path().join("a"), "old-a\n").unwrap();
+    fs::write(repo.dir.path().join("b"), "old-b\n").unwrap();
+    commit_all(&repo, "Undo both files", "2020-01-03T00:00:00Z");
+    fs::write(repo.dir.path().join("a"), "new-a\n").unwrap();
+    let partial = commit_all(&repo, "Reapply one file", "2020-01-04T00:00:00Z");
+    fs::write(repo.dir.path().join("a"), "old-a\n").unwrap();
+    commit_all(&repo, "Undo one file", "2020-01-05T00:00:00Z");
+    fs::write(repo.dir.path().join("a"), "new-a\n").unwrap();
+    fs::write(repo.dir.path().join("b"), "new-b\n").unwrap();
+    let equivalent = commit_all(&repo, "Reapply both files", "2020-01-06T00:00:00Z");
+    repo.index();
+
+    let report = json(
+        &repo,
+        &[
+            "followups",
+            &seed,
+            "--path",
+            "a",
+            "--days",
+            "10",
+            "--patch",
+            "--json",
+        ],
+    );
+    assert_eq!(report["scope"]["selected_paths"], serde_json::json!(["a"]));
+    let entries = report["entries"].as_array().unwrap();
+    let partial_entry = entries
+        .iter()
+        .find(|entry| entry["commit_id"] == partial.as_str())
+        .unwrap();
+    assert_eq!(partial_entry["patch_relationships"], serde_json::json!([]));
+    let equivalent_entry = entries
+        .iter()
+        .find(|entry| entry["commit_id"] == equivalent.as_str())
+        .unwrap();
+    assert_eq!(
+        equivalent_entry["patch_relationships"][0]["relation"],
+        "equivalent"
+    );
+    assert_eq!(
+        equivalent_entry["patch_relationships"][0]["paths"],
+        serde_json::json!(["a", "b"])
+    );
+    assert_eq!(equivalent_entry["patch"]["status"], "available");
 }
