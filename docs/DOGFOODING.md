@@ -29,6 +29,14 @@ Record a case only when it did not—for example, its output was not useful, it 
 - **Actual:** The endpoint-reachable query inspected 40 commits and returned `matched_in_inspected_scope=0`; no equivalent or inverse relationship lead was surfaced. It reported ambiguous merge file correspondence, including for `src/analysis/capabilities/followups/mod.rs`.
 - **Expected:** Traceable equivalent or inverse patch leads from eligible descendant history, or a controlled history fixture if none exists locally.
 
+### 2026-10-08 Followups matcher found no local relationships
+
+- **Command:** `cargo run --quiet --jobs 1 -- followups 372bf26 --to-rev HEAD --days 500 --limit 5 --json`
+- **Context:** Development build at HEAD `68464519760df3f4ee90f139fda0ec61bff40ed2` on `issue-270-patch-relationships`, with patch-matching changes in the working tree.
+- **Goal:** Check whether eligible descendants of `372bf26` contain a complete equivalent or inverse patch using the new coverage report.
+- **Actual:** Checked all 41 eligible descendants; `matched_in_inspected_scope=0`, `checked_count=41`, `unexamined_count=0`, and `coverage_complete=true`. The seed patch was complete at normalization version 3. No relationship lead was found; the report noted ambiguous merge file correspondence.
+- **Expected:** A traceable in-scope patch relationship, or a controlled fixture if repository history has none.
+
 ### 2026-10-06 Hotspot query timed out during dogfooding
 
 - **Command:** `cargo run --quiet --jobs 1 -- hotspots --limit 5 --json`
