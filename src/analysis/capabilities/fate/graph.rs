@@ -3,12 +3,12 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use crate::cache::followups::ForwardCommit;
 use crate::git::{Change, FateTarget, Hunk, Repository};
 use crate::{
-    analysis::query::{Context, Options, Outcome, QueryReport},
+    analysis::query::{Context, Options},
     app::AppError,
     cache::QuerySession,
 };
 
-use super::{Association, Event, FinalState, Location, Report, StopReason, SymbolSelection};
+use super::{Event, FinalState, Location, StopReason, SymbolSelection, Traversal};
 
 #[derive(Clone)]
 struct Reason {
@@ -175,7 +175,7 @@ pub(super) struct GraphQuery<'a> {
     pub(super) tracked: &'a HashSet<String>,
 }
 
-pub(super) fn execute(query: GraphQuery<'_>) -> Result<Outcome, AppError> {
+pub(super) fn execute(query: GraphQuery<'_>) -> Result<Traversal, AppError> {
     let GraphQuery {
         session,
         repository,
@@ -393,17 +393,6 @@ pub(super) fn execute(query: GraphQuery<'_>) -> Result<Outcome, AppError> {
             .copied()
             .unwrap_or(usize::MAX)
     });
-    let total_events = events.events.len();
-    let display_truncated = total_events > options.limit;
-    let displayed = events
-        .events
-        .into_iter()
-        .rev()
-        .take(options.limit)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
     let final_code = if truncated || endpoint_frontier {
         FinalState::Unknown
     } else {
@@ -417,32 +406,20 @@ pub(super) fn execute(query: GraphQuery<'_>) -> Result<Outcome, AppError> {
         code: reason.code,
         explanation: reason.explanation,
     });
-    Ok(super::finished(
-        session,
-        Report {
-            start_revision,
-            endpoint,
-            path: target.path,
-            line: target.line,
-            symbol_selection: selection,
-            final_state: final_code,
-            stopped_at,
-            stop_reason,
-            associations: Vec::<Association>::new(),
-            associations_truncated: false,
-            last_location: final_state.location().cloned(),
-            last_span: final_state.span(),
-            inspected_commits: allowed_nodes.len(),
-            max_commits,
-            traversal_truncated: truncated,
-            total_events,
-            display_truncated,
-            limit: options.limit,
-            events: displayed,
-            scope: None,
-        },
+    Ok(Traversal {
+        endpoint,
+        final_state: final_code,
+        stopped_at,
+        stop_reason,
+        associations: Vec::new(),
+        associations_truncated: false,
+        last_location: final_state.location().cloned(),
+        last_span: final_state.span(),
+        inspected_commits: allowed_nodes.len(),
+        traversal_truncated: truncated,
+        events: events.events,
         warnings,
-    ))
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -550,12 +527,13 @@ fn state_at(
         cache.insert(revision.to_owned(), state.clone());
         return Ok(Some(state));
     };
+    // Segment traversal retains every event; only the outer query limits display.
     let segment_options = Options {
-        limit: usize::MAX,
+        limit: options.limit,
         patch: options.patch,
         scope: options.scope.clone(),
     };
-    let outcome = if selection.is_some() {
+    let mut traversal = if selection.is_some() {
         super::execute_symbol(
             session,
             repository,
@@ -576,18 +554,16 @@ fn state_at(
             segment_options,
         )?
     };
-    for warning in &outcome.warnings {
+    // Preserve the cache warnings previously included by segment query execution.
+    for warning in session.warnings().iter().chain(&traversal.warnings) {
         if !warnings.contains(warning) {
             warnings.push(warning.clone());
         }
     }
-    let QueryReport::Fate(mut report) = outcome.report else {
-        unreachable!("fate segment returned a different report type")
-    };
     let mut heads = base_state.heads.clone();
     let mut current_commit: Option<String> = None;
     let mut current_predecessors = heads.clone();
-    for mut event in report.events.drain(..) {
+    for mut event in traversal.events.drain(..) {
         if current_commit.as_deref() != Some(event.commit_id.as_str()) {
             current_commit = Some(event.commit_id.clone());
             current_predecessors = heads.clone();
@@ -596,19 +572,23 @@ fn state_at(
         event.predecessors = current_predecessors.iter().cloned().collect();
         events.push(event);
     }
-    let state = state_from_report(report, heads, revision);
+    let state = state_from_traversal(traversal, heads, revision);
     cache.insert(revision.to_owned(), state.clone());
     Ok(Some(state))
 }
 
-fn state_from_report(report: Report, heads: BTreeSet<String>, revision: &str) -> BranchState {
-    let location = report.last_location;
-    let status = match report.final_state {
+fn state_from_traversal(
+    traversal: Traversal,
+    heads: BTreeSet<String>,
+    revision: &str,
+) -> BranchState {
+    let location = traversal.last_location;
+    let status = match traversal.final_state {
         FinalState::ReachedEndpoint => location
             .clone()
             .map(|location| Status::Active {
                 location,
-                span: report.last_span,
+                span: traversal.last_span,
             })
             .unwrap_or_else(|| Status::unknown(
                 None,
@@ -618,8 +598,8 @@ fn state_from_report(report: Report, heads: BTreeSet<String>, revision: &str) ->
             )),
         FinalState::Deleted => Status::Deleted {
             location,
-            stopped_at: report.stopped_at.unwrap_or_else(|| revision.to_owned()),
-            reason: report.stop_reason.map_or(
+            stopped_at: traversal.stopped_at.unwrap_or_else(|| revision.to_owned()),
+            reason: traversal.stop_reason.map_or(
                 Reason {
                     code: "removed",
                     explanation: "the tracked target was removed before this branch endpoint",
@@ -629,8 +609,8 @@ fn state_from_report(report: Report, heads: BTreeSet<String>, revision: &str) ->
         },
         FinalState::Unknown => Status::Unknown {
             location,
-            stopped_at: report.stopped_at.unwrap_or_else(|| revision.to_owned()),
-            reason: report.stop_reason.map_or(
+            stopped_at: traversal.stopped_at.unwrap_or_else(|| revision.to_owned()),
+            reason: traversal.stop_reason.map_or(
                 Reason {
                     code: "unknown_correspondence",
                     explanation: "the target correspondence could not be established on this branch",

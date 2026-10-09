@@ -115,6 +115,23 @@ pub(crate) struct Report {
     pub(crate) scope: Option<SearchScopeInfo>,
 }
 
+/// Complete tracking facts, before query presentation or event limiting.
+/// Linear segments and merge traversal share this internal result.
+struct Traversal {
+    endpoint: String,
+    final_state: FinalState,
+    stopped_at: Option<String>,
+    stop_reason: Option<StopReason>,
+    associations: Vec<Association>,
+    associations_truncated: bool,
+    last_location: Option<Location>,
+    last_span: Option<(i64, i64)>,
+    inspected_commits: usize,
+    traversal_truncated: bool,
+    events: Vec<Event>,
+    warnings: Vec<String>,
+}
+
 enum Forward {
     Kept { new_line: i64 },
     Deleted,
@@ -143,8 +160,13 @@ pub(in crate::analysis) fn execute(
         })?;
     let session = &context.session;
 
-    if target.symbol_selection.is_some() {
-        return execute_symbol(
+    let start_revision = target.revision.clone();
+    let path = target.path.clone();
+    let line = target.line;
+    let symbol_selection = target.symbol_selection.clone();
+    let limit = options.limit;
+    let traversal = if symbol_selection.is_some() {
+        execute_symbol(
             session,
             &repository,
             &context,
@@ -152,17 +174,54 @@ pub(in crate::analysis) fn execute(
             to_rev,
             max_commits,
             options,
-        );
-    }
-    execute_line(
+        )?
+    } else {
+        execute_line(
+            session,
+            &repository,
+            &context,
+            target,
+            to_rev,
+            max_commits,
+            options,
+        )?
+    };
+    let total_events = traversal.events.len();
+    let displayed = traversal
+        .events
+        .into_iter()
+        .rev()
+        .take(limit)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    Ok(finished(
         session,
-        &repository,
-        &context,
-        target,
-        to_rev,
-        max_commits,
-        options,
-    )
+        Report {
+            start_revision,
+            endpoint: traversal.endpoint,
+            path,
+            line,
+            symbol_selection,
+            final_state: traversal.final_state,
+            stopped_at: traversal.stopped_at,
+            stop_reason: traversal.stop_reason,
+            associations: traversal.associations,
+            associations_truncated: traversal.associations_truncated,
+            last_location: traversal.last_location,
+            last_span: traversal.last_span,
+            inspected_commits: traversal.inspected_commits,
+            max_commits,
+            traversal_truncated: traversal.traversal_truncated,
+            total_events,
+            display_truncated: total_events > limit,
+            limit,
+            events: displayed,
+            scope: None,
+        },
+        traversal.warnings,
+    ))
 }
 
 fn execute_line(
@@ -173,7 +232,7 @@ fn execute_line(
     to_rev: Option<String>,
     max_commits: Option<usize>,
     options: Options,
-) -> Result<Outcome, AppError> {
+) -> Result<Traversal, AppError> {
     let mut warnings = target.warnings.clone();
     let (endpoint, traversal_endpoint, endpoint_frontier) = resolve_endpoint(
         session,
@@ -198,36 +257,23 @@ fn execute_line(
     }
 
     if target.revision == endpoint {
-        let path = target.path.clone();
-        return Ok(finished(
-            session,
-            Report {
-                start_revision: target.revision,
-                endpoint,
-                path,
-                line: target.line,
-                symbol_selection: None,
-                final_state: FinalState::ReachedEndpoint,
-                stopped_at: None,
-                stop_reason: None,
-                associations: Vec::new(),
-                associations_truncated: false,
-                last_location: Some(Location {
-                    path: target.path,
-                    line: i64::from(u32::try_from(target.line).unwrap_or(0)),
-                }),
-                last_span: None,
-                inspected_commits: 0,
-                max_commits,
-                traversal_truncated: false,
-                total_events: 0,
-                display_truncated: false,
-                limit: options.limit,
-                events: Vec::new(),
-                scope: None,
-            },
+        return Ok(Traversal {
+            endpoint,
+            final_state: FinalState::ReachedEndpoint,
+            stopped_at: None,
+            stop_reason: None,
+            associations: Vec::new(),
+            associations_truncated: false,
+            last_location: Some(Location {
+                path: target.path,
+                line: i64::from(u32::try_from(target.line).unwrap_or(0)),
+            }),
+            last_span: None,
+            inspected_commits: 0,
+            traversal_truncated: false,
+            events: Vec::new(),
             warnings,
-        ));
+        });
     }
 
     let graph = session.forward_graph(&traversal_endpoint)?;
@@ -722,43 +768,20 @@ fn execute_line(
 
     link_event_predecessors(&mut events, &target.revision);
 
-    let total_events = events.len();
-    let display_truncated = total_events > options.limit;
-    let displayed = events
-        .into_iter()
-        .rev()
-        .take(options.limit)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
-
-    Ok(finished(
-        session,
-        Report {
-            start_revision: target.revision,
-            endpoint,
-            path: target.path,
-            line: target.line,
-            symbol_selection: None,
-            final_state,
-            stopped_at,
-            stop_reason,
-            associations,
-            associations_truncated,
-            last_location,
-            last_span: None,
-            inspected_commits: inspected,
-            max_commits,
-            traversal_truncated,
-            total_events,
-            display_truncated,
-            limit: options.limit,
-            events: displayed,
-            scope: None,
-        },
+    Ok(Traversal {
+        endpoint,
+        final_state,
+        stopped_at,
+        stop_reason,
+        associations,
+        associations_truncated,
+        last_location,
+        last_span: None,
+        inspected_commits: inspected,
+        traversal_truncated,
+        events,
         warnings,
-    ))
+    })
 }
 
 fn finished(session: &QuerySession, report: Report, warnings: Vec<String>) -> Outcome {
@@ -1332,7 +1355,7 @@ fn execute_symbol(
     to_rev: Option<String>,
     max_commits: Option<usize>,
     options: Options,
-) -> Result<Outcome, AppError> {
+) -> Result<Traversal, AppError> {
     let mut warnings = target.warnings.clone();
     let (endpoint, traversal_endpoint, endpoint_frontier) = resolve_endpoint(
         session,
@@ -1356,41 +1379,29 @@ fn execute_symbol(
     let mut symbol_language = selection.language.clone();
 
     if target.revision == endpoint {
-        return Ok(finished(
-            session,
-            Report {
-                start_revision: target.revision,
-                endpoint,
-                path: target.path.clone(),
-                line: target.line,
-                symbol_selection: Some(selection),
-                final_state: FinalState::ReachedEndpoint,
-                stopped_at: None,
-                stop_reason: None,
-                associations: Vec::new(),
-                associations_truncated: false,
-                last_location: Some(Location {
-                    path: target.path,
-                    line: i64::try_from(target.line)
-                        .map_err(|_| AppError::input("line does not fit the coordinate space"))?,
-                }),
-                last_span: Some((
-                    i64::try_from(target.line)
-                        .map_err(|_| AppError::input("line does not fit the coordinate space"))?,
-                    i64::try_from(target.symbol_end_line.unwrap_or(target.line))
-                        .map_err(|_| AppError::input("line does not fit the coordinate space"))?,
-                )),
-                inspected_commits: 0,
-                max_commits,
-                traversal_truncated: false,
-                total_events: 0,
-                display_truncated: false,
-                limit: options.limit,
-                events: Vec::new(),
-                scope: None,
-            },
+        return Ok(Traversal {
+            endpoint,
+            final_state: FinalState::ReachedEndpoint,
+            stopped_at: None,
+            stop_reason: None,
+            associations: Vec::new(),
+            associations_truncated: false,
+            last_location: Some(Location {
+                path: target.path,
+                line: i64::try_from(target.line)
+                    .map_err(|_| AppError::input("line does not fit the coordinate space"))?,
+            }),
+            last_span: Some((
+                i64::try_from(target.line)
+                    .map_err(|_| AppError::input("line does not fit the coordinate space"))?,
+                i64::try_from(target.symbol_end_line.unwrap_or(target.line))
+                    .map_err(|_| AppError::input("line does not fit the coordinate space"))?,
+            )),
+            inspected_commits: 0,
+            traversal_truncated: false,
+            events: Vec::new(),
             warnings,
-        ));
+        });
     }
 
     let graph = session.forward_graph(&traversal_endpoint)?;
@@ -2125,43 +2136,20 @@ fn execute_symbol(
 
     link_event_predecessors(&mut events, &target.revision);
 
-    let total_events = events.len();
-    let display_truncated = total_events > options.limit;
-    let displayed = events
-        .into_iter()
-        .rev()
-        .take(options.limit)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
-
-    Ok(finished(
-        session,
-        Report {
-            start_revision: target.revision,
-            endpoint,
-            path: target.path,
-            line: target.line,
-            symbol_selection: Some(selection),
-            final_state,
-            stopped_at,
-            stop_reason,
-            associations,
-            associations_truncated,
-            last_location,
-            last_span,
-            inspected_commits: inspected,
-            max_commits,
-            traversal_truncated,
-            total_events,
-            display_truncated,
-            limit: options.limit,
-            events: displayed,
-            scope: None,
-        },
+    Ok(Traversal {
+        endpoint,
+        final_state,
+        stopped_at,
+        stop_reason,
+        associations,
+        associations_truncated,
+        last_location,
+        last_span,
+        inspected_commits: inspected,
+        traversal_truncated,
+        events,
         warnings,
-    ))
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
