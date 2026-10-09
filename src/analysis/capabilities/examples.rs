@@ -1,7 +1,7 @@
 use crate::{
-    analysis::patch_relationship::{self, CompletePatch},
+    analysis::patch_relationship::{CompletePatch, PatchReader},
     app::AppError,
-    cache::{PatchFingerprints, QuerySession, SearchFilter},
+    cache::{QuerySession, SearchFilter},
     git::Repository,
 };
 
@@ -68,10 +68,15 @@ pub(crate) fn run(
     }
     retrieval::sort(&mut ranked);
 
+    let eligible = match scope {
+        Some(scope) => session.commits_scoped(scope)?,
+        None => session.commits()?,
+    };
+    let eligible_count = eligible.len();
     let repository = Repository::discover()?;
-    let fingerprints = PatchFingerprints::open(
-        &repository.common_dir,
-        patch_relationship::NORMALIZATION_VERSION,
+    let mut patches = PatchReader::new(
+        &repository,
+        eligible.iter().map(|commit| commit.oid.as_str()),
     )?;
     let mut groups = Vec::<PatchGroup>::new();
     let mut ungrouped = Vec::new();
@@ -91,7 +96,7 @@ pub(crate) fn run(
         };
         let candidate = &pool.candidates[index];
         candidate_oids.insert(candidate.oid.clone());
-        match patch_relationship::inspect_and_cache(&repository, &fingerprints, &candidate.oid)? {
+        match patches.inspect(&candidate.oid)? {
             Ok(patch) if patch.is_empty() => empty_count += 1,
             Ok(patch) => {
                 let fingerprint = patch.fingerprint();
@@ -122,31 +127,6 @@ pub(crate) fn run(
         }
     }
 
-    let eligible = match scope {
-        Some(scope) => session.commits_scoped(scope)?,
-        None => session.commits()?,
-    };
-    let eligible_count = eligible.len();
-    let mut cached = HashMap::new();
-    let mut object_ids = HashSet::new();
-    for commit in &eligible {
-        if candidate_oids.contains(&commit.oid) {
-            continue;
-        }
-        if let Some(record) = fingerprints.get(&commit.oid)? {
-            if matches!(record.integrity.as_str(), "complete" | "empty") {
-                object_ids.extend(record.objects.lines().map(str::to_owned));
-            }
-            cached.insert(commit.oid.clone(), record);
-        }
-    }
-    let mut object_ids: Vec<_> = object_ids.into_iter().collect();
-    object_ids.sort();
-    let missing_objects: HashSet<_> = repository
-        .missing_objects(&object_ids)?
-        .into_iter()
-        .collect();
-
     let mut groups_by_fingerprint = HashMap::<Vec<u8>, Vec<usize>>::new();
     for (index, group) in groups.iter().enumerate() {
         groups_by_fingerprint
@@ -164,67 +144,21 @@ pub(crate) fn run(
             continue;
         }
 
-        let mut cached_hash = None;
-        if let Some(record) = cached.remove(&commit.oid)
-            && matches!(record.integrity.as_str(), "complete" | "empty")
-        {
-            if record
-                .objects
-                .lines()
-                .any(|object| missing_objects.contains(object))
-            {
-                let reason = "cached patch source objects are unavailable".to_owned();
-                fingerprints.put(&commit.oid, "indeterminate", None, None, &[])?;
+        let patch = match patches.select(&commit.oid, |forward, _| {
+            groups_by_fingerprint.contains_key(forward)
+        })? {
+            Ok(Some(patch)) => patch,
+            Ok(None) => continue,
+            Err(reason) => {
                 indeterminate.push(PatchIndeterminate {
                     commit_oid: commit.oid.clone(),
                     reason,
                 });
                 continue;
             }
-            if record.integrity == "empty" && record.forward_fingerprint.is_some() {
-                continue;
-            }
-            cached_hash = record.forward_fingerprint;
-        }
-
-        let (fingerprint, inspected) = match cached_hash {
-            Some(fingerprint) => (fingerprint, None),
-            None => match patch_relationship::inspect_and_cache(
-                &repository,
-                &fingerprints,
-                &commit.oid,
-            )? {
-                Ok(patch) if patch.is_empty() => continue,
-                Ok(patch) => (patch.fingerprint(), Some(patch)),
-                Err(reason) => {
-                    indeterminate.push(PatchIndeterminate {
-                        commit_oid: commit.oid.clone(),
-                        reason,
-                    });
-                    continue;
-                }
-            },
         };
-        let Some(group_indices) = groups_by_fingerprint.get(&fingerprint) else {
+        let Some(group_indices) = groups_by_fingerprint.get(&patch.fingerprint()) else {
             continue;
-        };
-        // Fingerprints only narrow candidates; full normalized patches certify membership.
-        let patch = match inspected {
-            Some(patch) => patch,
-            None => match patch_relationship::inspect_and_cache(
-                &repository,
-                &fingerprints,
-                &commit.oid,
-            )? {
-                Ok(patch) => patch,
-                Err(reason) => {
-                    indeterminate.push(PatchIndeterminate {
-                        commit_oid: commit.oid.clone(),
-                        reason,
-                    });
-                    continue;
-                }
-            },
         };
         let matching_group = group_indices
             .iter()

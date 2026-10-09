@@ -1,11 +1,12 @@
 //! Strict complete-patch identity. Display excerpts never enter this module.
 use crate::{
     app::AppError,
-    cache::PatchFingerprints,
+    cache::{PatchFingerprint, PatchFingerprints},
     git::{Change, CurrentPatch, Hunk, Repository},
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use std::collections::{HashMap, HashSet};
 
 pub(crate) const NORMALIZATION_VERSION: i64 = 3;
 
@@ -250,32 +251,118 @@ fn normalize_changes(
     Ok((files, paths))
 }
 
-pub(crate) fn inspect_and_cache(
-    repository: &Repository,
-    fingerprints: &PatchFingerprints,
-    oid: &str,
-) -> Result<Result<CompletePatch, String>, AppError> {
-    match inspect(repository, oid) {
-        Ok(patch) => {
-            let fingerprint = patch.fingerprint();
-            let inverse_fingerprint = patch.inverse_fingerprint();
-            fingerprints.put(
-                oid,
-                if patch.is_empty() {
-                    "empty"
-                } else {
-                    "complete"
-                },
-                Some(&fingerprint),
-                Some(&inverse_fingerprint),
-                &patch.objects,
-            )?;
-            Ok(Ok(patch))
+/// One query's reusable fingerprints and complete-patch material.
+/// Callers supply only eligible candidates, bounded by any explicit inspection budget.
+/// Cache failures are operational errors; unavailable patch material is indeterminate.
+pub(crate) struct PatchReader<'a> {
+    repository: &'a Repository,
+    fingerprints: PatchFingerprints,
+    stored: HashMap<String, PatchFingerprint>,
+    missing_objects: HashSet<String>,
+}
+
+impl<'a> PatchReader<'a> {
+    pub(crate) fn new<'b>(
+        repository: &'a Repository,
+        candidates: impl IntoIterator<Item = &'b str>,
+    ) -> Result<Self, AppError> {
+        let fingerprints = PatchFingerprints::open(&repository.common_dir, NORMALIZATION_VERSION)?;
+        let mut stored = HashMap::new();
+        let mut objects = HashSet::new();
+        for oid in candidates {
+            if let Some(record) = fingerprints.get(oid)? {
+                objects.extend(record.objects.lines().map(str::to_owned));
+                stored.insert(oid.to_owned(), record);
+            }
         }
-        Err(reason) => {
-            fingerprints.put(oid, "indeterminate", None, None, &[])?;
-            Ok(Err(reason))
+        let mut objects: Vec<_> = objects.into_iter().collect();
+        objects.sort();
+        let missing_objects = repository.missing_objects(&objects)?.into_iter().collect();
+        Ok(Self {
+            repository,
+            fingerprints,
+            stored,
+            missing_objects,
+        })
+    }
+
+    /// Fresh material is required for query sources, even with a warm cache.
+    pub(crate) fn inspect(&mut self, oid: &str) -> Result<Result<CompletePatch, String>, AppError> {
+        self.stored.remove(oid);
+        match inspect(self.repository, oid) {
+            Ok(patch) => {
+                self.fingerprints.put(
+                    oid,
+                    if patch.is_empty() {
+                        "empty"
+                    } else {
+                        "complete"
+                    },
+                    Some(&patch.fingerprint()),
+                    Some(&patch.inverse_fingerprint()),
+                    &patch.objects,
+                )?;
+                Ok(Ok(patch))
+            }
+            Err(reason) => self.indeterminate(oid, reason),
         }
+    }
+
+    /// Fingerprints only shortlist candidates. Every selected candidate is read
+    /// completely, including on a warm cache; callers certify their relationship
+    /// with `CompletePatch::equivalent` or `CompletePatch::inverse_equivalent`.
+    pub(crate) fn select(
+        &mut self,
+        oid: &str,
+        matches: impl FnOnce(&[u8], &[u8]) -> bool,
+    ) -> Result<Result<Option<CompletePatch>, String>, AppError> {
+        let stored = self.stored.remove(oid);
+        if stored.as_ref().is_some_and(|record| {
+            record
+                .objects
+                .lines()
+                .any(|object| self.missing_objects.contains(object))
+        }) {
+            return self.indeterminate(oid, "cached patch source objects are unavailable".into());
+        }
+        let cached_hashes = stored
+            .filter(|record| matches!(record.integrity.as_str(), "complete" | "empty"))
+            .and_then(|record| {
+                Some((
+                    record.forward_fingerprint?,
+                    record.inverse_fingerprint?,
+                    record.integrity == "empty",
+                ))
+            });
+        let mut inspected = None;
+        let (forward, inverse, empty) = match cached_hashes {
+            Some(hashes) => hashes,
+            None => match self.inspect(oid)? {
+                Ok(patch) => {
+                    let hashes = (
+                        patch.fingerprint(),
+                        patch.inverse_fingerprint(),
+                        patch.is_empty(),
+                    );
+                    inspected = Some(patch);
+                    hashes
+                }
+                Err(reason) => return Ok(Err(reason)),
+            },
+        };
+        if empty || !matches(&forward, &inverse) {
+            return Ok(Ok(None));
+        }
+        match inspected {
+            Some(patch) => Ok(Ok(Some(patch))),
+            None => self.inspect(oid).map(|result| result.map(Some)),
+        }
+    }
+
+    fn indeterminate<T>(&self, oid: &str, reason: String) -> Result<Result<T, String>, AppError> {
+        self.fingerprints
+            .put(oid, "indeterminate", None, None, &[])?;
+        Ok(Err(reason))
     }
 }
 

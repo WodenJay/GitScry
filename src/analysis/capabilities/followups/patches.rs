@@ -1,11 +1,9 @@
 //! Strict patch relationships within the followups descendant and inspection scope.
 use crate::{
-    analysis::patch_relationship::{self, CompletePatch},
+    analysis::patch_relationship::{self, CompletePatch, PatchReader},
     app::AppError,
-    cache::{PatchFingerprint, PatchFingerprints},
     git::Repository,
 };
-use std::collections::{HashMap, HashSet};
 
 pub(crate) struct MatchingReport {
     pub(crate) seed_patch: SeedPatch,
@@ -42,13 +40,10 @@ pub(crate) struct Relationship {
 
 /// One query's seed patch, reusable candidate fingerprints, and coverage.
 pub(crate) struct Matcher<'a> {
-    repository: &'a Repository,
     seed_patch: Option<CompletePatch>,
     seed_fingerprint: Option<Vec<u8>>,
     seed_inverse_fingerprint: Option<Vec<u8>>,
-    fingerprints: Option<PatchFingerprints>,
-    stored: HashMap<String, PatchFingerprint>,
-    missing_objects: HashSet<String>,
+    patches: Option<PatchReader<'a>>,
     eligible_count: usize,
     checked_count: usize,
     indeterminate: Vec<Indeterminate>,
@@ -104,13 +99,10 @@ impl<'a> Matcher<'a> {
                 ),
             };
         let mut matcher = Self {
-            repository,
             seed_patch,
             seed_fingerprint,
             seed_inverse_fingerprint,
-            fingerprints: None,
-            stored: HashMap::new(),
-            missing_objects: HashSet::new(),
+            patches: None,
             eligible_count,
             checked_count: 0,
             indeterminate: Vec::new(),
@@ -127,22 +119,10 @@ impl<'a> Matcher<'a> {
             });
         }
         if matcher.seed_fingerprint.is_some() && !cache_candidates.is_empty() {
-            let fingerprints = PatchFingerprints::open(
-                &repository.common_dir,
-                patch_relationship::NORMALIZATION_VERSION,
-            )?;
-            let mut objects = HashSet::new();
-            for oid in cache_candidates {
-                if let Some(record) = fingerprints.get(oid)? {
-                    objects.extend(record.objects.lines().map(str::to_owned));
-                    matcher.stored.insert(oid.clone(), record);
-                }
-            }
-            matcher.missing_objects = repository
-                .missing_objects(&objects.into_iter().collect::<Vec<_>>())?
-                .into_iter()
-                .collect();
-            matcher.fingerprints = Some(fingerprints);
+            matcher.patches = Some(PatchReader::new(
+                repository,
+                cache_candidates.iter().map(String::as_str),
+            )?);
         }
         Ok(matcher)
     }
@@ -153,79 +133,25 @@ impl<'a> Matcher<'a> {
             return Ok(None);
         };
         self.checked_count += 1;
-        let fingerprints = self
-            .fingerprints
-            .as_ref()
-            .expect("nonempty seed with eligible candidates has a fingerprint cache");
-        let stored = self.stored.remove(oid);
-        if stored.as_ref().is_some_and(|record| {
-            record
-                .objects
-                .lines()
-                .any(|object| self.missing_objects.contains(object))
-        }) {
-            fingerprints.put(oid, "indeterminate", None, None, &[])?;
-            self.indeterminate.push(Indeterminate {
-                commit_id: oid.to_owned(),
-                reason: "cached patch source objects are unavailable".into(),
-            });
-            return Ok(None);
-        }
-        let mut inspected = None;
-        let cached_hashes = stored
-            .filter(|record| matches!(record.integrity.as_str(), "complete" | "empty"))
-            .and_then(|record| Some((record.forward_fingerprint?, record.inverse_fingerprint?)));
-        let (candidate_forward, candidate_inverse) = if let Some(hashes) = cached_hashes {
-            hashes
-        } else {
-            match patch_relationship::inspect(self.repository, oid) {
-                Ok(patch) => {
-                    let forward = patch.fingerprint();
-                    let inverse = patch.inverse_fingerprint();
-                    fingerprints.put(
-                        oid,
-                        if patch.is_empty() {
-                            "empty"
-                        } else {
-                            "complete"
-                        },
-                        Some(&forward),
-                        Some(&inverse),
-                        &patch.objects,
-                    )?;
-                    inspected = Some(patch);
-                    (forward, inverse)
-                }
-                Err(reason) => {
-                    fingerprints.put(oid, "indeterminate", None, None, &[])?;
-                    self.indeterminate.push(Indeterminate {
-                        commit_id: oid.to_owned(),
-                        reason,
-                    });
-                    return Ok(None);
-                }
-            }
-        };
-        let equivalent_fingerprint_match = self
+        let patches = self
+            .patches
+            .as_mut()
+            .expect("nonempty seed with eligible candidates has a patch reader");
+        let forward = self
             .seed_fingerprint
             .as_deref()
-            .is_some_and(|fingerprint| candidate_forward.as_slice() == fingerprint);
-        let inverse_fingerprint_match =
-            self.seed_inverse_fingerprint
-                .as_deref()
-                .is_some_and(|fingerprint| {
-                    candidate_forward.as_slice() == fingerprint
-                        || candidate_inverse.as_slice() == self.seed_fingerprint.as_deref().unwrap()
-                });
-        if !equivalent_fingerprint_match && !inverse_fingerprint_match {
-            return Ok(None);
-        }
-        // Fingerprints narrow the candidates; complete normalized patches certify identity.
-        let patch = inspected
-            .map(Ok)
-            .unwrap_or_else(|| patch_relationship::inspect(self.repository, oid));
-        match patch {
-            Ok(patch) => {
+            .expect("nonempty seed fingerprint");
+        let inverse = self
+            .seed_inverse_fingerprint
+            .as_deref()
+            .expect("nonempty seed inverse fingerprint");
+        let selected = patches.select(oid, |candidate_forward, candidate_inverse| {
+            candidate_forward == forward
+                || candidate_forward == inverse
+                || candidate_inverse == forward
+        })?;
+        match selected {
+            Ok(Some(patch)) => {
                 let relation = if seed.equivalent(&patch) {
                     Some("equivalent")
                 } else if seed.inverse_equivalent(&patch) {
@@ -242,8 +168,8 @@ impl<'a> Matcher<'a> {
                     paths: patch.paths,
                 }))
             }
+            Ok(None) => Ok(None),
             Err(reason) => {
-                fingerprints.put(oid, "indeterminate", None, None, &[])?;
                 self.indeterminate.push(Indeterminate {
                     commit_id: oid.to_owned(),
                     reason,

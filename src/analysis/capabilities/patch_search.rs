@@ -1,16 +1,15 @@
 //! Complete-patch search; relationship certification stays shared.
 use crate::{
     analysis::{
-        patch_relationship::{self, CompletePatch},
+        patch_relationship::{self, CompletePatch, PatchReader},
         query::{Options, Outcome, PatchRelationSelection, QueryReport, scope},
     },
     app::AppError,
-    cache::{self, PatchFingerprints},
+    cache,
     git::Repository,
 };
 use serde::Serialize;
 
-use std::collections::{HashMap, HashSet};
 #[derive(Serialize)]
 pub(crate) struct Report {
     pub(crate) kind: &'static str,
@@ -247,10 +246,6 @@ fn execute_input(
         .rev()
         .filter(|c| query_oid.as_ref().is_none_or(|oid| &c.oid != oid))
         .collect();
-    let fingerprints = PatchFingerprints::open(
-        &repository.common_dir,
-        patch_relationship::NORMALIZATION_VERSION,
-    )?;
     let query_hashes = query_patch
         .as_ref()
         .ok()
@@ -260,92 +255,26 @@ fn execute_input(
     let mut indeterminate = Vec::new();
     let mut checked = 0;
     if let Some((query_forward, query_inverse)) = &query_hashes {
-        // Cached normalization is reusable only while its source objects remain
-        // locally available. Batch existence checks without re-reading every patch.
-        let mut stored = HashMap::new();
-        let mut objects = HashSet::new();
-        for candidate in candidates.iter().take(cutoff.unwrap_or(usize::MAX)) {
-            if let Some(record) = fingerprints.get(&candidate.oid)? {
-                objects.extend(record.objects.lines().map(str::to_owned));
-                stored.insert(candidate.oid.clone(), record);
-            }
-        }
-        let missing: HashSet<_> = repository
-            .missing_objects(&objects.into_iter().collect::<Vec<_>>())?
-            .into_iter()
-            .collect();
+        let mut patches = PatchReader::new(
+            &repository,
+            candidates
+                .iter()
+                .take(cutoff.unwrap_or(usize::MAX))
+                .map(|candidate| candidate.oid.as_str()),
+        )?;
         for candidate in &candidates {
             if cutoff.is_some_and(|limit| checked >= limit) {
                 break;
             }
             checked += 1;
-            let stored = stored.remove(&candidate.oid);
-            if stored
-                .as_ref()
-                .is_some_and(|record| record.objects.lines().any(|oid| missing.contains(oid)))
-            {
-                fingerprints.put(&candidate.oid, "indeterminate", None, None, &[])?;
-                indeterminate.push(Indeterminate {
-                    commit_id: candidate.oid.clone(),
-                    reason: "cached patch source objects are unavailable".into(),
-                });
-                continue;
-            }
-            let mut inspected = None;
-            let cached_hashes = stored
-                .filter(|record| matches!(record.integrity.as_str(), "complete" | "empty"))
-                .and_then(|record| {
-                    Some((record.forward_fingerprint?, record.inverse_fingerprint?))
-                });
-            let hashes = if let Some(hashes) = cached_hashes {
-                Some(hashes)
-            } else {
-                match patch_relationship::inspect(&repository, &candidate.oid) {
-                    Ok(patch) => {
-                        let forward = patch.fingerprint();
-                        let inverse = patch.inverse_fingerprint();
-                        fingerprints.put(
-                            &candidate.oid,
-                            if patch.is_empty() {
-                                "empty"
-                            } else {
-                                "complete"
-                            },
-                            Some(&forward),
-                            Some(&inverse),
-                            &patch.objects,
-                        )?;
-                        inspected = Some(patch);
-                        Some((forward, inverse))
-                    }
-                    Err(reason) => {
-                        fingerprints.put(&candidate.oid, "indeterminate", None, None, &[])?;
-                        indeterminate.push(Indeterminate {
-                            commit_id: candidate.oid.clone(),
-                            reason,
-                        });
-                        None
-                    }
-                }
-            };
-            let Some((candidate_forward, candidate_inverse)) = hashes else {
-                continue;
-            };
-            let equivalent_fingerprint_match = relation_selection.includes_equivalent()
-                && candidate_forward.as_slice() == query_forward.as_slice();
-            let inverse_fingerprint_match = relation_selection.includes_inverse()
-                && (candidate_forward.as_slice() == query_inverse.as_slice()
-                    || candidate_inverse.as_slice() == query_forward.as_slice());
-            if !equivalent_fingerprint_match && !inverse_fingerprint_match {
-                continue;
-            }
-            // Every hash candidate is certified with full material, including on
-            // repeated queries. A fingerprint is never relationship proof.
-            let patch = inspected
-                .map(Ok)
-                .unwrap_or_else(|| patch_relationship::inspect(&repository, &candidate.oid));
-            match patch {
-                Ok(patch) => {
+            let selected = patches.select(&candidate.oid, |forward, inverse| {
+                (relation_selection.includes_equivalent() && forward == query_forward.as_slice())
+                    || (relation_selection.includes_inverse()
+                        && (forward == query_inverse.as_slice()
+                            || inverse == query_forward.as_slice()))
+            })?;
+            match selected {
+                Ok(Some(patch)) => {
                     let relation = query_patch.as_ref().ok().and_then(|query| {
                         if relation_selection.includes_equivalent() && query.equivalent(&patch) {
                             Some("equivalent")
@@ -366,8 +295,8 @@ fn execute_input(
                         ));
                     }
                 }
+                Ok(None) => {}
                 Err(reason) => {
-                    fingerprints.put(&candidate.oid, "indeterminate", None, None, &[])?;
                     indeterminate.push(Indeterminate {
                         commit_id: candidate.oid.clone(),
                         reason,
